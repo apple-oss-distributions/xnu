@@ -156,7 +156,6 @@ thread_quantum_expire(
 	 *	Check for fail-safe trip.
 	 */
 	if ((thread->sched_mode == TH_MODE_REALTIME || thread->sched_mode == TH_MODE_FIXED) &&
-	    !(thread->sched_flags & TH_SFLAG_PROMOTED) &&
 	    !(thread->kern_promotion_schedpri != 0) &&
 	    !(thread->sched_flags & TH_SFLAG_PROMOTE_REASON_MASK) &&
 	    !(thread->options & TH_OPT_SYSTEM_CRITICAL)) {
@@ -409,14 +408,6 @@ thread_recompute_sched_pri(thread_t thread, set_sched_pri_options_t options)
 			}
 		}
 
-		if (sched_flags & TH_SFLAG_PROMOTED) {
-			priority = MAX(priority, thread->promotion_priority);
-
-			if (sched_mode != TH_MODE_REALTIME) {
-				priority = MIN(priority, MAXPRI_PROMOTE);
-			}
-		}
-
 		if (sched_flags & TH_SFLAG_PROMOTE_REASON_MASK) {
 			if (sched_flags & TH_SFLAG_RW_PROMOTED) {
 				priority = MAX(priority, MINPRI_RWLOCK);
@@ -481,11 +472,12 @@ lightweight_update_priority(thread_t thread)
 		 *	resources.
 		 */
 		if (thread->pri_shift < INT8_MAX) {
+#if CONFIG_SCHED_SMT
 			if (thread_no_smt(thread) && smt_timeshare_enabled) {
-				thread->sched_usage += (delta + ((delta * smt_sched_bonus_16ths) >> 4));
-			} else {
-				thread->sched_usage += delta;
+				thread->sched_usage += ((delta * smt_sched_bonus_16ths) >> 4);
 			}
+#endif /* CONFIG_SCHED_SMT */
+			thread->sched_usage += delta;
 		}
 
 		thread->cpu_delta += delta;
@@ -672,11 +664,12 @@ update_priority(
 		 *	determine if the system was in a contended state.
 		 */
 		if (thread->pri_shift < INT8_MAX) {
+#if CONFIG_SCHED_SMT
 			if (thread_no_smt(thread) && smt_timeshare_enabled) {
-				thread->sched_usage += (delta + ((delta * smt_sched_bonus_16ths) >> 4));
-			} else {
-				thread->sched_usage += delta;
+				thread->sched_usage += ((delta * smt_sched_bonus_16ths) >> 4);
 			}
+#endif /* CONFIG_SCHED_SMT */
+			thread->sched_usage += delta;
 		}
 
 		thread->cpu_usage += delta + thread->cpu_delta;
@@ -819,7 +812,11 @@ sched_smt_run_incr(thread_t thread)
 {
 	assert((thread->state & (TH_RUN | TH_IDLE)) == TH_RUN);
 
+#if CONFIG_SCHED_SMT
 	uint8_t run_weight = (thread_no_smt(thread) && smt_timeshare_enabled) ? 2 : 1;
+#else /* CONFIG_SCHED_SMT */
+	uint8_t run_weight = 1;
+#endif /* CONFIG_SCHED_SMT */
 	thread->sched_saved_run_weight = run_weight;
 
 	uint32_t new_count = os_atomic_add(&sched_run_buckets[TH_BUCKET_RUN], run_weight, relaxed);
@@ -1080,6 +1077,8 @@ sched_thread_mode_undemote(thread_t thread, uint32_t reason)
 	case TH_SFLAG_FAILSAFE:
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_FAILSAFE),
 		    thread_tid(thread), thread->sched_flags);
+		/* re-arm failsafe reporting mechanism */
+		thread->sched_flags &= ~TH_SFLAG_FAILSAFE_REPORTED;
 		break;
 	case TH_SFLAG_RT_DISALLOWED:
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_MODE_UNDEMOTE_RT_DISALLOWED),

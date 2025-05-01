@@ -1,3 +1,5 @@
+#!special-case-list-v1
+# rdar://139815990
 # ARM64 specific blacklist
 
 [kernel-hwaddress|address]
@@ -15,6 +17,17 @@ fun:ml_at_interrupt_context
 fun:ml_stack_remaining
 fun:ml_stack_base
 fun:ml_stack_size
+
+# These are required to fixup the kernelcache, which needs to happen before KASAN
+# initialization on SPTM systems.
+fun:arm_slide_rebase_and_sign_image
+fun:kernel_collection_adjust_fileset_entry_addrs
+fun:kernel_collection_adjust_mh_addrs
+fun:PE_set_kc_header
+fun:phystokv
+
+# C function that initializes KASAN on SPTM systems.
+fun:arm_init_kasan
 
 [kernel-hwaddress]
 # TBI specific

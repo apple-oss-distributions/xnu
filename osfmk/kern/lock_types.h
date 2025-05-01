@@ -28,6 +28,9 @@
 #ifndef _KERN_LOCK_TYPES_H
 #define _KERN_LOCK_TYPES_H
 
+#if XNU_KERNEL_PRIVATE
+#include <machine/static_if.h>
+#endif /* XNU_KERNEL_PRIVATE */
 #include <kern/kern_types.h>
 
 __BEGIN_DECLS

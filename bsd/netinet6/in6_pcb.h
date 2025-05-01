@@ -106,6 +106,10 @@ extern struct inpcb *in6_pcblookup_local(struct inpcbinfo *, struct in6_addr *,
     u_int, uint32_t, int);
 extern struct inpcb *in6_pcblookup_hash(struct inpcbinfo *, struct in6_addr *,
     u_int, uint32_t, struct in6_addr *, u_int, uint32_t, int, struct ifnet *);
+extern struct inpcb *in6_pcblookup_hash_try(struct inpcbinfo *pcbinfo,
+    struct in6_addr *faddr, u_int fport_arg, uint32_t fifscope,
+    struct in6_addr *laddr, u_int lport_arg, uint32_t lifscope, int wildcard,
+    struct ifnet *ifp);
 extern int in6_pcblookup_hash_exists(struct inpcbinfo *, struct in6_addr *,
     u_int, uint32_t, struct in6_addr *, u_int, uint32_t, int, uid_t *, gid_t *, struct ifnet *, bool);
 extern void in6_pcbnotify(struct inpcbinfo *, struct sockaddr *, u_int,

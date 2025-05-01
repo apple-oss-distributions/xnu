@@ -359,7 +359,7 @@ class _HashedSeq(list):
         return cls(key)
 
 
-def _cache_with_registry(fn, registry, maxsize=128, sentinel=object()):
+def _cache_with_registry(fn, registry, maxsize=1024, sentinel=object()):
     """ Internal function """
 
     nokey = False

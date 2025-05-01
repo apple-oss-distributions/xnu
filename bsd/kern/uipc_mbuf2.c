@@ -133,11 +133,15 @@ struct m_tag_type_entry {
 	uint16_t mt_len;
 };
 
+typedef struct m_tag_type_entry * __single m_tag_type_entry_ref_t;
+
 struct m_tag_type_stats {
 	uint64_t mt_alloc_count;
 	uint64_t mt_alloc_failed;
 	uint64_t mt_free_count;
 };
+
+typedef struct m_tag_type_stats * __single m_tag_type_stats_ref_t;
 
 SECURITY_READ_ONLY_LATE(static struct m_tag_type_entry) m_tag_type_table[KERNEL_TAG_TYPE_COUNT] = {};
 
@@ -614,7 +618,7 @@ m_tag_free_mbuf(struct m_tag *t)
 
 __typed_allocators_ignore_push
 
-static inline void *
+static inline void * __bidi_indexable
 m_tag_data_kalloc(uint16_t len, int wait)
 {
 	return kheap_alloc(KHEAP_DEFAULT, len, wait | M_ZERO);
@@ -623,13 +627,17 @@ m_tag_data_kalloc(uint16_t len, int wait)
 static inline void
 m_tag_data_free(struct m_tag *tag)
 {
-	kheap_free(KHEAP_DEFAULT, tag->m_tag_data, tag->m_tag_len);
+	void *tag_data = tag->m_tag_data;
+	size_t tag_len = tag->m_tag_len;
+	kheap_free(KHEAP_DEFAULT, tag_data, tag_len);
+	tag->m_tag_data = NULL;
+	tag->m_tag_len = 0;
 }
 __typed_allocators_ignore_pop
 
 #else /* XNU_TARGET_OS_OSX */
 
-static inline void *
+static inline void * __bidi_indexable
 m_tag_data_kalloc(uint16_t len, int wait)
 {
 	return kalloc_data(len, wait | M_ZERO);
@@ -638,7 +646,7 @@ m_tag_data_kalloc(uint16_t len, int wait)
 static inline void
 m_tag_data_free(struct m_tag *tag)
 {
-	kfree_data(tag->m_tag_data, tag->m_tag_len);
+	kfree_data_sized_by(tag->m_tag_data, tag->m_tag_len);
 }
 
 #endif /* XNU_TARGET_OS_OSX */
@@ -679,7 +687,7 @@ m_tag_kfree_external(struct m_tag *tag)
 static struct m_tag_type_entry *
 get_m_tag_type_entry(uint32_t id, uint16_t type, struct m_tag_type_stats **pmtts)
 {
-	struct m_tag_type_entry *mtte = &m_tag_type_table[KERNEL_TAG_TYPE_NONE];
+	m_tag_type_entry_ref_t mtte = &m_tag_type_table[KERNEL_TAG_TYPE_NONE];
 
 	if (pmtts != NULL) {
 		*pmtts = &m_tag_type_stats[KERNEL_TAG_TYPE_NONE];
@@ -747,8 +755,8 @@ struct m_tag *
 m_tag_alloc(uint32_t id, uint16_t type, int len, int wait)
 {
 	struct m_tag *tag = NULL;
-	struct m_tag_type_entry *mtte = NULL;
-	struct m_tag_type_stats *mtts = NULL;
+	m_tag_type_entry_ref_t mtte = NULL;
+	m_tag_type_stats_ref_t mtts = NULL;
 
 	mtte = get_m_tag_type_entry(id, type, &mtts);
 
@@ -791,8 +799,8 @@ done:
 void
 m_tag_free(struct m_tag *tag)
 {
-	struct m_tag_type_entry *mtte = NULL;
-	struct m_tag_type_stats *mtts = NULL;
+	m_tag_type_entry_ref_t mtte = NULL;
+	m_tag_type_stats_ref_t mtts = NULL;
 
 	if (__improbable(tag == NULL)) {
 		return;
@@ -885,8 +893,6 @@ done:
 void
 m_tag_prepend(struct mbuf *m, struct m_tag *t)
 {
-	VERIFY(m != NULL && t != NULL);
-
 	SLIST_INSERT_HEAD(&m->m_pkthdr.tags, t, m_tag_link);
 }
 
@@ -894,9 +900,6 @@ m_tag_prepend(struct mbuf *m, struct m_tag *t)
 void
 m_tag_unlink(struct mbuf *m, struct m_tag *t)
 {
-	VERIFY(m->m_flags & M_PKTHDR);
-	VERIFY(t != NULL);
-
 	SLIST_REMOVE(&m->m_pkthdr.tags, t, m_tag, m_tag_link);
 }
 
@@ -913,8 +916,6 @@ void
 m_tag_delete_chain(struct mbuf *m)
 {
 	struct m_tag *p, *q;
-
-	VERIFY(m->m_flags & M_PKTHDR);
 
 	p = SLIST_FIRST(&m->m_pkthdr.tags);
 	if (p == NULL) {

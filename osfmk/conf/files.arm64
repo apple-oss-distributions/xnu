@@ -114,6 +114,7 @@ osfmk/arm64/alternate_debugger_asm.s		optional alternate_debugger
 
 osfmk/arm64/machine_remote_time.c optional config_mach_bridge_recv_time
 osfmk/arm64/sme.c		standard
+osfmk/arm64/static_if.c	standard
 osfmk/arm64/corecrypto/sha256_compress_arm64.s	standard
 
 osfmk/arm64/bti_telemetry.c optional config_bti_telemetry

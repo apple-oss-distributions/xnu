@@ -99,7 +99,9 @@ cc_enable_dit(void)
 	}
 
 	// Encoding of <msr dit, #1>.
-	__asm__ __volatile__ (".long 0xd503415f");
+	__asm__ __volatile__ (
+        ".long 0xd503415f\n"
+        );
 
 #if CC_BUILT_FOR_TESTING
 	// Check that DIT was enabled.

@@ -114,7 +114,7 @@
 
 #include <mach/vm_param.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern_xnu.h>
 
 #include <sys/reboot.h>
@@ -1193,9 +1193,11 @@ bsd_utaskbootstrap(void)
 	ut->uu_sigmask = 0;
 	act_set_astbsd(thread);
 
-	ipc_task_enable(get_threadtask(thread));
+	task_t task = get_threadtask(thread);
+	vm_map_setup(get_task_map(task), task);
+	ipc_task_enable(task);
 
-	task_clear_return_wait(get_threadtask(thread), TCRW_CLEAR_ALL_WAIT);
+	task_clear_return_wait(task, TCRW_CLEAR_ALL_WAIT);
 }
 
 static void

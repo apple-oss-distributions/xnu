@@ -124,8 +124,8 @@ bool is_debug_ptr_in_ext_paniclog(void);
  * This function is used to panic and add a buffer data to the extensible paniclog.
  * uuid here is used to decode the data.
  */
-__abortlike __printflike(4, 5)
-void panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *format, ...);
+__abortlike __printflike(5, 6)
+void panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint64_t debugger_options_mask, const char *format, ...);
 int ext_paniclog_test_hook(uint32_t option);
 void ext_paniclog_panic_with_data(uuid_t uuid, void *addr, uint32_t len);
 #endif // KERNEL_PRIVATE

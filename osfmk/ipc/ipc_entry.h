@@ -107,6 +107,8 @@
 struct ipc_entry {
 	union {
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_object;
+		struct ipc_port   *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_port;
+		struct ipc_pset   *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_pset;
 		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") volatile ie_volatile_object;
 		struct ipc_entry_table *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_self") ie_self;
 	};

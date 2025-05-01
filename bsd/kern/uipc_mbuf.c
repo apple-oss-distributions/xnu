@@ -69,6 +69,7 @@
 
 #include <ptrauth.h>
 
+#include <stdint.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
@@ -101,16 +102,15 @@
 #include <os/log.h>
 #include <os/ptrtools.h>
 
-#include <IOKit/IOMapper.h>
-
 #include <machine/limits.h>
 #include <machine/machine_routines.h>
 
 #if CONFIG_MBUF_MCACHE
 #include <sys/mcache.h>
+#include <IOKit/IOMapper.h>
 #endif /* CONFIG_MBUF_MCACHE */
-#include <net/ntstat.h>
 
+#include <net/ntstat.h>
 #include <net/droptap.h>
 
 #if INET
@@ -122,9 +122,8 @@ extern int tcp_reass_qlen_space(struct socket *);
 extern int dump_mptcp_reass_qlen(char *, int);
 #endif /* MPTCP */
 
-
 #if NETWORKING
-extern int dlil_dump_top_if_qlen(char *, int);
+extern int dlil_dump_top_if_qlen(char *__counted_by(str_len), int str_len);
 #endif /* NETWORKING */
 
 #if CONFIG_MBUF_MCACHE
@@ -537,6 +536,12 @@ unsigned int mbuf_debug; /* patchable mbuf mcache flags */
 #endif /* CONFIG_MBUF_DEBUG */
 static unsigned int mb_normalized; /* number of packets "normalized" */
 
+/*
+ * Convention typedefs for local __single pointers.
+ */
+typedef typeof(*((zone_t)0)) *__single zone_ref_t;
+typedef void * __single any_ref_t;
+
 #define MB_GROWTH_AGGRESSIVE    1       /* Threshold: 1/2 of total */
 #define MB_GROWTH_NORMAL        2       /* Threshold: 3/4 of total */
 
@@ -839,6 +844,10 @@ typedef struct {
 #define m_release_cnt(c) mbuf_table[c].mtbl_stats->mbcl_release_cnt
 #define m_region_expand(c)      mbuf_table[c].mtbl_expand
 
+/*
+ * Note: number of entries in mbuf_table must not exceed
+ * MB_STAT_MAX_MB_CLASSES
+ */
 static mbuf_table_t mbuf_table[] = {
 #if CONFIG_MBUF_MCACHE
 	/*
@@ -926,14 +935,6 @@ static unsigned int mb_drain_maxint = 0;
 #endif /* CONFIG_MBUF_MCACHE */
 static unsigned int mb_memory_pressure_percentage = 80;
 
-uintptr_t mb_obscure_extfree __attribute__((visibility("hidden")));
-uintptr_t mb_obscure_extref __attribute__((visibility("hidden")));
-
-/* Red zone */
-static u_int32_t mb_redzone_cookie;
-static void m_redzone_init(struct mbuf *);
-static void m_redzone_verify(struct mbuf *m);
-
 static void m_set_rfa(struct mbuf *, struct ext_ref *);
 
 #if CONFIG_MBUF_MCACHE
@@ -1018,7 +1019,7 @@ static struct mbuf *mz_alloc(zalloc_flags_t);
 static void mz_free(struct mbuf *);
 static struct ext_ref *mz_ref_alloc(zalloc_flags_t);
 static void mz_ref_free(struct ext_ref *);
-static void *mz_cl_alloc(zone_id_t, zalloc_flags_t);
+static void * __bidi_indexable mz_cl_alloc(zone_id_t, zalloc_flags_t);
 static void mz_cl_free(zone_id_t, void *);
 static struct mbuf *mz_composite_alloc(mbuf_class_t, zalloc_flags_t);
 static zstack_t mz_composite_alloc_n(mbuf_class_t, unsigned int, zalloc_flags_t);
@@ -1085,7 +1086,7 @@ static thread_call_t mbuf_defunct_tcall;
 static thread_call_t mbuf_drain_tcall;
 #endif /* CONFIG_MBUF_MCACHE */
 
-static int m_copyback0(struct mbuf **, int, int, const void *, int, int);
+static int m_copyback0(struct mbuf **, int, int len, const void * __sized_by_or_null(len), int, int);
 static struct mbuf *m_split0(struct mbuf *, int, int, int);
 #if CONFIG_MBUF_MCACHE && (DEBUG || DEVELOPMENT)
 #define mbwdog_logger(fmt, ...)  _mbwdog_logger(__func__, __LINE__, fmt, ## __VA_ARGS__)
@@ -1142,7 +1143,6 @@ static void mbuf_drain_locked(boolean_t);
 #define MEXT_FLAGS(m)           ((m_get_rfa(m))->flags)
 #define MEXT_PRIV(m)            ((m_get_rfa(m))->priv)
 #define MEXT_PMBUF(m)           ((m_get_rfa(m))->paired)
-#define MEXT_TOKEN(m)           ((m_get_rfa(m))->ext_token)
 #define MBUF_IS_COMPOSITE(m)                                            \
 	(MEXT_REF(m) == MEXT_MINREF(m) &&                               \
 	(MEXT_FLAGS(m) & EXTF_MASK) == EXTF_COMPOSITE)
@@ -1177,11 +1177,6 @@ static void mbuf_drain_locked(boolean_t);
 	                    (u_int16_t)(m)->m_type, m);                 \
 	}
 #endif /* CONFIG_MBUF_MCACHE */
-
-/*
- * Macro version of mtod.
- */
-#define MTOD(m, t)      ((t)((m)->m_data))
 
 #if CONFIG_MBUF_MCACHE
 #define MBUF_IN_MAP(addr)                                               \
@@ -1233,7 +1228,6 @@ static void mbuf_drain_locked(boolean_t);
 	m_classifier_init(m, 0);                                        \
 	m_tag_init(m, 1);                                               \
 	m_scratch_init(m);                                              \
-	m_redzone_init(m);                                              \
 }
 
 #define MBUF_INIT(m, pkthdr, type) {                                    \
@@ -1476,7 +1470,7 @@ mbuf_stat_sync(void)
 #else
 	for (k = 0; k < NELEM(mbuf_table); k++) {
 		const zone_id_t zid = m_class_to_zid(m_class(k));
-		const zone_t zone = zone_by_id(zid);
+		const zone_ref_t zone = zone_by_id(zid);
 		struct zone_basic_stats stats = {};
 
 		sp = m_stats(k);
@@ -1531,7 +1525,7 @@ static int
 mb_stat_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	void *statp;
+	any_ref_t statp;
 	int k, statsz, proc64 = proc_is64bit(req->p);
 
 	lck_mtx_lock(mbuf_mlock);
@@ -1608,7 +1602,6 @@ m_elide(struct mbuf *m)
 	m_tag_init(m, 1);
 	m->m_pkthdr.pkt_flags = 0;
 	m_scratch_init(m);
-	m->m_pkthdr.redzone = 0;
 	m->m_flags &= ~M_PKTHDR;
 }
 
@@ -1677,15 +1670,22 @@ mz_ref_free(struct ext_ref *rfa)
 }
 
 __attribute__((always_inline))
-static inline void *
+static inline void * __bidi_indexable
 mz_cl_alloc(zone_id_t zid, zalloc_flags_t flags)
 {
+	void * p __unsafe_indexable;
 	if (flags & Z_NOWAIT) {
 		flags ^= Z_NOWAIT | Z_NOPAGEWAIT;
 	} else if (!(flags & Z_NOPAGEWAIT)) {
 		flags |= Z_NOFAIL;
 	}
-	return (zalloc_id)(zid, flags | Z_NOZZC);
+	flags |= Z_NOZZC;
+
+	/*
+	 * N.B. Invoking `(zalloc_id)' directly, vs. via `zalloc_id' macro.
+	 */
+	p = (zalloc_id)(zid, flags);
+	return __unsafe_forge_bidi_indexable(void *, p, zone_get_elem_size(zone_by_id(zid)));
 }
 
 __attribute__((always_inline))
@@ -1789,18 +1789,22 @@ out:
 static void *
 mz_composite_mark_valid(zone_id_t zid, void *p)
 {
-	struct mbuf *m = p;
+	mbuf_ref_t m = p;
 
-	m = zcache_mark_valid(zone_by_id(ZONE_ID_MBUF), m);
+	m = zcache_mark_valid_single(zone_by_id(ZONE_ID_MBUF), m);
 #if KASAN
-	struct ext_ref *rfa = m_get_rfa(m);
+	struct ext_ref *rfa __single = m_get_rfa(m);
 	const zone_id_t cl_zid = mz_cl_zid(zid);
 	void *cl = m->m_ext.ext_buf;
 
-	cl = zcache_mark_valid(zone_by_id(cl_zid), cl);
-	rfa = zcache_mark_valid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
+	cl = __unsafe_forge_bidi_indexable(void *,
+	    zcache_mark_valid(zone_by_id(cl_zid), cl),
+	    zone_get_elem_size(zone_by_id(cl_zid)));
+	rfa = __unsafe_forge_single(struct ext_ref *,
+	    zcache_mark_valid(zone_by_id(ZONE_ID_MBUF_REF), rfa));
 	m->m_data = (uintptr_t)cl;
 	m->m_ext.ext_buf = cl;
+	m->m_ext.ext_size = m->m_ext.ext_size;
 	m_set_rfa(m, rfa);
 #else
 #pragma unused(zid)
@@ -1813,25 +1817,29 @@ mz_composite_mark_valid(zone_id_t zid, void *p)
 static void *
 mz_composite_mark_invalid(zone_id_t zid, void *p)
 {
-	struct mbuf *m = p;
+	mbuf_ref_t m = p;
 
 	VERIFY(MBUF_IS_COMPOSITE(m));
 	VERIFY(MEXT_REF(m) == MEXT_MINREF(m));
 #if KASAN
-	struct ext_ref *rfa = m_get_rfa(m);
+	struct ext_ref *rfa __single = m_get_rfa(m);
 	const zone_id_t cl_zid = mz_cl_zid(zid);
 	void *cl = m->m_ext.ext_buf;
 
-	cl = zcache_mark_invalid(zone_by_id(cl_zid), cl);
-	rfa = zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
+	cl = __unsafe_forge_bidi_indexable(void *,
+	    zcache_mark_invalid(zone_by_id(cl_zid), cl),
+	    zone_get_elem_size(zone_by_id(cl_zid)));
+	rfa = __unsafe_forge_single(struct ext_ref *,
+	    zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF_REF), rfa));
 	m->m_data = (uintptr_t)cl;
 	m->m_ext.ext_buf = cl;
+	m->m_ext.ext_size = m->m_ext.ext_size;
 	m_set_rfa(m, rfa);
 #else
 #pragma unused(zid)
 #endif
 
-	return zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF), m);
+	return zcache_mark_invalid_single(zone_by_id(ZONE_ID_MBUF), m);
 }
 
 static void
@@ -1839,7 +1847,7 @@ mz_composite_destroy(zone_id_t zid, void *p)
 {
 	const zone_id_t cl_zid = mz_cl_zid(zid);
 	struct ext_ref *rfa = NULL;
-	struct mbuf *m = p;
+	mbuf_ref_t m = p;
 
 	VERIFY(MBUF_IS_COMPOSITE(m));
 
@@ -1849,7 +1857,6 @@ mz_composite_destroy(zone_id_t zid, void *p)
 	MEXT_FLAGS(m) = 0;
 	MEXT_PRIV(m) = 0;
 	MEXT_PMBUF(m) = NULL;
-	MEXT_TOKEN(m) = 0;
 
 	rfa = m_get_rfa(m);
 	m_set_ext(m, NULL, NULL, NULL);
@@ -1859,6 +1866,7 @@ mz_composite_destroy(zone_id_t zid, void *p)
 	m->m_next = m->m_nextpkt = NULL;
 
 	mz_cl_free(cl_zid, m->m_ext.ext_buf);
+	m->m_ext.ext_size = 0;
 	m->m_ext.ext_buf = NULL;
 	mz_ref_free(rfa);
 	mz_free(m);
@@ -1934,10 +1942,17 @@ mbuf_table_init(void)
 	unsigned int b, c, s;
 	int m, config_mbuf_jumbo = 0;
 
-	omb_stat = zalloc_permanent(OMB_STAT_SIZE(NELEM(mbuf_table)),
+	VERIFY(NELEM(mbuf_table) <= MB_STAT_MAX_MB_CLASSES);
+	/*
+	 * Kernel version of mb_stat / omb_stat should be sufficient
+	 * for the NELEM(mbuf_table).
+	 */
+	VERIFY(OMB_STAT_SIZE(NELEM(mbuf_table)) <= sizeof(*omb_stat));
+	omb_stat = zalloc_permanent(sizeof(*omb_stat),
 	    ZALIGN(struct omb_stat));
 
-	mb_stat = zalloc_permanent(MB_STAT_SIZE(NELEM(mbuf_table)),
+	VERIFY(MB_STAT_SIZE(NELEM(mbuf_table)) <= sizeof(*mb_stat));
+	mb_stat = zalloc_permanent(sizeof(*mb_stat),
 	    ZALIGN(mb_stat_t));
 
 	mb_stat->mbs_cnt = NELEM(mbuf_table);
@@ -2146,7 +2161,7 @@ mbuf_class_under_pressure(struct mbuf *m)
 	 * We can't call mbuf_stat_sync() since that requires a lock.
 	 */
 	const zone_id_t zid = m_class_to_zid(m_class(mclass));
-	const zone_t zone = zone_by_id(zid);
+	const zone_ref_t zone = zone_by_id(zid);
 	struct zone_basic_stats stats = {};
 
 	zone_get_stats(zone, &stats);
@@ -2288,19 +2303,6 @@ mbinit(void)
 	/* Module specific scratch space (32-bit alignment requirement) */
 	_CASSERT(!(offsetof(struct mbuf, m_pkthdr.pkt_mpriv) %
 	    sizeof(uint32_t)));
-
-	/* pktdata needs to start at 128-bit offset! */
-	_CASSERT((offsetof(struct mbuf, m_pktdat) % 16) == 0);
-
-	/* Initialize random red zone cookie value */
-	_CASSERT(sizeof(mb_redzone_cookie) ==
-	    sizeof(((struct pkthdr *)0)->redzone));
-	read_random(&mb_redzone_cookie, sizeof(mb_redzone_cookie));
-	read_random(&mb_obscure_extref, sizeof(mb_obscure_extref));
-	read_random(&mb_obscure_extfree, sizeof(mb_obscure_extfree));
-	mb_obscure_extref |= 0x3;
-	mb_obscure_extref = 0;
-	mb_obscure_extfree |= 0x3;
 
 #if CONFIG_MBUF_MCACHE
 	/* Make sure we don't save more than we should */
@@ -2478,7 +2480,7 @@ mbinit(void)
 		    (void *)(uintptr_t)m, flags, MCR_SLEEP);
 #else
 		if (!MBUF_CLASS_COMPOSITE(m)) {
-			zone_t zone = zone_by_id(m_class_to_zid(m));
+			zone_ref_t zone = zone_by_id(m_class_to_zid(m));
 
 			zone_set_exhaustible(zone, m_maxlimit(m), false);
 			zone_raise_reserve(zone, m_minlimit(m));
@@ -3265,7 +3267,6 @@ cslab_free(mbuf_class_t class, mcache_obj_t *list, int purged)
 			MEXT_FLAGS(m) = 0;
 			MEXT_PRIV(m) = 0;
 			MEXT_PMBUF(m) = NULL;
-			MEXT_TOKEN(m) = 0;
 
 			rfa = (mcache_obj_t *)(void *)m_get_rfa(m);
 			m_set_ext(m, NULL, NULL, NULL);
@@ -4427,7 +4428,7 @@ m_getclr(int wait, int type)
 
 	_MGET(m, wait, type);
 	if (m != NULL) {
-		bzero(MTOD(m, caddr_t), MLEN);
+		bzero(mtod(m, caddr_t), MLEN);
 	}
 	return m;
 }
@@ -4469,7 +4470,7 @@ m_free_paired(struct mbuf *m)
 			 * as it is immutable.  atomic_set_ptr also causes
 			 * memory barrier sync.
 			 */
-			os_atomic_store(&MEXT_PMBUF(m), NULL, release);
+			os_atomic_store(&MEXT_PMBUF(m), (mbuf_ref_t)0, release);
 
 			switch (m->m_ext.ext_size) {
 			case MCLBYTES:
@@ -4509,8 +4510,6 @@ m_free(struct mbuf *m)
 	}
 
 	if (m->m_flags & M_PKTHDR) {
-		/* Check for scratch area overflow */
-		m_redzone_verify(m);
 		/* Free the aux data and tags if there is any */
 		m_tag_delete_chain(m);
 
@@ -4620,7 +4619,7 @@ m_free(struct mbuf *m)
 }
 
 __private_extern__ struct mbuf *
-m_clattach(struct mbuf *m, int type, caddr_t extbuf,
+m_clattach(struct mbuf *m, int type, caddr_t extbuf __sized_by(extsize),
     void (*extfree)(caddr_t, u_int, caddr_t), size_t extsize, caddr_t extarg,
     int wait, int pair)
 {
@@ -4800,6 +4799,7 @@ struct mbuf *
 m_mclget(struct mbuf *m, int wait)
 {
 	struct ext_ref *rfa = NULL;
+	char *bytes = NULL;
 
 #if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
@@ -4810,10 +4810,13 @@ m_mclget(struct mbuf *m, int wait)
 		return m;
 	}
 #endif /* CONFIG_MBUF_MCACHE */
-	m->m_ext.ext_buf = m_mclalloc(wait);
-	if (m->m_ext.ext_buf != NULL) {
+	if ((bytes = m_mclalloc(wait)) != NULL) {
+		m->m_ext.ext_size = MCLBYTES;
+		m->m_ext.ext_buf = bytes;
 		MBUF_CL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+		m->m_ext.ext_size = 0;
+		m->m_ext.ext_buf = NULL;
 #if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
 #else
@@ -4825,7 +4828,8 @@ m_mclget(struct mbuf *m, int wait)
 }
 
 /* Allocate an mbuf cluster */
-caddr_t
+char *
+__sized_by_or_null(MCLBYTES)
 m_mclalloc(int wait)
 {
 #if CONFIG_MBUF_MCACHE
@@ -4869,7 +4873,8 @@ m_mclhasreference(struct mbuf *m)
 	return (MEXT_FLAGS(m) & EXTF_READONLY) ? 1 : 0;
 }
 
-__private_extern__ caddr_t
+__private_extern__ char *
+__sized_by_or_null(MBIGCLBYTES)
 m_bigalloc(int wait)
 {
 #if CONFIG_MBUF_MCACHE
@@ -4901,6 +4906,7 @@ __private_extern__ struct mbuf *
 m_mbigget(struct mbuf *m, int wait)
 {
 	struct ext_ref *rfa = NULL;
+	void * bytes = NULL;
 
 #if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
@@ -4911,20 +4917,25 @@ m_mbigget(struct mbuf *m, int wait)
 		return m;
 	}
 #endif /* CONFIG_MBUF_MCACHE */
-	m->m_ext.ext_buf = m_bigalloc(wait);
-	if (m->m_ext.ext_buf != NULL) {
+	if ((bytes = m_bigalloc(wait)) != NULL) {
+		m->m_ext.ext_size = MBIGCLBYTES;
+		m->m_ext.ext_buf = bytes;
 		MBUF_BIGCL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+		m->m_ext.ext_size = 0;
+		m->m_ext.ext_buf = NULL;
 #if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
 #else
 		mz_ref_free(rfa);
 #endif /* CONFIG_MBUF_MCACHE */
 	}
+
 	return m;
 }
 
-__private_extern__ caddr_t
+__private_extern__ char *
+__sized_by_or_null(M16KCLBYTES)
 m_16kalloc(int wait)
 {
 #if CONFIG_MBUF_MCACHE
@@ -4956,6 +4967,7 @@ __private_extern__ struct mbuf *
 m_m16kget(struct mbuf *m, int wait)
 {
 	struct ext_ref *rfa = NULL;
+	void *bytes = NULL;
 
 #if CONFIG_MBUF_MCACHE
 	if ((rfa = mcache_alloc(ref_cache, MSLEEPF(wait))) == NULL) {
@@ -4966,10 +4978,13 @@ m_m16kget(struct mbuf *m, int wait)
 		return m;
 	}
 #endif /* CONFIG_MBUF_MCACHE */
-	m->m_ext.ext_buf =  m_16kalloc(wait);
-	if (m->m_ext.ext_buf != NULL) {
+	if ((bytes = m_16kalloc(wait)) != NULL) {
+		m->m_ext.ext_size = M16KCLBYTES;
+		m->m_ext.ext_buf = bytes;
 		MBUF_16KCL_INIT(m, m->m_ext.ext_buf, rfa, 1, 0);
 	} else {
+		m->m_ext.ext_size = 0;
+		m->m_ext.ext_buf = NULL;
 #if CONFIG_MBUF_MCACHE
 		mcache_free(ref_cache, rfa);
 #else
@@ -4989,12 +5004,7 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
 {
 	VERIFY(from->m_flags & M_PKTHDR);
 
-	/* Check for scratch area overflow */
-	m_redzone_verify(from);
-
 	if (to->m_flags & M_PKTHDR) {
-		/* Check for scratch area overflow */
-		m_redzone_verify(to);
 		/* We will be taking over the tags of 'to' */
 		m_tag_delete_chain(to);
 	}
@@ -5006,7 +5016,6 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
 	if ((to->m_flags & M_EXT) == 0) {
 		to->m_data = (uintptr_t)to->m_pktdat;
 	}
-	m_redzone_init(to);                     /* setup red zone on dst */
 }
 
 /*
@@ -5019,12 +5028,7 @@ m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int how)
 {
 	VERIFY(from->m_flags & M_PKTHDR);
 
-	/* Check for scratch area overflow */
-	m_redzone_verify(from);
-
 	if (to->m_flags & M_PKTHDR) {
-		/* Check for scratch area overflow */
-		m_redzone_verify(to);
 		/* We will be taking over the tags of 'to' */
 		m_tag_delete_chain(to);
 	}
@@ -5035,7 +5039,6 @@ m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int how)
 	to->m_pkthdr = from->m_pkthdr;
 	/* clear TX completion flag so the callback is not called in the copy */
 	to->m_pkthdr.pkt_flags &= ~PKTF_TX_COMPL_TS_REQ;
-	m_redzone_init(to);                     /* setup red zone on dst */
 	m_tag_init(to, 0);                      /* preserve dst static tags */
 	return m_tag_copy_chain(to, from, how);
 }
@@ -5109,8 +5112,8 @@ __private_extern__ struct mbuf *
 m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
     int wait, int wantall, size_t bufsize)
 {
-	struct mbuf *m = NULL;
-	struct mbuf **np, *top;
+	mbuf_ref_t m = NULL;
+	mbuf_ref_t *np, top;
 	unsigned int pnum, needed = *num_needed;
 #if CONFIG_MBUF_MCACHE
 	mcache_obj_t *mp_list = NULL;
@@ -5262,7 +5265,7 @@ __private_extern__ struct mbuf *
 m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
     unsigned int *maxsegments, int wait, int wantall, size_t wantsize)
 {
-	struct mbuf **np, *top, *first = NULL;
+	mbuf_ref_t *np, top, first = NULL;
 	size_t bufsize, r_bufsize;
 	unsigned int num = 0;
 	unsigned int nsegs = 0;
@@ -5383,7 +5386,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		}
 
 		while (num < needed) {
-			struct mbuf *m = NULL;
+			mbuf_ref_t m = NULL;
 
 #if CONFIG_MBUF_MCACHE
 			m = (struct mbuf *)mp_list;
@@ -5552,7 +5555,7 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 	}
 
 	for (;;) {
-		struct mbuf *m = NULL;
+		mbuf_ref_t m = NULL;
 		u_int16_t flag;
 		struct ext_ref *rfa;
 		void *cl;
@@ -5712,8 +5715,7 @@ m_getpackets(int num_needed, int num_with_pkthdrs, int how)
 struct mbuf *
 m_getpackethdrs(int num_needed, int how)
 {
-	struct mbuf *m;
-	struct mbuf **np, *top;
+	mbuf_ref_t m, *np, top;
 
 	top = NULL;
 	np = &top;
@@ -5774,8 +5776,6 @@ m_freem_list(struct mbuf *m)
 			}
 
 			if (m->m_flags & M_PKTHDR) {
-				/* Check for scratch area overflow */
-				m_redzone_verify(m);
 				/* Free the aux data and tags if there is any */
 				m_tag_delete_chain(m);
 				m_do_tx_compl_callback(m, NULL);
@@ -6013,11 +6013,10 @@ simple_free:
  * DROPTAP_FLAG_DIR_IN), or the packet will not be captured.
  */
 void
-m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+m_drop_list(mbuf_t m, struct ifnet *ifp, uint16_t flags, uint32_t reason, const char *funcname,
     uint16_t linenum)
 {
 	struct mbuf *nextpkt;
-	struct ifnet *ifp = NULL;
 
 	if (m == NULL) {
 		return;
@@ -6042,11 +6041,10 @@ m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
 		}
 	} else if (flags & DROPTAP_FLAG_DIR_IN) {
 		while (m != NULL) {
-			char *frame_header;
+			char *frame_header __single;
 			uint16_t tmp_flags = flags;
 
 			nextpkt = m->m_nextpkt;
-			ifp = m->m_pkthdr.rcvif;
 
 			if ((flags & DROPTAP_FLAG_L2_MISSING) == 0 &&
 			    m->m_pkthdr.pkt_hdr != NULL) {
@@ -6057,7 +6055,7 @@ m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
 			}
 
 			droptap_input_mbuf(m, reason, funcname, linenum, tmp_flags,
-			    ifp, frame_header);
+			    m->m_pkthdr.rcvif, frame_header);
 			m = nextpkt;
 		}
 	}
@@ -6079,27 +6077,14 @@ m_freem(struct mbuf *m)
  * direction flag (DROPTAP_FLAG_DIR_OUT, DROPTAP_FLAG_DIR_IN), or the packet will
  * not be captured.
  */
-void
-m_drop(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+static void
+m_drop_common(mbuf_t m, struct ifnet *ifp, uint16_t flags, uint32_t reason, const char *funcname,
     uint16_t linenum)
 {
-	struct ifnet *ifp = NULL;
-
-	if (m == NULL) {
-		return;
-	}
-
-	if (__probable(droptap_total_tap_count == 0)) {
-		m_freem(m);
-		return;
-	}
-
 	if (flags & DROPTAP_FLAG_DIR_OUT) {
 		droptap_output_mbuf(m, reason, funcname, linenum, flags, ifp);
 	} else if (flags & DROPTAP_FLAG_DIR_IN) {
-		char *frame_header;
-
-		ifp = m->m_pkthdr.rcvif;
+		char *frame_header __single;
 
 		if ((flags & DROPTAP_FLAG_L2_MISSING) == 0 &&
 		    m->m_pkthdr.pkt_hdr != NULL) {
@@ -6113,6 +6098,42 @@ m_drop(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
 		    frame_header);
 	}
 	m_freem(m);
+}
+
+void
+m_drop(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+    uint16_t linenum)
+{
+	if (m == NULL) {
+		return;
+	}
+
+	if (__probable(droptap_total_tap_count == 0)) {
+		m_freem(m);
+		return;
+	}
+
+	if (flags & DROPTAP_FLAG_DIR_OUT) {
+		m_drop_common(m, NULL, flags, reason, funcname, linenum);
+	} else if (flags & DROPTAP_FLAG_DIR_IN) {
+		m_drop_common(m, m->m_pkthdr.rcvif, flags, reason, funcname, linenum);
+	}
+}
+
+void
+m_drop_if(mbuf_t m, struct ifnet *ifp, uint16_t flags, uint32_t reason, const char *funcname,
+    uint16_t linenum)
+{
+	if (m == NULL) {
+		return;
+	}
+
+	if (__probable(droptap_total_tap_count == 0)) {
+		m_freem(m);
+		return;
+	}
+
+	m_drop_common(m, ifp, flags, reason, funcname, linenum);
 }
 
 /*
@@ -6204,9 +6225,8 @@ struct mbuf *
 m_copym_mode(struct mbuf *m, int off0, int len0, int wait,
     struct mbuf **m_lastm, int *m_off, uint32_t mode)
 {
-	struct mbuf *n, *mhdr = NULL, **np;
+	mbuf_ref_t n, mhdr = NULL, *np, top;
 	int off = off0, len = len0;
-	struct mbuf *top;
 	int copyhdr = 0;
 
 	if (off < 0 || len < 0) {
@@ -6290,18 +6310,14 @@ m_copym_mode(struct mbuf *m, int off0, int len0, int wait,
 			/*
 			 * Limit to the capacity of the destination
 			 */
-			if (n->m_flags & M_PKTHDR) {
-				n->m_len = MIN(n->m_len, MHLEN);
-			} else {
-				n->m_len = MIN(n->m_len, MLEN);
-			}
+			n->m_len = MIN(n->m_len, M_SIZE(n));
 
-			if (MTOD(n, char *) + n->m_len > ((char *)n) + _MSIZE) {
+			if (m_mtod_end(n) > m_mtod_upper_bound(n)) {
 				panic("%s n %p copy overflow",
 				    __func__, n);
 			}
 
-			bcopy(MTOD(m, caddr_t) + off, MTOD(n, caddr_t),
+			bcopy(mtod(m, caddr_t) + off, mtod(n, caddr_t),
 			    (unsigned)n->m_len);
 		}
 		if (len != M_COPYALL) {
@@ -6344,9 +6360,8 @@ struct mbuf *
 m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
     struct mbuf **m_lastm, int *m_off, uint32_t mode)
 {
-	struct mbuf *m = m0, *n, **np = NULL;
+	mbuf_ref_t m = m0, n, *np = NULL, top = NULL;
 	int off = off0, len = len0;
-	struct mbuf *top = NULL;
 #if CONFIG_MBUF_MCACHE
 	int mcflags = MSLEEPF(wait);
 	mcache_obj_t *list = NULL;
@@ -6454,7 +6469,7 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 				    __func__, n);
 			}
 
-			bcopy(MTOD(m, caddr_t) + off, MTOD(n, caddr_t),
+			bcopy(mtod(m, caddr_t) + off, mtod(n, caddr_t),
 			    (unsigned)n->m_len);
 		}
 		len -= n->m_len;
@@ -6505,9 +6520,9 @@ nospace:
  * continuing for "len" bytes, into the indicated buffer.
  */
 void
-m_copydata(struct mbuf *m, int off, int len, void *vp)
+m_copydata(struct mbuf *m, int off, int len0, void *vp __sized_by(len0))
 {
-	int off0 = off, len0 = len;
+	int off0 = off, len = len0;
 	struct mbuf *m0 = m;
 	unsigned count;
 	char *cp = vp;
@@ -6536,7 +6551,7 @@ m_copydata(struct mbuf *m, int off, int len, void *vp)
 			/* NOTREACHED */
 		}
 		count = MIN(m->m_len - off, len);
-		bcopy(MTOD(m, caddr_t) + off, cp, count);
+		bcopy(mtod(m, caddr_t) + off, cp, count);
 		len -= count;
 		cp += count;
 		off = 0;
@@ -6562,7 +6577,7 @@ m_cat(struct mbuf *m, struct mbuf *n)
 			return;
 		}
 		/* splat the data from one into the other */
-		bcopy(MTOD(n, caddr_t), MTOD(m, caddr_t) + m->m_len,
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
 		    (u_int)n->m_len);
 		m->m_len += n->m_len;
 		n = m_free(n);
@@ -6610,7 +6625,7 @@ m_adj(struct mbuf *mp, int req_len)
 		count = 0;
 		for (;;) {
 			count += m->m_len;
-			if (m->m_next == (struct mbuf *)0) {
+			if (m->m_next == NULL) {
 				break;
 			}
 			m = m->m_next;
@@ -6715,7 +6730,7 @@ m_pullup(struct mbuf *n, int len)
 	space = m_mtod_upper_bound(m) - m_mtod_end(m);
 	do {
 		count = MIN(MIN(MAX(len, max_protohdr), space), n->m_len);
-		bcopy(MTOD(n, caddr_t), MTOD(m, caddr_t) + m->m_len,
+		bcopy(mtod(n, caddr_t), mtod(m, caddr_t) + m->m_len,
 		    (unsigned)count);
 		len -= count;
 		m->m_len += count;
@@ -6897,7 +6912,7 @@ extpacket:
 		m_incref(m);
 		n->m_data = m->m_data + len;
 	} else {
-		bcopy(MTOD(m, caddr_t) + len, MTOD(n, caddr_t), remain);
+		bcopy(mtod(m, caddr_t) + len, mtod(n, caddr_t), remain);
 	}
 	n->m_len = remain;
 	m->m_len = len;
@@ -6906,88 +6921,6 @@ extpacket:
 	return n;
 }
 
-/*
- * Routine to copy from device local memory into mbufs.
- */
-struct mbuf *
-m_devget(char *buf, int totlen, int off0, struct ifnet *ifp,
-    void (*copy)(const void *, void *, size_t))
-{
-	struct mbuf *m;
-	struct mbuf *top = NULL, **mp = &top;
-	int off = off0, len;
-	char *cp;
-	char *epkt;
-
-	cp = buf;
-	epkt = cp + totlen;
-	if (off) {
-		/*
-		 * If 'off' is non-zero, packet is trailer-encapsulated,
-		 * so we have to skip the type and length fields.
-		 */
-		cp += off + 2 * sizeof(u_int16_t);
-		totlen -= 2 * sizeof(u_int16_t);
-	}
-	_MGETHDR(m, M_DONTWAIT, MT_DATA);
-	if (m == NULL) {
-		return NULL;
-	}
-	m->m_pkthdr.rcvif = ifp;
-	m->m_pkthdr.len = totlen;
-	m->m_len = MHLEN;
-
-	while (totlen > 0) {
-		if (top != NULL) {
-			_MGET(m, M_DONTWAIT, MT_DATA);
-			if (m == NULL) {
-				m_freem(top);
-				return NULL;
-			}
-			m->m_len = MLEN;
-		}
-		len = MIN(totlen, epkt - cp);
-		if (len >= MINCLSIZE) {
-			MCLGET(m, M_DONTWAIT);
-			if (m->m_flags & M_EXT) {
-				m->m_len = len = MIN(len, m_maxsize(MC_CL));
-			} else {
-				/* give up when it's out of cluster mbufs */
-				if (top != NULL) {
-					m_freem(top);
-				}
-				m_freem(m);
-				return NULL;
-			}
-		} else {
-			/*
-			 * Place initial small packet/header at end of mbuf.
-			 */
-			if (len < m->m_len) {
-				if (top == NULL &&
-				    len + max_linkhdr <= m->m_len) {
-					m->m_data += max_linkhdr;
-				}
-				m->m_len = len;
-			} else {
-				len = m->m_len;
-			}
-		}
-		if (copy) {
-			copy(cp, MTOD(m, caddr_t), (unsigned)len);
-		} else {
-			bcopy(cp, MTOD(m, caddr_t), (unsigned)len);
-		}
-		cp += len;
-		*mp = m;
-		mp = &m->m_next;
-		totlen -= len;
-		if (cp == epkt) {
-			cp = buf;
-		}
-	}
-	return top;
-}
 
 #if CONFIG_MBUF_MCACHE
 #ifndef MBUF_GROWTH_NORMAL_THRESH
@@ -7145,7 +7078,7 @@ m_length(struct mbuf *m)
  * chain if necessary.
  */
 void
-m_copyback(struct mbuf *m0, int off, int len, const void *cp)
+m_copyback(struct mbuf *m0, int off, int len, const void *cp __sized_by(len))
 {
 #if DEBUG
 	struct mbuf *origm = m0;
@@ -7170,7 +7103,7 @@ m_copyback(struct mbuf *m0, int off, int len, const void *cp)
 }
 
 struct mbuf *
-m_copyback_cow(struct mbuf *m0, int off, int len, const void *cp, int how)
+m_copyback_cow(struct mbuf *m0, int off, int len, const void *cp __sized_by(len), int how)
 {
 	int error;
 
@@ -7230,13 +7163,11 @@ m_makewritable(struct mbuf **mp, int off, int len, int how)
 }
 
 static int
-m_copyback0(struct mbuf **mp0, int off, int len, const void *vp, int flags,
+m_copyback0(struct mbuf **mp0, int off, int len0, const void *vp __sized_by_or_null(len0), int flags,
     int how)
 {
-	int mlen;
-	struct mbuf *m, *n;
-	struct mbuf **mp;
-	int totlen = 0;
+	int mlen, len = len0, totlen = 0;
+	mbuf_ref_t m, n, *mp;
 	const char *cp = vp;
 
 	VERIFY(mp0 != NULL);
@@ -7469,8 +7400,7 @@ mcl_to_paddr(char *addr)
 struct mbuf *
 m_dup(struct mbuf *m, int how)
 {
-	struct mbuf *n, **np;
-	struct mbuf *top;
+	mbuf_ref_t n, top, *np;
 	int copyhdr = 0;
 
 	np = &top;
@@ -7492,14 +7422,14 @@ m_dup(struct mbuf *m, int how)
 				}
 				n->m_len = m->m_len;
 				m_dup_pkthdr(n, m, how);
-				bcopy(MTOD(m, caddr_t), MTOD(n, caddr_t), m->m_len);
+				bcopy(mtod(m, caddr_t), mtod(n, caddr_t), m->m_len);
 				return n;
 			}
 		} else if (m->m_len <= MLEN) {
 			if ((n = _M_GET(how, m->m_type)) == NULL) {
 				return NULL;
 			}
-			bcopy(MTOD(m, caddr_t), MTOD(n, caddr_t), m->m_len);
+			bcopy(mtod(m, caddr_t), mtod(n, caddr_t), m->m_len);
 			n->m_len = m->m_len;
 			return n;
 		}
@@ -7548,7 +7478,7 @@ m_dup(struct mbuf *m, int how)
 		 * Assume that the two mbufs have the same offset to data area
 		 * (up to word boundaries)
 		 */
-		bcopy(MTOD(m, caddr_t), MTOD(n, caddr_t), (unsigned)n->m_len);
+		bcopy(mtod(m, caddr_t), mtod(n, caddr_t), (unsigned)n->m_len);
 		m = m->m_next;
 		np = &n->m_next;
 #if BLUE_DEBUG
@@ -7574,8 +7504,7 @@ nospace:
 static struct mbuf *
 m_expand(struct mbuf *m, struct mbuf **last)
 {
-	struct mbuf *top = NULL;
-	struct mbuf **nm = &top;
+	mbuf_ref_t top = NULL, *nm = &top;
 	uintptr_t data0, data;
 	unsigned int len0, len;
 
@@ -7631,19 +7560,18 @@ m_expand(struct mbuf *m, struct mbuf **last)
 struct mbuf *
 m_normalize(struct mbuf *m)
 {
-	struct mbuf *top = NULL;
-	struct mbuf **nm = &top;
+	mbuf_ref_t top = NULL, *nm = &top;
 	boolean_t expanded = FALSE;
 
 	while (m != NULL) {
-		struct mbuf *n;
+		mbuf_ref_t n;
 
 		n = m->m_next;
 		m->m_next = NULL;
 
 		/* Does the data cross one or more page boundaries? */
 		if (MBUF_MULTIPAGES(m)) {
-			struct mbuf *last;
+			mbuf_ref_t last;
 			if ((m = m_expand(m, &last)) == NULL) {
 				m_freem(n);
 				m_freem(top);
@@ -7673,10 +7601,11 @@ m_normalize(struct mbuf *m)
  * Return 1 if able to complete the job; otherwise 0.
  */
 int
-m_append(struct mbuf *m0, int len, caddr_t cp)
+m_append(struct mbuf *m0, int len0, caddr_t cp0 __sized_by(len0))
 {
 	struct mbuf *m, *n;
-	int remainder, space;
+	int remainder, space, len = len0;
+	caddr_t cp = cp0;
 
 	for (m = m0; m->m_next != NULL; m = m->m_next) {
 		;
@@ -8006,7 +7935,7 @@ mbuf_watchdog_defunct_iterate(proc_t p, void *arg)
 	}
 	fdt_foreach(fp, p) {
 		struct fileglob *fg = fp->fp_glob;
-		struct socket *so = NULL;
+		socket_ref_t so = NULL;
 
 		if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 			continue;
@@ -9586,8 +9515,6 @@ m_reinit(struct mbuf *m, int hdr)
 			MBUF_INIT_PKTHDR(m);
 		}
 	} else {
-		/* Check for scratch area overflow */
-		m_redzone_verify(m);
 		/* Free the aux data and tags if there is any */
 		m_tag_delete_chain(m);
 		m_do_tx_compl_callback(m, NULL);
@@ -9713,31 +9640,32 @@ m_add_crumb(struct mbuf *m, uint16_t crumb)
 	m->m_pkthdr.pkt_crumbs |= crumb;
 }
 
-static void
-m_redzone_init(struct mbuf *m)
+void
+m_add_hdr_crumb(struct mbuf *m, uint64_t crumb, uint64_t flag)
 {
-	VERIFY(m->m_flags & M_PKTHDR);
-	/*
-	 * Each mbuf has a unique red zone pattern, which is a XOR
-	 * of the red zone cookie and the address of the mbuf.
-	 */
-	m->m_pkthdr.redzone = ((u_int32_t)(uintptr_t)m) ^ mb_redzone_cookie;
+#if defined(__arm64__)
+	while (m != NULL) {
+		m->m_mhdrcommon_crumbs &= ~flag;
+		m->m_mhdrcommon_crumbs |= (crumb & flag);
+		m = m->m_next;
+	}
+#else
+#pragma unused(m, crumb, flag)
+#endif /*__arm64__*/
 }
 
-static void
-m_redzone_verify(struct mbuf *m)
+void
+m_add_hdr_crumb_chain(struct mbuf *head, uint64_t crumb, uint64_t flag)
 {
-	u_int32_t mb_redzone;
-
-	VERIFY(m->m_flags & M_PKTHDR);
-
-	mb_redzone = ((u_int32_t)(uintptr_t)m) ^ mb_redzone_cookie;
-	if (m->m_pkthdr.redzone != mb_redzone) {
-		panic("mbuf %p redzone violation with value 0x%x "
-		    "(instead of 0x%x, using cookie 0x%x)\n",
-		    m, m->m_pkthdr.redzone, mb_redzone, mb_redzone_cookie);
-		/* NOTREACHED */
+#if defined(__arm64__)
+	while (head) {
+		/* This assumes that we might have a chain of mbuf chains */
+		m_add_hdr_crumb(head, crumb, flag);
+		head = head->m_nextpkt;
 	}
+#else
+#pragma unused(head, crumb, flag)
+#endif /*__arm64__*/
 }
 
 __private_extern__ inline void
@@ -9745,102 +9673,34 @@ m_set_ext(struct mbuf *m, struct ext_ref *rfa, m_ext_free_func_t ext_free,
     caddr_t ext_arg)
 {
 	VERIFY(m->m_flags & M_EXT);
-	if (rfa != NULL) {
-		m_set_rfa(m, rfa);
-		if (ext_free != NULL) {
-			rfa->ext_token = ((uintptr_t)&rfa->ext_token) ^
-			    mb_obscure_extfree;
-			uintptr_t ext_free_val = ptrauth_nop_cast(uintptr_t, ext_free) ^ rfa->ext_token;
-			m->m_ext.ext_free = ptrauth_nop_cast(m_ext_free_func_t, ext_free_val);
-			if (ext_arg != NULL) {
-				m->m_ext.ext_arg =
-				    (caddr_t)(((uintptr_t)ext_arg) ^ rfa->ext_token);
-			} else {
-				m->m_ext.ext_arg = NULL;
-			}
-		} else {
-			rfa->ext_token = 0;
-			m->m_ext.ext_free = NULL;
-			m->m_ext.ext_arg = NULL;
-		}
-	} else {
-		/*
-		 * If we are going to loose the cookie in ext_token by
-		 * resetting the rfa, we should use the global cookie
-		 * to obscure the ext_free and ext_arg pointers.
-		 */
-		if (ext_free != NULL) {
-			uintptr_t ext_free_val = ptrauth_nop_cast(uintptr_t, ext_free) ^ mb_obscure_extfree;
-			m->m_ext.ext_free = ptrauth_nop_cast(m_ext_free_func_t, ext_free_val);
-			if (ext_arg != NULL) {
-				m->m_ext.ext_arg =
-				    (caddr_t)((uintptr_t)ext_arg ^
-				    mb_obscure_extfree);
-			} else {
-				m->m_ext.ext_arg = NULL;
-			}
-		} else {
-			m->m_ext.ext_free = NULL;
-			m->m_ext.ext_arg = NULL;
-		}
-		m->m_ext.ext_refflags = NULL;
-	}
+
+	m_set_rfa(m, rfa);
+	m->m_ext.ext_free = ext_free;
+	m->m_ext.ext_arg = ext_free == NULL ? NULL : ext_arg;
 }
 
-__private_extern__ inline struct ext_ref *
+__private_extern__ inline struct ext_ref * __stateful_pure
 m_get_rfa(struct mbuf *m)
 {
-	if (m->m_ext.ext_refflags == NULL) {
-		return NULL;
-	} else {
-		return (struct ext_ref *)(((uintptr_t)m->m_ext.ext_refflags) ^ mb_obscure_extref);
-	}
+	return __unsafe_forge_single(struct ext_ref *, m->m_ext.ext_refflags);
 }
 
 static inline void
 m_set_rfa(struct mbuf *m, struct ext_ref *rfa)
 {
-	if (rfa != NULL) {
-		m->m_ext.ext_refflags =
-		    (struct ext_ref *)(((uintptr_t)rfa) ^ mb_obscure_extref);
-	} else {
-		m->m_ext.ext_refflags = NULL;
-	}
+	m->m_ext.ext_refflags = rfa;
 }
 
-__private_extern__ inline m_ext_free_func_t
+__private_extern__ inline m_ext_free_func_t __stateful_pure
 m_get_ext_free(struct mbuf *m)
 {
-	struct ext_ref *rfa;
-	if (m->m_ext.ext_free == NULL) {
-		return NULL;
-	}
-
-	rfa = m_get_rfa(m);
-	if (rfa == NULL) {
-		uintptr_t ext_free_val = ptrauth_nop_cast(uintptr_t, m->m_ext.ext_free) ^ mb_obscure_extfree;
-		return ptrauth_nop_cast(m_ext_free_func_t, ext_free_val);
-	} else {
-		uintptr_t ext_free_val = ptrauth_nop_cast(uintptr_t, m->m_ext.ext_free) ^ rfa->ext_token;
-		return ptrauth_nop_cast(m_ext_free_func_t, ext_free_val);
-	}
+	return m->m_ext.ext_free;
 }
 
 __private_extern__ inline caddr_t
 m_get_ext_arg(struct mbuf *m)
 {
-	struct ext_ref *rfa;
-	if (m->m_ext.ext_arg == NULL) {
-		return NULL;
-	}
-
-	rfa = m_get_rfa(m);
-	if (rfa == NULL) {
-		return (caddr_t)((uintptr_t)m->m_ext.ext_arg ^ mb_obscure_extfree);
-	} else {
-		return (caddr_t)(((uintptr_t)m->m_ext.ext_arg) ^
-		       rfa->ext_token);
-	}
+	return __unsafe_forge_single(caddr_t, m->m_ext.ext_arg);
 }
 
 #if CONFIG_MBUF_MCACHE

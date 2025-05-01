@@ -30,7 +30,6 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
-#define MSEC_PER_SEC    1000            /* milliseconds per second */
 static void
 nsec_to_str(unsigned long long nsec, char *buf)
 {

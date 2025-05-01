@@ -1343,7 +1343,7 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 
 	do {
 		// This file reference remains open long-term in case we need to write a core-dump
-		err = IOPolledFileOpen(filename, kIOPolledFileCreate, corefile_size_bytes, free_space_to_leave_bytes,
+		err = IOPolledFileOpen(filename, kIOPolledFileCreate, 0 /*setFileSizeMin*/, corefile_size_bytes, free_space_to_leave_bytes,
 		    NULL, 0, &gIOPolledCoreFileVars, NULL, NULL, NULL);
 		if (kIOReturnSuccess == err) {
 			break;
@@ -1361,7 +1361,7 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 			return;
 		}
 
-		err = IOPolledFileOpen(filename, kIOPolledFileCreate, corefile_fallback_size_bytes, free_space_to_leave_bytes,
+		err = IOPolledFileOpen(filename, kIOPolledFileCreate, 0 /*setFileSizeMin*/, corefile_fallback_size_bytes, free_space_to_leave_bytes,
 		    NULL, 0, &gIOPolledCoreFileVars, NULL, NULL, NULL);
 		if (kIOReturnSuccess != err) {
 			IOLog("Failed to open corefile of size %llu MB (returned error 0x%x)\n",
@@ -1667,6 +1667,47 @@ IOVnodeHasEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 	}
 	obj->release();
 	return obj != kOSBooleanFalse;
+}
+
+/*
+ * Support querying an OSBoolean entitlement value,
+ * while distinguishing between the following cases:
+ *     - the entitlement does not exist.
+ *     - the entitlement exists with a value of false.
+ *     - the entitlement exists with a value of true.
+ *
+ * Return value:
+ *     - false if the entitlement does not exist.
+ *     - true if the entitlement exists.
+ *
+ * If the return value is true, the `value` argument will
+ * hold the entitlement value, which has to be Boolean.
+ */
+extern "C" boolean_t
+IOVnodeGetBooleanEntitlement(
+	vnode_t vnode,
+	int64_t off,
+	const char *entitlement,
+	bool *value)
+{
+	OSObject * obj;
+	off_t offset = (off_t)off;
+
+	obj = IOUserClient::copyClientEntitlementVnode(vnode, offset, entitlement);
+	if (!obj) {
+		return false;
+	}
+
+	if (obj == kOSBooleanTrue) {
+		*value = true;
+	} else if (obj == kOSBooleanFalse) {
+		*value = false;
+	} else {
+		panic("%s: entitlement is not OSBoolean", __func__);
+	}
+
+	obj->release();
+	return true;
 }
 
 extern "C" char *

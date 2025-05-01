@@ -4663,22 +4663,6 @@ skt_xfer_init_llink_multi(void)
 	sktc_config_fsw_rx_agg_tcp(0);
 }
 
-static uint32_t skt_switch_combined_mode;
-static void
-skt_xfer_init_llink_multi_combined(void)
-{
-	int err;
-	uint32_t enable_switching = 1;
-	size_t len = sizeof(skt_switch_combined_mode);
-
-	skt_xfer_init_llink_multi();
-	err = sysctlbyname("net.link.fake.switch_combined_mode",
-	    &skt_switch_combined_mode, &len, &enable_switching,
-	    sizeof(enable_switching));
-	assert(err == 0);
-}
-
-
 static void
 skt_xfer_fini(void)
 {
@@ -4746,18 +4730,6 @@ skt_xfer_fini_llink_multi(void)
 	    sizeof(skt_disable_nxctl_check));
 	assert(err == 0);
 	skt_xfer_fini();
-}
-
-static void
-skt_xfer_fini_llink_multi_cs_combined(void)
-{
-	int err;
-
-	err = sysctlbyname("net.link.fake.switch_combined_mode",
-	    NULL, NULL, &skt_switch_combined_mode,
-	    sizeof(skt_switch_combined_mode));
-	assert(err == 0);
-	skt_xfer_fini_llink_multi();
 }
 
 static void
@@ -5502,19 +5474,6 @@ struct skywalk_mptest skt_xferudpchaneventsasync = {
 	{ NULL, NULL, NULL, NULL, NULL,
 	  STR(SKT_FSW_EVENT_TEST_CHANNEL_EVENTS)},
 	skt_xfer_init_chan_event_async, skt_xfer_fini_chan_event_async, {},
-};
-
-struct skywalk_mptest skt_xferudppingllink_multi_combined = {
-	"xferudppingllinkmulti_combined",
-	"UDP ping-pong over fake ethernet pair in multi llink mode"
-	"while switching between combined and separate mode",
-	SK_FEATURE_SKYWALK | SK_FEATURE_NEXUS_NETIF |
-	SK_FEATURE_NEXUS_FLOWSWITCH | SK_FEATURE_NETNS,
-	2, skt_xfer_udp_ping_pong_main,
-	{ NULL, NULL, NULL, NULL, NULL,
-	  STR(SKT_FSW_PING_PONG_TEST_MULTI_LLINK)},
-	skt_xfer_init_llink_multi_combined, skt_xfer_fini_llink_multi_cs_combined,
-	{},
 };
 
 struct skywalk_mptest skt_xferparentchildflow = {

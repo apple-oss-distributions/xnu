@@ -1439,7 +1439,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 			ipstat.ips_rcv_if_no_match++;
 			tmp_mbuf = tmp_mbuf->m_nextpkt;
 		}
-		m_drop_list(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_RCV_IF_NO_MATCH, NULL, 0);
+		m_drop_list(m, NULL, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_RCV_IF_NO_MATCH, NULL, 0);
 		*mp = NULL;
 	}
 
@@ -1527,7 +1527,7 @@ ip_input_second_pass(struct mbuf *m, struct ifnet *inifp,
 		in_multihead_lock_done();
 		if (inm == NULL) {
 			OSAddAtomic(npkts_in_chain, &ipstat.ips_notmember);
-			m_drop_list(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_UNKNOWN_MULTICAST_GROUP,
+			m_drop_list(m, NULL, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_UNKNOWN_MULTICAST_GROUP,
 			    NULL, 0);
 			KERNEL_DEBUG(DBG_LAYER_END, 0, 0, 0, 0, 0);
 			return;
@@ -2659,7 +2659,7 @@ frag_freef(struct ipqhead *fhp, struct ipq *fp, drop_reason_t drop_reason)
 		if (drop_reason == DROP_REASON_UNSPECIFIED) {
 			m_freem_list(fp->ipq_frags);
 		} else {
-			m_drop_list(fp->ipq_frags, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
+			m_drop_list(fp->ipq_frags, NULL, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 		}
 		fp->ipq_frags = NULL;
 	}

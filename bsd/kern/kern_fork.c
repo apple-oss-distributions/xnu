@@ -133,7 +133,7 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #include <security/mac_mach_internal.h>
 #endif
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
 #include <vm/vm_pageout_xnu.h>
@@ -596,7 +596,8 @@ fork(proc_t parent_proc, __unused struct fork_args *uap, int32_t *retval)
 		 * Since the task ports for this new task are now set to be immovable,
 		 * we can enable them.
 		 */
-		ipc_task_enable(get_threadtask(child_thread));
+		vm_map_setup(get_task_map(child_task), child_task);
+		ipc_task_enable(child_task);
 
 		/*
 		 * Drop the signal lock on the child which was taken on our
@@ -950,7 +951,6 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	/* allocate a callout for use by interval timers */
 	child_proc->p_rcall = thread_call_allocate((thread_call_func_t)realitexpire, child_proc);
 
-
 	/*
 	 * Find an unused PID.
 	 */
@@ -986,6 +986,9 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 		proc_ro_data.p_idversion = OSIncrementAtomic(&nextpidversion);
 		/* kernel process is handcrafted and not from fork, so start from 1 */
 		proc_ro_data.p_uniqueid = ++nextuniqueid;
+		/* Retain our parent's current pid and pidversion */
+		proc_ro_data.p_orig_ppid = proc_getpid(parent_proc);
+		proc_ro_data.p_orig_ppidversion = proc_pidversion(parent_proc);
 
 		/* Insert in the hash, and inherit our group (and session) */
 		phash_insert_locked(child_proc);
@@ -995,11 +998,13 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 			os_atomic_or(&child_proc->p_ladvflag, P_RSR, relaxed);
 		}
 	} else {
-		/* For exec copy of the proc, copy the pid, pidversion and uniqueid of original proc */
+		/* For exec copy of the proc, copy the PID identifiers of original proc */
 		pid = parent_proc->p_pid;
 		child_proc->p_pid = pid;
 		proc_ro_data.p_idversion = parent_proc->p_proc_ro->p_idversion;
 		proc_ro_data.p_uniqueid = parent_proc->p_proc_ro->p_uniqueid;
+		proc_ro_data.p_orig_ppid = proc_original_ppid(parent_proc);
+		proc_ro_data.p_orig_ppidversion = proc_orig_ppidversion(parent_proc);
 
 		nprocs++;
 		os_atomic_or(&child_proc->p_refcount, P_REF_SHADOW, relaxed);
@@ -1205,7 +1210,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	child_proc->p_memstat_requestedpriority = JETSAM_PRIORITY_DEFAULT;
 	child_proc->p_memstat_assertionpriority = 0;
 	child_proc->p_memstat_userdata          = 0;
-	child_proc->p_memstat_idle_start        = 0;
+	child_proc->p_memstat_prio_start        = mach_absolute_time();
 	child_proc->p_memstat_idle_delta        = 0;
 	child_proc->p_memstat_memlimit          = 0;
 	child_proc->p_memstat_memlimit_active   = 0;

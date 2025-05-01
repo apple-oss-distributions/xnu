@@ -28,6 +28,7 @@
 #ifndef _KERN_LOCK_GROUP_H
 #define _KERN_LOCK_GROUP_H
 
+#include <kern/assert.h>
 #include <kern/queue.h>
 #include <kern/lock_types.h>
 #if XNU_KERNEL_PRIVATE
@@ -225,11 +226,8 @@ extern lck_grp_t       *lck_grp_resolve(
 extern void             lck_grp_assert_id(
 	lck_grp_t              *grp,
 	uint32_t                grp_attr_id);
-#if DEBUG || DEVELOPMENT
-#define LCK_GRP_ASSERT_ID(...)  lck_grp_assert_id(__VA_ARGS__)
-#else
-#define LCK_GRP_ASSERT_ID(...)  ((void)0)
-#endif
+
+#define LCK_GRP_ASSERT_ID(...)  MACH_ASSERT_DO(lck_grp_assert_id(__VA_ARGS__))
 
 extern void             lck_grp_reference(
 	lck_grp_t              *grp,

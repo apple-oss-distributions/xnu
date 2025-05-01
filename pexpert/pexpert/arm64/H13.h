@@ -31,6 +31,7 @@
 
 #define APPLEFIRESTORM
 #define NO_MONITOR              1 /* No EL3 for this CPU -- ever */
+#define HAS_EL2                 1 /* Has EL2 for this CPU */
 #define HAS_CTRR                1 /* Has CTRR registers */
 #define HAS_NEX_PG              1 /* Supports p-Core NEX powergating during Neon inactivity */
 #define HAS_BP_RET              1 /* Supports branch predictor state retention across ACC sleep */
@@ -82,7 +83,10 @@
 
 #define __ARM_RANGE_TLBI__                   1
 
+#if !CONFIG_SPTM
+/* VHE is disabled at runtime on SPTM-based systems. */
 #include <pexpert/arm64/vhe_disable.h>
+#endif /* !CONFIG_SPTM */
 
 #include <pexpert/arm64/apple_arm64_common.h>
 

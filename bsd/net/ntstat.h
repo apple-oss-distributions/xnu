@@ -758,7 +758,7 @@ typedef struct nstat_sysinfo_add_param {
 
 /* 0x0001 is unused */
 #define NSTAT_SYSINFO_TCP_STATS         0x0002
-#define NSTAT_SYSINFO_IFNET_ECN_STATS   0x0003
+/* 0x0003 is unused */
 #define NSTAT_SYSINFO_LIM_STATS         0x0004  /* Low Internet mode stats */
 #define NSTAT_SYSINFO_NET_API_STATS     0x0005  /* API and KPI stats */
 
@@ -1370,12 +1370,6 @@ enum {
 	, NSTAT_IFNET_ECN_TYPE_ETHERNET
 };
 
-typedef struct nstat_sysinfo_ifnet_ecn_stats {
-	u_int32_t               ifnet_proto;
-	u_int32_t               ifnet_type;
-	struct if_tcp_ecn_stat  ecn_stat;
-} nstat_sysinfo_ifnet_ecn_stats;
-
 /* Total number of Low Internet stats that will be reported */
 #define NSTAT_LIM_STAT_KEYVAL_COUNT     12
 typedef struct nstat_sysinfo_lim_stats {
@@ -1397,7 +1391,6 @@ typedef struct nstat_sysinfo_data {
 	uint32_t                unsent_data_cnt; /* Before sleeping */
 	union {
 		nstat_sysinfo_tcp_stats tcp_stats;
-		nstat_sysinfo_ifnet_ecn_stats ifnet_ecn_stats;
 		nstat_sysinfo_lim_stats lim_stats;
 		nstat_sysinfo_net_api_stats net_api_stats;
 	} u;

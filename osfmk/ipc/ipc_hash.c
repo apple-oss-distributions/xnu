@@ -205,7 +205,7 @@ ipc_hash_table_lookup(
 	ipc_entry_t       table = ipc_entry_table_base(array);
 	ipc_entry_num_t   size  = ipc_entry_table_count(array);
 
-	if (obj == IO_NULL) {
+	if (obj == IPC_OBJECT_NULL) {
 		return FALSE;
 	}
 
@@ -278,7 +278,7 @@ ipc_hash_table_insert(
 	ipc_entry_num_t   size  = ipc_entry_table_count(array);
 
 	assert(index != 0);
-	assert(obj != IO_NULL);
+	assert(obj != IPC_OBJECT_NULL);
 
 	hindex = IH_TABLE_HASH(obj, size);
 	hdist  = 0;
@@ -336,7 +336,7 @@ ipc_hash_table_delete(
 	ipc_entry_num_t   size  = ipc_entry_table_count(array);
 
 	assert(index != MACH_PORT_NULL);
-	assert(obj != IO_NULL);
+	assert(obj != IPC_OBJECT_NULL);
 
 	hindex = IH_TABLE_HASH(obj, size);
 

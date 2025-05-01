@@ -377,6 +377,10 @@ _Static_assert((_COMM_PAGE64_BASE_ADDRESS >= _COMM_PAGE64_NESTING_START) &&
 #define _COMM_PAGE_ASB_TARGET_KERN_VALUE        (_COMM_PAGE_START_ADDRESS+0x330)        // uint64_t for random kernel value
 #define _COMM_PAGE_ASB_TARGET_KERN_ADDRESS      (_COMM_PAGE_START_ADDRESS+0x338)        // uint64_t for random kernel target address
 
+#define _COMM_PAGE_APT_MSG_POLICY               (_COMM_PAGE_START_ADDRESS+0x340)        // uint8_t for APT_MSG policy
+
+#define _COMM_PAGE_APT_ACTIVE                   (_COMM_PAGE_START_ADDRESS+0x341)        // uint8_t for APT active status (infrequently mutated)
+
 #define _COMM_PAGE_END                          (_COMM_PAGE_START_ADDRESS+0xfff)        // end of common page
 
 #if defined(__LP64__)

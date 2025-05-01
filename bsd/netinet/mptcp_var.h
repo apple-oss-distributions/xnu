@@ -42,6 +42,8 @@
 #include <netinet/mp_pcb.h>
 #include <netinet/tcp_var.h>
 #include <os/log.h>
+#include <libkern/crypto/sha1.h>
+#include <libkern/crypto/sha2.h>
 
 struct mpt_itf_info {
 	uint32_t ifindex;
@@ -125,7 +127,7 @@ struct mptses {
 #define MPTE_ITFINFO_SIZE       4
 	uint32_t        mpte_itfinfo_size;
 	struct mpt_itf_info     _mpte_itfinfo[MPTE_ITFINFO_SIZE];
-	struct mpt_itf_info     *mpte_itfinfo;
+	struct mpt_itf_info     *mpte_itfinfo __counted_by(mpte_itfinfo_size);
 
 	struct mbuf             *mpte_reinjectq;
 
@@ -553,8 +555,8 @@ extern boolean_t mptcp_ok_to_create_subflows(struct mptcb *mp_tp);
 extern void mptcp_check_subflows_and_add(struct mptses *mpte);
 extern void mptcp_check_subflows_and_remove(struct mptses *mpte);
 extern void mptcpstats_inc_switch(struct mptses *mpte, const struct mptsub *mpts);
-extern void mptcpstats_update(struct mptcp_itf_stats *stats, const struct mptsub *mpts);
-extern int mptcpstats_get_index_by_ifindex(struct mptcp_itf_stats *stats, u_short ifindex, boolean_t create);
+extern void mptcpstats_update(struct mptcp_itf_stats *stats __counted_by(stats_count), uint16_t stats_count, const struct mptsub *mpts);
+extern int mptcpstats_get_index_by_ifindex(struct mptcp_itf_stats *stats __counted_by(stats_count), uint16_t stats_count, u_short ifindex, boolean_t create);
 extern struct mptses *mptcp_drop(struct mptses *mpte, struct mptcb *mp_tp, u_short errno);
 extern struct mptses *mptcp_close(struct mptses *, struct mptcb *);
 extern int mptcp_lock(struct socket *, int, void *);
@@ -593,10 +595,10 @@ extern int mptcp_output(struct mptses *);
 extern void mptcp_close_fsm(struct mptcb *, uint32_t);
 
 extern void mptcp_hmac_sha1(mptcp_key_t, mptcp_key_t, u_int32_t, u_int32_t,
-    u_char*);
-extern void mptcp_hmac_sha256(mptcp_key_t, mptcp_key_t, u_char*, uint16_t,
-    u_char*);
-extern void mptcp_get_mpjoin_hmac(mptcp_addr_id, struct mptcb *, u_char *, uint8_t);
+    u_char sha_digest[SHA1_RESULTLEN]);
+extern void mptcp_hmac_sha256(mptcp_key_t, mptcp_key_t, u_char* __sized_by(msglen), uint16_t msglen,
+    u_char sha_digest[SHA256_DIGEST_LENGTH]);
+extern void mptcp_get_mpjoin_hmac(mptcp_addr_id, struct mptcb *, u_char * __sized_by(digest_len), uint8_t digest_len);
 extern void mptcp_get_rands(mptcp_addr_id, struct mptcb *, u_int32_t *,
     u_int32_t *);
 extern void mptcp_set_raddr_rand(mptcp_addr_id, struct mptcb *, mptcp_addr_id,

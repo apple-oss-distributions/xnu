@@ -1013,7 +1013,7 @@ tcp_send_keep_alive(struct tcpcb *tp)
 		} else {
 			tra.ifscope = IFSCOPE_NONE;
 		}
-		tcp_respond(tp, t_template->tt_ipgen,
+		tcp_respond(tp, t_template->tt_ipgen, sizeof(t_template->tt_ipgen),
 		    &t_template->tt_t, (struct mbuf *)NULL,
 		    tp->rcv_nxt, tp->snd_una - 1, 0, &tra);
 		(void) m_free(m);
@@ -1033,6 +1033,7 @@ tcp_timers(struct tcpcb *tp, int timer)
 	struct socket *so;
 	u_int64_t accsleep_ms;
 	u_int64_t last_sleep_ms = 0;
+	struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 
 	so = tp->t_inpcb->inp_socket;
 	idle_time = tcp_now - tp->t_rcvtime;
@@ -1254,7 +1255,13 @@ retransmit_packet:
 		}
 
 		if (tp->t_state == TCPS_SYN_SENT) {
-			rexmt = TCP_REXMTVAL(tp) * tcp_syn_backoff[tp->t_rxtshift];
+			if ((tcp_link_heuristics_flags & TCP_LINK_HEUR_SYNRMXT) != 0 &&
+			    if_link_heuristics_enabled(outifp)) {
+				IF_TCP_STATINC(outifp, linkheur_synrxmt);
+				rexmt = TCP_REXMTVAL(tp) * tcp_backoff[tp->t_rxtshift];
+			} else {
+				rexmt = TCP_REXMTVAL(tp) * tcp_syn_backoff[tp->t_rxtshift];
+			}
 			tp->t_stat.synrxtshift = tp->t_rxtshift;
 			tp->t_stat.rxmitsyns++;
 
@@ -1267,9 +1274,10 @@ retransmit_packet:
 		} else {
 			rexmt = TCP_REXMTVAL(tp) * tcp_backoff[tp->t_rxtshift];
 		}
-
 		TCPT_RANGESET(tp->t_rxtcur, rexmt, tp->t_rttmin, TCPTV_REXMTMAX,
 		    TCP_ADD_REXMTSLOP(tp));
+
+		tcp_set_link_heur_rtomin(tp, outifp);
 		tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 
 		TCP_LOG_RTT_INFO(tp);
@@ -1384,13 +1392,19 @@ retransmit_packet:
 		 */
 		tp->t_flags |= TF_ACKNOW;
 
-		/* If timing a segment in this window, stop the timer */
-		tp->t_rtttime = 0;
+		/*
+		 * If timing a segment in this window, stop the timer
+		 * except when we are in connecting states on cellular
+		 * interfaces
+		 */
+		if (tp->t_state >= TCPS_ESTABLISHED || (outifp != NULL &&
+		    IFNET_IS_CELLULAR(outifp) == false)) {
+			tp->t_rtttime = 0;
+		}
 
 		if (!IN_FASTRECOVERY(tp) && tp->t_rxtshift == 1) {
 			tcpstat.tcps_tailloss_rto++;
 		}
-
 
 		/*
 		 * RFC 5681 says: when a TCP sender detects segment loss
@@ -1514,7 +1528,6 @@ fc_output:
 			    TCP_CONN_KEEPIDLE(tp));
 		}
 		if (tp->t_flagsext & TF_DETECT_READSTALL) {
-			struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 			bool reenable_probe = false;
 			/*
 			 * The keep alive packets sent to detect a read
@@ -1712,8 +1725,7 @@ fc_output:
 			tp->t_srtt = TCPTV_SRTTBASE;
 			tp->t_rttvar =
 			    ((TCPTV_RTOBASE - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
-			tp->t_rttmin = tp->t_flags & TF_LOCAL ? tcp_TCPTV_MIN :
-			    TCPTV_REXMTMIN;
+			tp->t_rttmin = TCPTV_REXMTMIN;
 			TCPT_RANGESET(tp->t_rxtcur, TCP_REXMTVAL(tp),
 			    tp->t_rttmin, TCPTV_REXMTMAX, TCP_ADD_REXMTSLOP(tp));
 			TCP_LOG_RTT_INFO(tp);
@@ -1737,6 +1749,8 @@ fc_output:
 
 			/* If timing a segment in this window, stop the timer */
 			tp->t_rtttime = 0;
+
+			tp->t_flagsext |= TF_TLP_IS_RETRANS;
 		} else {
 			int32_t snd_len;
 
@@ -1750,10 +1764,12 @@ fc_output:
 			    - (tp->snd_max - tp->snd_una);
 			if (snd_len > 0) {
 				tp->snd_nxt = tp->snd_max;
+				tp->t_flagsext &= ~TF_TLP_IS_RETRANS;
 			} else {
 				snd_len = min((tp->snd_max - tp->snd_una),
 				    tp->t_maxseg);
 				tp->snd_nxt = tp->snd_max - snd_len;
+				tp->t_flagsext |= TF_TLP_IS_RETRANS;
 			}
 		}
 
@@ -1813,8 +1829,8 @@ fc_output:
 		if (tp->t_timer[TCPT_REXMT] == 0 && tp->t_timer[TCPT_PERSIST] == 0 &&
 		    (tp->t_inpcb->inp_socket->so_snd.sb_cc != 0 || tp->t_state == TCPS_SYN_SENT ||
 		    tp->t_state == TCPS_SYN_RECEIVED)) {
-			tp->t_timer[TCPT_REXMT] =
-			    OFFSET_FROM_START(tp, tp->t_rxtcur);
+			tcp_set_link_heur_rtomin(tp, outifp);
+			tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 
 			os_log(OS_LOG_DEFAULT,
 			    "%s: tcp_output() returned %u with retransmission timer disabled "
@@ -1895,12 +1911,6 @@ tcp_remove_timer(struct tcpcb *tp)
 	}
 	lck_mtx_lock(&listp->mtx);
 
-	/* Check if pcb is on timer list again after acquiring the lock */
-	if (!(TIMER_IS_ON_LIST(tp))) {
-		lck_mtx_unlock(&listp->mtx);
-		return;
-	}
-
 	if (listp->next_te != NULL && listp->next_te == &tp->tentry) {
 		listp->next_te = LIST_NEXT(&tp->tentry, le);
 	}
@@ -1912,6 +1922,7 @@ tcp_remove_timer(struct tcpcb *tp)
 
 	tp->tentry.le.le_next = NULL;
 	tp->tentry.le.le_prev = NULL;
+
 	lck_mtx_unlock(&listp->mtx);
 }
 
@@ -2195,20 +2206,14 @@ tcp_run_timerlist(void * arg1, void * arg2)
 		if (in_pcb_checkstate(tp->t_inpcb, WNT_ACQUIRE, 0)
 		    == WNT_STOPUSING) {
 			/*
-			 * Some how this pcb went into dead state while
-			 * on the timer list, just take it off the list.
-			 * Since the timer list entry pointers are
-			 * protected by the timer list lock, we can
-			 * do it here without the socket lock.
+			 * Need to take socket lock because it protects
+			 * TIMER_IS_ON_LIST
 			 */
-			if (TIMER_IS_ON_LIST(tp)) {
-				tp->t_flags &= ~(TF_TIMER_ONLIST);
-				LIST_REMOVE(&tp->tentry, le);
-				listp->entries--;
-
-				tp->tentry.le.le_next = NULL;
-				tp->tentry.le.le_prev = NULL;
-			}
+			lck_mtx_unlock(&listp->mtx);
+			socket_lock(tp->t_inpcb->inp_socket, 1);
+			tcp_remove_timer(tp);
+			socket_unlock(tp->t_inpcb->inp_socket, 1);
+			lck_mtx_lock(&listp->mtx);
 			continue;
 		}
 		active_count++;
@@ -3047,4 +3052,16 @@ tcp_itimer(struct inpcbinfo *ipi)
 
 	ipi->ipi_flags &= ~(INPCBINFO_UPDATE_MSS | INPCBINFO_HANDLE_LQM_ABORT);
 	lck_rw_done(&ipi->ipi_lock);
+}
+
+void
+tcp_set_link_heur_rtomin(struct tcpcb *tp, ifnet_t ifp)
+{
+	if ((tcp_link_heuristics_flags & TCP_LINK_HEUR_RTOMIN) != 0 &&
+	    ifp != NULL && if_link_heuristics_enabled(ifp)) {
+		if (tp->t_rxtcur < tcp_link_heuristics_rto_min) {
+			IF_TCP_STATINC(ifp, linkheur_rxmtfloor);
+			tp->t_rxtcur = tcp_link_heuristics_rto_min;
+		}
+	}
 }

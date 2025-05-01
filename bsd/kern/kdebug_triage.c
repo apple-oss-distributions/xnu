@@ -414,70 +414,20 @@ const char *corpse_triage_strings[] =
 };
 /* Corpse section end */
 
-/* VM API sanitization begin */
-
-const char *vm_sanitize_triage_strings[] =
-{
-	[KDBG_TRIAGE_VM_SANITIZE_PREFIX] = "VM API - ",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_MAKE_MEMORY_ENTRY]     = "Unsanitary input passed to mach_make_memory_entry\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_PAGE_OP]  = "Unsanitary input passed to mach_memory_entry_page_op\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_RANGE_OP] = "Unsanitary input passed to mach_memory_entry_range_op\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_MAP_SIZE] = "Unsanitary input passed to mach_memory_entry_map_size\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_OBJECT_MEMORY_ENTRY] = "Unsanitary input passed to mach_memory_object_memory_entry\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_FIXED]          = "Unsanitary input passed to vm_allocate(VM_FLAGS_FIXED)\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_ANYWHERE]       = "Unsanitary input passed to vm_allocate(VM_FLAGS_ANYWHERE)\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_DEALLOCATE]              = "Unsanitary input passed to vm_deallocate\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MUNMAP]                     = "Unsanitary input passed to munmap\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_REMAP]               = "Unsanitary input passed to vm_remap or vm_remap_new\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MMAP]                       = "Unsanitary input passed to mmap\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MAP_WITH_LINKING_NP]        = "Unsanitary input passed to map_with_linking_np\n",
-	[KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ]              = "Unsanitary input passed to vm_map\n",
-	[KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ_CTL]          = "Unsanitary input passed to vm_map\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MREMAP_ENCRYPTED]           = "Unsanitary input passed to mremap_encrypted\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_WIRE_USER]               = "Unsanitary input passed to vm_wire\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_UNWIRE_USER]             = "Unsanitary input passed to vm_wire\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WIRE]                = "Unsanitary input passed to vm_map_wire\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_UNWIRE]              = "Unsanitary input passed to vm_map_unwire\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VSLOCK]                     = "Unsanitary input passed to vslock\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VSUNLOCK]                   = "Unsanitary input passed to vsunlock\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPY_OVERWRITE]      = "Unsanitary input passed to vm_map_copy_overwrite\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPYIN]              = "Unsanitary input passed to vm_map_copyin\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_READ_USER]           = "Unsanitary input passed to vm_read\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WRITE_USER]          = "Unsanitary input passed to vm_write\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_INHERIT]            = "Unsanitary input passed to mach_vm_inherit\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_INHERIT]                 = "Unsanitary input passed to vm_inherit\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM32_INHERIT]               = "Unsanitary input passed to vm32_inherit\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_INHERIT]             = "Unsanitary input passed to vm_map_inherit\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MINHERIT]                   = "Unsanitary input passed to minherit\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_PROTECT]            = "Unsanitary input passed to mach_vm_protect\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_PROTECT]                 = "Unsanitary input passed to vm_protect\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM32_PROTECT]               = "Unsanitary input passed to vm32_protect\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PROTECT]             = "Unsanitary input passed to vm_map_protect\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MPROTECT]                   = "Unsanitary input passed to mprotect\n",
-	[KDBG_TRIAGE_VM_SANITIZE_USERACC]                    = "Unsanitary input passed to useracc\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MSYNC]               = "Unsanitary input passed to vm_map_msync\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MSYNC]                      = "Unsanitary input passed to msync\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MACHINE_ATTRIBUTE]   = "Unsanitary input passed to vm_map_machine_attribute\n",
-	[KDBG_TRIAGE_VM_SANITIZE_MINCORE]                    = "Unsanitary input passed to mincore\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_INFO]     = "Unsanitary input passed to vm_map_page_range_info\n",
-	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_QUERY]    = "Unsanitary input passed to vm_map_page_range_query\n",
-	[KDBG_TRIAGE_VM_SANITIZE_TEST]                       = "Unsanitary input passed to vm_sanitize_run_test\n",
-};
-/* VM API sanitization end */
-
 /* subsystems starts at index 1 */
 ktriage_strings_t ktriage_subsystems_strings[KDBG_TRIAGE_SUBSYS_MAX + 1] = {
+	/* Static subsystems */
 	[KDBG_TRIAGE_SUBSYS_VM]            = {VM_MAX_TRIAGE_STRINGS, vm_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_CLUSTER]       = {CLUSTER_MAX_TRIAGE_STRINGS, cluster_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_SHARED_REGION] = {SHARED_REGION_MAX_TRIAGE_STRINGS, shared_region_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_DYLD_PAGER]    = {DYLD_PAGER_MAX_TRIAGE_STRINGS, dyld_pager_triage_strings},
-	[KDBG_TRIAGE_SUBSYS_APPLE_PROTECT_PAGER]    = {APPLE_PROTECT_PAGER_MAX_TRIAGE_STRINGS, apple_protect_pager_triage_strings},
-
-	[KDBG_TRIAGE_SUBSYS_APFS]          = {-1, NULL},
-	[KDBG_TRIAGE_SUBSYS_DECMPFS]       = {-1, NULL},
+	[KDBG_TRIAGE_SUBSYS_APPLE_PROTECT_PAGER] = {APPLE_PROTECT_PAGER_MAX_TRIAGE_STRINGS, apple_protect_pager_triage_strings},
 	[KDBG_TRIAGE_SUBSYS_CORPSE]        = {CORPSE_MAX_TRIAGE_STRINGS, corpse_triage_strings},
 
-	[KDBG_TRIAGE_SUBSYS_VM_SANITIZE]        = {VM_SANITIZE_MAX_TRIAGE_STRINGS, vm_sanitize_triage_strings},
+	/* Dynamic subsystems */
+	[KDBG_TRIAGE_SUBSYS_APFS]          = {-1, NULL},
+	[KDBG_TRIAGE_SUBSYS_DECMPFS]       = {-1, NULL},
+	[KDBG_TRIAGE_SUBSYS_VM_SANITIZE]   = {-1, NULL},
 };
 
 /* KDBG_TRIAGE_CODE_* section */

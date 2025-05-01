@@ -42,6 +42,7 @@
 
 #include <mach/boolean.h>
 #include <stdbool.h>
+#include <os/atomic_private.h>
 #include <os/base.h>
 #include <os/log.h>
 #include <os/overflow.h>
@@ -59,16 +60,11 @@
 /*
  * memorystatus subsystem globals
  */
+extern uint32_t memorystatus_available_pages;
 #if CONFIG_JETSAM
-extern unsigned int memorystatus_available_pages;
-extern unsigned int memorystatus_available_pages_pressure;
-extern unsigned int memorystatus_available_pages_critical;
-extern uint32_t jetsam_kill_on_low_swap;
-#else /* CONFIG_JETSAM */
-extern uint64_t memorystatus_available_pages;
-extern uint64_t memorystatus_available_pages_pressure;
-extern uint64_t memorystatus_available_pages_critical;
+extern bool jetsam_kill_on_low_swap;
 #endif /* CONFIG_JETSAM */
+extern bool kill_on_no_paging_space;
 extern int block_corpses; /* counter to block new corpses if jetsam purges them */
 extern int system_procs_aging_band;
 extern int applications_aging_band;
@@ -77,6 +73,8 @@ extern int memorystatus_freeze_jetsam_band;
 #if CONFIG_FREEZE
 extern unsigned int memorystatus_suspended_count;
 #endif /* CONFIG_FREEZE */
+extern uint64_t memorystatus_sysprocs_idle_delay_time;
+extern uint64_t memorystatus_apps_idle_delay_time;
 
 /*
  * TODO(jason): This should really be calculated dynamically by the zalloc
@@ -121,6 +119,8 @@ OS_CLOSED_ENUM(memorystatus_action, uint32_t,
     MEMORYSTATUS_PROCESS_SWAPIN_QUEUE, // Compact the swapin queue and move segments to the swapout queue
     MEMORYSTATUS_KILL_SUSPENDED_SWAPPABLE, // Kill a suspended swap-eligible processes based on jetsam priority
     MEMORYSTATUS_KILL_SWAPPABLE, // Kill a swap-eligible process (even if it's running)  based on jetsam priority
+    MEMORYSTATUS_KILL_IDLE, // Kill an idle process
+    MEMORYSTATUS_KILL_LONG_IDLE, // Kill a long-idle process (reaper)
     MEMORYSTATUS_KILL_NONE,     // Do nothing
     );
 
@@ -151,20 +151,21 @@ typedef struct jetsam_state_s {
  */
 typedef struct memorystatus_system_health {
 #if CONFIG_JETSAM
-	bool msh_available_pages_below_pressure;
+	bool msh_available_pages_below_soft;
+	bool msh_available_pages_below_idle;
 	bool msh_available_pages_below_critical;
+	bool msh_available_pages_below_reaper;
 	bool msh_compressor_needs_to_swap;
-	bool msh_compressor_is_low_on_space;
 	bool msh_compressor_is_thrashing;
-	bool msh_compressed_pages_nearing_limit;
 	bool msh_filecache_is_thrashing;
 	bool msh_phantom_cache_pressure;
 	bool msh_swappable_compressor_segments_over_limit;
 	bool msh_swapin_queue_over_limit;
-	bool msh_swap_low_on_space;
-	bool msh_swap_out_of_space;
 	bool msh_pageout_starved;
 #endif /* CONFIG_JETSAM */
+	bool msh_compressor_exhausted;
+	bool msh_swap_exhausted;
+	bool msh_swap_low_on_space;
 	bool msh_zone_map_is_exhausted;
 } memorystatus_system_health_t;
 
@@ -187,10 +188,13 @@ extern unsigned int jld_eval_aggressive_count;
 extern uint64_t  jld_timestamp_msecs;
 extern int       jld_idle_kill_candidates;
 
+#pragma mark No Paging Space Globals
 
-/*
- * VM globals read by the memorystatus subsystem
- */
+extern _Atomic uint64_t last_no_space_action_ts;
+extern uint64_t no_paging_space_action_throttle_delay_ns;
+
+#pragma mark VM globals read by the memorystatus subsystem
+
 extern unsigned int    vm_page_free_count;
 extern unsigned int    vm_page_active_count;
 extern unsigned int    vm_page_inactive_count;
@@ -207,7 +211,7 @@ extern _Atomic bool    vm_swapout_wake_pending;
 extern uint32_t vm_page_donate_mode;
 
 #if CONFIG_JETSAM
-#define MEMORYSTATUS_LOG_AVAILABLE_PAGES memorystatus_available_pages
+#define MEMORYSTATUS_LOG_AVAILABLE_PAGES os_atomic_load(&memorystatus_available_pages, relaxed)
 #else /* CONFIG_JETSAM */
 #define MEMORYSTATUS_LOG_AVAILABLE_PAGES (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
 #endif /* CONFIG_JETSAM */
@@ -229,7 +233,7 @@ memorystatus_action_t memorystatus_pick_action(jetsam_state_t state,
     bool suspended_swappable_apps_remaining,
     bool swappable_apps_remaining, int *jld_idle_kills);
 
-#define MEMSTAT_PERCENT_TOTAL_PAGES(p) (p * atop_64(max_mem) / 100)
+#define MEMSTAT_PERCENT_TOTAL_PAGES(p) ((uint32_t)(p * atop_64(max_mem) / 100))
 
 /*
  * Take a (redacted) zprint snapshot along with the jetsam snapshot.
@@ -264,7 +268,7 @@ extern memorystatus_log_level_t memorystatus_log_level;
  *  - rdar://27006343 (Custom kernel log handles)
  *  - rdar://80958044 (Kernel Logging Configuration)
  */
-#define _memorystatus_log_with_type(type, format, ...) os_log_with_type(memorystatus_log_handle, type, format, ##__VA_ARGS__)
+#define _memorystatus_log_with_type(type, format, ...) os_log_with_startup_serial_and_type(memorystatus_log_handle, type, format, ##__VA_ARGS__)
 #define memorystatus_log(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_DEFAULT, format, ##__VA_ARGS__)
 #define memorystatus_log_info(format, ...) if (memorystatus_log_level >= MEMORYSTATUS_LOG_LEVEL_INFO) { _memorystatus_log_with_type(OS_LOG_TYPE_INFO, format, ##__VA_ARGS__); }
 #define memorystatus_log_debug(format, ...) if (memorystatus_log_level >= MEMORYSTATUS_LOG_LEVEL_DEBUG) { _memorystatus_log_with_type(OS_LOG_TYPE_DEBUG, format, ##__VA_ARGS__); }
@@ -296,6 +300,12 @@ static inline bool
 _memstat_proc_is_dirty(proc_t p)
 {
 	return p->p_memstat_dirty & P_DIRTY_IS_DIRTY;
+}
+
+static inline bool
+_memstat_proc_is_internal(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_INTERNAL;
 }
 
 static inline bool
@@ -398,6 +408,82 @@ _memstat_proc_inactive_memlimit_is_fatal(proc_t p)
 {
 	return _memstat_proc_memlimit_is_fatal(p, false);
 }
+
+#pragma mark Jetsam
+
+/*
+ * @func memstat_evaluate_page_shortage
+ *
+ * @brief
+ * Evaluate page shortage conditions. Returns true if the jetsam thread should be woken up.
+ *
+ * @param should_enforce_memlimits
+ * Set to true if soft memory limits should be enforced
+ *
+ * @param should_idle_exit
+ * Set to true if idle processes should begin exiting
+ *
+ * @param should_jetsam
+ * Set to true if non-idle processes should be jetsammed
+ *
+ * @param should_reap
+ * Set to true if long-idle processes should be jetsammed
+ */
+bool memstat_evaluate_page_shortage(
+	bool *should_enforce_memlimits,
+	bool *should_idle_exit,
+	bool *should_jetsam,
+	bool *should_reap);
+
+/*
+ * In nautical applications, ballast tanks are tanks on boats or submarines
+ * which can be filled with water. When flooded, they provide stability and
+ * reduce buoyancy. When drained (and filled with air), they provide buoyancy.
+ *
+ * In our analogy, the ballast tanks may be drained of unneeded weight (as
+ * occupied by idle processes or processes who have exceeded their memory
+ * limit) and filled with air (available memory). Userspace may toggle between
+ * these two states (filled/drained) depending on system requirements. For
+ * example, drained ballast tanks (i.e. evelated available memory pools) may
+ * have benefits to power and latency. However, applications with large
+ * working sets may need to flood the ballast tanks (i.e. with
+ * anonymous/wired memory) to avoid issues like jetsam loops of daemons that it
+ * has IPC relationships with.
+ *
+ * Mechanically, "draining" the ballast tanks means applying a configurable
+ * offset to the idle and soft available page shortage thresholds. This offset
+ * is then removed when the policy is disengaged.
+ *
+ * The ballast mechanism is intended to be used over long time periods and the
+ * ballast_offset should be sustainable for general applications. If response to
+ * transient spikes in memory demand is desired, the clear-the-decks policy
+ * should be used instead.
+ *
+ * Clients may toggle this behavior via sysctl: kern.memorystatus.ballast_drained
+ */
+int memorystatus_ballast_control(bool drain);
+
+/* Synchronously kill a process due to sustained memory pressure */
+bool memorystatus_kill_on_sustained_pressure(void);
+
+/* Synchronously kill an idle process */
+bool memstat_kill_idle_process(memorystatus_kill_cause_t cause,
+    uint64_t *footprint_out);
+
+/*
+ * Attempt to kill the specified pid with the given reason.
+ * Consumes a reference on the jetsam_reason.
+ */
+bool memstat_kill_with_jetsam_reason_sync(pid_t pid, os_reason_t jetsam_reason);
+
+/* Count the number of processes at priority <= max_bucket_index */
+uint32_t memstat_get_proccnt_upto_priority(uint32_t max_bucket_index);
+
+/*
+ * @func memstat_get_idle_proccnt
+ * @brief Return the number of idle processes which may be terminated.
+ */
+uint32_t memstat_get_idle_proccnt(void);
 
 #pragma mark Freezer
 #if CONFIG_FREEZE

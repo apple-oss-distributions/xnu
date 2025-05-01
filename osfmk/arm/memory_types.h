@@ -41,7 +41,7 @@
 #define VM_WIMG_POSTED                    (VM_MEM_COHERENT | VM_MEM_NOT_CACHEABLE | VM_MEM_GUARDED | VM_MEM_EARLY_ACK) // 0x27
 #define VM_WIMG_WTHRU                     (VM_MEM_WRITE_THROUGH | VM_MEM_COHERENT | VM_MEM_GUARDED) // 0xb
 #define VM_WIMG_WCOMB                     (VM_MEM_NOT_CACHEABLE | VM_MEM_COHERENT) // 0x6
-#if HAS_UCNORMAL_MEM
+#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
 #define VM_WIMG_RT                        (VM_WIMG_WCOMB | VM_MEM_RT) // 0x16
 #else
 #define VM_WIMG_RT                        (VM_WIMG_IO | VM_MEM_RT) // 0x17

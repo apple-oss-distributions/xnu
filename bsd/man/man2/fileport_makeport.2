@@ -1,0 +1,139 @@
+.\"
+.\" Copyright (c) 2024 Apple Inc.  All rights reserved.
+.\"
+.\" @APPLE_LICENSE_HEADER_START@
+.\"
+.\" This file contains Original Code and/or Modifications of Original Code
+.\" as defined in and that are subject to the Apple Public Source License
+.\" Version 2.0 (the 'License'). You may not use this file except in
+.\" compliance with the License. Please obtain a copy of the License at
+.\" http://www.opensource.apple.com/apsl/ and read it before using this
+.\" file.
+.\"
+.\" The Original Code and all software distributed under the License are
+.\" distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+.\" EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+.\" INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+.\" Please see the License for the specific language governing rights and
+.\" limitations under the License.
+.\"
+.\" @APPLE_LICENSE_HEADER_END@
+.\"
+.Dd December 20, 2024
+.Dt FILEPORT_MAKEPORT 2
+.Os Darwin
+.Sh NAME
+.Nm fileport_makeport , fileport_makefd
+.Nd manipulate fileports
+.Sh SYNOPSIS
+.Fd #include <sys/fileport.h>
+.Ft int
+.Fo fileport_makeport
+.Fa "int fildes"
+.Fa "fileport_t *port"
+.Fc
+.Ft int
+.Fo fileport_makefd
+.Fa "fileport_t port"
+.Fc
+.Sh DESCRIPTION
+A fileport is a flavor of Mach port that implicitly contains a
+reference to an existing open file description.
+The
+.Fn fileport_makeport
+interface creates a new fileport from an open file descriptor
+.Fa fildes ,
+while
+.Fn fileport_makefd
+creates a new file descriptor from a fileport.
+.Pp
+A valid fileport may be sent from one process to another via Mach IPC.
+Once the sending process has successfully created a fileport from a
+file descriptor with
+.Fn fileport_makeport ,
+it may immediately close the descriptor with
+.Xr close 2 ,
+or use it to share the open file description with the receiver.
+.Pp
+The receiving process should use
+.Fn fileport_makefd
+to create a new file descriptor from the received fileport;
+that descriptor will reference the same underlying open file
+description as the sending process.
+The new descriptor is created with the close-on-exec file descriptor
+flag enabled.
+.Pp
+Further file descriptors can be created from the fileport using
+.Fn fileport_makefd
+until either the fileport is deallocated or a descriptor limit is exceeded.
+.Sh NOTES
+Fileports are a low-level primitive, and Mach IPC can be complex.
+Developers who need to move file descriptors between processes
+are advised to use XPC and the corresponding
+.Xr xpc_fd_create 3
+and
+.Xr xpc_fd_dup 3
+interfaces instead.
+.Pp
+Certain special types of open file descriptions,
+e.g.\ a kqueue, cannot be sent between processes;
+.Fn fileport_makeport
+will return an error for those descriptors.
+.Pp
+The effect of using these primitives
+as a file descriptor IPC mechanism, as outlined
+above, has the same sharing semantics as other file descriptor
+IPC mechanisms on the platform:
+it is as if the original file descriptor from the sending
+process has been duplicated, in the sense of
+.Xr dup 2 ,
+into the receiving process.
+.Sh RETURN VALUES
+If successful,
+.Fn fileport_makefd
+returns a non-negative integer.
+If successful,
+.Fn fileport_makeport
+returns 0.
+Otherwise on failure both interfaces return -1 and the global variable
+.Va errno
+is set to indicate the error.
+.Sh ERRORS
+The
+.Fn fileport_makeport
+system call will fail if:
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa fildes
+is not a valid file descriptor.
+.It Bq Er EINVAL
+The file descriptor cannot be sent to another procss.
+.It Bq Er EFAULT
+Fileport address is invalid.
+.It Bq Er EAGAIN
+Temporary resource shortage.
+.El
+.Pp
+The
+.Fn fileport_makefd
+system call will fail if:
+.Bl -tag -width Er
+.It Bq Er EINVAL
+The fileport is invalid.
+.It Bq Er EMFILE
+The process has reached its open file descriptor limit.
+.It Bq Er ENFILE
+Unable to extend the file table
+.It Bq Er ENOMEM
+Insufficient memory to allocate a descriptor.
+.El
+.Sh SEE ALSO
+.Xr xpc 3 ,
+.Xr xpc_fd_create 3 ,
+.Xr xpc_fd_dup 3 ,
+.Xr dup 2 ,
+.Xr getrlimit 2 ,
+.Xr sendmsg 2 ,
+.Xr recvmsg 2 ,
+.Xr kqueue 2

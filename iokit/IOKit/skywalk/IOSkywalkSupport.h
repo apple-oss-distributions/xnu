@@ -81,6 +81,7 @@ typedef struct {
 	boolean_t physcontig;           /* physically contiguous */
 	boolean_t puredata;             /* data only, no pointers */
 	boolean_t threadSafe;           /* thread safe */
+	boolean_t memtag;               /* memtag enabled */
 } IOSKMemoryBufferSpec;
 
 typedef struct {

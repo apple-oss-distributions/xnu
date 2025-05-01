@@ -1475,14 +1475,17 @@ ctl_ioctl(struct socket *so, u_long cmd,
 		}
 		lck_mtx_lock(&ctl_mtx);
 		kctl = ctl_find_by_name(__unsafe_null_terminated_from_indexable(ctl_info.ctl_name));
-		lck_mtx_unlock(&ctl_mtx);
-		if (kctl == 0) {
+		if (kctl) {
+			ctl_info.ctl_id = kctl->id;
+			error = 0;
+		} else {
 			error = ENOENT;
-			break;
 		}
-		ctl_info.ctl_id = kctl->id;
-		bcopy(&ctl_info, data, sizeof(ctl_info));
-		error = 0;
+		lck_mtx_unlock(&ctl_mtx);
+
+		if (error == 0) {
+			bcopy(&ctl_info, data, sizeof(ctl_info));
+		}
 		break;
 	}
 
@@ -2254,7 +2257,7 @@ kctl_pcblist SYSCTL_HANDLER_ARGS
             2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
             ROUNDUP64(sizeof(struct xsockstat_n));
 
-        buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+        buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
 
         lck_mtx_lock(&ctl_mtx);
 

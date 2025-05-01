@@ -95,13 +95,25 @@ memory_backing_aware_buffer_stage_outproc(struct kdp_output_stage *stage, unsign
 			/*
 			 * If this is not normal memory, be pessimistic and assume we have to
 			 * do aligned loads, we can't just do a memcpy (which can perform
-			 * 128-bit loads and unaligned accesses). We don't know if the data
-			 * pointer or length are aligned, so we do a bytewise copy.
+			 * 128-bit loads and unaligned accesses).
+			 *
+			 * If the data pointer and length are 4-bytes-aligned, we can copy 4 bytes at a time
+			 * (which is the safest option for reading from SRAMs). Otherwise, try copying byte-wise.
 			 */
-			volatile const uint8_t *src = panic_data;
-			volatile uint8_t *dst = buffer;
-			for (size_t i = 0; i < bytes_in_page; i++) {
-				dst[i] = src[i];
+			bool is_buffer_aligned = (((uintptr_t)panic_data & (sizeof(int32_t) - 1)) == 0);
+			bool is_length_aligned = (bytes_in_page % sizeof(int32_t) == 0);
+			if (is_buffer_aligned && is_length_aligned) {
+				volatile const int32_t *src = panic_data;
+				volatile int32_t *dst = buffer;
+				for (size_t i = 0; i < bytes_in_page / sizeof(int32_t); i++) {
+					dst[i] = src[i];
+				}
+			} else {
+				volatile const uint8_t *src = panic_data;
+				volatile uint8_t *dst = buffer;
+				for (size_t i = 0; i < bytes_in_page; i++) {
+					dst[i] = src[i];
+				}
 			}
 
 			err = next_stage->kos_funcs.kosf_outproc(next_stage, KDP_DATA, corename, bytes_in_page, buffer);

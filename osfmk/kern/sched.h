@@ -437,6 +437,8 @@ MACRO_END
 #endif
 extern int sched_rt_n_backup_processors;
 
+#if CONFIG_SCHED_SMT
 extern bool system_is_SMT;
+#endif /* CONFIG_SCHED_SMT */
 
 #endif  /* _KERN_SCHED_H_ */

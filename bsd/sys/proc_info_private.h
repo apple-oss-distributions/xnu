@@ -47,10 +47,12 @@ struct proc_uniqidentifierinfo {
 	uint64_t                p_uniqueid;             /* 64 bit unique identifier for process */
 	uint64_t                p_puniqueid;            /* unique identifier for process's parent */
 	int32_t                 p_idversion;            /* pid version */
-	uint32_t                p_reserve2;             /* reserved for future use */
+	int32_t                 p_orig_ppidversion;     /* process's original parent's pid version, doesn't change if reparented */
+	uint64_t                p_reserve2;             /* reserved for future use */
 	uint64_t                p_reserve3;             /* reserved for future use */
-	uint64_t                p_reserve4;             /* reserved for future use */
 };
+/* This structure is API */
+_Static_assert(sizeof(struct proc_uniqidentifierinfo) == 56, "sizeof(struct proc_uniqidentifierinfo) == 56");
 
 
 struct proc_bsdinfowithuniqid {
@@ -113,7 +115,7 @@ struct proc_delegated_signal_info {
 #define PROC_FLAG_EXT_DARWINBG  0x10000 /* process in darwin background - external enforcement */
 #define PROC_FLAG_IOS_APPLEDAEMON 0x20000       /* Process is apple daemon  */
 #define PROC_FLAG_DELAYIDLESLEEP 0x40000        /* Process is marked to delay idle sleep on disk IO */
-#define PROC_FLAG_IOS_IMPPROMOTION 0x80000      /* Process is daemon which receives importane donation  */
+#define PROC_FLAG_IOS_IMPPROMOTION 0x80000      /* Process is daemon which receives importance donation  */
 #define PROC_FLAG_ADAPTIVE              0x100000         /* Process is adaptive */
 #define PROC_FLAG_ADAPTIVE_IMPORTANT    0x200000         /* Process is adaptive, and is currently important */
 #define PROC_FLAG_IMPORTANCE_DONOR   0x400000 /* Process is marked as an importance donor */
@@ -121,7 +123,8 @@ struct proc_delegated_signal_info {
 #define PROC_FLAG_APPLICATION 0x1000000 /* Process is an application */
 #define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION /* Process is an application */
 #define PROC_FLAG_ROSETTA 0x2000000 /* Process is running translated under Rosetta */
-
+#define PROC_FLAG_SEC_ENABLED 0x4000000
+#define PROC_FLAG_SEC_BYPASS_ENABLED 0x8000000
 
 /* keep in sync with KQ_* in sys/eventvar.h */
 #define PROC_KQUEUE_WORKQ       0x0040
@@ -176,7 +179,7 @@ struct kevent_extinfo {
 #define PROC_PIDLISTTHREADIDS_SIZE      (2* sizeof(uint32_t))
 
 #define PROC_PIDVMRTFAULTINFO           29
-#define PROC_PIDVMRTFAULTINFO_SIZE (7 * sizeof(uint64_t))
+#define PROC_PIDVMRTFAULTINFO_SIZE (sizeof(vm_rtfault_record_t))
 
 #define PROC_PIDPLATFORMINFO 30
 #define PROC_PIDPLATFORMINFO_SIZE (sizeof(uint32_t))

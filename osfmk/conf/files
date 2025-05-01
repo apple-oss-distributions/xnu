@@ -5,24 +5,24 @@
 # Mach Operating System
 # Copyright (c) 1991,1990,1989 Carnegie Mellon University
 # All Rights Reserved.
-# 
+#
 # Permission to use, copy, modify and distribute this software and its
 # documentation is hereby granted, provided that both the copyright
 # notice and this permission notice appear in all copies of the
 # software, derivative works or modified versions, and any portions
 # thereof, and that both notices appear in supporting documentation.
-# 
-# CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS" 
+#
+# CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS"
 # CONDITION.  CARNEGIE MELLON DISCLAIMS ANY LIABILITY OF ANY KIND FOR
 # ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
-# 
+#
 # Carnegie Mellon requests users of this software to return to
-# 
+#
 #  Software Distribution Coordinator  or  Software.Distribution@CS.CMU.EDU
 #  School of Computer Science
 #  Carnegie Mellon University
 #  Pittsburgh PA 15213-3890
-# 
+#
 # any improvements or extensions that they make and grant Carnegie Mellon
 # the rights to redistribute these changes.
 #
@@ -168,6 +168,7 @@ osfmk/kern/mach_node.c			standard
 osfmk/kern/machine.c			standard
 osfmk/kern/mk_sp.c			standard
 osfmk/kern/mk_timer.c		standard
+osfmk/kern/mpsc_ring.c		standard
 osfmk/kern/mpsc_queue.c		standard
 osfmk/kern/page_decrypt.c	standard bound-checks
 osfmk/kern/printf.c			standard
@@ -187,6 +188,7 @@ osfmk/kern/sfi.c			standard
 osfmk/kern/smr.c		standard
 osfmk/kern/stack.c			standard
 osfmk/kern/startup.c			standard
+osfmk/kern/static_if_common.c	standard
 osfmk/kern/sync_sema.c		standard
 osfmk/kern/syscall_subr.c		standard
 osfmk/kern/syscall_sw.c		standard
@@ -203,6 +205,8 @@ osfmk/kern/thread_act.c		standard
 osfmk/kern/thread_call.c	standard
 osfmk/kern/thread_group.c	standard
 osfmk/kern/thread_policy.c	standard
+osfmk/kern/thread_test_context.c	optional development
+osfmk/kern/thread_test_context.c	optional debug
 osfmk/kern/timer.c			standard
 osfmk/kern/timer_call.c		standard
 osfmk/kern/turnstile.c  	standard
@@ -253,6 +257,7 @@ osfmk/tests/bitmap_test.c		optional config_xnupost
 osfmk/tests/test_thread_call.c          optional config_xnupost
 osfmk/tests/vfp_state_test.c		optional config_xnupost
 osfmk/tests/vm_parameter_validation_kern.c	optional development
+osfmk/tests/bcopy_test.c	    optional development
 ./mach/telemetry_notification_user.c optional config_telemetry
 osfmk/bank/bank.c			standard
 osfmk/atm/atm.c			optional config_atm
@@ -301,6 +306,7 @@ osfmk/vm/vm_map_store.c			standard
 osfmk/vm/vm_map_store_ll.c		standard
 osfmk/vm/vm_map_store_rb.c		standard
 osfmk/vm/vm_memory_entry.c		standard
+osfmk/vm/vm_memtag.c			standard
 osfmk/vm/vm_object.c			standard
 osfmk/vm/vm_pageout.c			standard
 osfmk/vm/vm_pmap.c			standard
@@ -330,7 +336,7 @@ osfmk/kern/kext_alloc.c     standard
 osfmk/kern/kmod.c			standard
 
 #
-# This file should go away when we get 
+# This file should go away when we get
 # libsa (it now only contains string
 # funcs).
 #
@@ -360,8 +366,9 @@ osfmk/console/serial_console.c	optional	serial_console
 osfmk/console/video_scroll.c	optional	video_console
 osfmk/console/video_console.c	optional	video_console
 
-
 osfmk/kern/telemetry.c			optional config_telemetry
+osfmk/kern/trap_telemetry.c		optional config_telemetry
+osfmk/kern/bootprofile.c		optional config_telemetry
 
 # Built-in corecrypto for early_random():
 osfmk/corecrypto/cc_clear.c	standard

@@ -187,6 +187,8 @@ static int ip6_fragment_packet(struct mbuf **m,
     uint32_t mtu, uint32_t unfragpartlen,
     int nxt0, uint32_t optlen);
 
+extern unsigned int log_restricted;
+
 SYSCTL_DECL(_net_inet6_ip6);
 
 static int ip6_output_measure = 0;
@@ -238,7 +240,7 @@ static unsigned int im6o_debug;         /* debugging (disabled) */
 
 ZONE_DECLARE(im6o_zone, struct ip6_moptions);
 #define IM6O_ZONE_NAME          "ip6_moptions"  /* zone name */
-zone_t im6o_zone = {0};                         /* zone for *ip6_moptions */
+zone_t im6o_zone;                               /* zone for *ip6_moptions */
 
 /*
  * ip6_output() calls ip6_output_list() to do the work
@@ -350,10 +352,19 @@ ip6_output_list(struct mbuf *m0, int packetchain, struct ip6_pktopts *opt,
 			boolean_t needipsec : 1;
 			boolean_t noipsec : 1;
 #endif /* IPSEC */
+			boolean_t management_allowed : 1;
+			boolean_t ultra_constrained_allowed : 1;
 		};
 		uint32_t raw;
 	} ip6obf = { .raw = 0 };
 	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
+
+	/*
+	 * Here we check for restrictions when sending frames.
+	 */
+  #define IP6_CHECK_RESTRICTIONS(_ifp, _ip6obf)                          \
+    ((!(_ip6obf).management_allowed && IFNET_IS_MANAGEMENT(_ifp)) ||     \
+	 (!(_ip6obf).ultra_constrained_allowed && IFNET_IS_ULTRA_CONSTRAINED(_ifp)))
 
 	if (ip6_output_measure) {
 		net_perf_start_time(&net_perf, &start_tv);
@@ -482,6 +493,13 @@ tags_done:
 		if (ip6oa->ip6oa_flags & IP6OAF_NO_CONSTRAINED) {
 			ipf_pktopts.ippo_flags |= IPPOF_NO_IFF_CONSTRAINED;
 		}
+		if (ip6oa->ip6oa_flags & IP6OAF_MANAGEMENT_ALLOWED) {
+			ip6obf.management_allowed = true;
+		}
+		if (ip6oa->ip6oa_flags & IP6OAF_ULTRA_CONSTRAINED_ALLOWED) {
+			ip6obf.ultra_constrained_allowed = true;
+		}
+
 		adv = &ip6oa->ip6oa_flowadv;
 		adv->code = FADV_SUCCESS;
 		ip6oa->ip6oa_flags &= ~IP6OAF_RET_MASK;
@@ -1218,6 +1236,18 @@ skip_ipsec:
 	}
 #endif /* NECP */
 
+	if (IP6_CHECK_RESTRICTIONS(ifp, ip6obf)) {
+		if (log_restricted) {
+			printf("%s:%d pid %d (%s) is unable to transmit packets on %s\n",
+			    __func__, __LINE__,
+			    proc_getpid(current_proc()), proc_best_name(current_proc()),
+			    ifp->if_xname);
+		}
+		error = EHOSTUNREACH;
+		drop_reason = DROP_REASON_IP_TO_RESTRICTED_IF;
+		goto bad;
+	}
+
 	/*
 	 * then rt (for unicast) and ifp must be non-NULL valid values.
 	 */
@@ -1704,6 +1734,7 @@ bad:
 #undef saved_route
 #undef saved_ro_pmtu
 #undef args
+#undef IP6_CHECK_RESTRICTIONS
 }
 
 /* ip6_fragment_packet
@@ -1813,6 +1844,7 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 {
 	VERIFY(NULL != mptr);
 	int error = 0;
+	drop_reason_t drop_reason;
 
 	mbuf_ref_t morig = *mptr;
 	mbuf_ref_t first_mbufp = NULL;
@@ -1884,6 +1916,7 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 			MGETHDR(new_m, M_DONTWAIT, MT_HEADER);  /* MAC-OK */
 			if (new_m == NULL) {
 				error = ENOBUFS;
+				drop_reason = DROP_REASON_IP_FRAG_NO_MEM;
 				ip6stat.ip6s_odropped++;
 				break;
 			}
@@ -1908,6 +1941,7 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 
 			error = ip6_insertfraghdr(morig, new_m, hlen, &ip6f);
 			if (error) {
+				drop_reason = DROP_REASON_IP_FRAG_NO_MEM;
 				ip6stat.ip6s_odropped++;
 				break;
 			}
@@ -1923,6 +1957,7 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 
 			if ((m_frgpart = m_copy(morig, off, len)) == NULL) {
 				error = ENOBUFS;
+				drop_reason = DROP_REASON_IP_FRAG_NO_MEM;
 				ip6stat.ip6s_odropped++;
 				break;
 			}
@@ -1944,7 +1979,7 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 		if (error) {
 			/* free all the fragments created */
 			if (first_mbufp != NULL) {
-				m_freem_list(first_mbufp);
+				m_drop_list(first_mbufp, ifp, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 				first_mbufp = NULL;
 			}
 			last_mbufp = NULL;
@@ -3270,7 +3305,7 @@ ip6_getpcbopt(struct ip6_pktopts *pktopt, int optname, struct sockopt *sopt)
 	switch (optname) {
 	case IPV6_PKTINFO:
 		if (pktopt && pktopt->ip6po_pktinfo) {
-			return sooptcopyout(sopt, &pktopt->ip6po_pktinfo, sizeof(struct in6_pktinfo));
+			return sooptcopyout(sopt, pktopt->ip6po_pktinfo, sizeof(struct in6_pktinfo));
 		} else {
 			return sooptcopyout(sopt, &null_pktinfo_bytes, sizeof(struct in6_pktinfo));
 		}
@@ -3286,30 +3321,30 @@ ip6_getpcbopt(struct ip6_pktopts *pktopt, int optname, struct sockopt *sopt)
 	case IPV6_HOPOPTS:
 		if (pktopt && pktopt->ip6po_hbh) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_hbh;
-			return sooptcopyout(sopt, &pktopt->ip6po_hbh, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_rthdr *__indexable)pktopt->ip6po_hbh, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_RTHDR:
 		if (pktopt && pktopt->ip6po_rthdr) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_rthdr;
-			return sooptcopyout(sopt, &pktopt->ip6po_rthdr, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_rthdr *__indexable)pktopt->ip6po_rthdr, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_RTHDRDSTOPTS:
 		if (pktopt && pktopt->ip6po_dest1) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_dest1;
-			return sooptcopyout(sopt, &pktopt->ip6po_dest1, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_dest *__indexable)pktopt->ip6po_dest1, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_DSTOPTS:
 		if (pktopt && pktopt->ip6po_dest2) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_dest2;
-			return sooptcopyout(sopt, &pktopt->ip6po_dest2, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_dest *__indexable)pktopt->ip6po_dest2, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_NEXTHOP:
 		if (pktopt && pktopt->ip6po_nexthop) {
-			return sooptcopyout(sopt, &pktopt->ip6po_nexthop, pktopt->ip6po_nexthop->sa_len);
+			return sooptcopyout(sopt, (struct sockaddr *__indexable)pktopt->ip6po_nexthop, pktopt->ip6po_nexthop->sa_len);
 		}
 		break;
 	case IPV6_USE_MIN_MTU: {

@@ -610,13 +610,15 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		i = 0;
 		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_info, layout_id);
 		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_info, etl_flags);
+		_SUBTYPE(KC_ST_UINT32, struct exclave_textlayout_info, sharedcache_index);
 		setup_type_definition(retval, type_id, i, "exclave_textlayout_info");
 		break;
 
 	case STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS:
 		i = 0;
-		_SUBTYPE_ARRAY(KC_ST_UINT8, struct exclave_textlayout_segment, layoutSegment_uuid, 16);
-		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_segment, layoutSegment_loadAddress);
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct exclave_textlayout_segment_v2, layoutSegment_uuid, 16);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_segment_v2, layoutSegment_loadAddress);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_segment_v2, layoutSegment_rawLoadAddress);
 		setup_type_definition(retval, type_id, i, "exclave_textlayout_segments");
 		break;
 
@@ -999,6 +1001,16 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		_SUBTYPE(KC_ST_UINT64, struct crashinfo_jit_address_range, start_address);
 		_SUBTYPE(KC_ST_UINT64, struct crashinfo_jit_address_range, end_address);
 		setup_type_definition(retval, type_id, 1, "jit_address_range");
+		break;
+	}
+	case TASK_CRASHINFO_MB: {
+		_SUBTYPE(KC_ST_UINT64, struct crashinfo_mb, start_address);
+		_SUBTYPE_ARRAY(KC_ST_UINT64, struct crashinfo_mb, data, 64);
+		setup_type_definition(retval, type_id, 1, "tags");
+	}
+	case TASK_CRASHINFO_CS_AUXILIARY_INFO: {
+		setup_subtype_description(&subtypes[0], KC_ST_UINT64, 0, "cs_auxiliary_info");
+		setup_type_definition(retval, type_id, 1, "cs_auxiliary_info");
 		break;
 	}
 	case EXIT_REASON_SNAPSHOT: {

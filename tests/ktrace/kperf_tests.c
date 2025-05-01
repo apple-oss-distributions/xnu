@@ -989,20 +989,7 @@ T_DECL(kperf_lightweight_pet,
 	    &set, sizeof(set)), NULL);
 	T_ASSERT_POSIX_SUCCESS(kperf_timer_pet_set(0), NULL);
 
-	__block uint64_t nfires = 0;
-
-	expect_stacks_traced(^(ktrace_session_t s) {
-		ktrace_events_single(s, PERF_TMR_FIRE, ^(struct trace_point *tp) {
-			nfires++;
-			T_QUIET;
-			T_ASSERT_EQ(tp->arg1, (uint64_t)0,
-					"timer fire should have timer ID of 0");
-			T_QUIET;
-			T_ASSERT_EQ(tp->arg2, (uint64_t)1,
-					"timer fire should have PET bit set");
-		});
-	}, ^(void) {
-		T_ASSERT_GT(nfires, (uint64_t)0, "timer fired at least once");
+	expect_stacks_traced(^(ktrace_session_t s) {}, ^(void) {
 		T_END;
 	});
 

@@ -39,11 +39,11 @@
 
 #ifdef KERNEL_PRIVATE
 struct ifnet_interface_advisory;
+typedef uint64_t kern_packet_t __kernel_ptr_semantics;
 #endif /* KERNEL_PRIVATE */
 
 struct ifnet_traffic_descriptor_common;
 struct ifnet_traffic_rule_action;
-typedef uint64_t kern_packet_t;
 
 /*
  * Nexus terminology and overview.  The relationship between the objects are

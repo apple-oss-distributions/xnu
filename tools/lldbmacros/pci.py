@@ -163,8 +163,8 @@ def PciCfgRead(cmd_args=None):
             bits: 8, 16, 32
     """
     if cmd_args is None or len(cmd_args) < 5:
-        print(PciCfgRead.__doc__)
-        return
+        raise ArgumentError()
+
     
     bits = ArgumentStringToInt(cmd_args[0])
     bus  = ArgumentStringToInt(cmd_args[1])
@@ -196,8 +196,8 @@ def PciCfgWrite(cmd_args=None):
         Prints nothing upon success.
     """
     if cmd_args is None or len(cmd_args) < 6:
-        print(PciCfgWrite.__doc__)
-        return
+        raise ArgumentError()
+
 
     bits = ArgumentStringToInt(cmd_args[0])
     bus  = ArgumentStringToInt(cmd_args[1])
@@ -221,8 +221,8 @@ def PciCfgDump(cmd_args=None):
         Syntax: pci_cfg_dump <bus> <dev> <fuction>
     """
     if cmd_args is None or len(cmd_args) < 3:
-        print(PciCfgDump.__doc__)
-        return
+        raise ArgumentError()
+
 
     bus  = ArgumentStringToInt(cmd_args[0])
     dev  = ArgumentStringToInt(cmd_args[1])
@@ -241,8 +241,12 @@ def PciCfgScan(cmd_args=None):
     elif len(cmd_args) == 1:
         max_bus = ArgumentStringToInt(cmd_args[0])
     else:
-        print(PciCfgScan.__doc__)
+        raise ArgumentError()
+
+    if IsDebuggingCore():
+        print("Can't run command when debugging a coredump")
         return
+
 
     print("bus:dev:fcn: vendor device rev | class")
     print("--------------------------------------")
@@ -259,7 +263,10 @@ def PciCfgDumpAll(cmd_args=None):
     elif len(cmd_args) == 1:
         max_bus = ArgumentStringToInt(cmd_args[0])
     else:
-        print(PciCfgDumpAll.__doc__)
+        raise ArgumentError()
+
+    if IsDebuggingCore():
+        print("Can't run command when debugging a coredump")
         return
-    
+
     DoPciCfgScan(max_bus, True)

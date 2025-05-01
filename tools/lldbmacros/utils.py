@@ -82,6 +82,22 @@ def SBValueToPointer(sbval):
     else:
         return int(sbval.GetAddress())
 
+def ArgumentStringToAddress(arg_string) -> int:
+    """ converts an argument to an address
+        params:
+            arg_string: str - typically a string passed from the commandline.
+                        Accepted inputs:
+                        1. A base 2/8/10/16 literal representation, e.g. "0b101"/"0o5"/"5"/"0x5"
+                        2. An LLDB expression, e.g. "((char*)foo_ptr + sizeof(bar_type))"
+        returns:
+            int - integer representation of the string
+    """
+    try:
+        return int(arg_string, 0)
+    except ValueError:
+        val = LazyTarget.GetTarget().chkEvaluateExpression(arg_string)
+        return val.unsigned
+
 def ArgumentStringToInt(arg_string) -> int:
     """ converts an argument to an int
         params:
@@ -563,13 +579,14 @@ def IsAppleInternal():
         retval = False
     return retval
 
-def print_hex_data(data, start=0, desc="", marks={}, prefix=" "):
+def print_hex_data(data, start=0, desc="", marks={}, prefix=" ", extra=None):
     """ print on stdout "hexdump -C < data" like output
         params:
             data - bytearray or array of int where each int < 255
             start - int offset that should be printed in left column
             desc - str optional description to print on the first line to describe data
             mark - dictionary of markers
+            extra - a function returning some extra things to add on the line
     """
 
     if desc:
@@ -580,6 +597,7 @@ def print_hex_data(data, start=0, desc="", marks={}, prefix=" "):
     for row in range(start & -16, end, 16):
         line  = ""
         chars = ""
+        lend  = ""
 
         for col in range(16):
             addr = row + col
@@ -594,7 +612,11 @@ def print_hex_data(data, start=0, desc="", marks={}, prefix=" "):
                 line  += "   "
                 chars += ' '
 
-        print("{}{:#016x} {}  |{}|".format(prefix, row, line, chars))
+        if extra:
+            lend = extra(row)
+            if lend: lend = " " + lend
+
+        print("{}{:#016x} {}  |{}|{}".format(prefix, row, line, chars, lend))
 
 def Ones(x):
     return (1 << x)-1
@@ -608,3 +630,7 @@ def StripPAC(x, TySz):
         return (x | pac_mask) + 2**64
     else:
         return x & ptr_mask
+
+@cache_statically
+def IsDebuggingCore(target: lldb.SBTarget=None):
+    return "mach-o-core" in target.process.GetPluginName().lower()

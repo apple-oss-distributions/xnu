@@ -339,7 +339,8 @@ stack_collect(void)
 				stack,
 				VM_MAP_PAGE_MASK(kernel_map));
 			stack -= PAGE_SIZE;
-			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(2));
+			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(2),
+			    KMF_GUARD_FIRST | KMF_GUARD_LAST);
 			stack = 0;
 
 			s = splsched();

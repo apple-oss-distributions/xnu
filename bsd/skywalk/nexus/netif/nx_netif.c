@@ -291,8 +291,6 @@ static uint32_t nq_transfer_decay = NQ_TRANSFER_DECAY;
 #define NQ_ACCUMULATE_INTERVAL  2 /* 2 seconds */
 static uint32_t nq_accumulate_interval = NQ_ACCUMULATE_INTERVAL;
 
-static uint32_t nq_stat_enable = 0;
-
 SYSCTL_EXTENSIBLE_NODE(_kern_skywalk, OID_AUTO, netif,
     CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Skywalk network interface");
 #if (DEVELOPMENT || DEBUG)
@@ -316,7 +314,7 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_stat_accumulate_interval,
 #endif /* !DEVELOPMENT && !DEBUG */
 
 SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, netif_queue_stat_enable,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &nq_stat_enable,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &sk_netif_queue_stat_enable,
     0, "enable/disable stats collection for netif queue");
 
 static SKMEM_TYPE_DEFINE(na_netif_zone, struct nexus_netif_adapter);
@@ -2435,8 +2433,8 @@ nx_netif_attach(struct kern_nexus *nx, struct ifnet *ifp)
 		retval = kern_pbufpool_get_memory_info(nx->nx_tx_pp, &pp_info);
 		VERIFY(retval == 0);
 
-		/* set the drop limit as 80% of size of packet pool */
-		drop_lim = (pp_info.kpm_packets * 4) / 5;
+		/* set the drop limit as 75% of size of packet pool */
+		drop_lim = (pp_info.kpm_packets * 3) / 4;
 		VERIFY(drop_lim != 0);
 		IFCQ_PKT_DROP_LIMIT(ifp->if_snd) = drop_lim;
 	}
@@ -4419,7 +4417,7 @@ kern_netif_increment_queue_stats(kern_netif_queue_t queue,
 	uint64_t diff_secs;
 	struct netif_qstats *stats = &queue->nq_stats;
 
-	if (nq_stat_enable == 0) {
+	if (sk_netif_queue_stat_enable == 0) {
 		return;
 	}
 

@@ -164,6 +164,7 @@ LEXT(arm64_panic_lockdown_test_sp1_invalid_stack)
 
 	.global EXT(arm64_panic_lockdown_test_sp1_invalid_stack_handler)
 LEXT(arm64_panic_lockdown_test_sp1_invalid_stack_handler)
+	ARM64_PROLOG
 	/* If we made it here, the test passed. Fix the system up. */
 	mrs		x0, SP_EL0
 	ldr		x1, [x0], #16
@@ -191,6 +192,7 @@ LEXT(arm64_panic_lockdown_test_sp1_exception_in_vector)
 
 	.globl EXT(arm64_panic_lockdown_test_sp1_exception_in_vector_handler)
 LEXT(arm64_panic_lockdown_test_sp1_exception_in_vector_handler)
+	ARM64_PROLOG
 	/* Return to SP0 */
 	msr		SPSel, #0
 	/* Return 1 to indicate success */

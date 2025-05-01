@@ -32,6 +32,7 @@
 #include <kern/sched.h>
 #include <kern/priority_queue.h>
 #include <kern/bits.h>
+#include <kern/kern_types.h>
 
 #if !SCHED_TEST_HARNESS
 
@@ -43,19 +44,17 @@
 #if CONFIG_SCHED_CLUTCH
 
 /*
- * For the current implementation, bound threads are not managed
- * in the clutch hierarchy. This helper macro is used to indicate
- * if the thread should be in the hierarchy.
+ * Threads hard-bound to specific processors are not managed in
+ * the Clutch hierarchy. This helper macro is used to indicate
+ * whether a thread should be enqueued in the hierarchy.
  */
 #define SCHED_CLUTCH_THREAD_ELIGIBLE(thread)    ((thread->bound_processor) == PROCESSOR_NULL)
 
 #if CONFIG_SCHED_EDGE
 #define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       (thread->th_bound_cluster_id != THREAD_BOUND_CLUSTER_NONE)
-#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread)  ((thread->sched_flags & TH_SFLAG_BOUND_SOFT) != 0)
 
 #else /* CONFIG_SCHED_EDGE */
 #define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       (0)
-#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread)  (0)
 #endif /* CONFIG_SCHED_EDGE */
 
 /*

@@ -77,6 +77,8 @@ struct proc_ro {
 	__xnu_struct_group(proc_ro_data, proc_data, {
 		uint64_t p_uniqueid;                               /* process unique ID - incremented on fork/spawn/vfork, remains same across exec. */
 		int p_idversion;                                   /* version of process identity */
+		pid_t p_orig_ppid;                                 /* process's original parent pid, doesn't change if reparented */
+		int p_orig_ppidversion;                            /* process's original parent pid version, doesn't change if reparented */
 		uint32_t p_csflags;
 		SMR_POINTER(struct ucred *) p_ucred;               /* Process owner's identity. (PUCL) */
 		uint8_t *__unsafe_indexable syscall_filter_mask;   /* syscall filter bitmask (length: nsysent bits) */

@@ -29,7 +29,8 @@
 #ifndef _KERN_SCHED_URGENCY_H_
 #define _KERN_SCHED_URGENCY_H_
 
-#ifdef MACH_KERNEL_PRIVATE
+#if defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS
+__BEGIN_DECLS
 
 #include <kern/kern_types.h>
 
@@ -56,8 +57,7 @@ extern void     thread_tell_urgency(
 	uint64_t        sched_latency,
 	thread_t nthread);
 
-#endif /* MACH_KERNEL_PRIVATE */
-
 __END_DECLS
+#endif /* defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 #endif /* _KERN_SCHED_URGENCY_H_ */

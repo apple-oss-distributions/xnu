@@ -38,6 +38,7 @@
 #include <mach/machine/vm_types.h>
 
 #include <mach/boolean.h>
+#include <kern/backtrace.h>
 #include <kern/bits.h>
 #include <kern/ecc.h>
 #include <kern/thread.h>
@@ -47,6 +48,7 @@
 #include <kern/kalloc.h>
 #include <kern/spl.h>
 #include <kern/startup.h>
+#include <kern/trap_telemetry.h>
 #include <kern/trustcache.h>
 
 #include <os/overflow.h>
@@ -133,11 +135,7 @@ pmap_sptm_percpu_data_t PERCPU_DATA(pmap_sptm_percpu);
 os_refgrp_decl(static, pmap_refgrp, "pmap", NULL);
 
 /* Boot-arg to enable/disable the use of XNU_KERNEL_RESTRICTED type in SPTM. */
-#if !XNU_TARGET_OS_XR && !XNU_TARGET_OS_OSX
 TUNABLE(bool, use_xnu_restricted, "xnu_restricted", true);
-#else
-TUNABLE(bool, use_xnu_restricted, "xnu_restricted", false);
-#endif // !XNU_TARGET_OS_XR
 
 extern u_int32_t random(void); /* from <libkern/libkern.h> */
 
@@ -189,7 +187,7 @@ const struct page_table_level_info pmap_table_level_info_16k[] =
 		.shift      = ARM_16K_TT_L3_SHIFT,
 		.index_mask = ARM_16K_TT_L3_INDEX_MASK,
 		.valid_mask = ARM_PTE_TYPE_VALID,
-		.type_mask  = ARM_PTE_TYPE_MASK,
+		.type_mask  = ARM_TTE_TYPE_MASK,
 		.type_block = ARM_TTE_TYPE_L3BLOCK
 	}
 };
@@ -229,7 +227,7 @@ const struct page_table_level_info pmap_table_level_info_4k[] =
 		.shift      = ARM_4K_TT_L3_SHIFT,
 		.index_mask = ARM_4K_TT_L3_INDEX_MASK,
 		.valid_mask = ARM_PTE_TYPE_VALID,
-		.type_mask  = ARM_PTE_TYPE_MASK,
+		.type_mask  = ARM_TTE_TYPE_MASK,
 		.type_block = ARM_TTE_TYPE_L3BLOCK
 	}
 };
@@ -273,7 +271,7 @@ const struct page_table_level_info pmap_table_level_info_4k_stage2[] =
 		.shift      = ARM_4K_TT_L3_SHIFT,
 		.index_mask = ARM_4K_TT_L3_INDEX_MASK,
 		.valid_mask = ARM_PTE_TYPE_VALID,
-		.type_mask  = ARM_PTE_TYPE_MASK,
+		.type_mask  = ARM_TTE_TYPE_MASK,
 		.type_block = ARM_TTE_TYPE_L3BLOCK
 	}
 };
@@ -620,7 +618,7 @@ SECURITY_READ_ONLY_LATE(static bool) sptm_sysreg_available = false;
 static inline bool
 pte_is_compressed(pt_entry_t pte, pt_entry_t *ptep)
 {
-	const bool compressed = (((pte & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE_FAULT) && (pte & ARM_PTE_COMPRESSED));
+	const bool compressed = (!pte_is_valid(pte) && (pte & ARM_PTE_COMPRESSED));
 	/**
 	 * Check for bits that shouldn't be present in a compressed PTE.  This is everything except the
 	 * compressed/compressed-alt bits, as well as the SPTM's in-flight marker which may be set while
@@ -1111,7 +1109,7 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
-	pmap_switch, (pmap_t pmap), PMAP_SWITCH_INDEX);
+	pmap_switch, (pmap_t pmap, thread_t thread), PMAP_SWITCH_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
@@ -1364,6 +1362,8 @@ pmap_map(
 		virt += ps;
 		start += ps;
 	}
+
+
 	return virt;
 }
 
@@ -1436,7 +1436,7 @@ pmap_map_bd_with_options(
 	}
 
 	tmplate = ARM_PTE_AP((prot & VM_PROT_WRITE) ? AP_RWNA : AP_RONA) |
-	    mem_attr | ARM_PTE_TYPE | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_AF;
+	    mem_attr | ARM_PTE_TYPE_VALID | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_AF;
 
 #if __ARM_KERNEL_PROTECT__
 	tmplate |= ARM_PTE_NG;
@@ -1507,7 +1507,7 @@ scan:
 	for (; va_start < va_max; va_start += PAGE_SIZE) {
 		ptep = pmap_pte(kernel_pmap, va_start);
 		assert(!pte_is_compressed(*ptep, ptep));
-		if (*ptep == ARM_PTE_TYPE_FAULT) {
+		if (!pte_is_valid(*ptep)) {
 			break;
 		}
 	}
@@ -1521,7 +1521,7 @@ scan:
 	for (va_end = va_start + PAGE_SIZE; va_end < va_start + len; va_end += PAGE_SIZE) {
 		ptep = pmap_pte(kernel_pmap, va_end);
 		assert(!pte_is_compressed(*ptep, ptep));
-		if (*ptep != ARM_PTE_TYPE_FAULT) {
+		if (pte_is_valid(*ptep)) {
 			va_start = va_end + PAGE_SIZE;
 			goto scan;
 		}
@@ -1530,7 +1530,7 @@ scan:
 	for (va = va_start; va < va_end; va += PAGE_SIZE, pa_start += PAGE_SIZE) {
 		ptep = pmap_pte(kernel_pmap, va);
 		pte = pa_to_pte(pa_start)
-		    | ARM_PTE_TYPE | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX
+		    | ARM_PTE_TYPE_VALID | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX
 		    | ARM_PTE_AP((prot & VM_PROT_WRITE) ? AP_RWNA : AP_RONA)
 		    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT)
 		    | ARM_PTE_SH(SH_OUTER_MEMORY);
@@ -1561,7 +1561,6 @@ pmap_get_arm64_prot(
 {
 	tt_entry_t tte = 0;
 	unsigned int level = 0;
-	uint64_t tte_type = 0;
 	uint64_t effective_prot_bits = 0;
 	uint64_t aggregate_tte = 0;
 	uint64_t table_ap_bits = 0, table_xn = 0, table_pxn = 0;
@@ -1574,13 +1573,10 @@ pmap_get_arm64_prot(
 			return 0;
 		}
 
-		tte_type = tte & ARM_TTE_TYPE_MASK;
-
-		if ((tte_type == ARM_TTE_TYPE_BLOCK) ||
-		    (level == pt_attr->pta_max_level)) {
+		if ((level == pt_attr->pta_max_level) || tte_is_block(tte)) {
 			/* Block or page mapping; both have the same protection bit layout. */
 			break;
-		} else if (tte_type == ARM_TTE_TYPE_TABLE) {
+		} else if (tte_is_table(tte)) {
 			/* All of the table bits we care about are overrides, so just OR them together. */
 			aggregate_tte |= tte;
 		}
@@ -1708,10 +1704,11 @@ pmap_bootstrap(
 	virtual_space_end = VM_MAX_KERNEL_ADDRESS;
 
 	bitmap_full(&asid_bitmap[0], pmap_max_asids);
-	// Clear the ASIDs which will alias the reserved kernel ASID of 0
+	/* Clear the ASIDs which will alias the reserved kernel ASID of 0. */
 	for (unsigned int i = 0; i < pmap_max_asids; i += MAX_HW_ASIDS) {
 		bitmap_clear(&asid_bitmap[0], i);
 	}
+
 
 #if !HAS_16BIT_ASID
 	/**
@@ -1771,7 +1768,7 @@ pmap_bootstrap(
 
 
 #if (DEVELOPMENT || DEBUG)
-	sptm_features_available(SPTM_FEATURE_SYSREG, &sptm_sysreg_available);
+	(void)sptm_features_available(SPTM_FEATURE_SYSREG, &sptm_sysreg_available);
 #endif /* (DEVELOPMENT || DEBUG) */
 
 	/* Signal that the pmap has been bootstrapped */
@@ -1864,6 +1861,7 @@ pmap_create_commpage_table(vm_map_address_t rw_va, vm_map_address_t ro_va,
 		sptm_ret = sptm_map_page(temp_commpage_pmap->ttep, commpage_text_user_va, commpage_pte_template | pa_to_pte(rx_pa));
 		assert(sptm_ret == SPTM_SUCCESS);
 	}
+
 
 	sptm_unmap_table(temp_commpage_pmap->ttep, pt_attr_align_va(pt_attr, pt_attr_commpage_level(pt_attr), rw_va),
 	    (sptm_pt_level_t)pt_attr_commpage_level(pt_attr));
@@ -2061,7 +2059,6 @@ pmap_is_bad_ram(__unused ppnum_t ppn)
  * Prepare bad ram pages to be skipped.
  */
 
-
 /*
  * Initialize the count of available pages. No lock needed here,
  * as this code is called while kernel boot up is single threaded.
@@ -2133,6 +2130,19 @@ pmap_next_page(
 
 
 
+
+/**
+ * Helper function to check wheter the given physical
+ * page number is a restricted page.
+ *
+ * @param pn the physical page number to query.
+ */
+bool
+pmap_is_page_restricted(ppnum_t pn)
+{
+	sptm_frame_type_t frame_type = sptm_get_frame_type(ptoa(pn));
+	return frame_type == XNU_KERNEL_RESTRICTED;
+}
 
 /*
  *	Initialize the pmap module.
@@ -2580,7 +2590,7 @@ pmap_deallocate_all_leaf_tts(pmap_t pmap, tt_entry_t * first_ttep, vm_map_addres
 				    pmap, first_ttep, level);
 			}
 
-			if ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_BLOCK) {
+			if (tte_is_block(tte)) {
 				panic("%s: found block mapping, ttep=%p, tte=%p, "
 				    "pmap=%p, first_ttep=%p, level=%u",
 				    __FUNCTION__, ttep + i, (void *)tte,
@@ -3050,7 +3060,7 @@ pmap_tte_check_refcounts(
 
 			if (__improbable(pte_is_compressed(*ptep, ptep))) {
 				comp++;
-			} else if (__improbable((*ptep & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE)) {
+			} else if (__improbable(pte_is_valid(*ptep))) {
 				valid++;
 			}
 		}
@@ -3180,8 +3190,8 @@ pmap_tte_deallocate(
 		    __func__, tte_get_ptd(tte), tte_get_ptd(tte)->pmap, pmap);
 	}
 
-	assertf((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE, "%s: invalid TTE %p (0x%llx)",
-	    __func__, ttep, (unsigned long long)tte);
+	assertf(tte_is_table(tte), "%s: invalid TTE %p (0x%llx)", __func__, ttep,
+	    (unsigned long long)tte);
 
 	/* pmap_tte_remove() will drop the pmap lock */
 	pmap_tte_remove(pmap, va_start, ttep, level);
@@ -3286,7 +3296,7 @@ pmap_remove_range_options(
 				}
 				pai_list[i] = INVALID_PAI;
 				continue;
-			} else if ((prev_pte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT) {
+			} else if (!pte_is_valid(prev_pte)) {
 				pai_list[i] = INVALID_PAI;
 				continue;
 			}
@@ -3435,7 +3445,7 @@ pmap_remove_options_internal(
 		goto done;
 	}
 
-	assertf((*tte_p & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE, "%s: invalid TTE %p (0x%llx) for pmap %p va 0x%llx",
+	assertf(tte_is_table(*tte_p), "%s: invalid TTE %p (0x%llx) for pmap %p va 0x%llx",
 	    __func__, tte_p, (unsigned long long)*tte_p, pmap, (unsigned long long)start);
 
 	pmap_remove_range_options(pmap, start, end, options);
@@ -3571,14 +3581,15 @@ pmap_switch_user(thread_t thread, vm_map_t new_map)
 void
 pmap_set_pmap(
 	pmap_t pmap,
-	__unused thread_t thread)
+	thread_t thread)
 {
-	pmap_switch(pmap);
+	pmap_switch(pmap, thread);
 }
 
 MARK_AS_PMAP_TEXT void
 pmap_switch_internal(
-	pmap_t pmap)
+	pmap_t pmap,
+	thread_t thread)
 {
 	validate_pmap_mutable(pmap);
 	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
@@ -3595,7 +3606,12 @@ pmap_switch_internal(
 		pmap_update_plru(asid_index);
 	}
 
-	__unused const sptm_return_t sptm_return = sptm_switch_root(pmap->ttep);
+	__unused sptm_return_t sptm_return;
+#pragma unused(thread)
+	if (0) {
+	} else {
+		sptm_return = sptm_switch_root(pmap->ttep, 0, 0);
+	}
 
 #if DEVELOPMENT || DEBUG
 	if (__improbable(sptm_return & SPTM_SWITCH_ASID_TLBI_FLUSH)) {
@@ -3610,10 +3626,11 @@ pmap_switch_internal(
 
 void
 pmap_switch(
-	pmap_t pmap)
+	pmap_t pmap,
+	thread_t thread)
 {
 	PMAP_TRACE(1, PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(pmap), PMAP_VASID(pmap), PMAP_HWASID(pmap));
-	pmap_switch_internal(pmap);
+	pmap_switch_internal(pmap, thread);
 	PMAP_TRACE(1, PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_END);
 }
 
@@ -3724,7 +3741,7 @@ pmap_disjoint_unmap(pmap_paddr_t pa, unsigned int num_mappings)
 		pt_desc_t * const ptdp = sptm_pcpu->sptm_ptds[cur_mapping];
 		const pmap_t pmap = ptdp->pmap;
 
-		assertf(((prev_pte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT) ||
+		assertf(!pte_is_valid(prev_pte) ||
 		    ((pte_to_pa(prev_pte) & ~PAGE_MASK) == pa), "%s: prev_pte 0x%llx does not map pa 0x%llx",
 		    __func__, (unsigned long long)prev_pte, (unsigned long long)pa);
 
@@ -3736,7 +3753,7 @@ pmap_disjoint_unmap(pmap_paddr_t pa, unsigned int num_mappings)
 			 * If the prior PTE is invalid (which may happen due to a concurrent remove operation),
 			 * the compressed marker won't be written so we shouldn't account the mapping as compressed.
 			 */
-			const bool is_compressed = (((prev_pte & ARM_PTE_TYPE_MASK) != ARM_PTE_TYPE_FAULT) &&
+			const bool is_compressed = (pte_is_valid(prev_pte) &&
 			    ((sptm_pcpu->sptm_ops[cur_mapping].pte_template & ARM_PTE_COMPRESSED_MASK) != 0));
 			const bool is_internal = (sptm_pcpu->sptm_acct_flags[cur_mapping] & PMAP_SPTM_FLAG_INTERNAL) != 0;
 			const bool is_altacct = (sptm_pcpu->sptm_acct_flags[cur_mapping] & PMAP_SPTM_FLAG_ALTACCT) != 0;
@@ -3750,7 +3767,7 @@ pmap_disjoint_unmap(pmap_paddr_t pa, unsigned int num_mappings)
 			 */
 			pmap_disjoint_unmap_accounting(pmap, pai, is_compressed, is_internal, is_altacct);
 
-			if ((prev_pte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT) {
+			if (!pte_is_valid(prev_pte)) {
 				continue;
 			}
 
@@ -4357,7 +4374,7 @@ pmap_page_protect_options_with_flush_range(
 
 		const pt_entry_t spte = os_atomic_load(pte_p, relaxed);
 
-		if (__improbable(!remove && ((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT))) {
+		if (__improbable(!remove && !pte_is_valid(spte))) {
 			++num_skipped_mappings;
 			goto protect_skip_pve;
 		}
@@ -4420,7 +4437,7 @@ pmap_page_protect_options_with_flush_range(
 		}
 
 		if (__improbable((pmap == NULL) ||
-		    (((spte & ARM_PTE_TYPE_MASK) != ARM_PTE_TYPE_FAULT) && (atop(pte_to_pa(spte)) != ppnum)))) {
+		    (pte_is_valid(spte) && (atop(pte_to_pa(spte)) != ppnum)))) {
 #if MACH_ASSERT
 			if ((pmap != NULL) && (pve_p != PV_ENTRY_NULL) && (kern_feature_override(KF_PMAPV_OVRD) == FALSE)) {
 				/* Temporarily set PTEP to NULL so that the logic below doesn't pick it up as duplicate. */
@@ -4894,7 +4911,7 @@ pmap_protect_options_internal(
 		 */
 		if (!set_NX) {
 			spte = os_atomic_load(pte_p, relaxed);
-			if (__improbable((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT)) {
+			if (__improbable(!pte_is_valid(spte))) {
 				tmplate |= pt_attr_leaf_xn(pt_attr);
 			} else {
 				tmplate |= (spte & ARM_PTE_XMASK);
@@ -4918,7 +4935,7 @@ pmap_protect_options_internal(
 			}
 
 			/* A concurrent remove or disconnect may have cleared the PTE. */
-			if (__improbable((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT)) {
+			if (__improbable(!pte_is_valid(spte))) {
 				goto pmap_protect_insert_mapping;
 			}
 
@@ -5078,6 +5095,7 @@ pmap_protect_options(
 		beg = pmap_protect_options_internal(pmap, beg, l, prot, options, args);
 	}
 
+
 	PMAP_TRACE(2, PMAP_CODE(PMAP__PROTECT) | DBG_FUNC_END);
 }
 
@@ -5149,6 +5167,7 @@ pmap_map_block_addr(
 		va += pmap_page_size;
 		pa += pmap_page_size;
 	}
+
 
 	return KERN_SUCCESS;
 }
@@ -5465,7 +5484,7 @@ pmap_construct_pte(
 	)
 {
 	bool set_NX = false, set_XO = false;
-	pt_entry_t pte = pa_to_pte(pa) | ARM_PTE_TYPE;
+	pt_entry_t pte = pa_to_pte(pa) | ARM_PTE_TYPE_VALID;
 	assert(pp_attr_bits != NULL);
 	*pp_attr_bits = 0;
 
@@ -5651,7 +5670,7 @@ pmap_enter_options_internal(
 	 */
 	const pt_entry_t prev_pte = os_atomic_load(pte_p, relaxed);
 
-	if (((prev_pte & ARM_PTE_TYPE_VALID) == ARM_PTE_TYPE) && (pte_to_pa(prev_pte) != pa)) {
+	if (pte_is_valid(prev_pte) && (pte_to_pa(prev_pte) != pa)) {
 		/*
 		 * There is already a mapping here & it's for a different physical page.
 		 * First remove that mapping.
@@ -5671,7 +5690,7 @@ pmap_enter_options_internal(
 	}
 
 	while (!committed) {
-		pt_entry_t spte = ARM_PTE_TYPE_FAULT;
+		pt_entry_t spte = ARM_PTE_EMPTY;
 		pv_alloc_return_t pv_status = PV_ALLOC_SUCCESS;
 		bool skip_footprint_debit = false;
 
@@ -5688,7 +5707,6 @@ pmap_enter_options_internal(
 		 */
 		pt_entry_t pte = pmap_construct_pte(pmap, v, pa,
 		    ((options & PMAP_OPTIONS_MAP_TPRO) ? VM_PROT_RORW_TP : prot), fault_type, wired, pt_attr, &pp_attr_bits);
-
 
 		if (pa_valid(pa)) {
 			unsigned int pai;
@@ -6033,7 +6051,7 @@ pmap_change_wiring_internal(
 	prev_pte = os_atomic_load(&sptm_pcpu->sptm_prev_ptes[0], relaxed);
 	enable_preemption();
 
-	if ((prev_pte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT) {
+	if (!pte_is_valid(prev_pte)) {
 		goto pmap_change_wiring_return;
 	}
 
@@ -6327,7 +6345,7 @@ pmap_expand(
 		 * of the table KVA.
 		 */
 		if (table_ttep == NULL) {
-			assert((old_tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) == (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID));
+			assert(tte_is_valid_table(old_tte));
 			table_ttep = (tt_entry_t*)phystokv(old_tte & ARM_TTE_TABLE_MASK);
 		}
 
@@ -6342,7 +6360,7 @@ pmap_expand(
 		ttep = &table_ttep[ttn_index(pt_attr, vaddr, ttlevel)];
 		old_tte = os_atomic_load(ttep, relaxed);
 		table_ttep = NULL;
-		if ((old_tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) != (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)) {
+		if (!tte_is_valid_table(old_tte)) {
 			tt_entry_t new_tte, *new_ttep;
 			while (pmap_tt_allocate(pmap, &new_ttep, ttlevel + 1, options | PMAP_PAGE_NOZEROFILL) != KERN_SUCCESS) {
 				if (options & PMAP_OPTIONS_NOWAIT) {
@@ -6353,7 +6371,7 @@ pmap_expand(
 			/* Grab the pmap lock to ensure we don't try to concurrently map different tables at the same TTE. */
 			pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
 			old_tte = os_atomic_load(ttep, relaxed);
-			if ((old_tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) != (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)) {
+			if (!tte_is_valid_table(old_tte)) {
 				pmap_init_pte_page(pmap, (pt_entry_t *) new_ttep, v, ttlevel + 1, FALSE);
 				pa = kvtophys_nofail((vm_offset_t)new_ttep);
 				/*
@@ -6644,7 +6662,7 @@ phys_attribute_clear_twig_internal(
 	 * It's possible that this portion of our VA region has never been paged in, in which case
 	 * there may not be a valid twig or leaf table here.
 	 */
-	if ((tte_p == (tt_entry_t *) NULL) || ((*tte_p & ARM_TTE_TYPE_MASK) != ARM_TTE_TYPE_TABLE)) {
+	if ((tte_p == (tt_entry_t *) NULL) || !tte_is_valid_table(*tte_p)) {
 		assert(flush_range->pending_region_entries == 0);
 		return end;
 	}
@@ -6668,7 +6686,7 @@ phys_attribute_clear_twig_internal(
 		flush_range->current_ptep = curr_pte_p;
 		const pt_entry_t spte = os_atomic_load(curr_pte_p, relaxed);
 		const pmap_paddr_t pa = pte_to_pa(spte);
-		if (((spte & ARM_PTE_TYPE_MASK) != ARM_PTE_TYPE_FAULT) && pa_valid(pa)) {
+		if (pte_is_valid(spte) && pa_valid(pa)) {
 			/* The PTE maps a managed page, so do the appropriate PV list-based permission changes. */
 			const ppnum_t pn = (ppnum_t) atop(pa);
 			phys_attribute_clear_with_flush_range(pn, bits, options, NULL, flush_range);
@@ -6684,7 +6702,7 @@ phys_attribute_clear_twig_internal(
 				 */
 				pmap_multipage_op_submit_region(flush_range);
 			}
-		} else if (__improbable((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT)) {
+		} else if (__improbable(!pte_is_valid(spte))) {
 			/**
 			 * We've found an invalid mapping, so we have a discontinuity in the the region to
 			 * update.  Handle this by submitting any pending region templates and starting a new
@@ -6692,7 +6710,7 @@ phys_attribute_clear_twig_internal(
 			 * a "safe" (AF bit cleared, minimal permissions) PTE template; the SPTM would just
 			 * ignore the update on finding an invalid mapping in the PTE.  But we don't know
 			 * what a "safe" template will be in all cases: for example, JIT regions require all
-			 * mapping to either be invalid or to have full RWX permissions.
+			 * mappings to either be invalid or to have full RWX permissions.
 			 */
 			pmap_multipage_op_submit_region(flush_range);
 		} else if (pmap_insert_flush_range_template(spte, flush_range)) {
@@ -6708,9 +6726,20 @@ phys_attribute_clear_twig_internal(
 			 */
 			pmap_multipage_op_submit_disjoint(0, flush_range);
 		}
+
+		/**
+		 * If the total number of pending + processed entries exceeds the mapping threshold,
+		 * we may need to submit all pending operations to avoid excessive preemption latency.
+		 * Otherwise, a small number of pending disjoint or region ops can hold preemption
+		 * disabled across an arbitrary number of total processed entries.
+		 * As an optimization, we may be able to avoid submitting if no urgent AST is
+		 * pending on the local CPU, but only if we aren't currently in an epoch.  If we are
+		 * in an epoch, failure to submit in a timely manner can cause another CPU to wait
+		 * too long for our epoch to drain.
+		 */
 		if (((flush_range->processed_entries + flush_range->pending_disjoint_entries +
 		    flush_range->pending_region_entries) >= SPTM_MAPPING_LIMIT) &&
-		    pmap_pending_preemption()) {
+		    (pmap_in_epoch() || pmap_pending_preemption())) {
 			pmap_multipage_op_submit(flush_range);
 			assert(preemption_enabled());
 		}
@@ -7401,7 +7430,7 @@ arm_force_fast_fault_with_flush_range(
 		}
 
 		// A concurrent pmap_remove() may have cleared the PTE
-		if (__improbable((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT)) {
+		if (__improbable(!pte_is_valid(spte))) {
 			skip_pte = true;
 		}
 
@@ -7738,7 +7767,7 @@ arm_clear_fast_fault(
 #endif
 		spte = os_atomic_load(pte_p, relaxed);
 		// A concurrent pmap_remove() may have cleared the PTE
-		if (__improbable((spte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_FAULT)) {
+		if (__improbable(!pte_is_valid(spte))) {
 			++num_skipped_mappings;
 			goto cff_skip_pve;
 		}
@@ -7773,7 +7802,7 @@ arm_clear_fast_fault(
 			}
 		}
 
-		assert(spte != ARM_PTE_TYPE_FAULT);
+		assert(spte != ARM_PTE_EMPTY);
 
 		if (spte != tmplate) {
 			sptm_ops[num_mappings].root_pt_paddr = pmap->ttep;
@@ -7844,7 +7873,7 @@ arm_fast_fault_internal(
 {
 	kern_return_t   result = KERN_FAILURE;
 	pt_entry_t     *ptep;
-	pt_entry_t      spte = ARM_PTE_TYPE_FAULT;
+	pt_entry_t      spte = ARM_PTE_EMPTY;
 	locked_pvh_t    locked_pvh = {.pvh = 0};
 	unsigned int    pai;
 	pmap_paddr_t    pa;
@@ -7882,8 +7911,7 @@ arm_fast_fault_internal(
 
 			pa = pte_to_pa(spte);
 
-			if ((spte == ARM_PTE_TYPE_FAULT) ||
-			    pte_is_compressed(spte, ptep)) {
+			if ((spte == ARM_PTE_EMPTY) || pte_is_compressed(spte, ptep)) {
 				pmap_unlock(pmap, PMAP_LOCK_SHARED);
 				return result;
 			}
@@ -8038,11 +8066,13 @@ arm_fast_fault(
 void
 pmap_copy_page(
 	ppnum_t psrc,
-	ppnum_t pdst)
+	ppnum_t pdst,
+	int options)
 {
-	bcopy_phys((addr64_t) (ptoa(psrc)),
+	bcopy_phys_with_options((addr64_t) (ptoa(psrc)),
 	    (addr64_t) (ptoa(pdst)),
-	    PAGE_SIZE);
+	    PAGE_SIZE,
+	    options);
 }
 
 
@@ -8075,6 +8105,19 @@ pmap_zero_page(
 }
 
 /*
+ *	pmap_zero_page_with_options allows to specify further operations
+ *	to perform with the zeroing.
+ */
+void
+pmap_zero_page_with_options(
+	ppnum_t pn,
+	int options)
+{
+	assert(pn != vm_page_fictitious_addr);
+	bzero_phys_with_options((addr64_t) ptoa(pn), PAGE_SIZE, options);
+}
+
+/*
  *	pmap_zero_part_page
  *	zeros the specified (machine independent) part of a page.
  */
@@ -8095,13 +8138,15 @@ pmap_map_globals(
 {
 	pt_entry_t      pte;
 
-	pte = pa_to_pte(kvtophys_nofail((vm_offset_t)&lowGlo)) | AP_RONA | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_AF | ARM_PTE_TYPE;
+	pte = pa_to_pte(kvtophys_nofail((vm_offset_t)&lowGlo)) | AP_RONA | ARM_PTE_NX |
+	    ARM_PTE_PNX | ARM_PTE_AF | ARM_PTE_TYPE_VALID;
 #if __ARM_KERNEL_PROTECT__
 	pte |= ARM_PTE_NG;
 #endif /* __ARM_KERNEL_PROTECT__ */
 	pte |= ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITEBACK);
 	pte |= ARM_PTE_SH(SH_OUTER_MEMORY);
 	sptm_map_page(kernel_pmap->ttep, LOWGLOBAL_ALIAS, pte);
+
 
 #if KASAN
 	kasan_notify_address(LOWGLOBAL_ALIAS, PAGE_SIZE);
@@ -8137,7 +8182,7 @@ pmap_map_cpu_windows_copy_internal(
 		cpu_copywindow_vaddr = pmap_cpu_windows_copy_addr(cpu_num, cpu_window_index);
 		ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
 		assert(!pte_is_compressed(*ptep, ptep));
-		if (*ptep == ARM_PTE_TYPE_FAULT) {
+		if (!pte_is_valid(*ptep)) {
 			break;
 		}
 	}
@@ -8145,7 +8190,7 @@ pmap_map_cpu_windows_copy_internal(
 		panic("%s: out of windows", __func__);
 	}
 
-	pte = pa_to_pte(ptoa(pn)) | ARM_PTE_TYPE | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX;
+	pte = pa_to_pte(ptoa(pn)) | ARM_PTE_TYPE_VALID | ARM_PTE_AF | ARM_PTE_NX | ARM_PTE_PNX;
 #if __ARM_KERNEL_PROTECT__
 	pte |= ARM_PTE_NG;
 #endif /* __ARM_KERNEL_PROTECT__ */
@@ -8175,6 +8220,7 @@ pmap_map_cpu_windows_copy_internal(
 		panic("%s: failed to map CPU copy-window VA 0x%llx with SPTM status %d",
 		    __func__, (unsigned long long)cpu_copywindow_vaddr, sptm_status);
 	}
+
 
 	/*
 	 * Clean up any pending strong TLB flush for the same window in a thread we may have
@@ -8321,7 +8367,7 @@ pmap_trim_range(
 
 		tte_p = pmap_tte(pmap, cur);
 
-		if ((tte_p != NULL) && ((*tte_p & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE)) {
+		if ((tte_p != NULL) && tte_is_valid_table(*tte_p)) {
 			/* pmap_tte_deallocate()/pmap_tte_trim() will drop the pmap lock */
 			if ((pmap->type == PMAP_TYPE_NESTED) && (sptm_get_page_table_refcnt(tte_to_pa(*tte_p)) == 0)) {
 				/* Deallocate for the nested map. */
@@ -8553,6 +8599,10 @@ pmap_auth_user_ptr(void *value, ptrauth_key key, uint64_t discriminator, uint64_
 	res = sptm_auth_user_pointer(value, key, discriminator, jop_key);
 	__compiler_materialize_and_prevent_reordering_on(res);
 	ml_disable_user_jop_key(jop_key, saved_jop_state);
+
+	if (res == SPTM_AUTH_FAILURE) {
+		res = ml_poison_ptr(value, key);
+	}
 
 	ml_set_interrupts_enabled(current_intr_state);
 
@@ -8954,7 +9004,7 @@ pmap_unnest_options_internal(
 				for (cpte = bpte; (bpte != NULL) && (addr < vlim); cpte += PAGE_RATIO) {
 					pt_entry_t  spte = os_atomic_load(cpte, relaxed);
 
-					if ((spte & ARM_PTE_TYPE_MASK) != ARM_PTE_TYPE_FAULT) {
+					if (pte_is_valid(spte)) {
 						spte |= ARM_PTE_NG;
 					}
 
@@ -9255,11 +9305,22 @@ pmap_update_compressor_page_internal(ppnum_t pn, unsigned int prev_cacheattr, un
 	pmap_sync_wimg(pn, prev_cacheattr & VM_WIMG_MASK, new_cacheattr & VM_WIMG_MASK);
 }
 
+static inline bool
+cacheattr_supports_compressor(unsigned int cacheattr)
+{
+	switch (cacheattr) {
+	case VM_WIMG_DEFAULT:
+		return true;
+	default:
+		return false;
+	}
+}
+
 void *
 pmap_map_compressor_page(ppnum_t pn)
 {
 	unsigned int cacheattr = pmap_cache_attributes(pn) & VM_WIMG_MASK;
-	if (cacheattr != VM_WIMG_DEFAULT) {
+	if (!cacheattr_supports_compressor(cacheattr)) {
 		pmap_update_compressor_page_internal(pn, cacheattr, VM_WIMG_DEFAULT);
 	}
 
@@ -9270,7 +9331,7 @@ void
 pmap_unmap_compressor_page(ppnum_t pn __unused, void *kva __unused)
 {
 	unsigned int cacheattr = pmap_cache_attributes(pn) & VM_WIMG_MASK;
-	if (cacheattr != VM_WIMG_DEFAULT) {
+	if (!cacheattr_supports_compressor(cacheattr)) {
 		pmap_update_compressor_page_internal(pn, VM_WIMG_DEFAULT, cacheattr);
 	}
 }
@@ -10338,8 +10399,7 @@ pmap_is_empty_internal(
 		}
 
 		tte_p = pmap_tte(pmap, block_start);
-		if ((tte_p != PT_ENTRY_NULL)
-		    && ((*tte_p & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE)) {
+		if ((tte_p != PT_ENTRY_NULL) && tte_is_valid_table(*tte_p)) {
 			pte_p = (pt_entry_t *) ttetokv(*tte_p);
 			bpte_p = &pte_p[pte_index(pt_attr, block_start)];
 			epte_p = &pte_p[pte_index(pt_attr, block_end)];
@@ -10796,7 +10856,7 @@ pmap_query_resident_internal(
 		pmap_unlock(pmap, PMAP_LOCK_SHARED);
 		return PMAP_RESIDENT_INVALID;
 	}
-	if ((*tte_p & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE) {
+	if (tte_is_valid_table(*tte_p)) {
 		pte_p = (pt_entry_t *) ttetokv(*tte_p);
 		bpte = &pte_p[pte_index(pt_attr, start)];
 		epte = &pte_p[pte_index(pt_attr, end)];
@@ -11014,6 +11074,7 @@ pmap_get_tpro(
 {
 	return false;
 }
+
 
 uint64_t pmap_query_page_info_retries MARK_AS_PMAP_DATA;
 
@@ -11429,7 +11490,8 @@ pmap_txm_allocate_page(void)
 	thread_vm_privileged = set_vm_privilege(true);
 
 	/* Allocate a page from the VM free list */
-	while ((page = vm_page_grab()) == VM_PAGE_NULL) {
+	int grab_options = VM_PAGE_GRAB_OPTIONS_NONE;
+	while ((page = vm_page_grab_options(grab_options)) == VM_PAGE_NULL) {
 		VM_PAGE_WAIT();
 	}
 
@@ -11726,6 +11788,7 @@ static NOKASAN bool
 pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_write)
 {
 	pmap_t old_pmap = NULL;
+	thread_t thread = current_thread();
 
 	pmap_test_took_fault = false;
 
@@ -11739,7 +11802,7 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
 
 	if (pmap != NULL) {
 		old_pmap = current_pmap();
-		pmap_switch(pmap);
+		pmap_switch(pmap, thread);
 
 		/* Disable PAN; pmap shouldn't be the kernel pmap. */
 #if __ARM_PAN_AVAILABLE__
@@ -11765,7 +11828,7 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
 		__builtin_arm_wsr("pan", 1);
 #endif /* __ARM_PAN_AVAILABLE__ */
 
-		pmap_switch(old_pmap);
+		pmap_switch(old_pmap, thread);
 	}
 
 	mp_enable_preemption();

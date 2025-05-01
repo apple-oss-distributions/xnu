@@ -6,6 +6,9 @@
 #include <string.h>
 #include <sys/sysctl.h>
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
 #include <sys/mman.h>
 
 #include "benchmark/helpers.h"
@@ -57,8 +60,9 @@ timespec_difference_us(const struct timespec* a, const struct timespec* b)
 }
 
 unsigned char *
-mmap_buffer(size_t memsize)
+map_buffer(size_t memsize, int flags)
 {
+#if USE_MMAP
 	int fd = -1;
 	unsigned char* addr = (unsigned char *)mmap(NULL, memsize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE,
 	    fd, 0);
@@ -67,6 +71,15 @@ mmap_buffer(size_t memsize)
 		exit(2);
 	}
 	return addr;
+#else
+	vm_address_t address;
+	kern_return_t kr = vm_allocate(mach_task_self(), &address, memsize, flags | VM_FLAGS_ANYWHERE);
+	if (kr != KERN_SUCCESS) {
+		fprintf(stderr, "Unable to vm_allocate: %d\n", kr);
+		exit(2);
+	}
+	return (unsigned char*)address;
+#endif
 }
 
 unsigned int

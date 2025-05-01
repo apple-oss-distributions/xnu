@@ -78,10 +78,13 @@ private:
 	uint32_t          _systemPartitionOffset;
 	uint32_t          _systemPartitionSize;
 
-	OSSharedPtr<OSDictionary> &_varDict;
+	OSSharedPtr<OSDictionary> _varDict;
 
 	uint32_t          _commonUsed;
 	uint32_t          _systemUsed;
+
+	IORWLock          *_variableLock;
+	IOLock            *_controllerLock;
 
 	uint32_t findCurrentBank(uint32_t *gen);
 	IOReturn unserializeImage(const uint8_t *image, IOByteCount length);
@@ -103,12 +106,9 @@ private:
 public:
 	virtual
 	~IONVRAMCHRPHandler() APPLE_KEXT_OVERRIDE;
-	IONVRAMCHRPHandler(OSSharedPtr<OSDictionary> &varDict);
-
+	IONVRAMCHRPHandler();
 	static bool isValidImage(const uint8_t *image, IOByteCount length);
-
-	static  IONVRAMCHRPHandler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-	    OSSharedPtr<OSDictionary> &varDict);
+	static  IONVRAMCHRPHandler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length);
 
 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
@@ -121,6 +121,7 @@ public:
 	virtual uint32_t getSystemUsed(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getCommonUsed(void) const APPLE_KEXT_OVERRIDE;
 	virtual bool     getSystemPartitionActive(void) const APPLE_KEXT_OVERRIDE;
+	virtual IOReturn getVarDict(OSSharedPtr<OSDictionary> &varDictCopy) APPLE_KEXT_OVERRIDE;
 };
 
 static const char *
@@ -291,18 +292,22 @@ IONVRAMCHRPHandler::isValidImage(const uint8_t *image, IOByteCount length)
 }
 
 IONVRAMCHRPHandler*
-IONVRAMCHRPHandler::init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-    OSSharedPtr<OSDictionary> &varDict)
+IONVRAMCHRPHandler::init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length)
 {
 	bool propertiesOk;
 
-	IONVRAMCHRPHandler *handler = new IONVRAMCHRPHandler(varDict);
+	IONVRAMCHRPHandler *handler = new IONVRAMCHRPHandler();
 
 	handler->_provider = provider;
 
+	handler->_variableLock = IORWLockAlloc();
+	require(handler->_variableLock != nullptr, exit);
+
+	handler->_controllerLock = IOLockAlloc();
+	require(handler->_controllerLock != nullptr, exit);
+
 	propertiesOk = handler->getNVRAMProperties();
 	require_action(propertiesOk, exit, DEBUG_ERROR("Unable to get NVRAM properties\n"));
-
 	require_action(length == handler->_bankSize, exit, DEBUG_ERROR("length 0x%llx != _bankSize 0x%x\n", length, handler->_bankSize));
 
 	if ((image != nullptr) && (length != 0)) {
@@ -319,9 +324,8 @@ exit:
 	return nullptr;
 }
 
-IONVRAMCHRPHandler::IONVRAMCHRPHandler(OSSharedPtr<OSDictionary> &varDict) :
-	_commonPartitionSize(0x800),
-	_varDict(varDict)
+IONVRAMCHRPHandler::IONVRAMCHRPHandler() :
+	_commonPartitionSize(0x800)
 {
 }
 
@@ -337,6 +341,7 @@ IONVRAMCHRPHandler::flush(const uuid_t guid, IONVRAMOperation op)
 
 	DEBUG_INFO("flushSystem=%d, flushCommon=%d\n", flushSystem, flushCommon);
 
+	NVRAMWRITELOCK(_variableLock);
 	if (flushSystem || flushCommon) {
 		const OSSymbol                    *canonicalKey;
 		OSSharedPtr<OSDictionary>         dictCopy;
@@ -370,6 +375,7 @@ IONVRAMCHRPHandler::flush(const uuid_t guid, IONVRAMOperation op)
 	}
 
 exit:
+	NVRAMRWUNLOCK(_variableLock);
 	return ret;
 }
 
@@ -379,14 +385,16 @@ IONVRAMCHRPHandler::reloadInternal(void)
 	uint32_t controllerBank;
 	uint32_t controllerGen;
 
+	NVRAMLOCKASSERTHELD(_controllerLock);
+
 	controllerBank = findCurrentBank(&controllerGen);
 
 	if (_currentBank != controllerBank) {
-		DEBUG_ERROR("_currentBank 0x%x != controllerBank 0x%x", _currentBank, controllerBank);
+		DEBUG_ERROR("_currentBank 0x%x != controllerBank 0x%x\n", _currentBank, controllerBank);
 	}
 
 	if (_generation != controllerGen) {
-		DEBUG_ERROR("_generation 0x%x != controllerGen 0x%x", _generation, controllerGen);
+		DEBUG_ERROR("_generation 0x%x != controllerGen 0x%x\n", _generation, controllerGen);
 	}
 
 	_currentBank = controllerBank;
@@ -611,6 +619,7 @@ IONVRAMCHRPHandler::serializeVariables(void)
 	NVRAMRegionInfo                   *currentRegion;
 	NVRAMRegionInfo                   variableRegions[] = { { kIONVRAMPartitionCommon, _commonPartitionOffset, _commonPartitionSize},
 								{ kIONVRAMPartitionSystem, _systemPartitionOffset, _systemPartitionSize} };
+	NVRAMLOCKASSERTHELD(_controllerLock);
 
 	require_action(_nvramController != nullptr, exit, (ret = kIOReturnNotReady, DEBUG_ERROR("No _nvramController\n")));
 	require_action(_newData == true, exit, (ret = kIOReturnSuccess, DEBUG_INFO("No _newData to sync\n")));
@@ -624,6 +633,7 @@ IONVRAMCHRPHandler::serializeVariables(void)
 
 	bcopy(_nvramImage, nvramImage, _bankSize);
 
+	NVRAMREADLOCK(_variableLock);
 	for (regionIndex = 0; regionIndex < ARRAY_SIZE(variableRegions); regionIndex++) {
 		currentRegion = &variableRegions[regionIndex];
 
@@ -696,6 +706,7 @@ IONVRAMCHRPHandler::serializeVariables(void)
 			_commonUsed = (uint32_t)(tmpBuffer - buffer);
 		}
 	}
+	NVRAMRWUNLOCK(_variableLock);
 
 	DEBUG_INFO("ok=%d\n", ok);
 	require(ok, exit);
@@ -736,6 +747,9 @@ IONVRAMCHRPHandler::setVariableInternal(const uuid_t varGuid, const char *variab
 	OSObject                    *existing;
 	OSSharedPtr<const OSSymbol> canonicalKey;
 	bool                        systemVar;
+
+	// Anyone calling setVariableInternal should've already held the lock for write.
+	NVRAMRWLOCKASSERTEXCLUSIVE(_variableLock);
 
 	systemVar = (uuid_compare(varGuid, gAppleSystemVariableGuid) == 0);
 	canonicalKey = keyWithGuidAndCString(varGuid, variableName);
@@ -811,6 +825,7 @@ IOReturn
 IONVRAMCHRPHandler::setVariable(const uuid_t varGuid, const char *variableName, OSObject *object)
 {
 	uuid_t destGuid;
+	IOReturn ret = kIOReturnError;
 
 	if (getSystemPartitionActive()) {
 		// System region case, if they're using the GUID directly or it's on the system allow list
@@ -828,8 +843,11 @@ IONVRAMCHRPHandler::setVariable(const uuid_t varGuid, const char *variableName, 
 			uuid_copy(destGuid, varGuid);
 		}
 	}
+	NVRAMWRITELOCK(_variableLock);
+	ret = setVariableInternal(destGuid, variableName, object);
+	NVRAMRWUNLOCK(_variableLock);
 
-	return setVariableInternal(destGuid, variableName, object);
+	return ret;
 }
 
 uint32_t
@@ -838,6 +856,8 @@ IONVRAMCHRPHandler::findCurrentBank(uint32_t *gen)
 	struct apple_nvram_header storeHeader;
 	uint32_t                  maxGen = 0;
 	uint32_t                  currentBank = 0;
+
+	NVRAMLOCKASSERTHELD(_controllerLock);
 
 	for (unsigned int i = 0; i < _bankCount; i++) {
 		NVRAMVersion bankVer;
@@ -853,7 +873,7 @@ IONVRAMCHRPHandler::findCurrentBank(uint32_t *gen)
 		}
 	}
 
-	DEBUG_ALWAYS("currentBank=%#x, gen=%#x", currentBank, maxGen);
+	DEBUG_ALWAYS("currentBank=%#x, gen=%#x\n", currentBank, maxGen);
 
 	*gen = maxGen;
 	return currentBank;
@@ -863,6 +883,8 @@ bool
 IONVRAMCHRPHandler::setController(IONVRAMController *controller)
 {
 	IOReturn ret;
+
+	NVRAMLOCK(_controllerLock);
 
 	if (_nvramController == NULL) {
 		_nvramController = controller;
@@ -875,6 +897,8 @@ IONVRAMCHRPHandler::setController(IONVRAMController *controller)
 		DEBUG_ERROR("reloadInternal failed, ret=0x%08x\n", ret);
 	}
 
+	NVRAMUNLOCK(_controllerLock);
+
 	return true;
 }
 
@@ -882,6 +906,8 @@ IOReturn
 IONVRAMCHRPHandler::sync(void)
 {
 	IOReturn ret;
+
+	NVRAMLOCK(_controllerLock);
 
 	if (_reload) {
 		ret = reloadInternal();
@@ -894,6 +920,7 @@ IONVRAMCHRPHandler::sync(void)
 	require_noerr_action(ret, exit, DEBUG_ERROR("serializeVariables failed, ret=%#x", ret));
 
 exit:
+	NVRAMUNLOCK(_controllerLock);
 	return ret;
 }
 
@@ -1225,4 +1252,23 @@ IONVRAMCHRPHandler::convertObjectToProp(uint8_t *buffer, uint32_t *length,
 	*length = offset + 1;
 
 	return true;
+}
+
+IOReturn
+IONVRAMCHRPHandler::getVarDict(OSSharedPtr<OSDictionary> &varDictCopy)
+{
+	IOReturn ret = kIOReturnNotFound;
+
+	NVRAMREADLOCK(_variableLock);
+	if (_varDict) {
+		varDictCopy = OSDictionary::withDictionary(_varDict.get());
+		if (varDictCopy) {
+			if (OSDictionary::withCapacity(varDictCopy->getCount()) != nullptr) {
+				ret = kIOReturnSuccess;
+			}
+		}
+	}
+	NVRAMRWUNLOCK(_variableLock);
+
+	return ret;
 }

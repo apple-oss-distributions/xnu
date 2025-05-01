@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -114,6 +114,8 @@
 #if CONFIG_MACF
 #include <sys/kauth.h>
 #endif
+
+#include <IOKit/IOBSD.h>
 
 /*
  * Synchronization notes:
@@ -405,11 +407,61 @@ static unsigned int primary6_ifscope = IFSCOPE_NONE;
 
 #define ROUTE_VERBOSE_LOGGING 0
 unsigned int rt_verbose = ROUTE_VERBOSE_LOGGING;
-SYSCTL_DECL(_net_route);
-SYSCTL_UINT(_net_route, OID_AUTO, verbose, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &rt_verbose, ROUTE_VERBOSE_LOGGING, "");
+static int sysctl_rt_verbose SYSCTL_HANDLER_ARGS;
 
-static void
+SYSCTL_DECL(_net_route);
+SYSCTL_PROC(_net_route, OID_AUTO, verbose,
+		CTLTYPE_INT | CTLFLAG_LOCKED | CTLFLAG_RW | CTLFLAG_ANYBODY,
+		&rt_verbose, 0,
+		sysctl_rt_verbose, "I",
+		"Route logging verbosity level");
+
+static int
+sysctl_rt_verbose SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error;
+	int old_value = rt_verbose;
+	int value = old_value;
+
+#if (DEBUG || DEVELOPMENT)
+	char proc_name_string[MAXCOMLEN + 1];
+
+	proc_name(proc_pid(current_proc()), proc_name_string, sizeof(proc_name_string));
+#endif
+
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error || req->newptr == USER_ADDR_NULL) {
+		goto done;
+	}
+
+	if (!(kauth_cred_issuser(kauth_cred_get()) != 0 ||
+				IOCurrentTaskHasEntitlement("com.apple.private.networking.elevated-logging"))) {
+#if (DEBUG || DEVELOPMENT)
+		os_log(OS_LOG_DEFAULT, "%s:%s: sysctl not allowed\n",
+				proc_name_string, __func__);
+#endif
+		error = EPERM;
+		goto done;
+	}
+
+	/* impose bounds */
+	if (value < 0) {
+		error = EINVAL;
+		goto done;
+	}
+
+	rt_verbose = value;
+
+done:
+#if (DEBUG || DEVELOPMENT)
+	os_log(OS_LOG_DEFAULT, "%s:%s return: verbose is %d "
+			"and error is %d\n", proc_name_string, __func__, rt_verbose, error);
+#endif
+	return error;
+}
+
+	static void
 rtable_init(struct radix_node_head * __single * __header_indexable table)
 {
 	struct domain *dom;

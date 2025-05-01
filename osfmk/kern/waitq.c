@@ -1513,17 +1513,18 @@ waitq_should_enable_interrupts(waitq_wakeup_flags_t flags)
 }
 
 kern_return_t
-waitq_wakeup64_all_locked(
+waitq_wakeup64_nthreads_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	waitq_wakeup_flags_t    flags)
+	waitq_wakeup_flags_t    flags,
+	uint32_t                nthreads)
 {
 	struct waitq_select_args args = {
 		.event = wake_event,
 		.result = result,
-		.flags = flags & ~WAITQ_HANDOFF,
-		.max_threads = UINT32_MAX,
+		.flags = (nthreads == 1) ? flags: (flags & ~WAITQ_HANDOFF),
+		.max_threads = nthreads,
 	};
 
 	assert(waitq_held(waitq));
@@ -1556,46 +1557,23 @@ waitq_wakeup64_all_locked(
 }
 
 kern_return_t
+waitq_wakeup64_all_locked(
+	waitq_t                 waitq,
+	event64_t               wake_event,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags)
+{
+	return waitq_wakeup64_nthreads_locked(waitq, wake_event, result, flags, UINT32_MAX);
+}
+
+kern_return_t
 waitq_wakeup64_one_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	struct waitq_select_args args = {
-		.event = wake_event,
-		.result = result,
-		.flags = flags,
-		.max_threads = 1,
-	};
-
-	assert(waitq_held(waitq));
-
-	if (flags & WAITQ_ENABLE_INTERRUPTS) {
-		assert(waitq_should_unlock(flags));
-		assert(ml_get_interrupts_enabled() == false);
-	}
-
-	do_waitq_select_n_locked(waitq, &args);
-	waitq_stats_count_wakeup(waitq, args.nthreads);
-
-	if (waitq_should_unlock(flags)) {
-		waitq_unlock(waitq);
-	}
-
-	if (waitq_should_enable_interrupts(flags)) {
-		ml_set_interrupts_enabled(true);
-	}
-
-	if (!circle_queue_empty(&args.threadq)) {
-		waitq_select_queue_flush(waitq, &args);
-	}
-
-	if (args.nthreads > 0) {
-		return KERN_SUCCESS;
-	}
-
-	return KERN_NOT_WAITING;
+	return waitq_wakeup64_nthreads_locked(waitq, wake_event, result, flags, 1);
 }
 
 thread_t
@@ -2354,11 +2332,12 @@ waitq_assert_wait64_leeway(struct waitq *waitq,
 }
 
 kern_return_t
-waitq_wakeup64_one(
+waitq_wakeup64_nthreads(
 	waitq_t                 waitq,
 	event64_t               wake_event,
 	wait_result_t           result,
-	waitq_wakeup_flags_t    flags)
+	waitq_wakeup_flags_t    flags,
+	uint32_t                nthreads)
 {
 	__waitq_validate(waitq);
 
@@ -2371,8 +2350,8 @@ waitq_wakeup64_one(
 	waitq_lock(waitq);
 
 	/* waitq is unlocked upon return, splx is handled */
-	return waitq_wakeup64_one_locked(waitq, wake_event, result,
-	           flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
+	return waitq_wakeup64_nthreads_locked(waitq, wake_event, result,
+	           flags | waitq_flags_splx(spl) | WAITQ_UNLOCK, nthreads);
 }
 
 kern_return_t
@@ -2382,19 +2361,17 @@ waitq_wakeup64_all(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	__waitq_validate(waitq);
+	return waitq_wakeup64_nthreads(waitq, wake_event, result, flags, UINT32_MAX);
+}
 
-	spl_t spl = 0;
-
-	if (waitq_irq_safe(waitq)) {
-		spl = splsched();
-	}
-
-	waitq_lock(waitq);
-
-	/* waitq is unlocked upon return, splx is handled */
-	return waitq_wakeup64_all_locked(waitq, wake_event, result,
-	           flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
+kern_return_t
+waitq_wakeup64_one(
+	waitq_t                 waitq,
+	event64_t               wake_event,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags)
+{
+	return waitq_wakeup64_nthreads(waitq, wake_event, result, flags, 1);
 }
 
 kern_return_t

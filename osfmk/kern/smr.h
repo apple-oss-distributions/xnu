@@ -32,6 +32,7 @@
 #include <sys/cdefs.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <machine/trap.h>
 #include <kern/assert.h>
 #include <kern/debug.h>
 #include <kern/smr_types.h>
@@ -1151,9 +1152,32 @@ extern void smr_cpu_checkin_set_min_interval_us(uint32_t new_value);
 #pragma mark - implementation details
 #pragma mark implementation details: SMR queues
 
-extern void __smr_linkage_invalid(__smrq_link_t *link) __abortlike;
-extern void __smr_stail_invalid(__smrq_slink_t *link, __smrq_slink_t *last) __abortlike;
-extern void __smr_tail_invalid(__smrq_link_t *link, __smrq_link_t *last) __abortlike;
+__dead2
+static inline void
+__smr_linkage_invalid(__smrq_link_t *link)
+{
+	struct smrq_link *elem = __container_of(link, struct smrq_link, next);
+
+	ml_fatal_trap_invalid_list_linkage((unsigned long)elem);
+}
+
+__dead2
+static inline void
+__smr_stail_invalid(__smrq_slink_t *link, __smrq_slink_t *last __unused)
+{
+	struct smrq_slink *elem = __container_of(link, struct smrq_slink, next);
+
+	ml_fatal_trap_invalid_list_linkage((unsigned long)elem);
+}
+
+__dead2
+static inline void
+__smr_tail_invalid(__smrq_link_t *link, __smrq_link_t *last __unused)
+{
+	struct smrq_link *elem = __container_of(link, struct smrq_link, next);
+
+	ml_fatal_trap_invalid_list_linkage((unsigned long)elem);
+}
 
 __attribute__((always_inline, overloadable))
 static inline __smrq_slink_t **

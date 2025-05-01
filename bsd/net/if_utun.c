@@ -161,8 +161,10 @@ static void             utun_ctl_rcvd(kern_ctl_ref kctlref, u_int32_t unit, void
 /* Network Interface functions */
 static void     utun_start(ifnet_t interface);
 static errno_t  utun_framer(ifnet_t interface, mbuf_t *packet,
-    const struct sockaddr *dest, const char *desk_linkaddr,
-    const char *frame_type, u_int32_t *prepend_len, u_int32_t *postpend_len);
+    const struct sockaddr *dest,
+    IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type,
+    u_int32_t *prepend_len, u_int32_t *postpend_len);
 static errno_t  utun_output(ifnet_t interface, mbuf_t data);
 static errno_t  utun_demux(ifnet_t interface, mbuf_t data, char *frame_header,
     protocol_family_t *protocol);
@@ -704,11 +706,13 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		// Fillout rx packet
 		kern_buflet_t rx_buf = kern_packet_get_next_buflet(rx_ph, NULL);
 		VERIFY(rx_buf != NULL);
-		void *__single rx_baddr = kern_buflet_get_data_address(rx_buf);
+		void *rx_baddr = __unsafe_forge_bidi_indexable(void *,
+		    kern_buflet_get_data_address(rx_buf),
+		    kern_buflet_get_data_limit(rx_buf));
 		VERIFY(rx_baddr != NULL);
 
 		// Copy-in data from mbuf to buflet
-		mbuf_copydata(data, header_offset, length, (void *)rx_baddr);
+		mbuf_copydata(data, header_offset, length, rx_baddr);
 		kern_packet_clear_flow_uuid(rx_ph);     // Zero flow id
 
 		// Finalize and attach the packet
@@ -2745,8 +2749,8 @@ static errno_t
 utun_framer(ifnet_t interface,
     mbuf_t *packet,
     __unused const struct sockaddr *dest,
-    __unused const char *desk_linkaddr,
-    const char *frame_type,
+    __unused IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type,
     u_int32_t *prepend_len,
     u_int32_t *postpend_len)
 {
@@ -3584,11 +3588,13 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			// Fillout rx packet
 			kern_buflet_t rx_buf = kern_packet_get_next_buflet(rx_ph, NULL);
 			VERIFY(rx_buf != NULL);
-			void *__single rx_baddr = kern_buflet_get_data_address(rx_buf);
+			void *rx_baddr = __unsafe_forge_bidi_indexable(void *,
+			    kern_buflet_get_data_address(rx_buf),
+			    kern_buflet_get_data_limit(rx_buf));
 			VERIFY(rx_baddr != NULL);
 
 			// Copy-in data from mbuf to buflet
-			mbuf_copydata(data, 0, length, (void *)rx_baddr);
+			mbuf_copydata(data, 0, length, rx_baddr);
 			kern_packet_clear_flow_uuid(rx_ph);     // Zero flow id
 
 			// Finalize and attach the packet

@@ -60,6 +60,7 @@
 #include <vm/vm_protos.h>
 #include <mach/mach_port.h>
 #include <kern/audit_sessionport.h>
+#include <kern/ipc_kobject.h>
 
 #include <libkern/OSDebug.h>
 
@@ -103,12 +104,6 @@ static au_sentry_t audit_default_se = {
 };
 
 struct auditinfo_addr * const audit_default_aia_p = &audit_default_se.se_auinfo;
-
-/* Copied from <ipc/ipc_object.h> */
-#define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
-kern_return_t ipc_object_copyin(ipc_space_t, mach_port_name_t,
-    mach_msg_type_name_t, ipc_port_t *, mach_port_context_t, mach_msg_guard_flags_t *, uint32_t);
-void ipc_port_release_send(ipc_port_t);
 
 #if CONFIG_AUDIT
 
@@ -1436,7 +1431,7 @@ audit_session_join_internal(proc_t p, ipc_port_t port, au_asid_t *new_asid)
 
 done:
 	if (port != IPC_PORT_NULL) {
-		ipc_port_release_send(port);
+		ipc_typed_port_release_send(port, IKOT_AU_SESSIONPORT);
 	}
 
 	return err;
@@ -1485,9 +1480,8 @@ audit_session_join(proc_t p, struct audit_session_join_args *uap,
 	int err = 0;
 
 
-	if (ipc_object_copyin(get_task_ipcspace(proc_task(p)), send,
-	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL,
-	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
+	if (ipc_typed_port_copyin_send(get_task_ipcspace(proc_task(p)), send,
+	    IKOT_AU_SESSIONPORT, &port) != KERN_SUCCESS) {
 		*ret_asid = AU_DEFAUDITSID;
 		err = EINVAL;
 	} else {

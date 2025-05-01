@@ -150,7 +150,7 @@ T_DECL(kevent_continuous_time_periodic_tick, "kevent(EVFILT_TIMER with NOTE_MACH
 	T_ASSERT_EQ(kevent64(kq, &kev, 1, &kev, 1, 0, NULL), 1, NULL);
 	T_ASSERT_EQ(0ll, kev.data, "No error returned");
 
-	T_ASSERT_POSIX_ZERO(close(kq), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(kq), NULL);
 }
 
 T_DECL(kevent_continuous_time_absolute, "kevent(EVFILT_TIMER with NOTE_MACH_CONTINUOUS_TIME and NOTE_ABSOLUTE)", T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED){
@@ -208,7 +208,7 @@ T_DECL(kevent_continuous_time_absolute, "kevent(EVFILT_TIMER with NOTE_MACH_CONT
 	T_ASSERT_EQ(kevent64(kq, NULL, 0, &event, 1, 0, &timeout), 0, NULL);
 	T_ASSERT_EQ(event.flags & EV_ERROR, 0, "event should not have EV_ERROR set: %s", event.flags & EV_ERROR ? strerror((int)event.data) : "no error");
 
-	T_ASSERT_POSIX_ZERO(close(kq), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(kq), NULL);
 }
 
 T_DECL(kevent_continuous_time_pops, "kevent(EVFILT_TIMER with NOTE_MACH_CONTINUOUS_TIME with multiple pops)", T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED){
@@ -266,5 +266,5 @@ T_DECL(kevent_continuous_time_pops, "kevent(EVFILT_TIMER with NOTE_MACH_CONTINUO
 	uint64_t got_pops      = (uint64_t)event.data;
 
 	T_ASSERT_GE(got_pops, expected_pops - 1, "tracking pops while asleep");
-	T_ASSERT_POSIX_ZERO(close(kq), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(kq), NULL);
 }

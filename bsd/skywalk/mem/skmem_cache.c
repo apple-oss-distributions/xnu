@@ -1568,7 +1568,7 @@ skmem_cache_batch_free_common(struct skmem_cache *skm, struct skmem_obj *list, u
 	struct skmem_mag *mg;
 	struct skmem_obj *listn;
 #if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	vm_offset_t tagged_address;           /* address tagging */
+	vm_map_address_t tagged_address;      /* address tagging */
 	struct skmem_region *region;          /* region source for this cache */
 #endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
@@ -1603,23 +1603,10 @@ skmem_cache_batch_free_common(struct skmem_cache *skm, struct skmem_obj *list, u
 				listn = NULL;
 			}
 #if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-			/*
-			 * If this region is configured to be tagged, we re-tag
-			 * the address that's being freed, to protect against
-			 * use-after-free bugs. This "re-tagged" address will
-			 * reside in the CPU's loaded magazine, and when cache
-			 * alloc is called, it is returned to client as is. At
-			 * this point, we know that this object will be freed to
-			 * the CPU's loaded magazine and not down to the slab
-			 * layer, so we won't be double tagging the same address
-			 * in the magazine layer and slab layer.
-			 */
 			region = skm->skm_region;
 			if (region->skr_mode & SKR_MODE_MEMTAG) {
-				tagged_address = vm_memtag_assign_tag(
-					(vm_offset_t)list, skm->skm_objsize);
-				vm_memtag_set_tag(tagged_address,
-				    skm->skm_objsize);
+				tagged_address = (vm_map_address_t)vm_memtag_generate_and_store_tag(
+					(caddr_t)list, skm->skm_objsize);
 				cp->cp_loaded->mg_round[cp->cp_rounds++] =
 				    __unsafe_forge_bidi_indexable(
 					struct skmem_obj *, tagged_address,

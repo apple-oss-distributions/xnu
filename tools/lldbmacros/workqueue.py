@@ -132,8 +132,8 @@ def ShowWQThread(cmd_args=None, cmd_options={}, O=None):
         usage: showworkqthread <thread_t>
     """
 
-    if not cmd_args:
-        return O.error('missing struct proc * argument')
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError('missing struct proc * argument')
 
     th = kern.GetValueFromAddress(cmd_args[0], "struct thread *")
     if not (th.thread_tag & 0x20):
@@ -150,8 +150,8 @@ def ShowProcWorkqueue(cmd_args=None, cmd_options={}, O=None):
         usage: showprocworkqueue <proc_t>
     """
 
-    if not cmd_args:
-        return O.error('missing struct proc * argument')
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], "proc_t")
     wq = Cast(proc.p_wqptr, "struct workqueue *")
@@ -199,7 +199,7 @@ def ShowAllWorkqueues(cmd_args=None, cmd_options={}, O=None):
     with O.table(GetWorkqueueSummary.header):
         for t in kern.tasks:
             proc = GetProcFromTask(t)
-            if not proc:
+            if proc is None:
                 continue
             wq = Cast(proc.p_wqptr, "struct workqueue *");
             if wq:

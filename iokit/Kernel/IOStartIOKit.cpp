@@ -177,7 +177,7 @@ ConfigureIOKit(void)
 void
 StartIOKitMatching(void)
 {
-	SOCD_TRACE_XNU(START_IOKIT);
+	SOCD_TRACE_XNU(START_IOKIT, SOCD_TRACE_MODE_NONE);
 	assert(gRootNub != NULL);
 	bool ok = gRootNub->startIOServiceMatching();
 	if (__improbable(!ok)) {

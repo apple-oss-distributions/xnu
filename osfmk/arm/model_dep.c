@@ -122,8 +122,8 @@ extern unsigned int         not_in_kdp;
 extern int                              copyinframe(vm_address_t fp, uint32_t * frame);
 extern void                             kdp_callouts(kdp_event_t event);
 
+#define MAX_PROCNAME_LEN 32
 /* #include <sys/proc.h> */
-#define MAXCOMLEN 16
 struct proc;
 extern int        proc_pid(struct proc *p);
 extern void       proc_name_kdp(struct proc *, char *, int);
@@ -186,9 +186,9 @@ static uint32_t       panic_bt_depth;
 boolean_t             PanicInfoSaved = FALSE;
 boolean_t             force_immediate_debug_halt = FALSE;
 unsigned int          debug_ack_timeout_count = 0;
-volatile unsigned int debugger_sync = 0;
-volatile unsigned int mp_kdp_trap = 0; /* CPUs signalled by the debug CPU will spin on this */
-volatile unsigned int debug_cpus_spinning = 0; /* Number of signalled CPUs still spinning on mp_kdp_trap (in DebuggerXCall). */
+_Atomic unsigned int  debugger_sync = 0;
+_Atomic unsigned int  mp_kdp_trap = 0; /* CPUs signalled by the debug CPU will spin on this */
+_Atomic unsigned int  debug_cpus_spinning = 0; /* Number of signalled CPUs still spinning on mp_kdp_trap (in DebuggerXCall). */
 unsigned int          DebugContextCount = 0;
 bool                  trap_is_stackshot = false; /* Whether the trap is for a stackshot */
 
@@ -225,9 +225,7 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 		if ((fp == 0) || ((fp & FP_ALIGNMENT_MASK) != 0)) {
 			break;
 		}
-		if (dump_kernel_stack && ((fp < VM_MIN_KERNEL_ADDRESS) || (fp > VM_MAX_KERNEL_ADDRESS))) {
-			break;
-		}
+
 		if ((!dump_kernel_stack) && (fp >= VM_MIN_KERNEL_ADDRESS)) {
 			break;
 		}
@@ -322,6 +320,7 @@ panic_display_tpidrs(void)
 	    __builtin_arm_rsr64("TPIDRRO_EL0"));
 #endif //defined(__arm64__)
 }
+
 
 static void
 panic_display_hung_cpus_help(void)
@@ -633,7 +632,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options, const char 
 		for (int i = 0; i < TOP_RUNNABLE_LIMIT; i++) {
 			if (top_runnable[i] &&
 			    panic_get_thread_proc_task(top_runnable[i], &task, &proc) && proc) {
-				char name[MAXCOMLEN + 1];
+				char name[MAX_PROCNAME_LEN + 1];
 				proc_name_kdp(proc, name, sizeof(name));
 				paniclog_append_noflush("%p %s %d %d\n",
 				    top_runnable[i], name, top_runnable[i]->sched_pri, top_runnable[i]->cpu_usage);
@@ -659,7 +658,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options, const char 
 		}
 
 		if (proc) {
-			char            name[MAXCOMLEN + 1];
+			char            name[MAX_PROCNAME_LEN + 1];
 			proc_name_kdp(proc, name, sizeof(name));
 			paniclog_append_noflush("pid %d: %s", proc_pid(proc), name);
 		} else {
@@ -1060,9 +1059,9 @@ DebuggerXCallEnter(
 	 * timing out on every entry to the debugger if we timeout once.
 	 */
 
-	debugger_sync = 0;
-	mp_kdp_trap = 1;
-	debug_cpus_spinning = 0;
+	os_atomic_store(&debugger_sync, 0, relaxed);
+	os_atomic_store(&mp_kdp_trap, 1, relaxed);
+	os_atomic_store(&debug_cpus_spinning, 0, relaxed);
 	trap_is_stackshot = is_stackshot;
 
 
@@ -1135,14 +1134,16 @@ DebuggerXCallEnter(
 				continue;
 			}
 			if (processor_array[cpu]->state <= PROCESSOR_PENDING_OFFLINE) {
+				int dbg_sync_count;
+
 				/*
 				 * This is a processor that was successfully sent a SIGPdebug signal
 				 * but which hasn't acknowledged it because it went offline with
 				 * interrupts disabled before the IPI was delivered, so count it
 				 * as halted here.
 				 */
-				os_atomic_dec(&debugger_sync, relaxed);
-				kprintf("%s>found CPU %d offline, debugger_sync=%d\n", __FUNCTION__, cpu, debugger_sync);
+				dbg_sync_count = os_atomic_dec(&debugger_sync, relaxed);
+				kprintf("%s>found CPU %d offline, debugger_sync=%d\n", __FUNCTION__, cpu, dbg_sync_count);
 				continue;
 			}
 			timeout_cpu = cpu;
@@ -1159,7 +1160,7 @@ DebuggerXCallEnter(
 				uint64_t sptm_cpuid = sptm_pcpu->sptm_cpu_id;
 
 				if (sptm_get_cpu_state(sptm_cpuid, CPUSTATE_PANIC_SPIN, &sptm_panic_loop)
-				    == SPTM_SUCCESS) {
+				    == SPTM_SUCCESS && sptm_panic_loop) {
 					xnu_saved_registers_t regs;
 
 					if (sptm_copy_callee_saved_state(sptm_cpuid, &regs)
@@ -1247,8 +1248,8 @@ DebuggerXCallReturn(
 		return;
 	}
 
-	mp_kdp_trap = 0;
-	debugger_sync = 0;
+	os_atomic_store(&mp_kdp_trap, 0, release);
+	os_atomic_store(&debugger_sync, 0, relaxed);
 
 	max_mabs_time = os_atomic_load(&debug_ack_timeout, relaxed);
 
@@ -1295,7 +1296,7 @@ wait_while_mp_kdp_trap(bool check_SIGPdebug)
 	bool found_mp_kdp_trap = false;
 	bool found_SIGPdebug = false;
 
-	while (os_atomic_load_exclusive(&mp_kdp_trap, relaxed) != 0) {
+	while (os_atomic_load_exclusive(&mp_kdp_trap, acquire) != 0) {
 		found_mp_kdp_trap = true;
 		if (check_SIGPdebug && cpu_has_SIGPdebug_pending()) {
 			found_SIGPdebug = true;

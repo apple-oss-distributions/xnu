@@ -1181,13 +1181,14 @@ csm_unregister_code_signature(
 
 kern_return_t
 csm_verify_code_signature(
-	void *monitor_sig_obj)
+	void *monitor_sig_obj,
+	uint32_t *trust_level)
 {
 	if (csm_enabled() == false) {
 		return KERN_NOT_SUPPORTED;
 	}
 
-	return CSM_PREFIX(verify_code_signature)(monitor_sig_obj);
+	return CSM_PREFIX(verify_code_signature)(monitor_sig_obj, trust_level);
 }
 
 kern_return_t
@@ -1275,10 +1276,15 @@ csm_associate_debug_region(
 		return KERN_NOT_SUPPORTED;
 	}
 
-	return CSM_PREFIX(associate_debug_region)(
+	kern_return_t ret = CSM_PREFIX(associate_debug_region)(
 		monitor_pmap,
 		region_addr,
 		region_size);
+
+	if (ret != KERN_SUCCESS) {
+		printf("unable to create debug region in address space: %d\n", ret);
+	}
+	return ret;
 }
 
 kern_return_t

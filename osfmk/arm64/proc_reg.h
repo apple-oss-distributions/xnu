@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -60,6 +60,19 @@
  */
 #ifndef _ARM64_PROC_REG_H_
 #define _ARM64_PROC_REG_H_
+
+#if !defined(KERNEL_PRIVATE) && !defined(SPTM_TESTING_PRIVATE)
+/**
+ * This file is only exported into the internal userspace SDK exclusively for
+ * usage by the SPTM userspace testing system. Let's enforce this by error'ing
+ * the build if an SPTM-specific define is not set. If your userspace project is
+ * not the SPTM testing system, then do not use these files!
+ *
+ * This check does not apply to the kernel itself, or when this file is exported
+ * into Kernel.framework.
+ */
+#error This file is only included in the userspace internal SDK for the SPTM project
+#endif /* !defined(KERNEL_PRIVATE) && !defined(SPTM_TESTING_PRIVATE) */
 
 #if defined (__arm64__)
 #include <pexpert/arm64/board_config.h>
@@ -402,6 +415,7 @@
  */
 
 #define PSR64_NZCV_SHIFT 28
+#define PSR64_NZCV_WIDTH 4
 #define PSR64_NZCV_MASK  (0xF << PSR64_NZCV_SHIFT)
 
 #define PSR64_N_SHIFT    31
@@ -534,12 +548,15 @@
  * System Control Register (SCTLR)
  */
 
+
 #if HAS_ARM_FEAT_SME
 // 60   EnTP2           Enable TPIDR2_EL0 at EL0
 #define SCTLR_OTHER               (1ULL << 60)
 #else
 #define SCTLR_OTHER               (0)
 #endif
+
+#define SCTLR_EPAN_ENABLED        (1ULL << 57)
 
 #define SCTLR_DSSBS               (1ULL << 44)
 
@@ -643,12 +660,30 @@
 // 0     M              MMU enable
 #define SCTLR_M_ENABLED           (1ULL << 0)
 
+#if APPLEVIRTUALPLATFORM
+#define SCTLR_EPAN_DEFAULT        0
+/* xnu tries to set SCTLR_EL1.EPAN = 1, but it may be RaZ/WI on some hosts */
+#define SCTLR_EPAN_OPTIONAL       SCTLR_EPAN_ENABLED
+#elif HAS_ARM_FEAT_PAN3
+#define SCTLR_EPAN_DEFAULT        SCTLR_EPAN_ENABLED
+#define SCTLR_EPAN_OPTIONAL       0
+#else
+#define SCTLR_EPAN_DEFAULT        0
+#define SCTLR_EPAN_OPTIONAL       0
+#endif
+
 #if __ARM_ARCH_8_5__
-#define SCTLR_CSEH_DEFAULT        (0)
+#define SCTLR_EIS_DEFAULT         (0)
 #define SCTLR_DSSBS_DEFAULT       SCTLR_DSSBS
 #else
-#define SCTLR_CSEH_DEFAULT        (SCTLR_EIS | SCTLR_EOS)
+#define SCTLR_EIS_DEFAULT         (SCTLR_EIS)
 #define SCTLR_DSSBS_DEFAULT       (0)
+#endif
+
+#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
+#define SCTLR_EOS_DEFAULT         (0)
+#else
+#define SCTLR_EOS_DEFAULT         (SCTLR_EOS)
 #endif
 
 #if   HAS_APPLE_PAC
@@ -664,11 +699,18 @@
 #define SCTLR_BT_DEFAULT                0
 #endif /* BTI_ENFORCED */
 
-#define SCTLR_EL1_DEFAULT \
+#define SCTLR_EL1_REQUIRED \
 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED | SCTLR_BT_DEFAULT | \
 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
-	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT | SCTLR_PAC_KEYS_DEFAULT | SCTLR_OTHER)
+	 SCTLR_EPAN_DEFAULT | SCTLR_EIS_DEFAULT | SCTLR_EOS_DEFAULT | SCTLR_DSSBS_DEFAULT | \
+	 SCTLR_PAC_KEYS_DEFAULT | SCTLR_OTHER)
+
+#define SCTLR_EL1_OPTIONAL \
+	(SCTLR_EPAN_OPTIONAL)
+
+#define SCTLR_EL1_DEFAULT \
+	(SCTLR_EL1_REQUIRED | SCTLR_EL1_OPTIONAL)
 
 /*
  * Coprocessor Access Control Register (CPACR)
@@ -929,7 +971,7 @@
 #endif
 
 
-#define TCR_EL1_EXTRA                    0
+#define TCR_EL1_EXTRA            0
 
 
 /*
@@ -1198,11 +1240,11 @@
 
 #endif /* HAS_FEAT_XS */
 
-#if HAS_UCNORMAL_MEM
+#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
 #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_WRITECOMB
 #else
 #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_DISABLE
-#endif /* HAS_UCNORMAL_MEM */
+#endif /* HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM */
 
 
 
@@ -1611,14 +1653,15 @@
 #define ARM_TTE_TABLE_PXNMASK       0x0800000000000000ULL          /* privilege execute mask */
 
 #if __ARM_KERNEL_PROTECT__
-#define ARM_TTE_BOOT_BLOCK \
+#define ARM_TTE_BOOT_BLOCK_LOWER \
 	(ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | \
 	 ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NG)
 #else /* __ARM_KERNEL_PROTECT__ */
-#define ARM_TTE_BOOT_BLOCK \
+#define ARM_TTE_BOOT_BLOCK_LOWER \
 	(ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | \
 	 ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) | ARM_TTE_BLOCK_AF)
 #endif /* __ARM_KERNEL_PROTECT__ */
+#define ARM_TTE_BOOT_BLOCK_UPPER ARM_TTE_BLOCK_NX
 
 #define ARM_TTE_BOOT_TABLE (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID )
 /*
@@ -1693,10 +1736,9 @@
 #define ARM_PTE_COMPRESSED_ALT  0x4000000000000000ULL /* ... and was "alt_acct" */
 #define ARM_PTE_COMPRESSED_MASK 0xC000000000000000ULL
 
-#define ARM_PTE_TYPE               0x0000000000000003ULL /* valid L3 entry: includes bit #1 (counterintuitively) */
 #define ARM_PTE_TYPE_VALID         0x0000000000000003ULL /* valid L3 entry: includes bit #1 (counterintuitively) */
 #define ARM_PTE_TYPE_FAULT         0x0000000000000000ULL /* invalid L3 entry */
-#define ARM_PTE_TYPE_MASK          0x0000000000000002ULL /* mask to get pte type */
+#define ARM_PTE_TYPE_MASK          0x0000000000000003ULL /* mask to get pte type */
 
 /* This mask works for both 16K and 4K pages because bits 12-13 will be zero in 16K pages */
 #define ARM_PTE_PAGE_MASK          0x0000FFFFFFFFF000ULL /* output address mask for page */
@@ -1706,7 +1748,7 @@
 #define ARM_PTE_APMASK             (0x3ULL << 6)         /* mask access protections */
 #define ARM_PTE_EXTRACT_AP(x)      (((x) >> 6) & 0x3ULL) /* extract access protections from PTE */
 
-#define ARM_PTE_ATTRINDX(x)        ((x) << 2)            /* memory attributes index */
+#define ARM_PTE_ATTRINDX(x)        (uint64_t)((x) << 2)  /* memory attributes index */
 #define ARM_PTE_ATTRINDXMASK       (0x7ULL << 2)         /* mask memory attributes index */
 #define ARM_PTE_EXTRACT_ATTRINDX(x) (((x) >> 2) & 0x7ULL) /* extract memory attributes index */
 
@@ -1743,18 +1785,26 @@
 #endif
 
 #define ARM_PTE_PNX                0x0020000000000000ULL /* value for privilege no execute bit */
+#define ARM_PTE_PXN                ARM_PTE_PNX
 #define ARM_PTE_PNXMASK            0x0020000000000000ULL /* privilege no execute mask */
 
 #define ARM_PTE_NX                 0x0040000000000000ULL /* value for no execute bit */
+#define ARM_PTE_XN                 ARM_PTE_NX
 #define ARM_PTE_NXMASK             0x0040000000000000ULL /* no execute mask */
 
 #define ARM_PTE_XMASK              (ARM_PTE_PNXMASK | ARM_PTE_NXMASK)
+
+#define ARM_PTE_GUARDED            0x0004000000000000ULL /* value for "guarded"/BTI enforcing code page */
+#define ARM_PTE_GUARDED_MASK       (PTE_GUARDED)
 
 #define ARM_PTE_WIRED              0x0400000000000000ULL /* value for software wired bit */
 #define ARM_PTE_WIRED_MASK         0x0400000000000000ULL /* software wired mask */
 
 #define ARM_PTE_WRITEABLE          0x0800000000000000ULL /* value for software writeable bit */
+#define ARM_PTE_WRITABLE           ARM_PTE_WRITEABLE
 #define ARM_PTE_WRITEABLE_MASK     0x0800000000000000ULL /* software writeable mask */
+
+#define ARM_PTE_SW_RESERVED_MASK   (ARM_PTE_WIRED_MASK | ARM_PTE_WRITEABLE_MASK)
 
 #define ARM_PTE_BOOT_PAGE_BASE \
 	(ARM_PTE_TYPE_VALID | ARM_PTE_SH(SH_OUTER_MEMORY) |       \
@@ -1773,6 +1823,9 @@
 #define TLBI_ADDR_SHIFT (0)
 #define TLBI_ADDR_SIZE  (44)
 #define TLBI_ADDR_MASK  ((1ULL << TLBI_ADDR_SIZE) - 1)
+#define TLBI_IPA_SHIFT  (0)
+#define TLBI_IPA_SIZE   (36)
+#define TLBI_IPA_MASK   ((1ULL << TLBI_IPA_SIZE) - 1)
 #define TLBI_ASID_SHIFT (48)
 #define TLBI_ASID_SIZE  (16)
 #define TLBI_ASID_MASK  (((1ULL << TLBI_ASID_SIZE) - 1))
@@ -1814,6 +1867,7 @@
  */
 
 #define ESR_EC_SHIFT           26
+#define ESR_EC_WIDTH           6
 #define ESR_EC_MASK            (0x3FULL << ESR_EC_SHIFT)
 #define ESR_EC(x)              ((x & ESR_EC_MASK) >> ESR_EC_SHIFT)
 
@@ -1830,6 +1884,8 @@
 /* Define only the classes we need to test in the exception vectors. */
 #define ESR_EC_UNCATEGORIZED   0x00
 #define ESR_EC_BTI_FAIL        0x0D
+#define ESR_EC_SVC_64          0x15
+#define ESR_EC_HVC_64          0x16
 #define ESR_EC_PAC_FAIL        0x1C
 #define ESR_EC_IABORT_EL1      0x21
 #define ESR_EC_DABORT_EL1      0x25
@@ -1904,6 +1960,20 @@ typedef enum {
 #endif /* ASSEMBLER */
 
 /*
+ * SVC event
+ *  24     16 15  0
+ * +---------+-----+
+ * |000000000| IMM |
+ * +---------+-----+
+ *
+ * where:
+ *   IMM: Immediate value
+ */
+
+#define ISS_SVC_IMM_MASK  0xffff
+#define ISS_SVC_IMM(x)    ((x) & ISS_SVC_IMM_MASK)
+
+/*
  * HVC event
  *  24     16 15  0
  * +---------+-----+
@@ -1916,6 +1986,7 @@ typedef enum {
 
 #define ISS_HVC_IMM_MASK  0xffff
 #define ISS_HVC_IMM(x)    ((x) & ISS_HVC_IMM_MASK)
+
 
 /*
  * Software step debug event ISS (EL1)
@@ -2237,14 +2308,17 @@ typedef enum {
 /*Donan*/
 #define MIDR_DONAN_ACCE    (0x052 << MIDR_EL1_PNUM_SHIFT)
 #define MIDR_DONAN_ACCP    (0x053 << MIDR_EL1_PNUM_SHIFT)
+/*Brava*/
+#define MIDR_BRAVA_ACCE    (0x054 << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_BRAVA_ACCP    (0x055 << MIDR_EL1_PNUM_SHIFT)
 
 
 /*
  * Apple-ISA-Extensions ID Register.
  */
-#define AIDR_MUL53            (1 << 0)
-#define AIDR_WKDM             (1 << 1)
-#define AIDR_ARCHRETENTION    (1 << 2)
+#define AIDR_MUL53            (1ULL << 0)
+#define AIDR_WKDM             (1ULL << 1)
+#define AIDR_ARCHRETENTION    (1ULL << 2)
 
 
 
@@ -2341,10 +2415,12 @@ typedef enum {
 #define ID_AA64ISAR1_EL1_BF16_OFFSET    44
 #define ID_AA64ISAR1_EL1_BF16_MASK      (0xfull << ID_AA64ISAR1_EL1_BF16_OFFSET)
 #define ID_AA64ISAR1_EL1_BF16_EN        (1ull << ID_AA64ISAR1_EL1_BF16_OFFSET)
+#define ID_AA64ISAR1_EL1_EBF16_EN       (2ull << ID_AA64ISAR1_EL1_BF16_OFFSET)
 
 #define ID_AA64ISAR1_EL1_SPECRES_OFFSET 40
 #define ID_AA64ISAR1_EL1_SPECRES_MASK   (0xfull << ID_AA64ISAR1_EL1_SPECRES_OFFSET)
 #define ID_AA64ISAR1_EL1_SPECRES_EN     (1ull << ID_AA64ISAR1_EL1_SPECRES_OFFSET)
+#define ID_AA64ISAR1_EL1_SPECRES2_EN    (2ull << ID_AA64ISAR1_EL1_SPECRES_OFFSET)
 
 #define ID_AA64ISAR1_EL1_SB_OFFSET      36
 #define ID_AA64ISAR1_EL1_SB_MASK        (0xfull << ID_AA64ISAR1_EL1_SB_OFFSET)
@@ -2392,11 +2468,19 @@ typedef enum {
 /*
  * ID_AA64ISAR2_EL1 - AArch64 Instruction Set Attribute Register 2
  *
- *  63   8 7     4 3    0
- * +------+-------+------+
- * | res0 | RPRES | WFxT |
- * +------+-------+------+
+ *  63  56 55  52 51  24 23  20 19    8 7     4 3    0
+ * +------+------+------+------+-------+-------+------+
+ * | res2 | CSSC | res1 |  BC  | res0  | RPRES | WFxT |
+ * +------+------+------+------+-------+-------+------+
  */
+
+#define ID_AA64ISAR2_EL1_CSSC_OFFSET    52
+#define ID_AA64ISAR2_EL1_CSSC_MASK      (0xfull << ID_AA64ISAR2_EL1_CSSC_OFFSET)
+#define ID_AA64ISAR2_EL1_CSSC_EN        (1ull << ID_AA64ISAR2_EL1_CSSC_OFFSET)
+
+#define ID_AA64ISAR2_EL1_BC_OFFSET      20
+#define ID_AA64ISAR2_EL1_BC_MASK        (0xfull << ID_AA64ISAR2_EL1_BC_OFFSET)
+#define ID_AA64ISAR2_EL1_BC_EN          (1ull << ID_AA64ISAR2_EL1_BC_OFFSET)
 
 #define ID_AA64ISAR2_EL1_RPRES_OFFSET   4
 #define ID_AA64ISAR2_EL1_RPRES_MASK     (0xfull << ID_AA64ISAR2_EL1_RPRES_OFFSET)
@@ -2429,6 +2513,8 @@ typedef enum {
 #define ID_AA64MMFR2_EL1_AT_OFFSET      32
 #define ID_AA64MMFR2_EL1_AT_MASK        (0xfull << ID_AA64MMFR2_EL1_AT_OFFSET)
 #define ID_AA64MMFR2_EL1_AT_LSE2_EN     (1ull << ID_AA64MMFR2_EL1_AT_OFFSET)
+#define ID_AA64MMFR2_EL1_VARANGE_OFFSET 16
+#define ID_AA64MMFR2_EL1_VARANGE_MASK   (0xfull << ID_AA64MMFR2_EL1_VARANGE_OFFSET)
 
 /*
  * ID_AA64PFR0_EL1 - AArch64 Processor Feature Register 0
@@ -2466,8 +2552,11 @@ typedef enum {
  */
 
 
+
+
 #define ID_AA64PFR1_EL1_SME_OFFSET      24
 #define ID_AA64PFR1_EL1_SME_MASK        (0xfull << ID_AA64PFR1_EL1_SME_OFFSET)
+#define ID_AA64PFR1_EL1_SME_EN          (1ull << ID_AA64PFR1_EL1_SME_OFFSET)
 #define ID_AA64PFR1_EL1_CSV2_frac_OFFSET        32
 #define ID_AA64PFR1_EL1_CSV2_frac_MASK          (0xfull << ID_AA64PFR1_EL1_CSV2_frac_OFFSET)
 #define ID_AA64PFR1_EL1_CSV2_frac_1p1           (1ull << ID_AA64PFR1_EL1_CSV2_frac_OFFSET)
@@ -2481,6 +2570,13 @@ typedef enum {
 #define ID_AA64PFR1_EL1_BT_OFFSET       0
 #define ID_AA64PFR1_EL1_BT_MASK         (0xfull << ID_AA64PFR1_EL1_BT_OFFSET)
 #define ID_AA64PFR1_EL1_BT_EN           (1ull << ID_AA64PFR1_EL1_BT_OFFSET)
+
+/*
+ * ID_AA64PFR2_EL1 - AArch64 Processor Feature Register 2
+ */
+
+
+
 
 /*
  * ID_AA64MMFR1_EL1 - AArch64 Memory Model Feature Register 1
@@ -2508,6 +2604,11 @@ typedef enum {
  * +------+------+--------+--------+------+--------+--------+------+-------+--------+--------+---------+--------+------+
  */
 
+#define ID_AA64SMFR0_EL1_SMEver_OFFSET  56
+#define ID_AA64SMFR0_EL1_SMEver_MASK    (0xfull << ID_AA64SMFR0_EL1_SMEver_OFFSET)
+#define ID_AA64SMFR0_EL1_SMEver_SME     (0ull << ID_AA64SMFR0_EL1_SMEver_OFFSET)
+#define ID_AA64SMFR0_EL1_SMEver_SME2    (1ull << ID_AA64SMFR0_EL1_SMEver_OFFSET)
+
 #define ID_AA64SMFR0_EL1_I16I64_OFFSET  52
 #define ID_AA64SMFR0_EL1_I16I64_MASK    (0xfull << ID_AA64SMFR0_EL1_I16I64_OFFSET)
 #define ID_AA64SMFR0_EL1_I16I64_EN      (0xfull << ID_AA64SMFR0_EL1_I16I64_OFFSET)
@@ -2519,6 +2620,7 @@ typedef enum {
 #define ID_AA64SMFR0_EL1_I16I32_OFFSET  44
 #define ID_AA64SMFR0_EL1_I16I32_MASK    (0xfull << ID_AA64SMFR0_EL1_I16I32_OFFSET)
 #define ID_AA64SMFR0_EL1_I16I32_EN      (0x5ull << ID_AA64SMFR0_EL1_I16I32_OFFSET)
+
 
 #define ID_AA64SMFR0_EL1_I8I32_OFFSET   36
 #define ID_AA64SMFR0_EL1_I8I32_MASK     (0xfull << ID_AA64SMFR0_EL1_I8I32_OFFSET)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -51,7 +51,7 @@ static const mbuf_flags_t mbuf_flags_mask = (MBUF_EXT | MBUF_PKTHDR | MBUF_EOR |
 /* Unalterable mbuf flags */
 static const mbuf_flags_t mbuf_cflags_mask = (MBUF_EXT);
 
-#define MAX_MBUF_TX_COMPL_FUNC 32
+#define MAX_MBUF_TX_COMPL_FUNC 8
 mbuf_tx_compl_func
     mbuf_tx_compl_table[MAX_MBUF_TX_COMPL_FUNC];
 extern lck_rw_t mbuf_tx_compl_tbl_lock;
@@ -155,7 +155,7 @@ mbuf_gethdr(mbuf_how_t how, mbuf_type_t type, mbuf_t *mbuf)
 
 errno_t
 mbuf_attachcluster(mbuf_how_t how, mbuf_type_t type, mbuf_t *mbuf,
-    caddr_t extbuf, void (*extfree)(caddr_t, u_int, caddr_t),
+    caddr_t extbuf __sized_by_or_null(extsize), void (*extfree)(caddr_t, u_int, caddr_t),
     size_t extsize, caddr_t extarg)
 {
 	if (mbuf == NULL || extbuf == NULL || extfree == NULL || extsize == 0) {
@@ -174,22 +174,30 @@ errno_t
 mbuf_ring_cluster_alloc(mbuf_how_t how, mbuf_type_t type, mbuf_t *mbuf,
     void (*extfree)(caddr_t, u_int, caddr_t), size_t *size)
 {
-	caddr_t extbuf = NULL;
+	size_t extsize = 0;
+	caddr_t extbuf __sized_by_or_null(extsize) = NULL;
 	errno_t err;
 
 	if (mbuf == NULL || extfree == NULL || size == NULL || *size == 0) {
 		return EINVAL;
 	}
 
-	if ((err = mbuf_alloccluster(how, size, &extbuf)) != 0) {
+	extsize = *size;
+	extbuf = NULL;
+
+	if ((err = mbuf_alloccluster(how, &extsize, &extbuf)) != 0) {
 		return err;
 	}
 
+	VERIFY((extsize == 0 && extbuf == NULL) || (extsize != 0 && extbuf != NULL));
+
 	if ((*mbuf = m_clattach(*mbuf, type, extbuf,
-	    extfree, *size, NULL, how, 1)) == NULL) {
-		mbuf_freecluster(extbuf, *size);
+	    extfree, extsize, NULL, how, 1)) == NULL) {
+		mbuf_freecluster(extbuf, extsize);
 		return ENOMEM;
 	}
+
+	*size = extsize;
 
 	return 0;
 }
@@ -233,34 +241,37 @@ mbuf_cluster_get_prop(mbuf_t mbuf, u_int32_t *prop)
 }
 
 errno_t
-mbuf_alloccluster(mbuf_how_t how, size_t *size, caddr_t *addr)
+mbuf_alloccluster(mbuf_how_t how, size_t *size, char * __sized_by_or_null(*size) *addr)
 {
 	if (size == NULL || *size == 0 || addr == NULL) {
 		return EINVAL;
 	}
-
-	*addr = NULL;
+	caddr_t _addr = NULL;
+	size_t _size = *size;
 
 	/* Jumbo cluster pool not available? */
-	if (*size > MBIGCLBYTES && njcl == 0) {
+	if (_size > MBIGCLBYTES && njcl == 0) {
 		return ENOTSUP;
 	}
 
-	if (*size <= MCLBYTES && (*addr = m_mclalloc(how)) != NULL) {
-		*size = MCLBYTES;
-	} else if (*size > MCLBYTES && *size <= MBIGCLBYTES &&
-	    (*addr = m_bigalloc(how)) != NULL) {
-		*size = MBIGCLBYTES;
-	} else if (*size > MBIGCLBYTES && *size <= M16KCLBYTES &&
-	    (*addr = m_16kalloc(how)) != NULL) {
-		*size = M16KCLBYTES;
+	if (_size <= MCLBYTES && (_addr = m_mclalloc(how)) != NULL) {
+		_size = MCLBYTES;
+	} else if (_size > MCLBYTES && _size <= MBIGCLBYTES &&
+	    (_addr = m_bigalloc(how)) != NULL) {
+		_size = MBIGCLBYTES;
+	} else if (_size > MBIGCLBYTES && _size <= M16KCLBYTES &&
+	    (_addr = m_16kalloc(how)) != NULL) {
+		_size = M16KCLBYTES;
 	} else {
-		*size = 0;
+		_size = 0;
 	}
 
-	if (*addr == NULL) {
+	if (_addr == NULL) {
 		return ENOMEM;
 	}
+
+	*size = _size;
+	*addr = _addr;
 
 	return 0;
 }
@@ -528,8 +539,9 @@ mbuf_concatenate(mbuf_t dst, mbuf_t src)
 	/* return dst as is in the current implementation */
 	return dst;
 }
+
 errno_t
-mbuf_copydata(const mbuf_t m0, size_t off, size_t len, void *out_data)
+mbuf_copydata(const mbuf_t m0, size_t off, size_t len, void *out_data __sized_by_or_null(len))
 {
 	/* Copied m_copydata, added error handling (don't just panic) */
 	size_t count;
@@ -537,6 +549,13 @@ mbuf_copydata(const mbuf_t m0, size_t off, size_t len, void *out_data)
 
 	if (off >= INT_MAX || len >= INT_MAX) {
 		return EINVAL;
+	}
+
+	/*
+	 * Empty destination buffer is permitted.
+	 */
+	if (out_data == NULL || len == 0) {
+		return 0;
 	}
 
 	while (off > 0) {
@@ -890,20 +909,149 @@ errno_t
 mbuf_get_tso_requested(
 	mbuf_t mbuf,
 	mbuf_tso_request_flags_t *request,
-	u_int32_t *value)
+	u_int32_t *mss)
 {
 	if (mbuf == NULL || (mbuf->m_flags & M_PKTHDR) == 0 ||
-	    request == NULL || value == NULL) {
+	    request == NULL || mss == NULL) {
 		return EINVAL;
 	}
 
 	*request = mbuf->m_pkthdr.csum_flags;
 	*request &= mbuf_valid_tso_request_flags;
-	if (*request && value != NULL) {
-		*value = mbuf->m_pkthdr.tso_segsz;
+	if (*request != 0) {
+		*mss = mbuf->m_pkthdr.tx_seg_size;
 	}
 
 	return 0;
+}
+
+static inline mbuf_gso_type_t
+gso_type_from_tso_request_flags(mbuf_tso_request_flags_t flags)
+{
+	mbuf_gso_type_t type = MBUF_GSO_TYPE_NONE;
+
+	if ((flags & MBUF_TSO_IPV4) != 0) {
+		type = MBUF_GSO_TYPE_IPV4;
+	} else if ((flags & MBUF_TSO_IPV6) != 0) {
+		type = MBUF_GSO_TYPE_IPV6;
+	}
+	return type;
+}
+
+errno_t
+mbuf_get_gso_info(
+	mbuf_t mbuf,
+	mbuf_gso_type_t *type,
+	uint16_t *ret_seg_size,
+	uint16_t *ret_hdr_len)
+{
+	mbuf_tso_request_flags_t flags;
+	uint16_t       hdr_len = 0;
+	uint16_t       seg_size = 0;
+
+	if (mbuf == NULL || (mbuf->m_flags & M_PKTHDR) == 0 ||
+	    type == NULL || ret_seg_size == NULL || ret_hdr_len == NULL) {
+		return EINVAL;
+	}
+	flags = mbuf->m_pkthdr.csum_flags & mbuf_valid_tso_request_flags;
+	if (flags != 0) {
+		seg_size = mbuf->m_pkthdr.tx_seg_size;
+		hdr_len = mbuf->m_pkthdr.tx_hdr_len;
+	}
+	*type = gso_type_from_tso_request_flags(flags);
+	*ret_seg_size = seg_size;
+	*ret_hdr_len = hdr_len;
+	return 0;
+}
+
+errno_t
+mbuf_set_gso_info(
+	mbuf_t mbuf,
+	mbuf_gso_type_t type,
+	uint16_t seg_size,
+	uint16_t hdr_len)
+{
+	errno_t         error = EINVAL;
+	mbuf_tso_request_flags_t flags = 0;
+
+	if (mbuf == NULL || (mbuf->m_flags & M_PKTHDR) == 0) {
+		goto done;
+	}
+	switch (type) {
+	case MBUF_GSO_TYPE_NONE:
+		break;
+	case MBUF_GSO_TYPE_IPV4:
+		flags = MBUF_TSO_IPV4;
+		break;
+	case MBUF_GSO_TYPE_IPV6:
+		flags = MBUF_TSO_IPV6;
+		break;
+	default:
+		/* unsupported type */
+		goto done;
+	}
+	switch (flags) {
+	case 0:
+		/* clearing GSO, seg_size and hdr_len must be zero */
+		if (seg_size != 0 || hdr_len != 0) {
+			goto done;
+		}
+		mbuf->m_pkthdr.csum_flags &= ~mbuf_valid_tso_request_flags;
+		mbuf->m_pkthdr.tx_seg_size = 0;
+		mbuf->m_pkthdr.tx_hdr_len = 0;
+		error = 0;
+		break;
+	default:
+		if (seg_size == 0) {
+			/* must specify seg_size */
+			goto done;
+		}
+		mbuf->m_pkthdr.csum_flags |= flags;
+		mbuf->m_pkthdr.tx_seg_size = seg_size;
+		mbuf->m_pkthdr.tx_hdr_len = hdr_len;
+		error = 0;
+		break;
+	}
+done:
+	return error;
+}
+
+errno_t
+mbuf_get_lro_info(
+	mbuf_t mbuf,
+	uint8_t * seg_cnt,
+	uint8_t * dup_ack_cnt)
+{
+	errno_t         error = EINVAL;
+
+	if (mbuf == NULL || (mbuf->m_flags & M_PKTHDR) == 0) {
+		goto done;
+	}
+	if (seg_cnt == NULL || dup_ack_cnt == NULL) {
+		goto done;
+	}
+	*seg_cnt = mbuf->m_pkthdr.rx_seg_cnt;
+	*dup_ack_cnt = 0;
+	error = 0;
+done:
+	return error;
+}
+
+errno_t
+mbuf_set_lro_info(
+	mbuf_t mbuf,
+	uint8_t seg_cnt,
+	uint8_t dup_ack_cnt)
+{
+	errno_t         error = EINVAL;
+
+	if (mbuf == NULL || (mbuf->m_flags & M_PKTHDR) == 0 ||
+	    dup_ack_cnt != 0 || seg_cnt == 1) {
+		goto done;
+	}
+	mbuf->m_pkthdr.rx_seg_cnt = seg_cnt;
+done:
+	return error;
 }
 
 errno_t
@@ -1358,13 +1506,13 @@ errno_t
 mbuf_copyback(
 	mbuf_t          m,
 	size_t          off,
-	size_t          len,
-	const void      *data,
+	size_t          len0,
+	const void      *data __sized_by_or_null(len0),
 	mbuf_how_t      how)
 {
-	size_t  mlen;
-	mbuf_t  m_start = m;
-	mbuf_t  n;
+	size_t  mlen, len = len0;
+	mbuf_ref_t  m_start = m;
+	mbuf_ref_t  n;
 	int             totlen = 0;
 	errno_t         result = 0;
 	const char      *cp = data;
@@ -1396,7 +1544,7 @@ mbuf_copyback(
 			mlen += grow;
 			m->m_len += grow;
 		}
-		bcopy(cp, off + (char *)mbuf_data(m), (unsigned)mlen);
+		bcopy(cp, off + mtod(m, char *), (unsigned)mlen);
 		cp += mlen;
 		len -= mlen;
 		mlen += off;
@@ -1899,7 +2047,7 @@ errno_t
 mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
     mbuf_tx_compl_func callback)
 {
-	size_t i;
+	uint32_t i;
 
 	if (m == NULL || !(m->m_flags & M_PKTHDR) || callback == NULL ||
 	    pktid == NULL) {
@@ -1912,10 +2060,6 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 	}
 
 	m_add_crumb(m, PKT_CRUMB_TS_COMP_REQ);
-
-#if (DEBUG || DEVELOPMENT)
-	VERIFY(i < sizeof(m->m_pkthdr.pkt_compl_callbacks));
-#endif /* (DEBUG || DEVELOPMENT) */
 
 	if ((m->m_pkthdr.pkt_flags & PKTF_TX_COMPL_TS_REQ) == 0) {
 		m->m_pkthdr.pkt_compl_callbacks = 0;

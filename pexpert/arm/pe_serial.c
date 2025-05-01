@@ -494,7 +494,7 @@ dockchannel_setup(const DeviceTreeNode *const devicetree_node)
 	if (SecureDTGetProperty(devicetree_node, "interrupts", &unused, &unused_size) == kSuccess) {
 		dockchannel_serial_functions.has_irq = true;
 	}
-	prev_dockchannel_spaces = rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
+	prev_dockchannel_spaces = rDOCKCHANNELS_DEV_WSTAT(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
 	dockchannel_drain_deadline = mach_absolute_time() + dockchannel_stall_grace;
 
 	// Register the Dock Channels serial driver.
@@ -511,7 +511,7 @@ dockchannel_drain_on_stall()
 	if (mach_absolute_time() >= dockchannel_drain_deadline) {
 		// It's been more than DOCKCHANEL_WR_MAX_STALL_US and nobody read from the FIFO
 		// Drop a character.
-		(void)rDOCKCHANNELS_DOCK_RDATA1(DOCKCHANNEL_UART_CHANNEL);
+		(void)ml_io_read32(rDOCKCHANNELS_DOCK_RDATA1(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL));
 		os_atomic_inc(&prev_dockchannel_spaces, relaxed);
 		return 1;
 	}
@@ -521,19 +521,23 @@ dockchannel_drain_on_stall()
 static void
 dockchannel_clear_intr(void)
 {
-	rDOCKCHANNELS_AGENT_AP_INTR_CTRL &= ~(0x3);
-	rDOCKCHANNELS_AGENT_AP_INTR_STATUS |= 0x3;
-	rDOCKCHANNELS_AGENT_AP_ERR_INTR_CTRL &= ~(0x3);
-	rDOCKCHANNELS_AGENT_AP_ERR_INTR_STATUS |= 0x3;
+	ml_io_write32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base),
+	    ml_io_read32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base)) & ~(0x3));
+	ml_io_write32(rDOCKCHANNELS_AGENT_AP_INTR_STATUS(dock_agent_base),
+	    ml_io_read32(rDOCKCHANNELS_AGENT_AP_INTR_STATUS(dock_agent_base)) | 0x3);
+	ml_io_write32(rDOCKCHANNELS_AGENT_AP_ERR_INTR_CTRL(dock_agent_base),
+	    ml_io_read32(rDOCKCHANNELS_AGENT_AP_ERR_INTR_CTRL(dock_agent_base)) & ~(0x3));
+	ml_io_write32(rDOCKCHANNELS_AGENT_AP_ERR_INTR_STATUS(dock_agent_base),
+	    ml_io_read32(rDOCKCHANNELS_AGENT_AP_ERR_INTR_STATUS(dock_agent_base)) | 0x3);
 }
 
 static bool
 dockchannel_disable_irq(void)
 {
-	const uint32_t ap_intr_ctrl = rDOCKCHANNELS_AGENT_AP_INTR_CTRL;
+	const uint32_t ap_intr_ctrl = ml_io_read32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base));
 	const bool irqs_were_enabled = ap_intr_ctrl & 0x1;
 	if (irqs_were_enabled) {
-		rDOCKCHANNELS_AGENT_AP_INTR_CTRL = ap_intr_ctrl & ~(0x1);
+		ml_io_write32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base), ap_intr_ctrl & ~(0x1));
 	}
 	return irqs_were_enabled;
 }
@@ -542,16 +546,19 @@ static void
 dockchannel_enable_irq(void)
 {
 	// set interrupt to be when fifo has 255 empty
-	rDOCKCHANNELS_DEV_WR_WATERMARK(DOCKCHANNEL_UART_CHANNEL) = 0xFF;
-	rDOCKCHANNELS_AGENT_AP_INTR_CTRL |= 0x1;
+	ml_io_write32(rDOCKCHANNELS_DEV_WR_WATERMARK(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL), 0xFF);
+	ml_io_write32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base),
+	    ml_io_read32(rDOCKCHANNELS_AGENT_AP_INTR_CTRL(dock_agent_base)) | 0x1);
 }
 
 static bool
 dockchannel_ack_irq(void)
 {
 	/* First check if the IRQ is for the kernel */
-	if (rDOCKCHANNELS_AGENT_AP_INTR_STATUS & 0x1) {
-		rDOCKCHANNELS_AGENT_AP_INTR_STATUS |= 0x1;
+	const uint32_t ap_intr_status = 0x1 & ml_io_read32(rDOCKCHANNELS_AGENT_AP_INTR_STATUS(dock_agent_base));
+	if (0x1 == ap_intr_status) {
+		/* And clear it */
+		ml_io_write32(rDOCKCHANNELS_AGENT_AP_INTR_STATUS(dock_agent_base), ap_intr_status);
 		return true;
 	}
 	return false;
@@ -560,7 +567,7 @@ dockchannel_ack_irq(void)
 MARK_AS_HIBERNATE_TEXT static void
 dockchannel_transmit_data(uint8_t c)
 {
-	rDOCKCHANNELS_DEV_WDATA1(DOCKCHANNEL_UART_CHANNEL) = (unsigned)c;
+	ml_io_write32(rDOCKCHANNELS_DEV_WDATA1(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL), (unsigned)c);
 
 	if (use_sw_drain && !uart_hibernation) {
 		os_atomic_dec(&prev_dockchannel_spaces, relaxed); // After writing a byte we have one fewer space than previously expected.
@@ -570,19 +577,19 @@ dockchannel_transmit_data(uint8_t c)
 static unsigned int
 dockchannel_receive_ready(void)
 {
-	return rDOCKCHANNELS_DEV_RDATA0(DOCKCHANNEL_UART_CHANNEL) & 0x7f;
+	return ml_io_read32(rDOCKCHANNELS_DEV_RDATA0(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL)) & 0x7f;
 }
 
 static uint8_t
 dockchannel_receive_data(void)
 {
-	return (uint8_t)((rDOCKCHANNELS_DEV_RDATA1(DOCKCHANNEL_UART_CHANNEL) >> 8) & 0xff);
+	return (uint8_t)((ml_io_read32(rDOCKCHANNELS_DEV_RDATA1(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL)) >> 8) & 0xff);
 }
 
 MARK_AS_HIBERNATE_TEXT static unsigned int
 dockchannel_transmit_ready(void)
 {
-	uint32_t spaces = rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
+	uint32_t spaces = ml_io_read32(rDOCKCHANNELS_DEV_WSTAT(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL)) & dock_wstat_mask;
 
 	if (!uart_hibernation) {
 		if (use_sw_drain) {
@@ -611,11 +618,11 @@ dockchannel_init(void)
 	dockchannel_clear_intr();
 
 	// Setup DRAIN timer
-	rDOCKCHANNELS_DEV_DRAIN_CFG(DOCKCHANNEL_UART_CHANNEL) = max_dockchannel_drain_period;
+	ml_io_write32(rDOCKCHANNELS_DEV_DRAIN_CFG(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL), max_dockchannel_drain_period);
 
 	// Drain timer doesn't get loaded with value from drain period register if fifo
 	// is already full. Drop a character from the fifo.
-	rDOCKCHANNELS_DOCK_RDATA1(DOCKCHANNEL_UART_CHANNEL);
+	(void)ml_io_read32(rDOCKCHANNELS_DOCK_RDATA1(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL));
 }
 
 MARK_AS_HIBERNATE_DATA_CONST_LATE
@@ -804,6 +811,67 @@ static const struct {
 #endif // PL011_UART
 };
 
+/**
+ * Gets the phandle of the devicetree node that represents the serial device
+ * XNU has been configured (either via devicetree or bootarg) to use.
+ *
+ * @param[out] phandle If XNU has been configured with a serial device to use,
+ * then this function will populate this output parameter with a phandle.
+ *
+ * @return Whether XNU has been configured with a serial device to use. Also,
+ * whether @p phandle has been populated by this function.
+ */
+static bool
+get_serial_device_phandle(uint32_t * const phandle)
+{
+	// Check the "defaults" devicetree node to see whether or not a serial
+	// device was specified. Specifically, check for the presence of a
+	// "serial-device" phandle property.
+	const DeviceTreeNode *defaults_node;
+	if (SecureDTFindNodeWithStringProperty("name", "defaults", &defaults_node) != kSuccess) {
+		panic("Unable to find the 'defaults' devicetree node.");
+	}
+	bool serial_device_phandle_specified = false;
+	const uint32_t *defaults_phandle;
+	unsigned int defaults_phandle_size;
+	if (SecureDTGetProperty(defaults_node, "serial-device", (const void **)&defaults_phandle, &defaults_phandle_size) == kSuccess) {
+		assert(defaults_phandle_size == sizeof(*defaults_phandle));
+		*phandle = *defaults_phandle;
+		serial_device_phandle_specified = true;
+	}
+
+	// Allow people to manually specify a serial device phandle via bootarg.
+	uint32_t phandle_bootarg;
+	if (PE_parse_boot_argn("serial-device", &phandle_bootarg, sizeof(phandle_bootarg))) {
+		*phandle = phandle_bootarg;
+		serial_device_phandle_specified = true;
+	}
+
+	// Give people an easier way to specify a serial device via bootarg (i.e.,
+	// by giving the name of the devicetree node).
+	const int kSerialDeviceNameMaxLen = 31;
+	char serial_device_name_buffer[kSerialDeviceNameMaxLen + 1];
+	if (PE_parse_boot_arg_str("serial-device-name", serial_device_name_buffer, sizeof(serial_device_name_buffer))) {
+		// Find the devicetree node with that name.
+		const DeviceTreeNode *serial_device_node;
+		if (SecureDTFindNodeWithStringProperty("name", serial_device_name_buffer, &serial_device_node) != kSuccess) {
+			panic("Unable to find a devicetree node with the name '%s'.", serial_device_name_buffer);
+		}
+
+		// Get the phandle of that node.
+		const uint32_t *node_phandle;
+		unsigned int node_phandle_size;
+		if (SecureDTGetProperty(serial_device_node, "AAPL,phandle", (const void **)&node_phandle, &node_phandle_size) != kSuccess) {
+			panic("The devicetree node has no phandle. This should never happen!");
+		}
+		assert(node_phandle_size == sizeof(*node_phandle));
+		*phandle = *node_phandle;
+		serial_device_phandle_specified = true;
+	}
+
+	return serial_device_phandle_specified;
+}
+
 int
 serial_init(void)
 {
@@ -840,39 +908,18 @@ serial_init(void)
 
 	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
 
-	// Check the "defaults" devicetree node to see whether or not a serial
-	// device was specified. Specifically, check for the presence of a
-	// "serial-device" phandle property.
-	const DeviceTreeNode *defaults_node;
-	if (SecureDTFindNodeWithStringProperty("name", "defaults", &defaults_node) != kSuccess) {
-		panic("Unable to find the 'defaults' devicetree node.");
-	}
-	bool serial_device_phandle_specified = false;
-	const uint32_t *phandle;
-	unsigned int phandle_size;
-	if (SecureDTGetProperty(defaults_node, "serial-device", (const void **)&phandle, &phandle_size) == kSuccess) {
-		assert(phandle_size == sizeof(*phandle));
-		serial_device_phandle_specified = true;
-	}
-
-	// Allow people to manually specify a serial device phandle via bootarg.
-	uint32_t phandle_bootarg;
-	if (PE_parse_boot_argn("serial-device", &phandle_bootarg, sizeof(phandle_bootarg))) {
-		phandle = &phandle_bootarg;
-		serial_device_phandle_specified = true;
-	}
-
-	// Return early if no serial device phandle was specified either in the
-	// devicetree or via bootarg.
-	if (!serial_device_phandle_specified) {
+	// Get the phandle of the serial device XNU has been configured to use.
+	uint32_t phandle;
+	if (!get_serial_device_phandle(&phandle)) {
+		// XNU has not been configured to use a serial device; return early.
 		return 0;
 	}
 
 	// Look at the "compatible" string in the devicetree node referenced by the
 	// "serial-device" phandle property to see which driver we should use.
 	const DeviceTreeNode *serial_device_node;
-	if (SecureDTFindNodeWithPhandle(*phandle, &serial_device_node) != kSuccess) {
-		panic("Unable to find a devicetree node with phandle %x", *phandle);
+	if (SecureDTFindNodeWithPhandle(phandle, &serial_device_node) != kSuccess) {
+		panic("Unable to find a devicetree node with phandle %x", phandle);
 	}
 	const char *compatible;
 	unsigned int compatible_size;

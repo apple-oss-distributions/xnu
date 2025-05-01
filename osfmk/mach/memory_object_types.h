@@ -497,11 +497,13 @@ struct upl_page_info {
 
 	    needed:1,           /* page should be left in cache on abort */
 	    mark:1,             /* a mark flag for the creator to use as they wish */
+	reserved: 12,
 	:0;                     /* force to long boundary */
 #else
 	opaque;                 /* use upl_page_xxx() accessor funcs */
 #endif /* XNU_KERNEL_PRIVATE */
 };
+_Static_assert(sizeof(struct upl_page_info) == 8, "sizeof(struct upl_page_info) doesn't match expectation");
 
 #else
 
@@ -804,6 +806,7 @@ extern boolean_t        upl_valid_page(upl_page_info_t *upl, int index);
 extern void             upl_deallocate(upl_t upl);
 extern void             upl_mark_decmp(upl_t upl);
 extern void             upl_unmark_decmp(upl_t upl);
+extern boolean_t        upl_has_wired_pages(upl_t upl);
 
 #ifdef KERNEL_PRIVATE
 

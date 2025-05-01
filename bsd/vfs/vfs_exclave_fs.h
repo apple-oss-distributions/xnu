@@ -48,6 +48,7 @@ typedef struct {
 /* sync operations for vfs_exclave_fs_sync() */
 #define EXCLAVE_FS_SYNC_OP_BARRIER 0
 #define EXCLAVE_FS_SYNC_OP_FULL 1
+#define EXCLAVE_FS_SYNC_OP_UBC 2
 
 #define EXCLAVE_FS_REGISTER_ENTITLEMENT  "com.apple.private.vfs.exclave-fs-register"
 
@@ -61,6 +62,7 @@ int vfs_exclave_fs_get_base_dirs(void *buf, uint32_t *count);
 int vfs_exclave_fs_register_path(uint32_t fs_tag, const char *base_path);
 
 int vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id);
+int vfs_exclave_fs_root_ex(uint32_t fs_tag, const char *exclave_id, uint64_t *root_id);
 int vfs_exclave_fs_open(uint32_t fs_tag, uint64_t root_id, const char *name, uint64_t *file_id);
 int vfs_exclave_fs_close(uint32_t fs_tag, uint64_t file_id);
 int vfs_exclave_fs_create(uint32_t fs_tag, uint64_t root_id, const char *name, uint64_t *file_id);
@@ -72,5 +74,6 @@ int vfs_exclave_fs_readdir(uint32_t fs_tag, uint64_t file_id, void *dirent_buf,
     uint32_t buf_size, int32_t *count);
 int vfs_exclave_fs_getsize(uint32_t fs_tag, uint64_t file_id, uint64_t *size);
 int vfs_exclave_fs_sealstate(uint32_t fs_tag, bool *sealed);
+int vfs_exclave_fs_query_volume_group(const uuid_string_t vguuid, bool *exists);
 
 #endif

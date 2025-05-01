@@ -93,6 +93,7 @@
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_importance.h>
+#include <ipc/ipc_policy.h>
 #include <machine/limits.h>
 #include <kern/turnstile.h>
 #include <kern/machine.h>
@@ -159,6 +160,27 @@ ipc_port_update_qos_n_iotier(
 	ipc_port_t port,
 	uint8_t    qos,
 	uint8_t    iotier);
+
+void
+ipc_port_lock(ipc_port_t port)
+{
+	ip_validate(port);
+	waitq_lock(&port->ip_waitq);
+}
+
+void
+ipc_port_lock_check_aligned(ipc_port_t port)
+{
+	zone_id_require_aligned(ZONE_ID_IPC_PORT, port);
+	waitq_lock(&port->ip_waitq);
+}
+
+bool
+ipc_port_lock_try(ipc_port_t port)
+{
+	ip_validate(port);
+	return waitq_lock_try(&port->ip_waitq);
+}
 
 void
 ipc_port_release(ipc_port_t port)
@@ -487,11 +509,10 @@ ipc_port_request_grow(
  *	Conditions:
  *		The port must be locked and active.
  *
- *		Returns TRUE if the request was armed
- *		(or armed with importance in that version).
+ *		Returns TRUE if the request was armed with importance.
  */
 
-boolean_t
+bool
 ipc_port_request_sparm(
 	ipc_port_t                      port,
 	__assert_only mach_port_name_t  name,
@@ -535,14 +556,12 @@ ipc_port_request_sparm(
 			    (port->ip_spimportant == 0) &&
 			    (((option & MACH_SEND_IMPORTANCE) != 0) ||
 			    (task_is_importance_donor(current_task())))) {
-				return TRUE;
+				return true;
 			}
-#else
-			return TRUE;
 #endif /* IMPORTANCE_INHERITANCE */
 		}
 	}
-	return FALSE;
+	return false;
 }
 
 /*
@@ -2920,8 +2939,8 @@ ipc_port_copyout_send_internal(
 	if (IP_VALID(sright)) {
 		kern_return_t kr;
 
-		kr = ipc_object_copyout(space, ip_to_object(sright),
-		    MACH_MSG_TYPE_PORT_SEND, flags, NULL, NULL, &name);
+		kr = ipc_object_copyout(space, sright, MACH_MSG_TYPE_PORT_SEND,
+		    flags, NULL, &name);
 		if (kr != KERN_SUCCESS) {
 			if (kr == KERN_INVALID_CAPABILITY) {
 				name = MACH_PORT_DEAD;
@@ -3481,7 +3500,9 @@ ipc_port_update_qos_n_iotier(
 
 /* Returns true if a rigid reply port violation should be enforced (by killing the process) */
 static bool
-__ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port_semantics_violation)
+__ip_rigid_reply_port_semantics_violation(
+	ipc_port_t                 reply_port,
+	ipc_policy_violation_id_t *reply_port_semantics_violation)
 {
 	bool hardened_runtime = csproc_hardened_runtime(current_proc());
 
@@ -3489,6 +3510,9 @@ __ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port
 #if CONFIG_ROSETTA
 	    || task_is_translated(current_task())
 #endif
+#if XNU_TARGET_OS_OSX
+	    || task_opted_out_mach_hardening(current_task())
+#endif /* XNU_TARGET_OS_OSX */
 	    ) {
 		return FALSE;
 	}
@@ -3498,27 +3522,48 @@ __ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port
 	}
 	if (!ip_is_provisional_reply_port(reply_port)) {
 		/* record telemetry for when third party fails to use a provisional reply port */
-		*reply_port_semantics_violation = hardened_runtime ? RRP_HARDENED_RUNTIME_VIOLATOR : RRP_3P_VIOLATOR;
+		*reply_port_semantics_violation = hardened_runtime ? IPCPV_RIGID_REPLY_PORT_HARDENED_RUNTIME : IPCPV_RIGID_REPLY_PORT_3P;
 	}
 	return FALSE;
 }
 
 bool
-ip_violates_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port,
-    int *reply_port_semantics_violation)
+ip_violates_reply_port_semantics(
+	ipc_port_t                 dest_port,
+	ipc_port_t                 reply_port,
+	ipc_policy_violation_id_t *reply_port_semantics_violation)
 {
+	/*
+	 * dest_port lock must be held to avoid race condition
+	 * when accessing ip_splabel rdar://139066947
+	 */
+	ip_mq_lock_held(dest_port);
+
 	if (ip_require_reply_port_semantics(dest_port)
 	    && !ip_is_reply_port(reply_port)
 	    && !ip_is_provisional_reply_port(reply_port)) {
-		*reply_port_semantics_violation = REPLY_PORT_SEMANTICS_VIOLATOR;
+		*reply_port_semantics_violation = IPCPV_REPLY_PORT_SEMANTICS;
 		return TRUE;
 	}
+
+	if (dest_port->ip_service_port) {
+		ipc_service_port_label_t label = dest_port->ip_splabel;
+		if (!ipc_service_port_label_is_bootstrap_port(label)
+		    && !ip_is_reply_port(reply_port)
+		    && !ip_is_provisional_reply_port(reply_port)) {
+			*reply_port_semantics_violation = IPCPV_REPLY_PORT_SEMANTICS_OPTOUT;
+		}
+	}
+
 	return FALSE;
 }
 
 /* Rigid reply port semantics don't allow for provisional reply ports */
 bool
-ip_violates_rigid_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port, int *violates_3p)
+ip_violates_rigid_reply_port_semantics(
+	ipc_port_t                 dest_port,
+	ipc_port_t                 reply_port,
+	ipc_policy_violation_id_t *violates_3p)
 {
 	return ip_require_rigid_reply_port_semantics(dest_port)
 	       && !ip_is_reply_port(reply_port)

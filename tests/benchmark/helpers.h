@@ -11,7 +11,7 @@
 /*
  * mmap an anonymous chunk of memory.
  */
-unsigned char *mmap_buffer(size_t size);
+unsigned char *map_buffer(size_t size, int flags);
 /*
  * Returns a - b in microseconds.
  * NB: a must be >= b

@@ -10,7 +10,8 @@ extern "C" {
 
 extern vm_offset_t pe_arm_get_soc_base_phys(void);
 extern uint32_t pe_arm_init_interrupts(void *args);
-extern void pe_arm_init_debug(void *args);
+extern void pe_arm_debug_init_early(void *args);
+extern void pe_arm_debug_init_late(void);
 
 #ifdef  PEXPERT_KERNEL_PRIVATE
 extern void console_write_unbuffered(char);

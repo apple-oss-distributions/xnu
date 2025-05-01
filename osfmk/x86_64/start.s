@@ -188,7 +188,7 @@ LEXT(pstart)
 
 	POSTCODE(PSTART_REBASE)
 
-/* the following code is shared by the master CPU and all slave CPUs */
+/* the following code is shared by the BSP CPU and all AP CPUs */
 L_pstart_common:
 	/*
 	 * switch to 64 bit mode

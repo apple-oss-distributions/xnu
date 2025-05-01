@@ -836,6 +836,11 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 		}
 	}
 
+	uint64_t cs_auxiliary_info = task_get_cs_auxiliary_info_kdp(corpse_task);
+	if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_CS_AUXILIARY_INFO, sizeof(cs_auxiliary_info), &uaddr)) {
+		kcdata_memcpy(crash_info_ptr, uaddr, &cs_auxiliary_info, sizeof(cs_auxiliary_info));
+	}
+
 	if (p->p_exit_reason != OS_REASON_NULL && reason == OS_REASON_NULL) {
 		reason = p->p_exit_reason;
 	}
@@ -858,6 +863,8 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 				kcdata_memcpy(crash_info_ptr, uaddr, reason->osr_kcd_buf, reason_buf_size);
 			}
 		}
+#if DEVELOPMENT || DEBUG
+#endif /* DEVELOPMENT || DEBUG */
 	}
 
 	if (num_udata > 0) {
@@ -886,7 +893,7 @@ get_exception_from_corpse_crashinfo(kcdata_descriptor_t corpse_info)
 }
 
 /*
- * Collect information required for generating lightwight corpse for current
+ * Collect information required for generating lightweight corpse for current
  * task, which can be terminating.
  */
 kern_return_t
@@ -3600,3 +3607,28 @@ exit_with_exclave_exception(
 	return exit_with_exception_internal(p, exception, flags);
 }
 #endif /* CONFIG_EXCLAVES */
+
+/**
+ * Causes the current process to exit with a Mach exception.
+ *
+ * Compared to exit_with_mach_exception(), exit_with_mach_exception_using_ast()
+ * can be called in a preemption-disabled context.  This function defers
+ * updating the process state until an AST.
+ *
+ * @note Currently only the PX_KTRIAGE flag is implemented.
+ *
+ * @param exception information about the exception
+ * @param flags a bitmask of PX_* flags describing how to deliver the exception
+ */
+void
+exit_with_mach_exception_using_ast(
+	exception_info_t exception,
+	uint32_t flags)
+{
+	const uint32_t __assert_only supported_flags = PX_KTRIAGE;
+	assert((flags & ~supported_flags) == 0);
+
+	bool ktriage = flags & PX_KTRIAGE;
+	thread_ast_mach_exception(current_thread(), exception.os_reason, exception.exception_type,
+	    exception.mx_code, exception.mx_subcode, false, ktriage);
+}

@@ -161,6 +161,7 @@ _err_link
 _err_mkdir
 _err_mknod
 _err_mmap
+_err_monitor
 _err_offtoblk
 _err_open
 _err_pagein
@@ -214,6 +215,7 @@ _ifaddr_address
 _ifaddr_address_family
 _ifaddr_dstaddress
 _ifaddr_findbestforaddr
+_ifaddr_get_ia6_flags
 _ifaddr_ifnet
 _ifaddr_netmask
 _ifaddr_reference
@@ -461,6 +463,7 @@ _nop_link
 _nop_mkdir
 _nop_mknod
 _nop_mmap
+_nop_monitor
 _nop_offtoblk
 _nop_open
 _nop_pagein
@@ -489,6 +492,7 @@ _proc_chrooted
 _proc_exiting
 _proc_find
 _proc_find_ident
+_proc_find_audit_token
 _proc_forcequota
 _proc_is64bit
 _proc_is64bit_data
@@ -783,6 +787,7 @@ _vnode_vfsmaxsymlen
 _vnode_vfsname
 _vnode_vfstypenum
 _vnode_vid
+_vnode_ismonitored
 _vnode_isonexternalstorage
 _vnode_vtype
 _vnode_waitforwrites
@@ -813,6 +818,7 @@ _vnop_mknod_desc
 _vnop_mmap_check_desc
 _vnop_mmap_desc
 _vnop_mnomap_desc
+_vnop_monitor_desc
 _vnop_offtoblk_desc
 _vnop_open_desc
 _vnop_pagein_desc

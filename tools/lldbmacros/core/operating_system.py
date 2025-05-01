@@ -5,8 +5,8 @@
 import struct
 import lldb
 
-
 osplugin_target_obj = None
+
 
 class PluginValue(lldb.SBValue):
     def GetChildMemberWithName(val, name):
@@ -115,7 +115,7 @@ class Armv8_RegisterSet(object):
     def ReadRegisterDataFromKDPSavedState(self, kdp_state, kernel_version):
         """ Setup register values from KDP saved information.
         """
-        saved_state = kernel_version.CreateValueFromExpression(None, '(struct arm_saved_state64 *) ' + str(kdp_state.GetValueAsUnsigned()))
+        saved_state = kernel_version.CreateValueFromExpression(None, f"(struct arm_saved_state64 *) {str(kdp_state.GetValueAsUnsigned())}")
         saved_state = saved_state.Dereference()
         saved_state = PluginValue(saved_state)
         self.ResetRegisterValues()
@@ -158,7 +158,7 @@ class Armv8_RegisterSet(object):
         return self
 
     def ReadRegisterDataFromKernelStack(self, kstack_saved_state_addr, kernel_version):
-        saved_state = kernel_version.CreateValueFromExpression(None, '(arm_kernel_saved_state_t *) '+ str(kstack_saved_state_addr))
+        saved_state = kernel_version.CreateValueFromExpression(None, f"(arm_kernel_saved_state_t *) {str(kstack_saved_state_addr)}")
         saved_state = saved_state.Dereference()
         saved_state = PluginValue(saved_state)
         self.ResetRegisterValues()
@@ -663,6 +663,7 @@ class OperatingSystemPlugIn(object):
         self.thread_cache = {}
         self.current_session_id = 0
         self.kdp_thread = None
+        self.struct_arm_kernel_context_type = None
         if type(process) is lldb.SBProcess and process.IsValid():
             global osplugin_target_obj
             self.process = process
@@ -672,7 +673,7 @@ class OperatingSystemPlugIn(object):
             self.version = self._target.FindGlobalVariables('version', 1).GetValueAtIndex(0)
 
             # Configure explicit pointer stripping
-            is_tagged = self._target.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+            is_tagged = self._target.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
 
             if is_tagged:
 
@@ -684,7 +685,7 @@ class OperatingSystemPlugIn(object):
 
                 def strip_thread_sbval(th):
                     addr = th.GetValueAsAddress()
-                    return self.version.CreateValueFromExpression(str(addr), '(struct thread *)' + str(addr))
+                    return self.version.CreateValueFromExpression(str(addr), f"(struct thread *) {str(addr)}")
                 self._strip_thread_sbval = strip_thread_sbval
 
             else:
@@ -736,7 +737,6 @@ class OperatingSystemPlugIn(object):
                 print("Instantiating threads completely from saved state in memory.")
 
     def create_thread(self, tid, context):
-
         # Strip TBI explicitly in case create_thread() is called externally.
         context = self._strip_ptr(context)
 
@@ -756,10 +756,12 @@ class OperatingSystemPlugIn(object):
             return thread_obj
         
         th_ptr = context
-        th = self.version.CreateValueFromExpression(str(th_ptr), '(struct thread *)' + str(th_ptr))
+        th = self.version.CreateValueFromExpression(str(th_ptr), f"(struct thread *) {str(th_ptr)}")
         thread_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
-        if tid != thread_id:
-            print("FATAL ERROR: Creating thread from memory 0x%x with tid in mem=%d when requested tid = %d " % (context, thread_id, tid))
+        # thread_unique_id starts at 100. If we're reading bogus memory, something's wrong
+        if tid != thread_id or tid == 0:
+            print(f"FATAL ERROR: Creating thread from memory 0x{context:x} with tid in mem={thread_id:d} when requested tid = {tid:d} ")
+            print(th)
             return None
 
         wait_queue = self._strip_ptr(th.GetChildMemberWithName('wait_queue').GetValueAsUnsigned())
@@ -777,6 +779,40 @@ class OperatingSystemPlugIn(object):
 
         self.thread_cache[tid] = thread_obj
         return thread_obj
+
+    def populate_info_from_cores(self):
+        """
+        Populates info from active cores, including creating LLDB threads for
+        active threads
+        """
+
+        self.current_session_id = GetUniqueSessionID(self.process)
+        self.threads = []
+        self.thread_cache = {}
+        self.processors = []
+
+        processor_list_val = PluginValue(self._target.FindGlobalVariables('processor_list',1).GetValueAtIndex(0))
+        while processor_list_val.IsValid() and processor_list_val.error.success and processor_list_val.GetValueAsUnsigned() !=0:
+            cpu_id = processor_list_val.GetChildMemberWithName('cpu_id').GetValueAsUnsigned()
+            th = self._strip_thread_sbval(processor_list_val.GetChildMemberWithName('active_thread'))
+            th_id_val = th.GetChildMemberWithName('thread_id')
+            if th_id_val.IsValid() and th_id_val.error.success:
+                th_id = th_id_val.GetValueAsUnsigned()
+                self.processors.append({'active_thread': th.GetValueAsUnsigned(), 'cpu_id': cpu_id})
+                thread_obj = self.create_thread(th_id, th.GetValueAsUnsigned())
+                if thread_obj is None:
+                    print(f"Error creating LLDB thread for thread\n{th}\nDo not trust register state and backtrace for this thread.\n")
+                else:
+                    if self.connected_to_debugserver:
+                        self.thread_cache[th_id]['core'] = cpu_id
+                    self.thread_cache[th_id]['queue'] = "cpu-%d" % int(cpu_id)
+                    nth = self.thread_cache[th_id]
+                    self.threads.append(nth)
+                    self.thread_cache[nth['tid']] = nth
+            else:
+                print(f"Invalid active core thread SBValue:\n{th_id_val}Do not trust register state and backtrace for this thread.\n")
+            processor_list_val = processor_list_val.GetChildMemberWithName('processor_list')
+
 
     def get_thread_info(self):
         self.kdp_thread = None
@@ -798,54 +834,11 @@ class OperatingSystemPlugIn(object):
                 return []
 
         num_threads = self._target.FindGlobalVariables('threads_count',1).GetValueAtIndex(0).GetValueAsUnsigned()
-        #In case we are caught before threads are initialized. Fallback to threads known by astris/gdb server.
+        # In case we are caught before threads are initialized. Fallback to threads known by astris/gdb server.
         if num_threads <=0 :
             return []
 
-        self.current_session_id = GetUniqueSessionID(self.process)
-        self.threads = []
-        self.thread_cache = {}
-        self.processors = []
-        try:
-            processor_list_val = PluginValue(self._target.FindGlobalVariables('processor_list',1).GetValueAtIndex(0))
-            while processor_list_val.IsValid() and processor_list_val.error.success and processor_list_val.GetValueAsUnsigned() !=0:
-                th = self._strip_thread_sbval(processor_list_val.GetChildMemberWithName('active_thread'))
-                th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
-                cpu_id = processor_list_val.GetChildMemberWithName('cpu_id').GetValueAsUnsigned()
-                self.processors.append({'active_thread': th.GetValueAsUnsigned(), 'cpu_id': cpu_id})
-                self.create_thread(th_id, th.GetValueAsUnsigned())
-                if self.connected_to_debugserver:
-                    self.thread_cache[th_id]['core'] = cpu_id
-                self.thread_cache[th_id]['queue'] = "cpu-%d" % int(cpu_id)
-                nth = self.thread_cache[th_id]
-                self.threads.append(nth)
-                self.thread_cache[nth['tid']] = nth
-                processor_list_val = processor_list_val.GetChildMemberWithName('processor_list')
-        except KeyboardInterrupt as ke:
-            print("OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate.")
-            return self.threads
-
-        if hasattr(self.process, 'CreateOSPluginThread'):
-            return self.threads
-
-        # FIXME remove legacy code
-        try:
-            thread_q_head = self._target.FindGlobalVariables('threads', 1).GetValueAtIndex(0)
-            thread_type = self._target.FindFirstType('thread')
-            thread_ptr_type = thread_type.GetPointerType()
-            for th in IterateQueue(thread_q_head, thread_ptr_type, 'threads'):
-                th = self._strip_thread_sbval(th)
-                th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
-                self.create_thread(th_id, th.GetValueAsUnsigned())
-                nth = self.thread_cache[th_id]
-                for cputhread in self.processors:
-                    if cputhread['active_thread'] == nth['ptr']:
-                        nth['core'] = cputhread['cpu_id']
-                self.threads.append( nth )
-        except KeyboardInterrupt as ke:
-            print("OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate.")
-            return self.threads
-        # end legacy code
+        self.populate_info_from_cores()
         return self.threads
 
     def get_register_info(self):
@@ -868,7 +861,7 @@ class OperatingSystemPlugIn(object):
                     regs.ReadRegisterDataFromKDPSavedState(savedstateobj, self.version)
                     return regs.GetPackedRegisterState()
 
-                thobj = self.version.CreateValueFromExpression(self.thread_cache[tid]['name'], '(struct thread *)' + str(self.thread_cache[tid]['ptr']))
+                thobj = self.version.CreateValueFromExpression(self.thread_cache[tid]['name'], f"(struct thread *) {self.thread_cache[tid]['ptr']}")
             
             if thobj == None :
                 print("FATAL ERROR: Could not find thread with id %d" % tid)
@@ -889,14 +882,21 @@ class OperatingSystemPlugIn(object):
                     saved_state_addr = PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()
                     regs.ReadRegisterDataFromKernelStack(saved_state_addr, self.version)
                     return regs.GetPackedRegisterState()
-                elif self.target_arch.startswith(archARMv8) and int(PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()) != 0:
-                    saved_state_addr = PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsAddress()
-                    arm_ctx = PluginValue(self.version.CreateValueFromExpression(None, '(struct arm_kernel_context *) ' + str(saved_state_addr)))
+                elif self.target_arch.startswith(archARMv8) and int((kstackptr := PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr')).GetValueAsUnsigned()) != 0:
+                    saved_state_addr = kstackptr.GetValueAsAddress()
+
+                    if self.struct_arm_kernel_context_type is not None:
+                        arm_ctx = self.version.CreateValueFromAddress(None, saved_state_addr, self.struct_arm_kernel_context_type)
+                    else:
+                        arm_ctx = self.version.CreateValueFromExpression(None, '(struct arm_kernel_context *) ' + str(saved_state_addr))
+                        arm_ctx = PluginValue(arm_ctx)
+                        self.struct_arm_kernel_context_type = arm_ctx.GetType().GetPointeeType()
+                    
                     arm_ss_addr = arm_ctx.GetChildMemberWithName('ss').GetLoadAddress()
                     regs.ReadRegisterDataFromKernelStack(arm_ss_addr, self.version)
                     return regs.GetPackedRegisterState()
             elif self.target_arch == archX86_64 or self.target_arch.startswith(archARMv7) or self.target_arch.startswith(archARMv8):
-                regs.ReadRegisterDataFromContinuation( PluginValue(thobj).GetChildMemberWithName('continuation').GetValueAsAddress())
+                regs.ReadRegisterDataFromContinuation(PluginValue(thobj).GetChildMemberWithName('continuation').GetValueAsAddress())
                 return regs.GetPackedRegisterState()
             #incase we failed very miserably
         except KeyboardInterrupt as ke:

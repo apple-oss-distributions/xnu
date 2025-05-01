@@ -155,6 +155,7 @@ static void ip_mloopback(struct ifnet *, struct ifnet *, struct mbuf *,
 static struct ifaddr *in_selectsrcif(struct ip *, struct route *, unsigned int);
 
 extern struct ip_linklocal_stat ip_linklocal_stat;
+extern unsigned int log_restricted;
 
 /* temporary: for testing */
 #if IPSEC
@@ -233,7 +234,7 @@ static unsigned int imo_debug;          /* debugging (disabled) */
 
 ZONE_DECLARE(imo_zone, struct ip_moptions);
 #define IMO_ZONE_NAME  "ip_moptions"   /* zone name */
-zone_t imo_zone = {0};                 /* zone for ip_moptions */
+zone_t imo_zone;                       /* zone for ip_moptions */
 
 #if PF
 __attribute__((noinline))
@@ -350,6 +351,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 			boolean_t noconstrained : 1;      /* set once */
 			boolean_t awdl_unrestricted : 1;        /* set once */
 			boolean_t management_allowed : 1;        /* set once */
+			boolean_t ultra_constrained_allowed : 1; /* set once */
 		};
 		uint32_t raw;
 	} ipobf = { .raw = 0 };
@@ -367,6 +369,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 	 ((_ipobf).noconstrained && IFNET_IS_CONSTRAINED(_ifp)) ||          \
 	  (IFNET_IS_INTCOPROC(_ifp)) ||                                     \
 	 (!(_ipobf).management_allowed && IFNET_IS_MANAGEMENT(_ifp)) ||     \
+	 (!(_ipobf).ultra_constrained_allowed && IFNET_IS_ULTRA_CONSTRAINED(_ifp)) || \
 	 (!(_ipobf).awdl_unrestricted && IFNET_IS_AWDL_RESTRICTED(_ifp)))
 
 	if (ip_output_measure) {
@@ -483,6 +486,9 @@ ipfw_tags_done:
 		}
 		if (ipoa->ipoa_flags & IPOAF_MANAGEMENT_ALLOWED) {
 			ipobf.management_allowed = true;
+		}
+		if (ipoa->ipoa_flags & IPOAF_ULTRA_CONSTRAINED_ALLOWED) {
+			ipobf.ultra_constrained_allowed = true;
 		}
 		adv = &ipoa->ipoa_flowadv;
 		adv->code = FADV_SUCCESS;
@@ -712,6 +718,12 @@ loopit:
 			 */
 			if (ia0 != NULL &&
 			    IP_CHECK_RESTRICTIONS(ia0->ifa_ifp, ipobf)) {
+				if (log_restricted) {
+					printf("%s:%d pid %d (%s) is unable to transmit packets on %s\n",
+					    __func__, __LINE__,
+					    proc_getpid(current_proc()), proc_best_name(current_proc()),
+					    ia0->ifa_ifp->if_xname);
+				}
 				ifa_remref(ia0);
 				ia0 = NULL;
 				error = EHOSTUNREACH;
@@ -818,6 +830,12 @@ loopit:
 				RT_LOCK_SPIN(ro->ro_rt);
 				if (IP_CHECK_RESTRICTIONS(ro->ro_rt->rt_ifp,
 				    ipobf)) {
+					if (log_restricted) {
+						printf("%s:%d pid %d (%s) is unable to transmit packets on %s\n",
+						    __func__, __LINE__,
+						    proc_getpid(current_proc()), proc_best_name(current_proc()),
+						    ro->ro_rt->rt_ifp->if_xname);
+					}
 					RT_UNLOCK(ro->ro_rt);
 					ROUTE_RELEASE(ro);
 					if (flags & IP_OUTARGS) {
@@ -1303,6 +1321,18 @@ sendit:
 		goto bad;
 	}
 #endif /* NECP */
+
+	if (IP_CHECK_RESTRICTIONS(ifp, ipobf)) {
+		if (log_restricted) {
+			printf("%s:%d pid %d (%s) is unable to transmit packets on %s\n",
+			    __func__, __LINE__,
+			    proc_getpid(current_proc()), proc_best_name(current_proc()),
+			    ifp->if_xname);
+		}
+		error = EHOSTUNREACH;
+		drop_reason = DROP_REASON_IP_TO_RESTRICTED_IF;
+		goto bad;
+	}
 
 #if IPSEC
 	if (ipsec_bypass != 0 || (flags & IP_NOIPSEC)) {
@@ -1843,7 +1873,7 @@ bad:
 	if (pktcnt > 0) {
 		m0 = packetlist;
 	}
-	m_drop_list(m0, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
+	m_drop_list(m0, ifp, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	goto done;
 
 #undef ipsec_state

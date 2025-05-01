@@ -82,6 +82,7 @@
 #include <net/if_types.h>
 #include <net/route.h>
 #include <net/dlil.h>
+#include <net/droptap.h>
 #include <net/net_api_stats.h>
 
 #include <netinet/in.h>
@@ -305,6 +306,7 @@ udp_input(struct mbuf *m, int iphlen)
 	u_int16_t pf_tag = 0;
 	boolean_t is_wake_pkt = false;
 	boolean_t check_cfil = cfil_filter_present();
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 
 	SOCKADDR_ZERO(&udp_in, sizeof(udp_in));
 	udp_in.sin_len = sizeof(struct sockaddr_in);
@@ -358,6 +360,7 @@ udp_input(struct mbuf *m, int iphlen)
 
 	/* destination port of 0 is illegal, based on RFC768. */
 	if (uh->uh_dport == 0) {
+		drop_reason = DROP_REASON_UDP_DST_PORT_ZERO;
 		IF_UDP_STATINC(ifp, port0);
 		goto bad;
 	}
@@ -374,6 +377,7 @@ udp_input(struct mbuf *m, int iphlen)
 		if (len > ip->ip_len || len < sizeof(struct udphdr)) {
 			udpstat.udps_badlen++;
 			IF_UDP_STATINC(ifp, badlength);
+			drop_reason = DROP_REASON_UDP_BAD_LENGTH;
 			goto bad;
 		}
 		m_adj(m, len - ip->ip_len);
@@ -389,6 +393,7 @@ udp_input(struct mbuf *m, int iphlen)
 	 * Checksum extended UDP header and data.
 	 */
 	if (udp_input_checksum(m, uh, iphlen, len)) {
+		drop_reason = DROP_REASON_UDP_BAD_CHECKSUM;
 		goto bad;
 	}
 
@@ -534,6 +539,7 @@ udp_input(struct mbuf *m, int iphlen)
 			    &ip->ip_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
 				/* do not inject data to pcb */
 				skipit = 1;
+				UDP_LOG_DROP_NECP(ip, uh, inp, false);
 			}
 			if (skipit == 0)
 #endif /* NECP */
@@ -590,6 +596,7 @@ udp_input(struct mbuf *m, int iphlen)
 			 */
 			udpstat.udps_noportbcast++;
 			IF_UDP_STATINC(ifp, port_unreach);
+			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
 			goto bad;
 		}
 
@@ -704,12 +711,19 @@ udp_input(struct mbuf *m, int iphlen)
 		udpstat.udps_noport++;
 		if (m->m_flags & (M_BCAST | M_MCAST)) {
 			udpstat.udps_noportbcast++;
+			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
 			goto bad;
 		}
 		if (blackhole) {
 			if (ifp && ifp->if_type != IFT_LOOP) {
+				drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
 				goto bad;
 			}
+		}
+		if (if_link_heuristics_enabled(ifp)) {
+			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
+			IF_UDP_STATINC(ifp, linkheur_stealthdrop);
+			goto bad;
 		}
 		*ip = save_ip;
 		ip->ip_len += iphlen;
@@ -722,6 +736,7 @@ udp_input(struct mbuf *m, int iphlen)
 	if (in_pcb_checkstate(inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
 		udp_unlock(inp->inp_socket, 1, 0);
 		IF_UDP_STATINC(ifp, cleanup);
+		drop_reason = DROP_REASON_UDP_SOCKET_CLOSING;
 		goto bad;
 	}
 #if NECP
@@ -729,6 +744,7 @@ udp_input(struct mbuf *m, int iphlen)
 	    uh->uh_sport, &ip->ip_dst, &ip->ip_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
 		udp_unlock(inp->inp_socket, 1, 0);
 		IF_UDP_STATINC(ifp, badipsec);
+		drop_reason = DROP_REASON_UDP_NECP;
 		goto bad;
 	}
 #endif /* NECP */
@@ -755,6 +771,7 @@ udp_input(struct mbuf *m, int iphlen)
 		}
 		if (ret != 0) {
 			udp_unlock(inp->inp_socket, 1, 0);
+			drop_reason = DROP_REASON_UDP_CANNOT_SAVE_CONTROL;
 			goto bad;
 		}
 	}
@@ -810,7 +827,7 @@ udp_input(struct mbuf *m, int iphlen)
 	KERNEL_DEBUG(DBG_FNC_UDP_INPUT | DBG_FUNC_END, 0, 0, 0, 0, 0);
 	return;
 bad:
-	m_freem(m);
+	m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	if (opts) {
 		m_freem(opts);
 	}
@@ -863,12 +880,14 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 			ret = ip6_savecontrol(last, n, &opts);
 			if (ret != 0) {
 				last->inp_flags = savedflags;
+				UDP_LOG(last, "ip6_savecontrol error %d", ret);
 				goto error;
 			}
 			last->inp_flags = savedflags;
 		} else {
 			ret = ip_savecontrol(last, &opts, ip, n);
 			if (ret != 0) {
+				UDP_LOG(last, "ip_savecontrol error %d", ret);
 				goto error;
 			}
 		}
@@ -894,6 +913,7 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 	if (sbappendaddr(&last->inp_socket->so_rcv, append_sa,
 	    n, opts, NULL) == 0) {
 		udpstat.udps_fullsock++;
+		UDP_LOG(last, "sbappendaddr full receive socket buffer");
 	} else {
 		sorwakeup(last->inp_socket);
 	}
@@ -1616,6 +1636,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		m_freem(control);
 		control = NULL;
 		if (error) {
+			UDP_LOG(inp, "udp_check_pktinfo error %d", error);
 			goto release;
 		}
 		if (outif != NULL) {
@@ -1634,6 +1655,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 
 	if (len + sizeof(struct udpiphdr) > IP_MAXPACKET) {
 		error = EMSGSIZE;
+		UDP_LOG(inp, "len %d too big error EMSGSIZE", len);
 		goto release;
 	}
 
@@ -1643,6 +1665,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		 * until the inp is not flow controlled
 		 */
 		error = ENOBUFS;
+		UDP_LOG(inp, "flow controlled error ENOBUFS");
 		goto release;
 	}
 	/*
@@ -1674,6 +1697,9 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	}
 	if (INP_MANAGEMENT_ALLOWED(inp)) {
 		ipoa.ipoa_flags |= IPOAF_MANAGEMENT_ALLOWED;
+	}
+	if (INP_ULTRA_CONSTRAINED_ALLOWED(inp)) {
+		ipoa.ipoa_flags |= IPOAF_ULTRA_CONSTRAINED_ALLOWED;
 	}
 	ipoa.ipoa_sotc = sotc;
 	ipoa.ipoa_netsvctype = netsvctype;
@@ -1711,6 +1737,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 				soevent(so, (SO_FILT_HINT_LOCKED |
 				    SO_FILT_HINT_NOSRCADDR));
 				error = EADDRNOTAVAIL;
+				UDP_LOG(inp, "source address not available error EADDRNOTAVAIL");
 				goto release;
 			} else {
 				/* new src will be set later */
@@ -1764,9 +1791,12 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		sin = SIN(addr);
 		if (faddr.s_addr != INADDR_ANY) {
 			error = EISCONN;
+			UDP_LOG(inp, "socket already connected error EISCONN");
 			goto release;
 		}
 		if (lport == 0) {
+			inp_enter_bind_in_progress(so);
+
 			/*
 			 * In case we don't have a local port set, go through
 			 * the full connect.  We don't have a local port yet
@@ -1784,7 +1814,11 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 			 */
 			error = in_pcbconnect(inp, addr, p, ipoa.ipoa_boundif,
 			    &outif);
+
+			inp_exit_bind_in_progress(so);
+
 			if (error) {
+				UDP_LOG(inp, "in_pcbconnect error %d", error);
 				goto release;
 			}
 
@@ -1812,6 +1846,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 			if (laddr.s_addr == INADDR_ANY) {
 				if ((error = in_pcbladdr(inp, addr, &laddr,
 				    ipoa.ipoa_boundif, &outif, 0)) != 0) {
+					UDP_LOG(inp, "in_pcbladdr error %d", error);
 					goto release;
 				}
 				/*
@@ -1833,6 +1868,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	} else {
 		if (faddr.s_addr == INADDR_ANY) {
 			error = ENOTCONN;
+			UDP_LOG(inp, "not connected error ENOTCONN");
 			goto release;
 		}
 	}
@@ -1854,6 +1890,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	M_PREPEND(m, sizeof(struct udpiphdr), M_DONTWAIT, 1);
 	if (m == 0) {
 		error = ENOBUFS;
+		UDP_LOG(inp, "M_PREPEND error ENOBUFS");
 		goto abort;
 	}
 
@@ -1961,6 +1998,9 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		if (!necp_socket_is_allowed_to_send_recv_v4(inp, lport, fport,
 		    &laddr, &faddr, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			error = EHOSTUNREACH;
+			UDP_LOG_DROP_NECP((struct ip *)&ui->ui_i, &ui->ui_u, inp, true);
+			m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_UDP_NECP, NULL, 0);
+			m = NULL;
 			goto abort;
 		}
 
@@ -1982,6 +2022,9 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 #if IPSEC
 	if (inp->inp_sp != NULL && ipsec_setsocket(m, inp->inp_socket) != 0) {
 		error = ENOBUFS;
+		UDP_LOG_DROP_PCB((struct ip *)&ui->ui_i, &ui->ui_u, inp, true, "ipsec_setsocket error ENOBUFS");
+		m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_UDP_IPSEC, NULL, 0);
+		m = NULL;
 		goto abort;
 	}
 #endif /* IPSEC */
@@ -2299,6 +2342,9 @@ udp_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+
+	inp_enter_bind_in_progress(so);
+
 	error = in_pcbbind(inp, nam, NULL, p);
 
 #if NECP
@@ -2314,6 +2360,8 @@ udp_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	UDP_LOG_BIND(inp, error);
 
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 
@@ -2327,8 +2375,11 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+	inp_enter_bind_in_progress(so);
+
 	if (inp->inp_faddr.s_addr != INADDR_ANY) {
-		return EISCONN;
+		error = EISCONN;
+		goto done;
 	}
 
 	if (!(so->so_flags1 & SOF1_CONNECT_COUNTED)) {
@@ -2343,8 +2394,7 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		if (error == 0) {
 			error = flow_divert_connect_out(so, nam, p);
 		}
-		UDP_LOG_CONNECT(inp, error);
-		return error;
+		goto done;
 	} else {
 		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
@@ -2369,7 +2419,11 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		}
 		inp->inp_connect_timestamp = mach_continuous_time();
 	}
+done:
 	UDP_LOG_CONNECT(inp, error);
+
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 
@@ -2580,6 +2634,9 @@ udp_send(struct socket *so, int flags, struct mbuf *m,
 #endif /* NECP */
 
 	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
+
+	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
 
 #if SKYWALK
 	sk_protect_t protect = sk_async_transmit_protect();

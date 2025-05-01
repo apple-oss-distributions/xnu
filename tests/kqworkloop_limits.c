@@ -111,7 +111,11 @@ T_DECL(test_kqworkloop_hard_limit, "Allocate kqworkloops up to hard limit",
 }
 
 T_DECL(test_kqworkloop_soft_and_hard_limit, "Allocate kqworkloops with soft and hard limit",
-    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
+    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"),
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133461542 */)
+    )
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");

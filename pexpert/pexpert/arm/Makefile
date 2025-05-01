@@ -6,7 +6,7 @@ export MakeInc_dir=$(SRCROOT)/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-PRIVATE_DATAFILES = boot.h consistent_debug.h protos.h
+PRIVATE_DATAFILES = boot.h consistent_debug.h protos.h dockchannel.h apple_uart_regs.h
 
 PRIVATE_KERNELFILES = \
 	AIC.h \

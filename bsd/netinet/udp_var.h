@@ -152,6 +152,7 @@ struct udpstat_local {
 	u_int64_t       badmcast;
 	u_int64_t       cleanup;
 	u_int64_t       badipsec;
+	u_int64_t       linkheur_stealthdrop;
 };
 
 extern struct pr_usrreqs udp_usrreqs;

@@ -30,23 +30,29 @@
 #define _ARM64_AMCC_RORGN_H_
 
 #include <sys/cdefs.h>
+#include <stdbool.h>
+#include <libkern/section_keywords.h>
 
 __BEGIN_DECLS
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
-#include <stdbool.h>
 
-#include <libkern/section_keywords.h>
+extern vm_offset_t ctrr_begin, ctrr_end;
+
+#if CONFIG_CSR_FROM_DT
+extern bool csr_unsafe_kernel_text;
+#endif /* CONFIG_CSR_FROM_DT */
+
+#if DEVELOPMENT || DEBUG || CONFIG_DTRACE || CONFIG_CSR_FROM_DT
+extern bool rorgn_disable;
+#else
+#define rorgn_disable false
+#endif /* DEVELOPMENT || DEBUG */
 
 void rorgn_stash_range(void);
 void rorgn_lockdown(void);
 bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval);
 void rorgn_validate_core(void);
-
-extern vm_offset_t ctrr_begin, ctrr_end;
-#if CONFIG_CSR_FROM_DT
-extern bool csr_unsafe_kernel_text;
-#endif /* CONFIG_CSR_FROM_DT */
 
 #if KERNEL_CTRR_VERSION >= 3
 #define CTXR_XN_DISALLOW_ALL \
@@ -76,6 +82,13 @@ extern bool csr_unsafe_kernel_text;
     (CTXR3_XN_disallow_inside << CTXR3_x_CTL_EL2_XN_GL0TGE0_shift)
 #endif /* KERNEL_CTRR_VERSION >= 3 */
 
+#else
+
+#if CONFIG_CSR_FROM_DT
+#define csr_unsafe_kernel_text false
+#endif /* CONFIG_CSR_FROM_DT */
+
+#define rorgn_disable false
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
 __END_DECLS

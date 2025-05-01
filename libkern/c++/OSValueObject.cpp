@@ -32,6 +32,8 @@
 
 #define IOKIT_ENABLE_SHARED_PTR
 
+OSDefineValueObjectForDependentType(int)
+
 namespace os_detail {
 kalloc_type_view_t
 GetOSValueObjectKTV()

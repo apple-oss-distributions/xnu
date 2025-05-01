@@ -63,7 +63,7 @@
 #include "externs.h"
 
 mach_port_t bootstrap_port = MACH_PORT_NULL;
-mach_port_t mach_task_self_ = MACH_PORT_NULL;
+__swift_nonisolated_unsafe mach_port_t mach_task_self_ = MACH_PORT_NULL;
 #ifdef __i386__
 mach_port_t mach_host_self_ = MACH_PORT_NULL;
 #endif

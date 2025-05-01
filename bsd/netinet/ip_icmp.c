@@ -385,7 +385,7 @@ stdreply:       icmpelen = max(ICMP_MINLEN, min(icmp_datalen,
 	 * Copy icmplen worth of content from original
 	 * mbuf (n) to the new packet after ICMP header.
 	 */
-	m_copydata(n, 0, icmplen, (caddr_t)&icp->icmp_ip);
+	m_copydata(n, 0, icmplen, mtod(m, caddr_t) + offsetof(struct icmp, icmp_ip));
 	nip = &icp->icmp_ip;
 
 	/*

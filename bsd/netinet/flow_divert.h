@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020, 2022, 2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2017, 2020, 2022, 2024, 2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,6 +68,7 @@ struct flow_divert_pcb {
 	struct ifnet                    *original_last_outifp6;
 	struct ifnet                    *original_last_outifp;
 	uint8_t                         original_vflag;
+	bool                            plugin_locked; // tell detach() that our locking is correct
 };
 
 RB_HEAD(fd_pcb_tree, flow_divert_pcb);

@@ -299,9 +299,9 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_to_object(port)              (&(port)->ip_object)
 #define ip_active(port)                 io_active(ip_to_object(port))
 #define ip_mq_lock_held(port)           io_lock_held(ip_to_object(port))
-#define ip_mq_lock(port)                ipc_object_lock(ip_to_object(port), IOT_PORT)
-#define ip_mq_lock_check_aligned(port)  ipc_object_lock_check_aligned(ip_to_object(port), IOT_PORT)
-#define ip_mq_lock_try(port)            ipc_object_lock_try(ip_to_object(port), IOT_PORT)
+#define ip_mq_lock(port)                ipc_port_lock(port)
+#define ip_mq_lock_check_aligned(port)  ipc_port_lock_check_aligned(port)
+#define ip_mq_lock_try(port)            ipc_port_lock_try(port)
 #define ip_mq_lock_held_kdp(port)       io_lock_held_kdp(ip_to_object(port))
 #define ip_mq_unlock(port)              io_unlock(ip_to_object(port))
 
@@ -311,8 +311,6 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_release_live(port)           io_release_live(ip_to_object(port))
 #define ip_validate(port) \
 	zone_id_require(ZONE_ID_IPC_PORT, sizeof(struct ipc_port), port)
-#define ip_validate_aligned(port) \
-	zone_id_require_aligned(ZONE_ID_IPC_PORT, port)
 
 #define ip_from_waitq(wq)               __container_of(wq, struct ipc_port, ip_waitq)
 #define ip_from_mq(mq)                  __container_of(mq, struct ipc_port, ip_messages)
@@ -371,19 +369,6 @@ extern void __ipc_right_delta_overflow_panic(
 
 #define ip_is_libxpc_connection_port(port) \
 	(!ip_is_kolabeled(port) && (!(port)->ip_service_port) && ((port)->ip_splabel != NULL))
-
-extern bool ip_violates_rigid_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port,
-    int *reply_port_semantics_violation);
-
-extern bool ip_violates_reply_port_semantics(ipc_port_t dest_port, ipc_port_t reply_port,
-    int *reply_port_semantics_violation);
-
-/* Rigid Reply Port and Move Reply Port violators */
-#define REPLY_PORT_SEMANTICS_VIOLATOR    1 /* normal reply port semantics violator */
-#define RRP_HARDENED_RUNTIME_VIOLATOR    2
-#define MRP_HARDENED_RUNTIME_VIOLATOR    3
-#define MRP_3P_VIOLATOR                  4
-#define RRP_3P_VIOLATOR                  5
 
 /* Bits reserved in IO_BITS_PORT_INFO are defined here */
 
@@ -605,7 +590,7 @@ extern ipc_port_t ipc_port_request_cancel(
 	ipc_port_request_index_t        index);
 
 /* Arm any delayed send-possible notification */
-extern boolean_t ipc_port_request_sparm(
+extern bool ipc_port_request_sparm(
 	ipc_port_t                port,
 	mach_port_name_t          name,
 	ipc_port_request_index_t  index,
@@ -646,6 +631,15 @@ extern void ipc_port_init(
 	ipc_space_t             space,
 	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name);
+
+extern void ipc_port_lock(
+	ipc_port_t              port);
+
+extern void ipc_port_lock_check_aligned(
+	ipc_port_t              port);
+
+extern bool ipc_port_lock_try(
+	ipc_port_t              port);
 
 /* Allocate a port */
 extern kern_return_t ipc_port_alloc(

@@ -482,13 +482,13 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 }
 
 static int
-_kpc_set_config_internal(uint32_t classes, kpc_config_t *configv, bool allow_list)
+_kpc_set_config_internal(uint32_t classes, kpc_config_t *configv, bool secure)
 {
 	int ret = 0;
 	struct kpc_config_remote mp_config = {
 		.classes = classes, .configv = configv,
 		.pmc_mask = kpc_get_configurable_pmc_mask(classes),
-		.allow_list = allow_list,
+		.secure = secure,
 	};
 
 	assert(configv);

@@ -374,6 +374,7 @@ boolean_t ml_get_interrupts_enabled(void);
 
 /* Set Interrupts Enabled */
 boolean_t ml_set_interrupts_enabled(boolean_t enable);
+#define ml_set_interrupts_enabled_with_debug(en, dbg) ml_set_interrupts_enabled(en);
 boolean_t ml_early_set_interrupts_enabled(boolean_t enable);
 
 /* Check if running at interrupt context */

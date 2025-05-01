@@ -1303,7 +1303,7 @@ struct TrivialAggregateTestType {
 	bool b;
 	float c;
 };
-OSDefineValueObjectForDependentType(int)
+OSDefineValueObjectForDependentType(char)
 OSDefineValueObjectForDependentType(TrivialAggregateTestType)
 
 static int
@@ -1311,12 +1311,12 @@ OSValueObjectTests(int)
 {
 	// test simple built-in type
 	{
-		using T = int;
+		using T = char;
 		OSSharedPtr<OSValueObject<T> > test = OSValueObject<T>::create();
 		assert(test);
 		if (test) {
 			assert(test->getRef() == 0);
-			assert(test->isEqualTo(0));
+			assert(test->isEqualTo((char) 0));
 			assert(test->getBytesNoCopy());
 			assert(test->getBytesNoCopy() == test->getMutableBytesNoCopy());
 			assert(test->getLength() == sizeof(T));
@@ -2048,6 +2048,9 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		assert(KERN_SUCCESS == error);
 	}
 #endif /* TEST_ZLIB */
+
+
+
 	if (changed && newValue) {
 		error = TestLockForArbitration(newValue);
 		assert(KERN_SUCCESS == error);

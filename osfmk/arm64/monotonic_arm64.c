@@ -74,21 +74,11 @@ const bool mt_core_supported = true;
 static const ml_topology_info_t *topology_info;
 
 /*
- * PMC[0-1] are the 48/64-bit fixed counters -- PMC0 is cycles and PMC1 is
+ * PMC[0-1] are the 48/64-bit fixed counters -- S3_2_C15_C0_0 is cycles and S3_2_C15_C1_0 is
  * instructions (see arm64/monotonic.h).
  *
- * PMC2+ are currently handled by kpc.
+ * S3_2_C15_C2_0+ are currently handled by kpc.
  */
-#define PMC_0_7(X, A) X(0, A); X(1, A); X(2, A); X(3, A); X(4, A); X(5, A); \
-    X(6, A); X(7, A)
-
-#if CORE_NCTRS > 8
-#define PMC_8_9(X, A) X(8, A); X(9, A)
-#else // CORE_NCTRS > 8
-#define PMC_8_9(X, A)
-#endif // CORE_NCTRS > 8
-
-#define PMC_ALL(X, A) PMC_0_7(X, A); PMC_8_9(X, A)
 
 #if CPMU_64BIT_PMCS
 #define PMC_WIDTH (63)
@@ -102,12 +92,12 @@ static const ml_topology_info_t *topology_info;
 #define INSTRS 1
 
 /*
- * PMC0's offset into a core's PIO range.
+ * S3_2_C15_C0_0's offset into a core's PIO range.
  *
  * This allows cores to remotely query another core's counters.
  */
 
-#define PIO_PMC0_OFFSET (0x200)
+#define PIO_S3_2_C15_C0_0_OFFSET (0x200)
 
 /*
  * The offset of the counter in the configuration registers.  Post-Hurricane
@@ -170,7 +160,7 @@ enum {
  */
 #define PMCR1_EL0A32_EN(CTR) (UINT64_C(1) << (0 + CTR_POS(CTR)))
 #define PMCR1_EL0A64_EN(CTR) (UINT64_C(1) << (8 + CTR_POS(CTR)))
-#define PMCR1_EL1A64_EN(CTR) (UINT64_C(1) << (16 + CTR_POS(CTR)))
+#define S3_1_C15_C1_0A64_EN(CTR) (UINT64_C(1) << (16 + CTR_POS(CTR)))
 /* PMCR1_EL3A64 is not supported on systems with no monitor */
 #if defined(APPLEHURRICANE)
 #define PMCR1_EL3A64_EN(CTR) UINT64_C(0)
@@ -178,7 +168,7 @@ enum {
 #define PMCR1_EL3A64_EN(CTR) (UINT64_C(1) << (24 + CTR_POS(CTR)))
 #endif
 #define PMCR1_ALL_EN(CTR) (PMCR1_EL0A32_EN(CTR) | PMCR1_EL0A64_EN(CTR) | \
-	                   PMCR1_EL1A64_EN(CTR) | PMCR1_EL3A64_EN(CTR))
+	                   S3_1_C15_C1_0A64_EN(CTR) | PMCR1_EL3A64_EN(CTR))
 
 /* fixed counters always count in all modes */
 #define PMCR1_INIT (PMCR1_ALL_EN(CYCLES) | PMCR1_ALL_EN(INSTRS))
@@ -188,11 +178,11 @@ core_init_execution_modes(void)
 {
 	uint64_t pmcr1;
 
-	pmcr1 = __builtin_arm_rsr64("PMCR1_EL1");
+	pmcr1 = __builtin_arm_rsr64("S3_1_C15_C1_0");
 	pmcr1 |= PMCR1_INIT;
-	__builtin_arm_wsr64("PMCR1_EL1", pmcr1);
+	__builtin_arm_wsr64("S3_1_C15_C1_0", pmcr1);
 #if CONFIG_EXCLAVES
-	__builtin_arm_wsr64("PMCR1_EL12", pmcr1);
+	__builtin_arm_wsr64("S3_1_C15_C7_2", pmcr1);
 #endif
 }
 
@@ -215,9 +205,28 @@ uint64_t
 mt_core_snap(unsigned int ctr)
 {
 	switch (ctr) {
-#define PMC_RD(CTR, UNUSED) case (CTR): return __builtin_arm_rsr64(__MSR_STR(PMC ## CTR))
-		PMC_ALL(PMC_RD, 0);
-#undef PMC_RD
+	case 0:
+		return __builtin_arm_rsr64("S3_2_C15_C0_0");
+	case 1:
+		return __builtin_arm_rsr64("S3_2_C15_C1_0");
+	case 2:
+		return __builtin_arm_rsr64("S3_2_C15_C2_0");
+	case 3:
+		return __builtin_arm_rsr64("S3_2_C15_C3_0");
+	case 4:
+		return __builtin_arm_rsr64("S3_2_C15_C4_0");
+	case 5:
+		return __builtin_arm_rsr64("S3_2_C15_C5_0");
+	case 6:
+		return __builtin_arm_rsr64("S3_2_C15_C6_0");
+	case 7:
+		return __builtin_arm_rsr64("S3_2_C15_C7_0");
+#if CORE_NCTRS > 8
+	case 8:
+		return __builtin_arm_rsr64("S3_2_C15_C9_0");
+	case 9:
+		return __builtin_arm_rsr64("S3_2_C15_C10_0");
+#endif /* CORE_NCTRS > 8 */
 	default:
 		panic("monotonic: invalid core counter read: %u", ctr);
 		__builtin_unreachable();
@@ -229,10 +238,10 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 {
 	switch (ctr) {
 	case 0:
-		__builtin_arm_wsr64("PMC0", count);
+		__builtin_arm_wsr64("S3_2_C15_C0_0", count);
 		break;
 	case 1:
-		__builtin_arm_wsr64("PMC1", count);
+		__builtin_arm_wsr64("S3_2_C15_C1_0", count);
 		break;
 	default:
 		panic("monotonic: invalid core counter %u write %llu", ctr, count);
@@ -245,7 +254,7 @@ core_set_enabled(void)
 {
 	uint32_t kpc_mask = kpc_get_running() &
 	    (KPC_CLASS_CONFIGURABLE_MASK | KPC_CLASS_POWER_MASK);
-	uint64_t pmcr0 = __builtin_arm_rsr64("PMCR0_EL1");
+	uint64_t pmcr0 = __builtin_arm_rsr64("S3_1_C15_C0_0");
 	pmcr0 |= PMCR0_INIT | PMCR0_FIXED_EN;
 
 	if (kpc_mask != 0) {
@@ -261,12 +270,12 @@ core_set_enabled(void)
 		pmcr0 |= kpc_ctrs;
 	}
 
-	__builtin_arm_wsr64("PMCR0_EL1", pmcr0);
+	__builtin_arm_wsr64("S3_1_C15_C0_0", pmcr0);
 #if MACH_ASSERT
 	/*
 	 * Only check for the values that were ORed in.
 	 */
-	uint64_t pmcr0_check = __builtin_arm_rsr64("PMCR0_EL1");
+	uint64_t pmcr0_check = __builtin_arm_rsr64("S3_1_C15_C0_0");
 	if ((pmcr0_check & (PMCR0_INIT | PMCR0_FIXED_EN)) != (PMCR0_INIT | PMCR0_FIXED_EN)) {
 		panic("monotonic: hardware ignored enable (read %llx, wrote %llx)",
 		    pmcr0_check, pmcr0);
@@ -281,18 +290,18 @@ core_idle(__unused cpu_data_t *cpu)
 	assert(ml_get_interrupts_enabled() == FALSE);
 
 #if DEBUG
-	uint64_t pmcr0 = __builtin_arm_rsr64("PMCR0_EL1");
+	uint64_t pmcr0 = __builtin_arm_rsr64("S3_1_C15_C0_0");
 	if ((pmcr0 & PMCR0_FIXED_EN) == 0) {
 		panic("monotonic: counters disabled before idling, pmcr0 = 0x%llx", pmcr0);
 	}
-	uint64_t pmcr1 = __builtin_arm_rsr64("PMCR1_EL1");
+	uint64_t pmcr1 = __builtin_arm_rsr64("S3_1_C15_C1_0");
 	if ((pmcr1 & PMCR1_INIT) == 0) {
 		panic("monotonic: counter modes disabled before idling, pmcr1 = 0x%llx", pmcr1);
 	}
 #endif /* DEBUG */
 
 	/* disable counters before updating */
-	__builtin_arm_wsr64("PMCR0_EL1", PMCR0_INIT);
+	__builtin_arm_wsr64("S3_1_C15_C0_0", PMCR0_INIT);
 
 	mt_update_fixed_counts();
 }
@@ -504,7 +513,7 @@ uncmon_set_counting_locked_l(__unused unsigned int monid, uint64_t enctrmask)
 	 * UPMCR0 controls which counters are enabled and how interrupts are generated
 	 * for overflows.
 	 */
-	__builtin_arm_wsr64("UPMCR0_EL1", UPMCR0_INIT | enctrmask);
+	__builtin_arm_wsr64("S3_7_C15_C0_4", UPMCR0_INIT | enctrmask);
 }
 
 #if UNCORE_PER_CLUSTER
@@ -528,21 +537,24 @@ uncmon_set_counting_locked_r(unsigned int monid, uint64_t enctrmask)
 
 #define UPMC_MAX ((UINT64_C(1) << UPMC_WIDTH) - 1)
 
-/*
- * The `__builtin_arm_{r,w}sr` functions require constant strings, since the
- * MSR/MRS instructions encode the registers as immediates.  Otherwise, this
- * would be indexing into an array of strings.
- */
+static void
+_broadcast_block_trampoline(void *blk)
+{
+	void (^cb)(unsigned int) = blk;
+	const ml_topology_info_t *topo = ml_get_topology_info();
+	unsigned int cpu = cpu_number();
+	unsigned int cluster = topo->cpus[cpu].cluster_id;
+	if (topo->clusters[cluster].first_cpu_id == cpu) {
+		cb(topo->cpus[cpu].cluster_id);
+	}
+}
 
-#define UPMC_0_7(X, A) X(0, A); X(1, A); X(2, A); X(3, A); X(4, A); X(5, A); \
-	        X(6, A); X(7, A)
-#if UNCORE_NCTRS <= 8
-#define UPMC_ALL(X, A) UPMC_0_7(X, A)
-#else /* UNCORE_NCTRS <= 8 */
-#define UPMC_8_15(X, A) X(8, A); X(9, A); X(10, A); X(11, A); X(12, A); \
-	        X(13, A); X(14, A); X(15, A)
-#define UPMC_ALL(X, A) UPMC_0_7(X, A); UPMC_8_15(X, A)
-#endif /* UNCORE_NCTRS > 8 */
+__unused
+static void
+_broadcast_each_cluster(void (^cb)(unsigned int cluster_id))
+{
+	cpu_broadcast_xcall_simple(TRUE, _broadcast_block_trampoline, cb);
+}
 
 __unused
 static inline uint64_t
@@ -550,9 +562,40 @@ uncmon_read_counter_locked_l(__unused unsigned int monid, unsigned int ctr)
 {
 	assert(ctr < UNCORE_NCTRS);
 	switch (ctr) {
-#define UPMC_RD(CTR, UNUSED) case (CTR): return __builtin_arm_rsr64(__MSR_STR(UPMC ## CTR))
-		UPMC_ALL(UPMC_RD, 0);
-#undef UPMC_RD
+	case 0:
+		return __builtin_arm_rsr64("S3_7_C15_C7_4");
+	case 1:
+		return __builtin_arm_rsr64("S3_7_C15_C8_4");
+	case 2:
+		return __builtin_arm_rsr64("S3_7_C15_C9_4");
+	case 3:
+		return __builtin_arm_rsr64("S3_7_C15_C10_4");
+	case 4:
+		return __builtin_arm_rsr64("S3_7_C15_C11_4");
+	case 5:
+		return __builtin_arm_rsr64("S3_7_C15_C12_4");
+	case 6:
+		return __builtin_arm_rsr64("S3_7_C15_C13_4");
+	case 7:
+		return __builtin_arm_rsr64("S3_7_C15_C14_4");
+#if UNCORE_NCTRS > 8
+	case 8:
+		return __builtin_arm_rsr64("S3_7_C15_C0_5");
+	case 9:
+		return __builtin_arm_rsr64("S3_7_C15_C1_5");
+	case 10:
+		return __builtin_arm_rsr64("S3_7_C15_C2_5");
+	case 11:
+		return __builtin_arm_rsr64("S3_7_C15_C3_5");
+	case 12:
+		return __builtin_arm_rsr64("S3_7_C15_C4_5");
+	case 13:
+		return __builtin_arm_rsr64("S3_7_C15_C5_5");
+	case 14:
+		return __builtin_arm_rsr64("S3_7_C15_C6_5");
+	case 15:
+		return __builtin_arm_rsr64("S3_7_C15_C7_5");
+#endif /* UNCORE_NCTRS > 8 */
 	default:
 		panic("monotonic: invalid counter read %u", ctr);
 		__builtin_unreachable();
@@ -566,10 +609,40 @@ uncmon_write_counter_locked_l(__unused unsigned int monid, unsigned int ctr,
 	assert(count < UPMC_MAX);
 	assert(ctr < UNCORE_NCTRS);
 	switch (ctr) {
-#define UPMC_WR(CTR, COUNT) case (CTR): \
-	        return __builtin_arm_wsr64(__MSR_STR(UPMC ## CTR), (COUNT))
-		UPMC_ALL(UPMC_WR, count);
-#undef UPMC_WR
+	case 0:
+		return __builtin_arm_wsr64("S3_7_C15_C7_4", count);
+	case 1:
+		return __builtin_arm_wsr64("S3_7_C15_C8_4", count);
+	case 2:
+		return __builtin_arm_wsr64("S3_7_C15_C9_4", count);
+	case 3:
+		return __builtin_arm_wsr64("S3_7_C15_C10_4", count);
+	case 4:
+		return __builtin_arm_wsr64("S3_7_C15_C11_4", count);
+	case 5:
+		return __builtin_arm_wsr64("S3_7_C15_C12_4", count);
+	case 6:
+		return __builtin_arm_wsr64("S3_7_C15_C13_4", count);
+	case 7:
+		return __builtin_arm_wsr64("S3_7_C15_C14_4", count);
+#if UNCORE_NCTRS > 8
+	case 8:
+		return __builtin_arm_wsr64("S3_7_C15_C0_5", count);
+	case 9:
+		return __builtin_arm_wsr64("S3_7_C15_C1_5", count);
+	case 10:
+		return __builtin_arm_wsr64("S3_7_C15_C2_5", count);
+	case 11:
+		return __builtin_arm_wsr64("S3_7_C15_C3_5", count);
+	case 12:
+		return __builtin_arm_wsr64("S3_7_C15_C4_5", count);
+	case 13:
+		return __builtin_arm_wsr64("S3_7_C15_C5_5", count);
+	case 14:
+		return __builtin_arm_wsr64("S3_7_C15_C6_5", count);
+	case 15:
+		return __builtin_arm_wsr64("S3_7_C15_C7_5", count);
+#endif /* UNCORE_NCTRS > 8 */
 	default:
 		panic("monotonic: invalid counter write %u", ctr);
 	}
@@ -651,10 +724,10 @@ uncmon_program_events_locked_l(unsigned int monid)
 	 * UPMESR[01] is the event selection register that determines which event a
 	 * counter will count.
 	 */
-	CTRL_REG_SET("UPMESR0_EL1", uncore_config.uc_events.uce_regs[0]);
+	CTRL_REG_SET("S3_7_C15_C1_4", uncore_config.uc_events.uce_regs[0]);
 
 #if UNCORE_NCTRS > 8
-	CTRL_REG_SET("UPMESR1_EL1", uncore_config.uc_events.uce_regs[1]);
+	CTRL_REG_SET("S3_7_C15_C11_5", uncore_config.uc_events.uce_regs[1]);
 #endif /* UNCORE_NCTRS > 8 */
 
 	/*
@@ -666,15 +739,15 @@ uncmon_program_events_locked_l(unsigned int monid)
 	 * has a CPU ID of 4, it might be the first CPU in a cluster.  Shift the
 	 * registers right by the ID of the first CPU in the cluster.
 	 */
-	CTRL_REG_SET("UPMECM0_EL1",
+	CTRL_REG_SET("S3_7_C15_C3_4",
 	    uncore_config.uc_cpu_masks[monid].uccm_regs[0]);
-	CTRL_REG_SET("UPMECM1_EL1",
+	CTRL_REG_SET("S3_7_C15_C4_4",
 	    uncore_config.uc_cpu_masks[monid].uccm_regs[1]);
 
 #if UNCORE_NCTRS > 8
-	CTRL_REG_SET("UPMECM2_EL1",
+	CTRL_REG_SET("S3_7_C15_C8_5",
 	    uncore_config.uc_cpu_masks[monid].uccm_regs[2]);
-	CTRL_REG_SET("UPMECM3_EL1",
+	CTRL_REG_SET("S3_7_C15_C9_5",
 	    uncore_config.uc_cpu_masks[monid].uccm_regs[3]);
 #endif /* UNCORE_NCTRS > 8 */
 }
@@ -708,7 +781,7 @@ uncmon_program_events_locked_r(unsigned int monid)
 static void
 uncmon_clear_int_locked_l(__unused unsigned int monid)
 {
-	__builtin_arm_wsr64("UPMSR_EL1", 0);
+	__builtin_arm_wsr64("S3_7_C15_C6_4", 0);
 }
 
 #if UNCORE_PER_CLUSTER
@@ -751,7 +824,7 @@ uncmon_init_locked_l(unsigned int monid)
 	 * UPMPCM defines the PMI core mask for the UPMCs -- which cores should
 	 * receive interrupts on overflow.
 	 */
-	CTRL_REG_SET("UPMPCM_EL1", uncmon_get_pmi_mask(monid));
+	CTRL_REG_SET("S3_7_C15_C5_4", uncmon_get_pmi_mask(monid));
 	uncmon_set_counting_locked_l(monid,
 	    mt_uncore_enabled ? uncore_active_ctrs : 0);
 }
@@ -1086,6 +1159,7 @@ uncmon_set_enabled_l_locked(unsigned int monid, bool enable)
 
 #if UNCORE_PER_CLUSTER
 
+__unused
 static void
 uncmon_set_enabled_r_locked(unsigned int monid, bool enable)
 {
@@ -1111,18 +1185,12 @@ uncore_set_enabled(bool enable)
 {
 	mt_uncore_enabled = enable;
 
-	for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
-		struct uncore_monitor *mon = &uncore_monitors[monid];
+	_broadcast_each_cluster(^(unsigned int cluster_id) {
+		struct uncore_monitor *mon = &uncore_monitors[cluster_id];
 		int intrs_en = uncmon_lock(mon);
-		if (uncmon_is_remote(monid)) {
-#if UNCORE_PER_CLUSTER
-			uncmon_set_enabled_r_locked(monid, enable);
-#endif /* UNCORE_PER_CLUSTER */
-		} else {
-			uncmon_set_enabled_l_locked(monid, enable);
-		}
+		uncmon_set_enabled_l_locked(cluster_id, enable);
 		uncmon_unlock(mon, intrs_en);
-	}
+	});
 }
 
 /*
@@ -1329,7 +1397,7 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 	assert(cpu != NULL);
 	assert(ml_get_interrupts_enabled() == FALSE);
 
-	__builtin_arm_wsr64("PMCR0_EL1", PMCR0_INIT);
+	__builtin_arm_wsr64("S3_1_C15_C0_0", PMCR0_INIT);
 	/*
 	 * Ensure the CPMU has flushed any increments at this point, so PMSR is up
 	 * to date.
@@ -1348,7 +1416,7 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 #pragma unused(pmcr0)
 #endif /* !MONOTONIC_DEBUG */
 
-	uint64_t pmsr = __builtin_arm_rsr64("PMSR_EL1");
+	uint64_t pmsr = __builtin_arm_rsr64("S3_1_C15_C13_0");
 
 #if MONOTONIC_DEBUG
 	printf("monotonic: cpu = %d, PMSR = 0x%llx, PMCR0 = 0x%llx\n",
@@ -1404,7 +1472,7 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 	}
 
 #if MACH_ASSERT
-	uint64_t pmsr_after_handling = __builtin_arm_rsr64("PMSR_EL1");
+	uint64_t pmsr_after_handling = __builtin_arm_rsr64("S3_1_C15_C13_0");
 	if (pmsr_after_handling != 0) {
 		unsigned int first_ctr_ovf = __builtin_ffsll(pmsr_after_handling) - 1;
 		uint64_t count = 0;
@@ -1418,7 +1486,7 @@ mt_cpu_pmi(cpu_data_t *cpu, uint64_t pmcr0)
 		panic("monotonic: PMI status not cleared on exit from handler, "
 		    "PMSR = 0x%llx HANDLE -> -> 0x%llx, handled 0x%llx, "
 		    "PMCR0 = 0x%llx, PMC%d = 0x%llx%s", pmsr, pmsr_after_handling,
-		    handled, __builtin_arm_rsr64("PMCR0_EL1"), first_ctr_ovf, count, extra);
+		    handled, __builtin_arm_rsr64("S3_1_C15_C0_0"), first_ctr_ovf, count, extra);
 	}
 #endif /* MACH_ASSERT */
 
@@ -1434,7 +1502,7 @@ mt_cpmu_aic_pmi(cpu_id_t source)
 		panic("monotonic: PMI from IOCPU %p delivered to %p", source,
 		    curcpu->interrupt_nub);
 	}
-	mt_cpu_pmi(curcpu, __builtin_arm_rsr64("PMCR0_EL1"));
+	mt_cpu_pmi(curcpu, __builtin_arm_rsr64("S3_1_C15_C0_0"));
 }
 #endif /* CPMU_AIC_PMI */
 
@@ -1479,7 +1547,7 @@ mt_microstackshot_start_remote(__unused void *arg)
 {
 	cpu_data_t *cpu = getCpuDatap();
 
-	__builtin_arm_wsr64("PMCR0_EL1", PMCR0_INIT);
+	__builtin_arm_wsr64("S3_1_C15_C0_0", PMCR0_INIT);
 
 	for (int i = 0; i < MT_CORE_NFIXED; i++) {
 		uint64_t count = mt_cpu_update_count(cpu, i);

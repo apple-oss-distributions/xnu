@@ -1158,7 +1158,7 @@ setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 static void
 kern_settid_assume_cred(thread_ro_t tro, kauth_cred_t tmp)
 {
-	kauth_cred_t cred = NOCRED;
+	kauth_cred_t cred = tro->tro_cred;
 
 	kauth_cred_set(&cred, tmp);
 	zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_cred, &cred);

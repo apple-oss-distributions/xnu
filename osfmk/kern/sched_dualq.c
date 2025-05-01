@@ -110,7 +110,11 @@ const struct sched_dispatch_table sched_dualq_dispatch = {
 	.steal_thread                                   = sched_dualq_steal_thread,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
 	.choose_node                                    = sched_choose_node,
+#if CONFIG_SCHED_SMT
+	.choose_processor                               = choose_processor_smt,
+#else /* CONFIG_SCHED_SMT */
 	.choose_processor                               = choose_processor,
+#endif /* CONFIG_SCHED_SMT */
 	.processor_enqueue                              = sched_dualq_processor_enqueue,
 	.processor_queue_shutdown                       = sched_dualq_processor_queue_shutdown,
 	.processor_queue_remove                         = sched_dualq_processor_queue_remove,
@@ -245,6 +249,7 @@ sched_dualq_choose_thread(
 		return run_queue_dequeue(chosen_runq, SCHED_HEADQ);
 	}
 
+#if CONFIG_SCHED_SMT
 	if (processor->is_SMT) {
 		thread_t potential_thread = run_queue_peek(chosen_runq);
 		if (potential_thread == THREAD_NULL) {
@@ -280,6 +285,7 @@ sched_dualq_choose_thread(
 			}
 		}
 	}
+#endif /* CONFIG_SCHED_SMT */
 
 	return run_queue_dequeue(chosen_runq, SCHED_HEADQ);
 }
@@ -457,8 +463,10 @@ sched_dualq_steal_thread(processor_set_t pset)
 	processor_set_t nset = next_pset(cset);
 	thread_t        thread;
 
+#if CONFIG_SCHED_SMT
 	/* Secondary processors on SMT systems never steal */
 	assert(current_processor()->processor_primary == current_processor());
+#endif /* CONFIG_SCHED_SMT */
 
 	while (nset != pset) {
 		pset_unlock(cset);
@@ -556,6 +564,7 @@ sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread, __unu
 		return false;
 	}
 
+#if CONFIG_SCHED_SMT
 	if (processor->processor_primary != processor) {
 		/*
 		 * This is a secondary SMT processor.  If the primary is running
@@ -592,6 +601,7 @@ sched_dualq_thread_avoid_processor(processor_t processor, thread_t thread, __unu
 			}
 		}
 	}
+#endif /* CONFIG_SCHED_SMT */
 
 	return false;
 }

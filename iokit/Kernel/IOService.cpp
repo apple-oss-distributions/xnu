@@ -508,6 +508,7 @@ IOService::initialize( void )
 	gIOUserUserClientKey   = OSSymbol::withCStringNoCopy(kIOUserUserClientKey);
 
 	gIOUserServerOneProcessKey = OSSymbol::withCStringNoCopy(kIOUserServerOneProcessKey);
+
 	gIOUserServerPreserveUserspaceRebootKey = OSSymbol::withCStringNoCopy(kIOUserServerPreserveUserspaceRebootKey);
 
 	gIOResourcesKey       = OSSymbol::withCStringNoCopy( kIOResourcesClass );
@@ -888,8 +889,8 @@ IOService::attach( IOService * provider )
 
 	if (provider) {
 		if (gIOKitDebug & kIOLogAttach) {
-			LOG( "%s::attach(%s)\n", getName(),
-			    provider->getName());
+			LOG( "%s[0x%qx]::attach(%s[0x%qx])\n", getName(), getRegistryEntryID(),
+			    provider->getName(), provider->getRegistryEntryID());
 		}
 
 		ok   = false;
@@ -947,7 +948,7 @@ IOService::detach( IOService * provider )
 	bool        adjParent;
 
 	if (gIOKitDebug & kIOLogAttach) {
-		LOG("%s::detach(%s)\n", getName(), provider->getName());
+		LOG("%s[0x%qx]::detach(%s[0x%qx])\n", getName(), getRegistryEntryID(), provider->getName(), provider->getRegistryEntryID());
 	}
 
 #if !NO_KEXTD
@@ -2947,6 +2948,8 @@ IOService::willTerminate( IOService * provider, IOOptionBits options )
 {
 	if (reserved->uvars) {
 		IOUserServer::serviceWillTerminate(this, provider, options);
+	} else if (kIODKLogSetup & gIODKDebug) {
+		DKLOG("%s[0x%qx]::willTerminate serviceWillTerminate not called\n", getName(), getRegistryEntryID());
 	}
 	return true;
 }
@@ -3930,6 +3933,9 @@ IOService::probeCandidates( OSOrderedSet * matches )
 			if (isDext && !gIODextRelaunchMax && rematchCountProp) {
 				continue;
 			}
+			if (isDext && isInactive()) {
+				continue;
+			}
 			newIsBoot = gIOCatalogue->personalityIsBoot(match);
 
 			category = OSDynamicCast( OSSymbol,
@@ -4068,7 +4074,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 				if (!(inst->init( props ))) {
 #if IOMATCHDEBUG
 					if (debugFlags & kIOLogStart) {
-						IOLog("%s::init fails\n", symbol->getCStringNoCopy());
+						IOLog("%s::init in provider %s[0x%qx] fails\n", symbol->getCStringNoCopy(), getName(), getRegistryEntryID());
 					}
 #endif
 					continue;
@@ -4095,8 +4101,8 @@ IOService::probeCandidates( OSOrderedSet * matches )
 				// & probe the new driver instance
 #if IOMATCHDEBUG
 				if (debugFlags & kIOLogProbe) {
-					LOG("%s::probe(%s)\n",
-					    inst->getMetaClass()->getClassName(), getName());
+					LOG("%s[0x%qx]::probe(%s)\n",
+					    inst->getMetaClass()->getClassName(), inst->getRegistryEntryID(), getName());
 				}
 #endif
 				newInst = inst->probe( this, &score );
@@ -4104,7 +4110,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 				if (NULL == newInst) {
 #if IOMATCHDEBUG
 					if (debugFlags & kIOLogProbe) {
-						IOLog("%s::probe fails\n", symbol->getCStringNoCopy());
+						IOLog("%s[0x%qx]::probe fails\n", symbol->getCStringNoCopy(), inst->getRegistryEntryID());
 					}
 #endif
 					continue;
@@ -4191,7 +4197,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 					if (started) {
 						LOG( "match category exists, skipping " );
 					}
-					LOG( "%s::start(%s) <%d>\n", inst->getName(),
+					LOG( "%s[0x%qx]::start(%s) <%d>\n", inst->getName(), inst->getRegistryEntryID(),
 					    getName(), inst->getRetainCount());
 				}
 #endif
@@ -4221,7 +4227,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 						started = startCandidate( inst );
 #if IOMATCHDEBUG
 						if ((debugFlags & kIOLogStart) && (false == started)) {
-							LOG( "%s::start(%s) <%d> failed\n", inst->getName(), getName(),
+							LOG( "%s[0x%qx]::start(%s[0x%qx]) <%d> failed\n", inst->getName(), inst->getRegistryEntryID(), getName(), getRegistryEntryID(),
 							    inst->getRetainCount());
 						}
 #endif
@@ -4593,9 +4599,14 @@ IOServicePH::matchingEnd(IOService * service)
 	serverAck(NULL);
 }
 
-TUNABLE(uint32_t, dk_shutdown_timeout_ms, "dk_shutdown_timeout_ms", 5000);
+TUNABLE(uint32_t, dk_shutdown_timeout_ms, "dk_shutdown_timeout_ms", 30000);
 TUNABLE(bool, dk_panic_on_shutdown_hang, "dk_panic_on_shutdown_hang", false);
-TUNABLE(bool, dk_panic_on_setpowerstate_hang, "dk_panic_on_setpowerstate_hang", false);
+#if DEVELOPMENT || DEBUG
+#define DK_SETPOWERSTATE_HANG true
+#else
+#define DK_SETPOWERSTATE_HANG false
+#endif
+TUNABLE(bool, dk_panic_on_setpowerstate_hang, "dk_panic_on_setpowerstate_hang", DK_SETPOWERSTATE_HANG);
 
 void
 IOServicePH::userServerAckTimerExpired(void *, void *)
@@ -4863,6 +4874,10 @@ IOService::startCandidate( IOService * service )
 
 			sym = OSSymbol::withString(serverName);
 			bool reuse = service->propertyExists(gIOUserServerOneProcessKey);
+			bool reuseRequired = false;
+			if (propertyExists(gIOUserServerNameKey)) {
+				reuseRequired = reuse && service->propertyHasValue(gIOUserServerNameKey, getProperty(gIOUserServerNameKey));
+			}
 			serverDUI = OSDynamicCast(OSData, service->getProperty(kOSBundleDextUniqueIdentifierKey));
 			userServer = IOUserServer::launchUserServer(bundleID, sym, serverTag, reuse, &token, serverDUI);
 			OSSafeReleaseNULL(sym);
@@ -4870,7 +4885,7 @@ IOService::startCandidate( IOService * service )
 			OSSafeReleaseNULL(serverName);
 			if (userServer) {
 				DKLOG(DKS " using existing server " DKS "\n", DKN(service), DKN(userServer));
-			} else if (token != NULL) {
+			} else if (!reuseRequired && token != NULL) {
 				const OSSymbol * tokenServerName = token->copyServerName();
 				OSNumber * tokenServerTag = token->copyServerTag();
 				assert(tokenServerName && tokenServerTag);
@@ -4878,6 +4893,8 @@ IOService::startCandidate( IOService * service )
 				userServer = __WAITING_FOR_USER_SERVER__(token);
 				OSSafeReleaseNULL(tokenServerName);
 				OSSafeReleaseNULL(tokenServerTag);
+			} else if (reuseRequired) {
+				DKLOG(DKS " failed to reuse server\n", DKN(service));
 			} else {
 				DKLOG(DKS " failed to launch server\n", DKN(service));
 			}
@@ -4959,7 +4976,7 @@ IOService::startCandidate( IOService * service )
 			SUB_ABSOLUTETIME(&endTime, &startTime);
 			absolutetime_to_nanoseconds(endTime, &nano);
 			if (nano > 500000000ULL) {
-				IOLog("%s::start took %ld ms\n", service->getName(), (long)(UInt32)(nano / 1000000ULL));
+				IOLog("%s[0x%qx]::start took %ld ms\n", service->getName(), service->getRegistryEntryID(), (long)(UInt32)(nano / 1000000ULL));
 			}
 		}
 	}
@@ -5592,7 +5609,7 @@ IOReturn
 IOService::waitForState( UInt32 mask, UInt32 value,
     uint64_t timeout )
 {
-	bool            wait;
+	bool            wait, done;
 	int             waitResult = THREAD_AWAKENED;
 	bool            computeDeadline = true;
 	AbsoluteTime    abstime;
@@ -5600,7 +5617,8 @@ IOService::waitForState( UInt32 mask, UInt32 value,
 	do {
 		lockForArbitration();
 		IOLockLock( gIOServiceBusyLock );
-		wait = (value != (__state[1] & mask));
+		done = (value == (__state[1] & mask));
+		wait = (waitResult != THREAD_TIMED_OUT) && !done;
 		if (wait) {
 			__state[1] |= kIOServiceBusyWaiterState;
 			unlockForArbitration();
@@ -5622,12 +5640,12 @@ IOService::waitForState( UInt32 mask, UInt32 value,
 		if (wait) {
 			waitResult = thread_block(THREAD_CONTINUE_NULL);
 		}
-	} while (wait && (waitResult != THREAD_TIMED_OUT));
+	} while (wait);
 
-	if (waitResult == THREAD_TIMED_OUT) {
-		return kIOReturnTimeout;
-	} else {
+	if (done) {
 		return kIOReturnSuccess;
+	} else {
+		return kIOReturnTimeout;
 	}
 }
 
@@ -5727,7 +5745,7 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 						}
 #if defined(XNU_TARGET_OS_OSX)
 						OSObject * prop;
-						if ((prop = next->copyProperty(kIOServiceBusyTimeoutExtensionsKey))) {
+						if ((prop = next->copyProperty(kIOServiceBusyTimeoutExtensionsKey, gIOServicePlane))) {
 							OSNumber * num;
 							uint32_t   value;
 							if ((num = OSDynamicCast(OSNumber, prop))) {

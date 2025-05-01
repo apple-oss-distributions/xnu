@@ -75,6 +75,7 @@
 #include <sys/uio_internal.h>
 #include <libkern/libkern.h>
 #include <machine/machine_routines.h>
+#include <machine/smp.h>
 
 #include <sys/ubc_internal.h>
 #include <vm/vnode_pager.h>
@@ -343,12 +344,18 @@ static int verify_in_flight = 0;
 
 #if defined(XNU_TARGET_OS_IOS)
 #define NUM_DEFAULT_THREADS 2
+#elif defined(XNU_TARGET_OS_OSX)
+#define NUM_DEFAULT_THREADS 4
 #else
 #define NUM_DEFAULT_THREADS 0
 #endif
 
 static TUNABLE(uint32_t, num_verify_threads, "num_verify_threads", NUM_DEFAULT_THREADS);
 static uint32_t cluster_verify_threads = 0; /* will be launched as needed upto num_verify_threads */
+
+#if __AMP__
+static TUNABLE(uint32_t, ecore_verify_threads, "ecore_verify_threads", false);
+#endif /* __AMP__ */
 
 static void
 cluster_verify_init(void)
@@ -804,6 +811,72 @@ do_commit:
 	}
 }
 
+static void
+cluster_iodone_verify_continue(void)
+{
+	lck_mtx_lock_spin(&cl_transaction_mtxp);
+	for (;;) {
+		struct verify_buf *vb = TAILQ_FIRST(&verify_work_head);
+
+		if (!vb) {
+			assert_wait(&verify_work_head, (THREAD_UNINT));
+			break;
+		}
+		buf_t cbp = vb->vb_cbp;
+		void* callback_arg = vb->vb_callback_arg;
+
+		TAILQ_REMOVE(&verify_work_head, vb, vb_entry);
+		vb->vb_cbp = NULL;
+		vb->vb_callback_arg = NULL;
+		vb->vb_whichq = 0;
+		TAILQ_INSERT_TAIL(&verify_free_head, vb, vb_entry);
+		lck_mtx_unlock(&cl_transaction_mtxp);
+
+		(void)cluster_iodone_finish(cbp, callback_arg);
+		cbp = NULL;
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+	}
+	lck_mtx_unlock(&cl_transaction_mtxp);
+	thread_block((thread_continue_t)cluster_iodone_verify_continue);
+	/* NOT REACHED */
+}
+
+static void
+cluster_verify_thread(void)
+{
+	thread_t self = current_thread();
+
+	thread_set_thread_name(self, "cluster_verify_thread");
+#if __AMP__
+	if (ecore_verify_threads) {
+		thread_soft_bind_cluster_type(self, 'E');
+	}
+#endif /* __AMP__ */
+#if !defined(__x86_64__)
+	thread_group_join_io_storage();
+#endif /* __x86_64__ */
+	cluster_iodone_verify_continue();
+	/* NOT REACHED */
+}
+
+static bool
+enqueue_buf_for_verify(buf_t cbp, void *callback_arg)
+{
+	struct verify_buf *vb;
+
+	vb = TAILQ_FIRST(&verify_free_head);
+	if (vb) {
+		TAILQ_REMOVE(&verify_free_head, vb, vb_entry);
+		vb->vb_cbp = cbp;
+		vb->vb_callback_arg = callback_arg;
+		vb->vb_whichq = 1;
+		TAILQ_INSERT_TAIL(&verify_work_head, vb, vb_entry);
+		return true;
+	} else {
+		return false;
+	}
+}
+
 static int
 cluster_ioerror(upl_t upl, int upl_offset, int abort_size, int error, int io_flags, vnode_t vp)
 {
@@ -843,6 +916,85 @@ cluster_ioerror(upl_t upl, int upl_offset, int abort_size, int error, int io_fla
 		ubc_upl_abort_range(upl, upl_offset, abort_size, upl_abort_code);
 	}
 	return upl_abort_code;
+}
+
+
+static int
+cluster_iodone(buf_t bp, void *callback_arg)
+{
+	buf_t   cbp;
+	buf_t   cbp_head;
+	int     error = 0;
+	boolean_t       transaction_complete = FALSE;
+	bool async;
+
+	__IGNORE_WCASTALIGN(cbp_head = (buf_t)(bp->b_trans_head));
+
+	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_START,
+	    cbp_head, bp->b_lblkno, bp->b_bcount, bp->b_flags, 0);
+
+	async = cluster_verify_threads &&
+	    (os_atomic_load(&cbp_head->b_attr.ba_flags, acquire) & BA_ASYNC_VERIFY);
+
+	assert(!async || cbp_head->b_attr.ba_verify_ctx);
+
+	if (cbp_head->b_trans_next || !(cbp_head->b_flags & B_EOT)) {
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+
+		bp->b_flags |= B_TDONE;
+
+		for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
+			/*
+			 * all I/O requests that are part of this transaction
+			 * have to complete before we can process it
+			 */
+			if (!(cbp->b_flags & B_TDONE)) {
+				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+
+				lck_mtx_unlock(&cl_transaction_mtxp);
+
+				return 0;
+			}
+
+			if (cbp->b_trans_next == CLUSTER_IO_WAITING) {
+				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+
+				lck_mtx_unlock(&cl_transaction_mtxp);
+				wakeup(cbp);
+
+				return 0;
+			}
+
+			if (cbp->b_flags & B_EOT) {
+				transaction_complete = TRUE;
+
+				if (async) {
+					async = enqueue_buf_for_verify(cbp_head, callback_arg);
+				}
+			}
+		}
+		lck_mtx_unlock(&cl_transaction_mtxp);
+
+		if (transaction_complete == FALSE) {
+			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+			    cbp_head, 0, 0, 0, 0);
+			return 0;
+		}
+	} else if (async) {
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+		async = enqueue_buf_for_verify(cbp_head, callback_arg);
+		lck_mtx_unlock(&cl_transaction_mtxp);
+	}
+
+	if (async) {
+		wakeup(&verify_work_head);
+	} else {
+		error = cluster_iodone_finish(cbp_head, callback_arg);
+	}
+
+	return error;
 }
 
 static int
@@ -1059,143 +1211,6 @@ cluster_iodone_finish(buf_t cbp_head, void *callback_arg)
 	}
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
 	    upl, upl_offset - pg_offset, commit_size, (error << 24) | upl_flags, 0);
-
-	return error;
-}
-
-static void
-cluster_iodone_verify_continue(void)
-{
-	lck_mtx_lock_spin(&cl_transaction_mtxp);
-	for (;;) {
-		struct verify_buf *vb = TAILQ_FIRST(&verify_work_head);
-
-		if (!vb) {
-			assert_wait(&verify_work_head, (THREAD_UNINT));
-			break;
-		}
-		buf_t cbp = vb->vb_cbp;
-		void* callback_arg = vb->vb_callback_arg;
-
-		TAILQ_REMOVE(&verify_work_head, vb, vb_entry);
-		vb->vb_cbp = NULL;
-		vb->vb_callback_arg = NULL;
-		vb->vb_whichq = 0;
-		TAILQ_INSERT_TAIL(&verify_free_head, vb, vb_entry);
-		lck_mtx_unlock(&cl_transaction_mtxp);
-
-		(void)cluster_iodone_finish(cbp, callback_arg);
-		cbp = NULL;
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-	}
-	lck_mtx_unlock(&cl_transaction_mtxp);
-	thread_block((thread_continue_t)cluster_iodone_verify_continue);
-	/* NOT REACHED */
-}
-
-static void
-cluster_verify_thread(void)
-{
-	thread_set_thread_name(current_thread(), "cluster_verify_thread");
-#if !defined(__x86_64__)
-	thread_group_join_io_storage();
-#endif /* __x86_64__ */
-	cluster_iodone_verify_continue();
-	/* NOT REACHED */
-}
-
-static bool
-enqueue_buf_for_verify(buf_t cbp, void *callback_arg)
-{
-	struct verify_buf *vb;
-
-	vb = TAILQ_FIRST(&verify_free_head);
-	if (vb) {
-		TAILQ_REMOVE(&verify_free_head, vb, vb_entry);
-		vb->vb_cbp = cbp;
-		vb->vb_callback_arg = callback_arg;
-		vb->vb_whichq = 1;
-		TAILQ_INSERT_TAIL(&verify_work_head, vb, vb_entry);
-		return true;
-	} else {
-		return false;
-	}
-}
-
-static int
-cluster_iodone(buf_t bp, void *callback_arg)
-{
-	buf_t   cbp;
-	buf_t   cbp_head;
-	int     error = 0;
-	boolean_t       transaction_complete = FALSE;
-	bool async;
-
-	__IGNORE_WCASTALIGN(cbp_head = (buf_t)(bp->b_trans_head));
-
-	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_START,
-	    cbp_head, bp->b_lblkno, bp->b_bcount, bp->b_flags, 0);
-
-	async = cluster_verify_threads &&
-	    (os_atomic_load(&cbp_head->b_attr.ba_flags, acquire) & BA_ASYNC_VERIFY);
-
-	assert(!async || cbp_head->b_attr.ba_verify_ctx);
-
-	if (cbp_head->b_trans_next || !(cbp_head->b_flags & B_EOT)) {
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-
-		bp->b_flags |= B_TDONE;
-
-		for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
-			/*
-			 * all I/O requests that are part of this transaction
-			 * have to complete before we can process it
-			 */
-			if (!(cbp->b_flags & B_TDONE)) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
-
-				lck_mtx_unlock(&cl_transaction_mtxp);
-
-				return 0;
-			}
-
-			if (cbp->b_trans_next == CLUSTER_IO_WAITING) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
-
-				lck_mtx_unlock(&cl_transaction_mtxp);
-				wakeup(cbp);
-
-				return 0;
-			}
-
-			if (cbp->b_flags & B_EOT) {
-				transaction_complete = TRUE;
-
-				if (async) {
-					async = enqueue_buf_for_verify(cbp_head, callback_arg);
-				}
-			}
-		}
-		lck_mtx_unlock(&cl_transaction_mtxp);
-
-		if (transaction_complete == FALSE) {
-			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-			    cbp_head, 0, 0, 0, 0);
-			return 0;
-		}
-	} else if (async) {
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-		async = enqueue_buf_for_verify(cbp_head, callback_arg);
-		lck_mtx_unlock(&cl_transaction_mtxp);
-	}
-
-	if (async) {
-		wakeup(&verify_work_head);
-	} else {
-		error = cluster_iodone_finish(cbp_head, callback_arg);
-	}
 
 	return error;
 }
@@ -1429,6 +1444,7 @@ cluster_complete_transaction(buf_t *cbp_head, void *callback_arg, int *retval, i
 	*cbp_head = (buf_t)NULL;
 }
 
+uint64_t cluster_direct_write_wired = 0;
 
 static int
 cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int non_rounded_size,
@@ -1457,54 +1473,17 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 	vm_offset_t upl_end_offset;
 	boolean_t   need_EOT = FALSE;
 
-	if (real_bp) {
-		/*
-		 * we currently don't support buffers larger than a page
-		 */
-		if (non_rounded_size > PAGE_SIZE) {
-			panic("%s(): Called with real buffer of size %d bytes which "
-			    "is greater than the maximum allowed size of "
-			    "%d bytes (the system PAGE_SIZE).\n",
-			    __FUNCTION__, non_rounded_size, PAGE_SIZE);
-		}
+	/*
+	 * we currently don't support buffers larger than a page
+	 */
+	if (real_bp && non_rounded_size > PAGE_SIZE) {
+		panic("%s(): Called with real buffer of size %d bytes which "
+		    "is greater than the maximum allowed size of "
+		    "%d bytes (the system PAGE_SIZE).\n",
+		    __FUNCTION__, non_rounded_size, PAGE_SIZE);
 	}
 
 	mp = vp->v_mount;
-
-	if ((flags & CL_READ) && mp && !(mp->mnt_kern_flag & MNTK_VIRTUALDEV)) {
-		if ((flags & CL_PAGEIN) || cluster_verify_threads) {
-			error = VNOP_VERIFY(vp, f_offset, NULL, 0, &verify_block_size, NULL, VNODE_VERIFY_DEFAULT, NULL);
-			if (error) {
-				if (error != ENOTSUP) {
-					return error;
-				}
-				error = 0;
-			}
-			if (verify_block_size != PAGE_SIZE) {
-				verify_block_size = 0;
-			}
-		}
-
-		if (verify_block_size && real_bp) {
-			panic("%s(): Called with real buffer and needs verification ",
-			    __FUNCTION__);
-		}
-
-		/*
-		 * For direct io, only allow cluster verification if f_offset
-		 * and upl_offset are both page aligned. They will always be
-		 * page aligned for pageins and cached reads. If they are not
-		 * page aligned, leave it to the filesystem to do verification
-		 * Furthermore, the size also has to be aligned to page size.
-		 * Strictly speaking the alignments need to be for verify_block_size
-		 * but since the only verify_block_size that is currently supported
-		 * is page size, we check against page alignment.
-		 */
-		if (verify_block_size && (flags & (CL_DEV_MEMORY | CL_DIRECT_IO)) &&
-		    ((f_offset & PAGE_MASK) || (upl_offset & PAGE_MASK) || (non_rounded_size & PAGE_MASK))) {
-			verify_block_size = 0;
-		}
-	}
 
 	/*
 	 * we don't want to do any funny rounding of the size for IO requests
@@ -1555,6 +1534,33 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 
 		max_iosize  = mp->mnt_maxreadcnt;
 		max_vectors = mp->mnt_segreadcnt;
+
+		/* See if we can do cluster verification (pageins and aligned reads) */
+		if ((flags & CL_PAGEIN || cluster_verify_threads) &&
+		    !(mp->mnt_kern_flag & MNTK_VIRTUALDEV) &&
+		    (VNOP_VERIFY(vp, f_offset, NULL, 0, &verify_block_size, NULL, VNODE_VERIFY_DEFAULT, NULL) == 0) &&
+		    verify_block_size) {
+			if (verify_block_size != PAGE_SIZE) {
+				verify_block_size = 0;
+			}
+			if (real_bp && verify_block_size) {
+				panic("%s(): Called with real buffer and needs verification ",
+				    __FUNCTION__);
+			}
+			/*
+			 * For reads, only allow cluster verification if f_offset
+			 * and upl_offset are both page aligned. If they are not
+			 * page aligned, leave it to the filesystem to do verification
+			 * Furthermore, the size also has to be aligned to page size.
+			 * Strictly speaking the alignments need to be for verify_block_size
+			 * but since the only verify_block_size that is currently supported
+			 * is page size, we check against page alignment.
+			 */
+			if (verify_block_size && !(flags & CL_PAGEIN) &&
+			    ((f_offset & PAGE_MASK) || (upl_offset & PAGE_MASK) || (non_rounded_size & PAGE_MASK))) {
+				verify_block_size = 0;
+			}
+		}
 	} else {
 		io_flags = B_WRITE;
 		bmap_flags = VNODE_WRITE;
@@ -1700,7 +1706,24 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		 */
 create_cached_upl:
 		ubc_create_upl_kernel(vp, cached_upl_f_offset, cached_upl_size, &cached_upl,
-		    &cached_pl, UPL_SET_LITE, VM_KERN_MEMORY_FILE);
+		    &cached_pl, UPL_SET_LITE | UPL_WILL_MODIFY, VM_KERN_MEMORY_FILE);
+		if (upl_has_wired_pages(cached_upl)) {
+			/*
+			 * Pages in this UPL would contain stale data after our direct write
+			 * (which is intended to overwrite these pages on disk).  The UPL is
+			 * just holding these pages "busy" to synchronize with any other I/O
+			 * or mmap() access and we have to dump these pages when the direct
+			 * write is done.
+			 * But we can't do that for wired pages, so let's release this UPL
+			 * and fall back to the "cached" path.
+			 */
+//			printf("*******  FBDP %s:%d vp %p offset 0x%llx size 0x%llx - switching from direct to cached write\n", __FUNCTION__, __LINE__, vp, cached_upl_f_offset, (uint64_t)cached_upl_size);
+			ubc_upl_abort_range(cached_upl, 0, cached_upl_size, UPL_ABORT_FREE_ON_EMPTY);
+			cached_upl = NULL;
+			cached_pl = NULL;
+			cluster_direct_write_wired++;
+			return ENOTSUP;
+		}
 
 		/*
 		 * If we are not overwriting the first and last pages completely
@@ -2766,7 +2789,7 @@ cluster_write_ext(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, off_t
 	int             zflags;
 	int             bflag;
 	int             write_type = IO_COPY;
-	u_int32_t       write_length;
+	u_int32_t       write_length = 0, saved_write_length;
 	uint32_t        min_direct_size = MIN_DIRECT_WRITE_SIZE;
 
 	flags = xflags;
@@ -2892,7 +2915,15 @@ cluster_write_ext(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, off_t
 			/*
 			 * cluster_write_direct is never called with IO_TAILZEROFILL || IO_HEADZEROFILL
 			 */
+			saved_write_length = write_length;
 			retval = cluster_write_direct(vp, uio, oldEOF, newEOF, &write_type, &write_length, flags, callback, callback_arg, min_direct_size);
+			if (retval == ENOTSUP) {
+				/* direct I/O didn't work; retry with cached I/O */
+//				printf("*******  FBDP %s:%d ENOTSUP cnt %d resid 0x%llx offset 0x%llx write_length 0x%x -> 0x%x\n", __FUNCTION__, __LINE__, uio_iovcnt(uio), (uint64_t) uio_resid(uio), uio_offset(uio), write_length, saved_write_length);
+				write_length = saved_write_length;
+				write_type = IO_COPY;
+				retval = 0;
+			}
 			break;
 
 		case IO_UNKNOWN:
@@ -2954,6 +2985,7 @@ cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, in
 	off_t            v_upl_uio_offset = 0;
 	int              vector_upl_index = 0;
 	upl_t            vector_upl = NULL;
+	uio_t            snapshot_uio = NULL;
 
 	uint32_t         io_align_mask;
 
@@ -3012,6 +3044,15 @@ cluster_write_direct(vnode_t vp, struct uio *uio, off_t oldEOF, off_t newEOF, in
 		assert((min_io_size & (min_io_size - 1)) == 0);
 		io_align_mask = min_io_size - 1;
 		io_flag |= CL_DIRECT_IO_FSBLKSZ;
+	}
+
+	if (uio_iovcnt(uio) > 1) {
+		/* vector uio -> take a snapshot so we can rollback if needed */
+		if (snapshot_uio) {
+			uio_free(snapshot_uio);
+			snapshot_uio = NULL;
+		}
+		snapshot_uio = uio_duplicate(uio);
 	}
 
 next_dwrite:
@@ -3088,6 +3129,9 @@ next_dwrite:
 			 */
 			if (vector_upl_index) {
 				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
+				if (retval == ENOTSUP) {
+					goto enotsup;
+				}
 				reset_vector_run_state();
 			}
 
@@ -3179,6 +3223,7 @@ next_dwrite:
 
 		if (io_size == 0) {
 			ubc_upl_abort(upl, 0);
+			upl = NULL;
 			/*
 			 * we may have already spun some portion of this request
 			 * off as async requests... we need to wait for the I/O
@@ -3227,6 +3272,7 @@ next_dwrite:
 			 * to complete before returning the error to the caller
 			 */
 			ubc_upl_abort(upl, 0);
+			upl = NULL;
 
 			goto wait_for_dwrites;
 		}
@@ -3252,8 +3298,39 @@ next_dwrite:
 
 			if (issueVectorUPL || vector_upl_index == vector_upl_max_upls(vector_upl) || vector_upl_size >= max_vector_size) {
 				retval = vector_cluster_io(vp, vector_upl, vector_upl_offset, v_upl_uio_offset, vector_upl_iosize, io_flag, (buf_t)NULL, &iostate, callback, callback_arg);
-				reset_vector_run_state();
+				if (retval != ENOTSUP) {
+					reset_vector_run_state();
+				}
 			}
+		}
+		if (retval == ENOTSUP) {
+enotsup:
+			/*
+			 * Can't do direct I/O.  Try again with cached I/O.
+			 */
+//			printf("*******  FBDP %s:%d ENOTSUP io_size 0%x resid 0x%llx\n", __FUNCTION__, __LINE__, io_size, uio_resid(uio));
+			io_size = 0;
+			if (snapshot_uio) {
+				int restore_error;
+
+				/*
+				 * We've been collecting UPLs for this vector UPL and
+				 * moving the uio along.  We need to undo that so that
+				 * the I/O can continue where it actually stopped...
+				 */
+				restore_error = uio_restore(uio, snapshot_uio);
+				assert(!restore_error);
+				uio_free(snapshot_uio);
+				snapshot_uio = NULL;
+			}
+			if (vector_upl_index) {
+				ubc_upl_abort(vector_upl, 0);
+				vector_upl = NULL;
+			} else {
+				ubc_upl_abort(upl, 0);
+				upl = NULL;
+			}
+			goto wait_for_dwrites;
 		}
 
 		/*
@@ -3330,6 +3407,12 @@ wait_for_dwrites:
 
 		*write_type = IO_UNKNOWN;
 	}
+
+	if (snapshot_uio) {
+		uio_free(snapshot_uio);
+		snapshot_uio = NULL;
+	}
+
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 75)) | DBG_FUNC_END,
 	    (int)uio->uio_offset, io_req_size, retval, 4, 0);
 
@@ -5920,7 +6003,7 @@ cluster_io_type(struct uio *uio, int *io_type, u_int32_t *io_length, u_int32_t m
 	 */
 	uio_update(uio, (user_size_t)0);
 
-	iov_len = uio_curriovlen(uio);
+	iov_len = MIN(uio_curriovlen(uio), uio_resid(uio));
 
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 94)) | DBG_FUNC_START, uio, (int)iov_len, 0, 0, 0);
 
@@ -7094,10 +7177,16 @@ cluster_copy_upl_data(struct uio *uio, upl_t upl, int upl_offset, int *io_resid)
 	dirty_count = 0;
 	while (xsize && retval == 0) {
 		addr64_t  paddr;
+		ppnum_t pn = upl_phys_page(pl, pg_index);
 
-		paddr = ((addr64_t)upl_phys_page(pl, pg_index) << PAGE_SHIFT) + pg_offset;
+		paddr = ((addr64_t)pn << PAGE_SHIFT) + pg_offset;
 		if ((uio->uio_rw == UIO_WRITE) && (upl_dirty_page(pl, pg_index) == FALSE)) {
 			dirty_count++;
+		}
+
+		/* such phyiscal pages should never be restricted pages */
+		if (pmap_is_page_restricted(pn)) {
+			panic("%s: cannot uiomove64 into a restricted page", __func__);
 		}
 
 		retval = uiomove64(paddr, csize, uio);

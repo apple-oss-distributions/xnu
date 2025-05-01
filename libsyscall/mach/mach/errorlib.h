@@ -77,7 +77,6 @@
 #define SERV_ENV_MOD            (err_server|err_sub(1))
 #define SERV_EXECD_MOD          (err_server|err_sub(2))
 
-
 #define NO_SUCH_ERROR           "unknown error code"
 
 struct error_subsystem {

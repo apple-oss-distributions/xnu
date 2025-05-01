@@ -245,6 +245,12 @@ struct inpcb {
 	struct inp_necp_attributes inp_necp_attributes;
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
+
+	uint32_t inp_bind_in_progress_waiters;
+	thread_t inp_bind_in_progress_last_waiter_thread;
+
+	thread_t inp_bind_in_progress_thread;
+
 	necp_client_flow_cb necp_cb;
 	size_t inp_resolver_signature_length;
 	uint8_t *inp_resolver_signature __sized_by(inp_resolver_signature_length);
@@ -856,6 +862,9 @@ extern struct inpcb *in_pcblookup_local_and_cleanup(struct inpcbinfo *,
     struct in_addr, u_int, int);
 extern struct inpcb *in_pcblookup_hash(struct inpcbinfo *, struct in_addr,
     u_int, struct in_addr, u_int, int, struct ifnet *);
+extern struct inpcb *in_pcblookup_hash_try(struct inpcbinfo *pcbinfo,
+    struct in_addr faddr, u_int fport_arg, struct in_addr laddr,
+    u_int lport_arg, int wildcard, struct ifnet *ifp);
 extern int in_pcblookup_hash_exists(struct inpcbinfo *, struct in_addr,
     u_int, struct in_addr, u_int, int, uid_t *, gid_t *, struct ifnet *);
 extern void in_pcbnotifyall(struct inpcbinfo *, struct in_addr, int,
@@ -926,6 +935,8 @@ extern void inp_set_activity_bitmap(struct inpcb *inp);
 extern void inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *b);
 extern void inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep);
 extern void inp_copy_last_owner(struct socket *so, struct socket *head);
+extern void inp_enter_bind_in_progress(struct socket *so);
+extern void inp_exit_bind_in_progress(struct socket *so);
 #if SKYWALK
 extern void inp_update_netns_flags(struct socket *so);
 #endif /* SKYWALK */

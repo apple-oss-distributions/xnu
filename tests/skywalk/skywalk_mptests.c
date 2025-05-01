@@ -86,7 +86,6 @@
 	X(xferudppingllink, "UDP ping-pong over fake ethernet pair in llink mode") \
 	X(xferudppingllink_wmm, "UDP ping-pong over fake ethernet pair in llink & wmm mode") \
 	X(xferudppingllink_multi, "UDP ping-pong over fake ethernet pair in multi llink mode") \
-	X(xferudppingllink_multi_combined, "UDP ping-pong over fake ethernet pair in multi llink mode while switching between combined and separate mode") \
 	X(xferparentchildflow, "flowswitch parent child flows test") \
 	X(xferparentchildflown, "flowswitch parent child flows on native fake ethernet interface test") \
 	X(xferparentchildflow_offset_400, "flowswitch parent child flows test with demux offset 400") \

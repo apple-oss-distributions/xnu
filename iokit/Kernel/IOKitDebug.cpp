@@ -1031,6 +1031,7 @@ IOTrackingLeakScan(void * refcon)
 			continue;
 		}
 
+		vm_memtag_disable_checking();
 		for (ptrIdx = 0; ptrIdx < (page_size / sizeof(uintptr_t)); ptrIdx++) {
 			ptr = ((uintptr_t *)vphysaddr)[ptrIdx];
 #if defined(HAS_APPLE_PAC)
@@ -1076,6 +1077,7 @@ IOTrackingLeakScan(void * refcon)
 				// else move left
 			}
 		}
+		vm_memtag_enable_checking();
 		ref->bytes += page_size;
 	}
 

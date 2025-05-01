@@ -30,7 +30,8 @@
 #include <arm64/proc_reg.h>
 #include <libkern/section_keywords.h>
 
-SECURITY_READ_ONLY_LATE(unsigned int) sme_version = 0;
+SECURITY_READ_ONLY_LATE(arm_sme_version_t) sme_version = 0;
+SECURITY_READ_ONLY_LATE(int) sme_max_svl_b = 0;
 
 /**
  * Returns the version of SME supported on this platform.
@@ -40,9 +41,9 @@ SECURITY_READ_ONLY_LATE(unsigned int) sme_version = 0;
  * indicates actual processor support.
  *
  * @return the highest SME ISA version supported on this platform
- * (where 0 indicates no SME support)
+ * (where ARM_SME_UNSUPPORTED or 0 indicates no SME support)
  */
-unsigned int
+arm_sme_version_t
 arm_sme_version(void)
 {
 	return sme_version;
@@ -53,12 +54,41 @@ arm_sme_version(void)
 #include <kern/cpu_data.h>
 #include <kern/thread.h>
 
+static arm_sme_version_t
+arm_sme_probe_version(void)
+{
+	uint64_t aa64pfr1_el1 = __builtin_arm_rsr64("ID_AA64PFR1_EL1");
+	uint64_t aa64pfr1_el1_sme = aa64pfr1_el1 & ID_AA64PFR1_EL1_SME_MASK;
+
+	if (aa64pfr1_el1_sme < ID_AA64PFR1_EL1_SME_EN) {
+		return ARM_SME_UNSUPPORTED;
+	}
+
+	uint64_t aa64smfr0_el1 = __builtin_arm_rsr64("ID_AA64SMFR0_EL1");
+	uint64_t aa64smfr0_el1_smever = aa64smfr0_el1 & ID_AA64SMFR0_EL1_SMEver_MASK;
+
+	switch (aa64smfr0_el1_smever) {
+	case ID_AA64SMFR0_EL1_SMEver_SME:
+		return ARM_FEAT_SME;
+
+	case ID_AA64SMFR0_EL1_SMEver_SME2:
+		return ARM_FEAT_SME2;
+
+	default:
+		return ARM_FEAT_SME2;
+	}
+}
+
+#if !APPLEVIRTUALPLATFORM
+__assert_only
+#endif
+static const unsigned int SME_MAX_SVL_B = 64;
+
 void
 arm_sme_init(bool is_boot_cpu)
 {
 	if (is_boot_cpu) {
-		uint64_t aa64pfr1_el1 = __builtin_arm_rsr64("ID_AA64PFR1_EL1");
-		sme_version = (aa64pfr1_el1 & ID_AA64PFR1_EL1_SME_MASK) >> ID_AA64PFR1_EL1_SME_OFFSET;
+		sme_version = arm_sme_probe_version();
 	}
 
 	if (!sme_version) {
@@ -72,23 +102,23 @@ arm_sme_init(bool is_boot_cpu)
 	__builtin_arm_wsr64("CPACR_EL1", cpacr_el1);
 	__builtin_arm_isb(ISB_SY);
 
-	/* set vector length to max supported by hardware */
+#if APPLEVIRTUALPLATFORM
+	uint64_t smcr_el1 = SMCR_EL1_LEN((SME_MAX_SVL_B / 16) - 1);
+#else
 	uint64_t smcr_el1 = SMCR_EL1_LEN(~0);
-#ifdef APPLEH16
-	/*
-	 * fastsim bug: rdar://96247932 (SME streaming vector length seems to be uncapped)
-	 *
-	 * SME saved-state with the max-size SVL is too large to use with the
-	 * zone allocator.  H16G hardware is expected to cap SVL at 64 bytes.
-	 */
-	const unsigned int H16_SME_SVL_B = 64;
-	smcr_el1 = SMCR_EL1_LEN((H16_SME_SVL_B / 16) - 1);
 #endif
 #if HAS_ARM_FEAT_SME2
 	/* enable ZT0 access */
 	smcr_el1 |= SMCR_EL1_EZT0;
 #endif
+	/*
+	 * Request the highest possible SVL and read back the actual SVL.
+	 * ARM guarantees these accesses will occur in program order.
+	 */
 	__builtin_arm_wsr64("SMCR_EL1", smcr_el1);
+	if (is_boot_cpu) {
+		sme_max_svl_b = arm_sme_svl_b();
+	}
 
 	/* disable SME prioritization */
 	const uint64_t smpri_el1 = SMPRI_EL1_PRIORITY(0);
@@ -114,7 +144,7 @@ arm_sme_svl_b(void)
 
 	assert(__builtin_popcountll(ret) == 1);
 	assert(ret >= 16);
-	assert(ret <= 256);
+	assert(ret <= SME_MAX_SVL_B);
 
 	return (uint16_t)ret;
 }

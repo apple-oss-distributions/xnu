@@ -313,6 +313,8 @@ struct nx_flowswitch {
 
 	fsw_tso_mode_t          fsw_tso_mode;
 	uint32_t                fsw_tso_sw_mtu;
+	uint32_t                fsw_tso_hw_v4_mtu;
+	uint32_t                fsw_tso_hw_v6_mtu;
 
 #if (DEVELOPMENT || DEBUG)
 	uint32_t                fsw_rps_nthreads;

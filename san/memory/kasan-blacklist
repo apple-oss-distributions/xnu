@@ -1,3 +1,5 @@
+#!special-case-list-v1
+# rdar://139815990
 # This file declares the list of source files that should be exempt from
 # AddressSanitizer instrumentation. Usually, this is because a file is used by
 # the AddressSanitizer runtime itself, or because the code executes before
@@ -52,6 +54,9 @@ fun:fbt_perfCallback
 # Exclude leak detection code that reads all memory
 fun:_ZL18IOTrackingLeakScanPv
 
+# Exclude static_if dependencies
+src:./osfmk/*/static_if.c
+src:./osfmk/kern/static_if_common.c
 # Exclude KASAN dependencies
 src:./osfmk/kern/btlog.c
 # XXX: could this be relaxed since fakestack is reentrant?

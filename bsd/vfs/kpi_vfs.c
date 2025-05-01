@@ -96,6 +96,7 @@
 #include <sys/mbuf.h>
 #include <sys/syslog.h>
 #include <sys/ubc.h>
+#include <sys/ubc_internal.h>
 #include <sys/vm.h>
 #include <sys/sysctl.h>
 #include <sys/filedesc.h>
@@ -831,6 +832,22 @@ vfs_vnodecovered(mount_t mp)
 		return vp;
 	}
 }
+/*
+ * Similar to vfs_vnodecovered() except this variant doesn't block and returns
+ * NULL if the covered vnode is being reclaimed.
+ * Returns vnode with an iocount that must be released with vnode_put().
+ */
+vnode_t
+vfs_vnodecovered_noblock(mount_t mp)
+{
+	vnode_t vp = mp->mnt_vnodecovered;
+
+	if ((vp == NULL) || (vnode_getwithref_noblock(vp) != 0)) {
+		return NULL;
+	} else {
+		return vp;
+	}
+}
 
 int
 vfs_setdevvp(mount_t mp, vnode_t devvp)
@@ -1382,6 +1399,15 @@ vfs_context_skip_mtime_update(vfs_context_t ctx)
 
 	if (ut && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE)) {
 		return true;
+	}
+
+	/*
+	 * If the 'UT_SKIP_MTIME_UPDATE_IGNORE' policy is set for this thread then
+	 * we override the default behavior and ignore the process's mtime update
+	 * policy.
+	 */
+	if (ut && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE_IGNORE)) {
+		return false;
 	}
 
 	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE)) {
@@ -2286,6 +2312,12 @@ vnode_clearnoflush(vnode_t vp)
 	vnode_unlock(vp);
 }
 
+/* Get the memory object control associated with the vnode */
+memory_object_control_t
+vnode_memoryobject(vnode_t vp)
+{
+	return ubc_getobject(vp, UBC_FLAGS_NONE);
+}
 
 /* is vnode_t a blkdevice and has a FS mounted on it */
 int
@@ -2885,7 +2917,12 @@ vnode_getattr(vnode_t vp, struct vnode_attr *vap, vfs_context_t ctx)
 	/*
 	 * Default sizes.  Ordering here is important, as later defaults build on earlier ones.
 	 */
-	if (!VATTR_IS_SUPPORTED(vap, va_data_size)) {
+	if (VATTR_IS_SUPPORTED(vap, va_data_size)) {
+		/* va_data_size (uint64_t) is often assigned to off_t (int64_t), which can result in a negative size. */
+		if (vap->va_data_size > INT64_MAX) {
+			vap->va_data_size = INT64_MAX;
+		}
+	} else {
 		VATTR_RETURN(vap, va_data_size, 0);
 	}
 
@@ -3805,20 +3842,21 @@ VNOP_SETATTR(vnode_t vp, struct vnode_attr * vap, vfs_context_t ctx)
 	 * Shadow uid/gid/mod change to extended attribute file.
 	 */
 	if (_err == 0 && !NATIVE_XATTR(vp)) {
-		struct vnode_attr va;
+		struct vnode_attr *va;
 		int change = 0;
 
-		VATTR_INIT(&va);
+		va = kalloc_type(struct vnode_attr, Z_WAITOK);
+		VATTR_INIT(va);
 		if (VATTR_IS_ACTIVE(vap, va_uid)) {
-			VATTR_SET(&va, va_uid, vap->va_uid);
+			VATTR_SET(va, va_uid, vap->va_uid);
 			change = 1;
 		}
 		if (VATTR_IS_ACTIVE(vap, va_gid)) {
-			VATTR_SET(&va, va_gid, vap->va_gid);
+			VATTR_SET(va, va_gid, vap->va_gid);
 			change = 1;
 		}
 		if (VATTR_IS_ACTIVE(vap, va_mode)) {
-			VATTR_SET(&va, va_mode, vap->va_mode);
+			VATTR_SET(va, va_mode, vap->va_mode);
 			change = 1;
 		}
 		if (change) {
@@ -3828,7 +3866,7 @@ VNOP_SETATTR(vnode_t vp, struct vnode_attr * vap, vfs_context_t ctx)
 			dvp = vnode_getparent(vp);
 			vname = vnode_getname(vp);
 
-			xattrfile_setattr(dvp, vname, &va, ctx);
+			xattrfile_setattr(dvp, vname, va, ctx);
 			if (dvp != NULLVP) {
 				vnode_put(dvp);
 			}
@@ -3836,6 +3874,7 @@ VNOP_SETATTR(vnode_t vp, struct vnode_attr * vap, vfs_context_t ctx)
 				vnode_putname(vname);
 			}
 		}
+		kfree_type(struct vnode_attr, va);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
 
@@ -5254,6 +5293,7 @@ out2:
 /*
  * Shadow uid/gid/mod to a ._ AppleDouble file
  */
+__attribute__((noinline))
 static void
 xattrfile_setattr(vnode_t dvp, const char * basename, struct vnode_attr * vap,
     vfs_context_t ctx)

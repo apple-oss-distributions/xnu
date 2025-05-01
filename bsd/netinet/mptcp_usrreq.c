@@ -538,7 +538,7 @@ mptcp_getconninfo(struct mptses *mpte, sae_connid_t *cid, uint32_t *flags,
 					initial_info_set = 1;
 				}
 
-				mptcpstats_update(mptcp_ci.mptcpci_itfstats, mpts);
+				mptcpstats_update(mptcp_ci.mptcpci_itfstats, MPTCP_ITFSTATS_SIZE, mpts);
 
 				i++;
 			}
@@ -743,7 +743,7 @@ interface_info:
 			 * nor anything in the stats, return EINVAL. Because the
 			 * ifindex belongs to something that doesn't exist.
 			 */
-			index = mptcpstats_get_index_by_ifindex(mpte->mpte_itfstats, (u_short)(*cid), false);
+			index = mptcpstats_get_index_by_ifindex(mpte->mpte_itfstats, MPTCP_ITFSTATS_SIZE, (u_short)(*cid), false);
 			if (index == -1) {
 				os_log_error(mptcp_log_handle,
 				    "%s - %lx: Asking for too many ifindex: %u subcount %u, mpts? %s\n",

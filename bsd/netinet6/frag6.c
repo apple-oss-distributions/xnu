@@ -73,6 +73,7 @@
 #include <kern/queue.h>
 #include <kern/locks.h>
 
+#include <net/droptap.h>
 #include <net/if.h>
 #include <net/route.h>
 
@@ -293,6 +294,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	boolean_t drop_fragq = FALSE;
 	int local_ip6q_unfrglen;
 	u_int8_t local_ip6q_nxt;
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 
 	VERIFY(m->m_flags & M_PKTHDR);
 
@@ -353,7 +355,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		ip6stat.ip6s_fragments++;
 		ip6stat.ip6s_fragdropped++;
 		in6_ifstat_inc(dstifp, ifs6_reass_fail);
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_FRAG_NOT_ACCEPTED,
+		    NULL, 0);
 		m = NULL;
 		goto done;
 	}
@@ -474,6 +477,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 
 		q6 = ip6q_alloc();
 		if (q6 == NULL) {
+			drop_reason = DROP_REASON_IP_FRAG_TOO_MANY;
 			goto dropfrag;
 		}
 
@@ -509,6 +513,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	}
 
 	if (q6->ip6q_flags & IP6QF_DIRTY) {
+		drop_reason = DROP_REASON_IP6_FRAG_OVERLAPPING;
 		goto dropfrag;
 	}
 
@@ -613,6 +618,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 
 	ip6af = ip6af_alloc();
 	if (ip6af == NULL) {
+		drop_reason = DROP_REASON_IP_FRAG_TOO_MANY;
 		goto dropfrag;
 	}
 
@@ -637,6 +643,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	if (ecn == IPTOS_ECN_CE) {
 		if (ecn0 == IPTOS_ECN_NOTECT) {
 			ip6af_free(ip6af);
+			drop_reason = DROP_REASON_IP6_FRAG_MIXED_CE;
 			goto dropfrag;
 		}
 		if (ecn0 != IPTOS_ECN_CE) {
@@ -645,6 +652,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	}
 	if (ecn == IPTOS_ECN_NOTECT && ecn0 != IPTOS_ECN_NOTECT) {
 		ip6af_free(ip6af);
+		drop_reason = DROP_REASON_IP6_FRAG_MIXED_CE;
 		goto dropfrag;
 	}
 
@@ -678,6 +686,7 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 				 * to ignore a duplicate fragment.
 				 */
 				ip6af_free(ip6af);
+				drop_reason = DROP_REASON_IP6_FRAG_OVERLAPPING;
 				goto dropfrag;
 			}
 		} else {
@@ -742,7 +751,7 @@ insert:
 
 		/* free fragments that need to be freed */
 		if (!MBUFQ_EMPTY(&dfq6)) {
-			MBUFQ_DRAIN(&dfq6);
+			MBUFQ_DROP_AND_DRAIN(&dfq6, DROPTAP_FLAG_DIR_IN, DROP_REASON_IP6_FRAG_OVERLAPPING);
 		}
 		VERIFY(MBUFQ_EMPTY(&dfq6));
 		/*
@@ -757,7 +766,7 @@ insert:
 		 * Just empty it out.
 		 */
 		if (!MBUFQ_EMPTY(&diq6)) {
-			MBUFQ_DRAIN(&diq6);
+			MBUFQ_DROP_AND_DRAIN(&diq6, DROPTAP_FLAG_DIR_IN, DROP_REASON_IP6_FRAG_OVERLAPPING);
 		}
 		VERIFY(MBUFQ_EMPTY(&diq6));
 		/*
@@ -937,7 +946,7 @@ dropfrag:
 	frag6_sched_timeout();
 	lck_mtx_unlock(&ip6qlock);
 	in6_ifstat_inc(dstifp, ifs6_reass_fail);
-	m_freem(m);
+	m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	*mp = NULL;
 	frag6_icmp6_paramprob_error(&diq6);
 	VERIFY(MBUFQ_EMPTY(&diq6));
@@ -1129,7 +1138,7 @@ frag6_timeout(void *arg)
 
 	/* free fragments that need to be freed */
 	if (!MBUFQ_EMPTY(&dfq6)) {
-		MBUFQ_DRAIN(&dfq6);
+		MBUFQ_DROP_AND_DRAIN(&dfq6, DROPTAP_FLAG_DIR_IN, DROP_REASON_IP_FRAG_TIMEOUT);
 	}
 
 	frag6_icmp6_timeex_error(&diq6);
@@ -1177,7 +1186,7 @@ frag6_drain(void)
 
 	/* free fragments that need to be freed */
 	if (!MBUFQ_EMPTY(&dfq6)) {
-		MBUFQ_DRAIN(&dfq6);
+		MBUFQ_DROP_AND_DRAIN(&dfq6, DROPTAP_FLAG_DIR_IN, DROP_REASON_IP_FRAG_DRAINED);
 	}
 
 	frag6_icmp6_timeex_error(&diq6);

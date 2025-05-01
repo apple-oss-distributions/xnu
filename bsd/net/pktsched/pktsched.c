@@ -378,7 +378,7 @@ pktsched_free_pkt(pktsched_pkt_t *pkt)
 }
 
 void
-pktsched_drop_pkt(pktsched_pkt_t *pkt, drop_reason_t reason, const char *funcname,
+pktsched_drop_pkt(pktsched_pkt_t *pkt, struct ifnet *ifp, drop_reason_t reason, const char *funcname,
     uint16_t linenum, uint16_t flags)
 {
 	if (__probable(droptap_total_tap_count == 0)) {
@@ -399,7 +399,7 @@ pktsched_drop_pkt(pktsched_pkt_t *pkt, drop_reason_t reason, const char *funcnam
 		} else {
 			VERIFY(m->m_nextpkt != NULL);
 		}
-		m_drop_list(m, flags | DROPTAP_FLAG_DIR_OUT, reason, funcname, linenum);
+		m_drop_list(m, ifp, flags | DROPTAP_FLAG_DIR_OUT, reason, funcname, linenum);
 		break;
 	}
 #if SKYWALK
@@ -413,7 +413,7 @@ pktsched_drop_pkt(pktsched_pkt_t *pkt, drop_reason_t reason, const char *funcnam
 			VERIFY(kpkt->pkt_nextpkt != NULL);
 		}
 		droptap_output_packet(SK_PKT2PH(kpkt), reason, funcname, linenum,
-		    flags, NULL, kpkt->pkt_qum.qum_pid, NULL, -1, NULL, 0, 0);
+		    flags, ifp, kpkt->pkt_qum.qum_pid, NULL, -1, NULL, 0, 0);
 		break;
 	}
 #endif /* SKYWALK */
@@ -526,8 +526,8 @@ pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
 		if (comp_gencnt != NULL) {
 			*comp_gencnt = kp->pkt_comp_gencnt;
 		}
-		if (pkt_tx_time != NULL && (kp->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0) {
-			*pkt_tx_time = kp->pkt_com_opt->__po_pkt_tx_time;
+		if (pkt_tx_time != NULL) {
+			*pkt_tx_time = __packet_get_tx_timestamp(SK_PKT2PH(kp));
 		}
 
 		break;

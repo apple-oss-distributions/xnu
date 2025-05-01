@@ -92,6 +92,7 @@ struct file_list {
 #define BOUND_CHECKS_SOFT    0x18    /* emit non-panicking traps for bound-checked source */
 #define BOUND_CHECKS_DEBUG   0x20    /* emit one panicking trap per bounds check */
 #define BOUND_CHECKS_SEED    0x40    /* emit panicking traps on !RELEASE builds */
+#define BOUND_CHECKS_NEW_CHECKS 0x80 /* build with -fbounds-safety-bringup-missing-checks if building with -fbounds-safety*/
 
 struct device {
 	int     d_type;                 /* CONTROLLER, DEVICE, bus adaptor */

@@ -105,7 +105,6 @@ extern int get_map_nentries(vm_map_t);
 
 extern vm_map_offset_t vm_map_page_mask(vm_map_t);
 
-
 #if MACH_ASSERT
 extern void vm_map_pmap_set_process(
 	vm_map_t        map,
@@ -294,8 +293,6 @@ extern kern_return_t mach_memory_entry_purgable_control(
 	vm_purgable_t   control,
 	int             *state);
 
-extern int no_paging_space_action(void);
-
 extern unsigned int vmtc_total;        /* total # of text page corruptions detected */
 
 extern kern_return_t revalidate_text_page(task_t, vm_map_offset_t);
@@ -309,12 +306,6 @@ int vm_toggle_entry_reuse(int, int*);
 #define SWAP_READ               0x00000001      /* Read buffer. */
 #define SWAP_ASYNC              0x00000002      /* Start I/O, do not wait. */
 
-extern boolean_t vm_compressor_low_on_space(void);
-extern bool vm_compressor_compressed_pages_nearing_limit(void);
-extern boolean_t vm_compressor_out_of_space(void);
-
-extern bool      vm_swap_low_on_space(void);
-extern int       vm_swap_out_of_space(void);
 void             do_fastwake_warmup_all(void);
 
 #if CONFIG_JETSAM
@@ -417,6 +408,8 @@ extern uint64_t vm_purge_filebacked_pagers(void);
 
 #define roundup(x, y)   ((((x) % (y)) == 0) ? \
 	                (x) : ((x) + ((y) - ((x) % (y)))))
+
+#define rounddown(x, y) (((x)/(y))*(y))
 
 #ifdef __cplusplus
 }

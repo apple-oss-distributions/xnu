@@ -15,7 +15,7 @@
 #include "cs_helpers.h"
 #include <TargetConditionals.h>
 
-#define MAX_TEST_NUM 9
+#define MAX_TEST_NUM 10
 #define MAX_ARGV 3
 
 extern char **environ;
@@ -32,6 +32,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("IPC"),
+	T_META_TIMEOUT(10),
 	T_META_RUN_CONCURRENTLY(TRUE));
 
 static mach_port_t
@@ -248,14 +249,15 @@ T_DECL(reply_port_defense,
 	}
 }
 
-
 T_DECL(test_move_provisional_reply_port,
-    "provisional reply ports are immovable",
+    "provisional reply ports are movable",
     T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
-    T_META_CHECK_LEAKS(false)) {
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(TARGET_OS_OSX || TARGET_OS_BRIDGE)) {
 	int test_num = 4;
 	mach_exception_data_type_t expected_exception_code = 0;
 	bool triggers_exception = false;
+
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }
@@ -299,10 +301,17 @@ T_DECL(test_unentitled_thread_set_exception_ports,
 T_DECL(test_unentitled_thread_set_state,
     "thread_set_state should fail without an entitlement",
     T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
-    T_META_CHECK_LEAKS(false)) {
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(false /* rdar://133955889 */))
+{
 	int test_num = 6;
 	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_THREAD_SET_STATE;
 	bool triggers_exception = true;
+
+#if TARGET_OS_OSX
+	T_SKIP("Test disabled on macOS due to mach hardening opt out");
+#endif /* TARGET_OS_OSX */
+
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }
@@ -314,6 +323,37 @@ T_DECL(unentitled_set_exception_ports_pass,
 	int test_num = 7;
 	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)0;
 	bool triggers_exception = false;
+	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
+	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
+}
+
+
+T_DECL(kobject_reply_port_defense,
+    "sending messages to kobjects without a proper reply port should crash",
+    T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(!TARGET_OS_OSX)) {     /* disable on macOS due to BATS boot-args */
+	int test_num = 9;
+#if __x86_64__
+	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS;
+#else
+	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_SEND_INVALID_REPLY;
+#endif
+	bool triggers_exception = true;
+	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
+	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
+}
+
+T_DECL(test_alloc_provisional_reply_port,
+    "1p is not allowed to create provisional reply ports on iOS+",
+    T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(!TARGET_OS_OSX && !TARGET_OS_BRIDGE && !TARGET_OS_XR)) {
+	int test_num = 10;
+	mach_exception_data_type_t expected_exception_code = kGUARD_EXC_PROVISIONAL_REPLY_PORT;
+	bool triggers_exception = true;
+
+	/* rdar://136996362 (iOS+ telemetry for restricting 1P usage of provisional reply port) */
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }

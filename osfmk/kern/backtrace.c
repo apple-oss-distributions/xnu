@@ -48,15 +48,13 @@
 static void
 _backtrace_packed_out_of_reach(void)
 {
-	/*
-	 * This symbol is used to replace frames that have been "JIT-ed"
-	 * or dynamically inserted in the kernel by some kext in a regular
-	 * VM mapping that might be outside of the filesets.
-	 *
-	 * This is an Intel only issue.
-	 */
+	// This symbol is used to replace frames that have been "JIT-ed"
+	// or dynamically inserted in the kernel by some kext in a regular
+	// VM mapping that might be outside of the filesets.
+	//
+	// This is an Intel only issue.
 }
-#endif
+#endif // __x86_64__
 
 // Pack an address according to a particular packing format.
 static size_t
@@ -78,9 +76,9 @@ _backtrace_pack_addr(backtrace_pack_t packing, uint8_t *dst, size_t dst_size,
 			addr_delta = addr - vm_kernel_stext;
 			addr_packed = (int32_t)addr_delta;
 		}
-#else
+#else // __x86_64__
 		assert((uintptr_t)(int32_t)addr_delta == addr_delta);
-#endif
+#endif // !__x86_64__
 		if (dst_size >= sizeof(addr_packed)) {
 			memcpy(dst, &addr_packed, sizeof(addr_packed));
 		}
@@ -148,6 +146,10 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 #else // defined(HAS_APPLE_PAC)
 		uintptr_t pc = ret_addr;
 #endif // !defined(HAS_APPLE_PAC)
+		if (pc == 0) {
+			// Once a NULL PC is encountered, ignore the rest of the call stack.
+			break;
+		}
 		pc += addr_offset;
 		size_used += _backtrace_pack_addr(packing, bt + size_used,
 		    btsize - size_used, pc);
@@ -384,7 +386,9 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 	uintptr_t fp = ctl->btc_frame_addr;
 	bool custom_fp = fp != 0;
 	int64_t addr_offset = ctl ? ctl->btc_addr_offset : 0;
-	vm_map_t map = NULL, old_map = NULL;
+	vm_map_t map = NULL;
+	vm_map_switch_context_t switch_ctx;
+	bool switched_map = false;
 	unsigned int frame_index = 0;
 	int error = 0;
 	size_t frame_size = 0;
@@ -426,7 +430,8 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 				error = ENOMEM;
 				goto out;
 			}
-			old_map = vm_map_switch(map);
+			switched_map = true;
+			switch_ctx = vm_map_switch_to(map);
 		}
 	}
 
@@ -570,8 +575,8 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 	}
 
 out:
-	if (old_map != NULL) {
-		(void)vm_map_switch(old_map);
+	if (switched_map) {
+		vm_map_switch_back(switch_ctx);
 		vm_map_deallocate(map);
 	}
 

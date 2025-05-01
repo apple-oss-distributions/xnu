@@ -574,6 +574,26 @@ extern kern_return_t waitq_wakeup64_one(
 	waitq_wakeup_flags_t    flags);
 
 /**
+ * @functiong waitq_wakeup64_nthreads()
+ *
+ * @brief
+ * Wakeup up to nthreads threads from a waitq
+ * that are waiting for a given event.
+ *
+ * @description
+ * This function will set the inheritor of the wait queue
+ * to TURNSTILE_INHERITOR_NULL if it is a turnstile wait queue.
+ *
+ * @c waitq must be unlocked
+ */
+extern kern_return_t waitq_wakeup64_nthreads(
+	waitq_t                 waitq,
+	event64_t               wake_event,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags,
+	uint32_t                nthreads);
+
+/**
  * @functiong waitq_wakeup64_all()
  *
  * @brief
@@ -708,6 +728,24 @@ extern kern_return_t waitq_wakeup64_all_locked(
 	event64_t               wake_event,
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags);
+
+/**
+ * @function waitq_wakeup64_nthreads_locked()
+ *
+ * @brief
+ * Wakeup up to nthreads threads waiting on @c waitq for @c wake_event.
+ *
+ * @discussion
+ * @c waitq must be locked.
+ *
+ * May temporarily disable and re-enable interrupts.
+ */
+extern kern_return_t waitq_wakeup64_nthreads_locked(
+	waitq_t                 waitq,
+	event64_t               wake_event,
+	wait_result_t           result,
+	waitq_wakeup_flags_t    flags,
+	uint32_t                nthreads);
 
 /**
  * @function waitq_wakeup64_one_locked()

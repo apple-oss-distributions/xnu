@@ -98,15 +98,19 @@ struct droptap_header {
 /* All domains for Skywalk component */
 #define DROPTAP_FSW     1
 #define DROPTAP_NETIF   2
+#define _DROPTAP_PAD_3  3
+#define _DROPTAP_PAD_4  4
+#define DROPTAP_AQM     5
 
 /* All domains for BSD component */
 #define DROPTAP_TCP     1
 #define DROPTAP_UDP     2
 #define DROPTAP_IP      3
 #define DROPTAP_SOCK    4
-#define DROPTAP_AQM     5
+#define DROPTAP_DLIL    5
 #define DROPTAP_IPSEC   6
 #define DROPTAP_IP6     7
+#define DROPTAP_MPTCP   8
 
 #define DROPTAP_UNSPEC  0
 
@@ -134,10 +138,68 @@ struct droptap_header {
 	X(DROP_REASON_FSW_GSO_NOMEM_MBUF,           DROPTAP_SKYWALK, DROPTAP_FSW,  19, "Flowswitch GSO not enough mbuf memory")      \
 	X(DROP_REASON_FSW_DST_NXPORT_INVALID,       DROPTAP_SKYWALK, DROPTAP_FSW,  20, "Flowswitch dst nexus port invalid")          \
 	X(DROP_REASON_AQM_FULL,                     DROPTAP_SKYWALK, DROPTAP_AQM,  1,  "AQM full")                                   \
+	X(DROP_REASON_AQM_COMPRESSED,               DROPTAP_SKYWALK, DROPTAP_AQM,  2,  "AQM compressed")                             \
+	X(DROP_REASON_AQM_BK_SYS_THROTTLED,         DROPTAP_SKYWALK, DROPTAP_AQM,  3,  "AQM BK_SYS throttled")                       \
+	X(DROP_REASON_AQM_PURGE_FLOW,               DROPTAP_SKYWALK, DROPTAP_AQM,  4,  "AQM purge flow")                             \
+	X(DROP_REASON_AQM_DROP,                     DROPTAP_SKYWALK, DROPTAP_AQM,  5,  "AQM drop")                                   \
 	/* Socket */                                                                                                                 \
 	X(DROP_REASON_FULL_SOCK_RCVBUF,             DROPTAP_BSD,     DROPTAP_SOCK, 1,  "Socket receive buffer full")                 \
+	/* DLIL */                                                                                                                   \
+	X(DROP_REASON_DLIL_BURST_LIMIT,             DROPTAP_BSD,     DROPTAP_DLIL, 1,  "DLIL burst limit exceeded")                  \
+	X(DROP_REASON_DLIL_ENQUEUE_INVALID,         DROPTAP_BSD,     DROPTAP_DLIL, 2,  "DLIL enqueue invalid")                       \
+	X(DROP_REASON_DLIL_ENQUEUE_IF_NOT_ATTACHED, DROPTAP_BSD,     DROPTAP_DLIL, 3,  "DLIL enqueue interface not fully attached")  \
+	X(DROP_REASON_DLIL_ENQUEUE_IF_NOT_UP,       DROPTAP_BSD,     DROPTAP_DLIL, 4,  "DLIL enqueue interface not up")              \
+	X(DROP_REASON_DLIL_IF_FILTER,               DROPTAP_BSD,     DROPTAP_DLIL, 5,  "DLIL interface filter")                      \
+	X(DROP_REASON_DLIL_IF_DATAMOV_BEGIN,        DROPTAP_BSD,     DROPTAP_DLIL, 6,  "DLIL interface datamove begin")              \
+	X(DROP_REASON_DLIL_CLAT64,                  DROPTAP_BSD,     DROPTAP_DLIL, 7,  "DLIL CLAT46")                                \
+	X(DROP_REASON_DLIL_PROMISC,                 DROPTAP_BSD,     DROPTAP_DLIL, 8,  "DLIL promiscuous")                           \
+	X(DROP_REASON_DLIL_NO_PROTO,                DROPTAP_BSD,     DROPTAP_DLIL, 9,  "DLIL no protocol")                           \
+	X(DROP_REASON_DLIL_PRE_OUTPUT,              DROPTAP_BSD,     DROPTAP_DLIL, 10, "DLIL pre output")                            \
+	X(DROP_REASON_DLIL_IF_FRAMER,               DROPTAP_BSD,     DROPTAP_DLIL, 11, "DLIL interface framer")                      \
+	X(DROP_REASON_DLIL_TSO_NOT_OK,              DROPTAP_BSD,     DROPTAP_DLIL, 12, "DLIL interface TSO not OK")                  \
+	/* MPTCP */                                                                                                                  \
+	X(DROP_REASON_MPTCP_INPUT_MALFORMED,        DROPTAP_BSD,     DROPTAP_MPTCP,1,  "MPTCP input packet malformed")               \
 	/* TCP */                                                                                                                    \
 	X(DROP_REASON_TCP_RST,                      DROPTAP_BSD,     DROPTAP_TCP,  1,  "TCP connection reset")                       \
+	X(DROP_REASON_TCP_REASSEMBLY_ALLOC,         DROPTAP_BSD,     DROPTAP_TCP,  2,  "TCP reassembly allocation")                  \
+	X(DROP_REASON_TCP_NECP,                     DROPTAP_BSD,     DROPTAP_TCP,  3,  "TCP NECP not allowed")                       \
+	X(DROP_REASON_TCP_PKT_UNSENT,               DROPTAP_BSD,     DROPTAP_TCP,  4,  "TCP unsent packet")                          \
+	X(DROP_REASON_TCP_SRC_ADDR_NOT_AVAIL,       DROPTAP_BSD,     DROPTAP_TCP,  5,  "TCP source address not available")           \
+	X(DROP_REASON_TCP_REASS_OVERFLOW,           DROPTAP_BSD,     DROPTAP_TCP,  6,  "TCP reassembly queue overflow")              \
+	X(DROP_REASON_TCP_CHECKSUM_INCORRECT,       DROPTAP_BSD,     DROPTAP_TCP,  7,  "TCP checksum incorrect")                     \
+	X(DROP_REASON_TCP_SRC_ADDR_UNSPECIFIED,     DROPTAP_BSD,     DROPTAP_TCP,  8,  "TCP source address unspecified")             \
+	X(DROP_REASON_TCP_OFFSET_INCORRECT,         DROPTAP_BSD,     DROPTAP_TCP,  9,  "TCP offset incorrect")                       \
+	X(DROP_REASON_TCP_SYN_FIN,                  DROPTAP_BSD,     DROPTAP_TCP,  10, "TCP SYN with FIN")                           \
+	X(DROP_REASON_TCP_NO_SOCK,                  DROPTAP_BSD,     DROPTAP_TCP,  11, "TCP no socket")                              \
+	X(DROP_REASON_TCP_PCB_MISMATCH,             DROPTAP_BSD,     DROPTAP_TCP,  12, "TCP protocol control block mismatch")        \
+	X(DROP_REASON_TCP_NO_PCB,                   DROPTAP_BSD,     DROPTAP_TCP,  13, "TCP no protocol control block")              \
+	X(DROP_REASON_TCP_CLOSED,                   DROPTAP_BSD,     DROPTAP_TCP,  14, "TCP state CLOSED")                           \
+	X(DROP_REASON_TCP_FLAGS_INCORRECT,          DROPTAP_BSD,     DROPTAP_TCP,  15, "TCP flags incorrect")                        \
+	X(DROP_REASON_TCP_LISTENER_CLOSING,         DROPTAP_BSD,     DROPTAP_TCP,  16, "TCP listener closing")                       \
+	X(DROP_REASON_TCP_SYN_RST,                  DROPTAP_BSD,     DROPTAP_TCP,  17, "TCP SYN with RST")                           \
+	X(DROP_REASON_TCP_SYN_ACK_LISTENER,         DROPTAP_BSD,     DROPTAP_TCP,  18, "TCP SYN with ACK for listener")              \
+	X(DROP_REASON_TCP_LISTENER_NO_SYN,          DROPTAP_BSD,     DROPTAP_TCP,  19, "TCP no SYN for listener")                    \
+	X(DROP_REASON_TCP_SAME_PORT,                DROPTAP_BSD,     DROPTAP_TCP,  20, "TCP same source and destination ports")      \
+	X(DROP_REASON_TCP_BCAST_MCAST,              DROPTAP_BSD,     DROPTAP_TCP,  21, "TCP address not unicast")                    \
+	X(DROP_REASON_TCP_DEPRECATED_ADDR,          DROPTAP_BSD,     DROPTAP_TCP,  22, "TCP address deprecated")                     \
+	X(DROP_REASON_TCP_LISTENER_DROP,            DROPTAP_BSD,     DROPTAP_TCP,  23, "TCP listener drop")                          \
+	X(DROP_REASON_TCP_PCB_HASH_FAILED,          DROPTAP_BSD,     DROPTAP_TCP,  24, "TCP protocol control block hash")            \
+	X(DROP_REASON_TCP_CONTENT_FILTER_ATTACH,    DROPTAP_BSD,     DROPTAP_TCP,  25, "TCP control filter attach")                  \
+	X(DROP_REASON_TCP_BIND_IN_PROGRESS,         DROPTAP_BSD,     DROPTAP_TCP,  26, "TCP bind in progress")                       \
+	X(DROP_REASON_TCP_MEM_ALLOC,                DROPTAP_BSD,     DROPTAP_TCP,  27, "TCP memory allocation")                      \
+	X(DROP_REASON_TCP_PCB_CONNECT,              DROPTAP_BSD,     DROPTAP_TCP,  28, "TCP protocol control block connect")         \
+	X(DROP_REASON_TCP_SYN_RECEIVED_BAD_ACK,     DROPTAP_BSD,     DROPTAP_TCP,  29, "TCP SYN_RECEIVED bad ACK")                   \
+	X(DROP_REASON_TCP_SYN_SENT_BAD_ACK,         DROPTAP_BSD,     DROPTAP_TCP,  30, "TCP SYN_SENT bad ACK")                       \
+	X(DROP_REASON_TCP_SYN_SENT_NO_SYN,          DROPTAP_BSD,     DROPTAP_TCP,  31, "TCP SYN_SENT no SYN")                        \
+	X(DROP_REASON_TCP_ACK_TOOMUCH,              DROPTAP_BSD,     DROPTAP_TCP,  32, "TCP ACK rate limit")                         \
+	X(DROP_REASON_TCP_OLD_ACK,                  DROPTAP_BSD,     DROPTAP_TCP,  33, "TCP challenge ACK")                          \
+	X(DROP_REASON_TCP_SYN_DATA_INVALID,         DROPTAP_BSD,     DROPTAP_TCP,  34, "TCP SYN data invalid")                       \
+	X(DROP_REASON_TCP_SYN_RECEIVED_BAD_SEQ,     DROPTAP_BSD,     DROPTAP_TCP,  35, "TCP SYN_RECEIVED bad sequence number")       \
+	X(DROP_REASON_TCP_RECV_AFTER_CLOSE,         DROPTAP_BSD,     DROPTAP_TCP,  36, "TCP receive after close")                    \
+	X(DROP_REASON_TCP_BAD_ACK,                  DROPTAP_BSD,     DROPTAP_TCP,  37, "TCP bad ACK")                                \
+	X(DROP_REASON_TCP_BAD_RST,                  DROPTAP_BSD,     DROPTAP_TCP,  38, "TCP bad RST")                                \
+	X(DROP_REASON_TCP_PAWS,                     DROPTAP_BSD,     DROPTAP_TCP,  39, "TCP PAWS")                                   \
+	X(DROP_REASON__TCP_REASS_MEMORY_PRESSURE,   DROPTAP_BSD,     DROPTAP_TCP,  40, "TCP reassembly queue memory pressure")       \
 	/* IP */                                                                                                                     \
 	X(DROP_REASON_IP_UNKNOWN_MULTICAST_GROUP,   DROPTAP_BSD,     DROPTAP_IP,   2, "IP unknown multicast group join")             \
 	X(DROP_REASON_IP_INVALID_ADDR,              DROPTAP_BSD,     DROPTAP_IP,   3, "Invalid IP address")                          \
@@ -203,8 +265,19 @@ struct droptap_header {
 	X(DROP_REASON_IP6_NO_ND6ALT_IF,             DROPTAP_BSD,     DROPTAP_IP6,  11, "IPv6 no ND6ALT interface")                   \
 	X(DROP_REASON_IP6_BAD_ND_STATE,             DROPTAP_BSD,     DROPTAP_IP6,  12, "IPv6 Bad ND state")                          \
 	X(DROP_REASON_IP6_ONLY,                     DROPTAP_BSD,     DROPTAP_IP6,  13, "IPv6 Only")                                  \
-	X(DROP_REASON_IP6_ADDR_UNSPECIFIED,         DROPTAP_BSD,     DROPTAP_IP6,  14, "IPv6 Address is unspecified")
-
+	X(DROP_REASON_IP6_ADDR_UNSPECIFIED,         DROPTAP_BSD,     DROPTAP_IP6,  14, "IPv6 Address is unspecified")                \
+	X(DROP_REASON_IP6_FRAG_OVERLAPPING,         DROPTAP_BSD,     DROPTAP_IP6,  15, "IPv6 Fragment overlaping")                   \
+	X(DROP_REASON_IP6_FRAG_MIXED_CE,            DROPTAP_BSD,     DROPTAP_IP6,  16, "IPv6 Fragment mixed CE bits")                \
+	/* UDP */                                                                                                                    \
+	X(DROP_REASON_UDP_SET_PORT_FAILURE,         DROPTAP_BSD,     DROPTAP_UDP,  1, "UDP failed to set ephemeral port ")           \
+	X(DROP_REASON_UDP_DST_PORT_ZERO,            DROPTAP_BSD,     DROPTAP_UDP,  2, "UDP destination port zero")                   \
+	X(DROP_REASON_UDP_BAD_LENGTH,               DROPTAP_BSD,     DROPTAP_UDP,  3, "UDP bad length")                              \
+	X(DROP_REASON_UDP_BAD_CHECKSUM,             DROPTAP_BSD,     DROPTAP_UDP,  4, "UDP bad checksum")                            \
+	X(DROP_REASON_UDP_PORT_UNREACHEABLE,        DROPTAP_BSD,     DROPTAP_UDP,  5, "UDP port unreachable")                        \
+	X(DROP_REASON_UDP_SOCKET_CLOSING,           DROPTAP_BSD,     DROPTAP_UDP,  6, "UDP socket closing")                          \
+	X(DROP_REASON_UDP_NECP,                     DROPTAP_BSD,     DROPTAP_UDP,  7, "UDP denied by NECP")                          \
+	X(DROP_REASON_UDP_CANNOT_SAVE_CONTROL,      DROPTAP_BSD,     DROPTAP_UDP,  8, "UDP cannot save control mbufs")               \
+	X(DROP_REASON_UDP_IPSEC,                    DROPTAP_BSD,     DROPTAP_UDP,  9, "UDP IPsec")                                   \
 
 typedef enum drop_reason : uint32_t {
 #define X(reason, component, domain, code, ...) \
@@ -235,6 +308,7 @@ drop_reason_str(drop_reason_t value)
 #define DROPTAP_FLAG_L2_MISSING 0x0004
 
 extern uint32_t droptap_total_tap_count;
+extern uint32_t droptap_verbose;
 
 extern void droptap_init(void);
 #if SKYWALK

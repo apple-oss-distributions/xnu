@@ -245,6 +245,27 @@ __ZN20IOExtensiblePaniclog20CopyMemoryDescriptorEPP24IOBufferMemoryDescriptorPFi
 __ZN20IOExtensiblePaniclog10SetUsedLenEjPFiP15OSMetaClassBase5IORPCE
 __ZN20IOExtensiblePaniclog4freeEv
 __ZN20IOExtensiblePaniclog4initEv
+__ZN24IOProviderPropertyMerger10gMetaClassE
+__ZN24IOProviderPropertyMerger10superClassE
+__ZN24IOProviderPropertyMerger11setPropertyEPK8OSSymbolP8OSObject
+__ZN24IOProviderPropertyMerger16setPropertyTableEP12OSDictionary
+__ZN24IOProviderPropertyMerger4initEP12OSDictionary
+__ZN24IOProviderPropertyMerger9MetaClassC1Ev
+__ZN24IOProviderPropertyMerger9MetaClassC2Ev
+__ZN24IOProviderPropertyMerger9metaClassE
+__ZN24IOProviderPropertyMergerC1EPK11OSMetaClass
+__ZN24IOProviderPropertyMergerC1Ev
+__ZN24IOProviderPropertyMergerC2EPK11OSMetaClass
+__ZN24IOProviderPropertyMergerC2Ev
+__ZN24IOProviderPropertyMergerD0Ev
+__ZN24IOProviderPropertyMergerD1Ev
+__ZN24IOProviderPropertyMergerD2Ev
+__ZN24IOProviderPropertyMergerdlEPvm
+__ZN24IOProviderPropertyMergernwEm
+__ZNK24IOProviderPropertyMerger12getMetaClassEv
+__ZNK24IOProviderPropertyMerger9MetaClass5allocEv
+__ZTV24IOProviderPropertyMerger
+__ZTVN24IOProviderPropertyMerger9MetaClassE
 _PE_i_can_has_kernel_configuration
 _add_fsevent
 _need_fsevent
@@ -380,6 +401,9 @@ _csblob_get_size
 _csblob_get_storage_addr
 _csblob_set_validation_category
 _csblob_get_validation_category
+_csblob_set_auxiliary_info
+_csblob_get_auxiliary_info
+_csblob_get_trust_level
 _csfg_get_cdhash
 _csfg_get_identity
 _csfg_get_path
@@ -516,6 +540,7 @@ _ipc_port_reset_thread_attr
 _ipf_addv4_internal
 _ipf_addv6_internal
 _kalloc_data:_kalloc_data_external
+_kalloc_shared_data:_kalloc_shared_data_external
 _kalloc_type_impl:_kalloc_type_impl_external
 _kalloc_type_var_impl:_kalloc_type_var_impl_external
 _kauth_acl_evaluate
@@ -542,7 +567,9 @@ _kern_allocation_get_name
 _kern_allocation_name_allocate
 _kern_allocation_name_release
 _kfree_data:_kfree_data_external
+_kfree_shared_data:_kfree_shared_data_external
 _kfree_data_addr:_kfree_data_addr_external
+_kfree_shared_data_addr:_kfree_shared_data_addr_external
 _kfree_type_impl:_kfree_type_impl_external
 _kfree_type_var_impl:_kfree_type_var_impl_external
 _thread_get_current_exec_path
@@ -736,10 +763,12 @@ _lockd_request
 _log
 _logwakeup
 _check_trust_cache_runtime_for_uuid
+_unload_trust_cache
 _load_trust_cache
 _load_trust_cache_with_type
 _load_legacy_trust_cache
 _query_trust_cache
+_query_trust_cache_for_rem
 _m_cat
 _m_free:_mbuf_free
 _m_freem:_mbuf_freem
@@ -791,6 +820,10 @@ _mbuf_get_keepalive_flag
 _mbuf_set_keepalive_flag
 _mbuf_get_wake_packet_flag
 _mbuf_set_wake_packet_flag
+_mbuf_get_gso_info
+_mbuf_set_gso_info
+_mbuf_get_lro_info
+_mbuf_set_lro_info
 _mcl_to_paddr
 _ml_io_increase_timeouts
 _ml_io_increase_timeouts_phys
@@ -875,6 +908,7 @@ _port_name_to_task:_port_name_to_task_external
 _port_name_to_thread
 _post_sys_powersource
 _proc_best_name
+_proc_ident
 _proc_csflags
 _proc_fdlist
 _proc_get_filter_message_flag
@@ -892,6 +926,7 @@ _proc_parent_audit_token
 _proc_pidbackgrounded
 _proc_pidoriginatorpid_uuid
 _proc_pidversion
+_proc_orig_ppidversion
 _proc_platform
 _proc_set_responsible_pid
 _proc_set_filter_message_flag
@@ -912,6 +947,7 @@ _proc_exitstatus
 _proc_is_zombie
 _proc_is_translated
 _proc_is_rsr
+_proc_is_simulated
 _proc_isinitproc
 _proc_lvfork
 _proc_increment_ru_oublock
@@ -931,6 +967,7 @@ _pru_sense_null
 _pru_shutdown_notsupp
 _pru_sockaddr_notsupp
 _pru_sopoll_notsupp
+_psignal_sigkill_try_thread_with_reason
 _psignal_sigkill_with_reason
 _pthread_kext_register
 _q_to_b
@@ -983,7 +1020,9 @@ _static_trust_cache_capabilities
 _strnstr
 _sysdiagnose_notify_user
 _task_find_region_details
+_task_get_platform_binary
 _task_get_suspend_stats
+_task_set_cs_auxiliary_info
 _task_id_token_to_energy_id
 _task_is_driver
 _termioschars
@@ -1077,6 +1116,7 @@ _vfs_setfskit
 _vfs_setfstypename
 _vfs_throttle_mask
 _vfs_vnodecovered
+_vfs_vnodecovered_noblock
 _vm_fault:_vm_fault_external
 _vm_map_copy_discard
 _vm_map_copyin
@@ -1102,11 +1142,11 @@ _vnode_create_empty
 _vnode_create_ext
 _vnode_initialize
 _vnode_isdyldsharedcache
-_vnode_ismonitored
 _vnode_isonssd
 _vnode_istty
 _vnode_lookupat
 _vnode_lookup_continue_needed
+_vnode_memoryobject
 _vnode_clearnoflush
 _vnode_isnoflush
 _vnode_is_rsr
@@ -1121,7 +1161,6 @@ _vnop_compound_open_desc
 _vnop_compound_remove_desc
 _vnop_compound_rename_desc
 _vnop_compound_rmdir_desc
-_vnop_monitor_desc
 _vnio_openfd
 _vnio_close
 _vnio_read
@@ -1389,3 +1428,5 @@ __ZNK8OSNumber10floatValueEv
 __ZN8OSNumber9withFloatEf
 __ZN8OSNumber10withDoubleEd
 __ZNK8OSNumber11doubleValueEv
+
+__Z34IOInterruptDispatchSourceInterruptP8OSObjectPvP9IOServicei

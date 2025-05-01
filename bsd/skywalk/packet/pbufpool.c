@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,7 +68,9 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp,
     bool large);
 
 #define KERN_PBUFPOOL_U_HASH_SIZE       64      /* hash table size */
-#define KERN_BUF_MIN_STRIDING_SIZE      256 * 1024
+
+#define KERN_BUF_MIN_STRIDING_SIZE      32 * 1024
+static uint32_t kern_buf_min_striding_size = KERN_BUF_MIN_STRIDING_SIZE;
 
 /*
  * Since the inputs are small (indices to the metadata region), we can use
@@ -92,6 +94,7 @@ static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_hash, SKMEM_TAG_PBUFPOOL_HASH);
 
 #define SKMEM_TAG_PBUFPOOL_BFT_HASH  "com.apple.skywalk.pbufpool.bft.hash"
 static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_bft_hash, SKMEM_TAG_PBUFPOOL_BFT_HASH);
+
 
 struct kern_pbufpool_u_htbl {
 	struct kern_pbufpool_u_bkt upp_hash[KERN_PBUFPOOL_U_HASH_SIZE];
@@ -221,6 +224,9 @@ pp_init(void)
 	pp_compl_cache = skmem_cache_create("pkt.compl",
 	    sizeof(struct __packet_compl), sizeof(uint64_t),
 	    NULL, NULL, NULL, NULL, NULL, 0);
+
+	PE_parse_boot_argn("sk_pp_min_striding_size", &kern_buf_min_striding_size,
+	    sizeof(kern_buf_min_striding_size));
 
 	return 0;
 }
@@ -406,6 +412,9 @@ pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
 	}
 	skmem_region_params_config(kmd_srp);
 
+	/* Sanity check for memtag */
+	ASSERT(kmd_srp->srp_c_seg_size == SKMEM_MD_SEG_SIZE);
+
 	/* configure user metadata region */
 	srp = &srp_array[SKMEM_REGION_UMD];
 	if (!kernel_only) {
@@ -439,9 +448,9 @@ pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
 		buf_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
 	}
 	ASSERT((buf_srp->srp_cflags & SKMEM_REGION_CR_NOMAGAZINES) != 0);
-	if (buf_srp->srp_r_obj_size >= KERN_BUF_MIN_STRIDING_SIZE) {
+	if (buf_srp->srp_r_obj_size >= kern_buf_min_striding_size) {
 		/*
-		 * A buffer size larger than 256K indicates striding is in use, which
+		 * A buffer size larger than 32K indicates striding is in use, which
 		 * means a buffer could be detached from a buflet. In this case, magzine
 		 * layer should be enabled.
 		 */
@@ -506,6 +515,8 @@ pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
 		skmem_region_params_config(kbft_srp);
 		ASSERT(kbft_srp->srp_c_obj_cnt >= buf_srp->srp_c_obj_cnt +
 		    lbuf_srp->srp_c_obj_cnt);
+		/* Sanity check for memtag */
+		ASSERT(kbft_srp->srp_c_seg_size == SKMEM_MD_SEG_SIZE);
 	} else {
 		ASSERT(kbft_srp->srp_r_obj_cnt == 0);
 		ASSERT(kbft_srp->srp_r_obj_size == 0);
@@ -624,11 +635,6 @@ pp_metadata_construct(struct __kern_quantum *kqum, struct __user_quantum *uqum,
 				goto fail;
 			}
 
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-			/* Checking to ensure the object address is tagged */
-			ASSERT((vm_offset_t)kbuf !=
-			    vm_memtag_canonicalize_address((vm_offset_t)kbuf));
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 			blistn = (*blist)->mo_next;
 			(*blist)->mo_next = NULL;
@@ -2095,11 +2101,6 @@ pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-		/* Checking to ensure the object address is tagged */
-		ASSERT((vm_offset_t)kqum !=
-		    vm_memtag_canonicalize_address((vm_offset_t)kqum));
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		if (tagged) {
 			*array_cp = SK_PTR_ENCODE(kqum, METADATA_TYPE(kqum),
@@ -2220,11 +2221,6 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-		/* Checking to ensure the object address is tagged */
-		ASSERT((vm_offset_t)kpkt !=
-		    vm_memtag_canonicalize_address((vm_offset_t)kpkt));
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		KPKTQ_ENQUEUE(pktq, kpkt);
 
@@ -2656,11 +2652,6 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp,
 		list->mo_next = NULL;
 		kbft = (kern_buflet_t)(void *)list;
 
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-		/* Checking to ensure the object address is tagged */
-		ASSERT((vm_offset_t)kbft !=
-		    vm_memtag_canonicalize_address((vm_offset_t)kbft));
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		KBUF_EXT_INIT(kbft, pp);
 		*array_cp = (uint64_t)kbft;

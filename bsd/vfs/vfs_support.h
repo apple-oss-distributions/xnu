@@ -176,6 +176,10 @@ extern int err_offtoblk(struct vnop_offtoblk_args *ap);
 
 extern int nop_blockmap(struct vnop_blockmap_args *ap);
 extern int err_blockmap(struct vnop_blockmap_args *ap);
+
+extern int nop_monitor(struct vnop_monitor_args *ap);
+extern int err_monitor(struct vnop_monitor_args *ap);
+
 __END_DECLS
 
 #endif  /* _VFS_VFS_SUPPORT_H_ */

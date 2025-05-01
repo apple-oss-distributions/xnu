@@ -30,6 +30,7 @@
 #define _KERN_TICKET_LOCK_H_
 
 #ifndef __ASSEMBLER__
+#include <kern/assert.h>
 #include <kern/lock_types.h>
 #include <kern/lock_group.h>
 #if XNU_KERNEL_PRIVATE
@@ -327,13 +328,10 @@ extern __exported void lck_ticket_assert_owned(
 extern __exported void lck_ticket_assert_not_owned(
 	const lck_ticket_t            *tlock);
 
-#if MACH_ASSERT
-#define LCK_TICKET_ASSERT_OWNED(tlock)     lck_ticket_assert_owned(tlock)
-#define LCK_TICKET_ASSERT_NOT_OWNED(tlock) lck_ticket_assert_owned(tlock)
-#else
-#define LCK_TICKET_ASSERT_OWNED(tlock)     (void)(tlock)
-#define LCK_TICKET_ASSERT_NOT_OWNED(tlock) (void)(tlock)
-#endif
+#define LCK_TICKET_ASSERT_OWNED(tlock) \
+	MACH_ASSERT_DO(lck_ticket_assert_owned(tlock))
+#define LCK_TICKET_ASSERT_NOT_OWNED(tlock) \
+	MACH_ASSERT_DO(lck_ticket_assert_not_owned(tlock))
 
 #pragma GCC visibility pop
 __END_DECLS

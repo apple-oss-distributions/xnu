@@ -605,7 +605,8 @@ csm_unregister_code_signature(
  */
 kern_return_t
 csm_verify_code_signature(
-	void *monitor_sig_obj);
+	void *monitor_sig_obj,
+	uint32_t *trust_level);
 
 /**
  * Perform 2nd stage reconstitution through the monitor. This unlocks any unused parts

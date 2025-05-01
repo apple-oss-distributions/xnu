@@ -46,6 +46,12 @@ os_ref_panic_live(void *rc)
 	panic("os_refcnt: unexpected release of final reference (rc=%p)", rc);
 	__builtin_unreachable();
 }
+void
+os_ref_panic_last(void *rc)
+{
+	panic("os_refcnt: expected release of final reference but rc %p!=0\n", rc);
+	__builtin_unreachable();
+}
 
 __abortlike
 static void

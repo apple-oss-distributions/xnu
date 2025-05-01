@@ -194,7 +194,7 @@ memory_object_lock_page(
 		}
 		return MEMORY_OBJECT_LOCK_RESULT_DONE;
 	}
-	assert(!m->vmp_fictitious);
+	assert(!vm_page_is_fictitious(m));
 
 	if (VM_PAGE_WIRED(m)) {
 		/*

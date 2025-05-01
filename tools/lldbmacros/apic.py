@@ -264,9 +264,8 @@ def LapicRead32(cmd_args=None):
         be optionally specified
         Syntax: lapic_read32 <offset> [lcpu]
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(LapicRead32.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Command requires 1 argument")
     if not IsArchX86_64():
         print("lapic_read32 not supported on this architecture.")
         return
@@ -287,7 +286,7 @@ def LapicWrite32(cmd_args=None):
         Syntax: lapic_write32 <offset> <val> [lcpu]
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print(LapicWrite32.__doc__)
+        raise ArgumentError("Please provide 2 arguments")
         return
     if not IsArchX86_64():
         print("lapic_write32 not supported on this architecture.")
@@ -315,7 +314,7 @@ def IoApicRead32(cmd_args=None):
         Syntax: ioapic_read32 <offset>
     """
     if cmd_args is None or len(cmd_args) < 1:
-        print(IoApicRead32.__doc__)
+        raise ArgumentError("Command requires 1 argument")
         return
     if not IsArchX86_64():
         print("ioapic_read32 not supported on this architecture.")
@@ -331,7 +330,7 @@ def IoApicWrite32(cmd_args=None):
         Syntax: ioapic_write32 <offset> <val>
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print(IoApicWrite32.__doc__)
+        raise ArgumentError("Command requires 2 arguments")
         return
     if not IsArchX86_64():
         print("ioapic_write32 not supported on this architecture.")

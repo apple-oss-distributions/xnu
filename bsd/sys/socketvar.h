@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1041,7 +1041,14 @@ extern int tracker_lookup(uuid_t app_uuid, struct sockaddr *, tracker_metadata_t
 // Check if socket flow tracking is present for socket
 #define SOFLOW_ENABLED(so) (so != NULL && (so->so_flow_db != NULL))
 
-extern struct soflow_hash_entry *soflow_get_flow(struct socket *, struct sockaddr *, struct sockaddr *, struct mbuf *, size_t, bool, u_short);
+
+typedef enum {
+	SOFLOW_DIRECTION_UNKNOWN = 0,
+	SOFLOW_DIRECTION_OUTBOUND = 1,
+	SOFLOW_DIRECTION_INBOUND = 2,
+} soflow_direction_t;
+
+extern struct soflow_hash_entry *soflow_get_flow(struct socket *, struct sockaddr *, struct sockaddr *, struct mbuf *, size_t, soflow_direction_t, u_short);
 extern void soflow_free_flow(struct soflow_hash_entry *);
 extern void soflow_detach(struct socket *);
 

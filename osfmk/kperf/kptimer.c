@@ -282,9 +282,6 @@ kptimer_fire(struct kptimer *timer, unsigned int timerid,
 		 */
 		timer->kt_fire_time = mach_absolute_time();
 #endif /* DEVELOPMENT || DEBUG */
-		if (timerid == kptimer.g_pet_timerid && kppet_get_lightweight_pet()) {
-			os_atomic_inc(&kppet_gencount, relaxed);
-		}
 	} else {
 		/*
 		 * In case this CPU has missed several timer fires, get it back on track
@@ -611,15 +608,18 @@ kptimer_start(void)
 			 * No period or action means the timer is inactive.
 			 */
 			continue;
-		} else if (!kppet_get_lightweight_pet() &&
-		    i == kptimer.g_pet_timerid) {
-			kptimer.g_pet_active = true;
-			timer_call_enter(&kptimer.g_pet_timer, now + timer->kt_period_abs,
-			    TIMER_CALL_SYS_CRITICAL);
-		} else {
-			timer->kt_cur_deadline = now + timer->kt_period_abs;
-			ntimers_active++;
 		}
+		if (i == kptimer.g_pet_timerid) {
+			kppet_set_period(timer->kt_period_abs);
+			if (!kppet_get_lightweight_pet()) {
+				kptimer.g_pet_active = true;
+				timer_call_enter(&kptimer.g_pet_timer, now + timer->kt_period_abs,
+				    TIMER_CALL_SYS_CRITICAL);
+				continue;
+			}
+		}
+		timer->kt_cur_deadline = now + timer->kt_period_abs;
+		ntimers_active++;
 	}
 	if (ntimers_active > 0) {
 		kptimer_broadcast(kptimer_start_remote);

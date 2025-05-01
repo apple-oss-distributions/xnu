@@ -13,6 +13,8 @@ typedef struct _IODataQueueMemory {
 	IODataQueueEntry  queue[0];
 } IODataQueueMemory;
 
+#define DATA_QUEUE_MEMORY_HEADER_SIZE (offsetof(IODataQueueMemory, queue))
+
 struct IODataQueueDispatchSource_IVars {
 	IODataQueueMemory         * dataQueue;
 	IODataQueueDispatchSource * source;
@@ -81,9 +83,10 @@ IODataQueueDispatchSource::Create_Impl(
 	if (3 & queueByteCount) {
 		return kIOReturnBadArgument;
 	}
-	if (queueByteCount > UINT_MAX) {
+	if (queueByteCount > UINT_MAX - DATA_QUEUE_MEMORY_HEADER_SIZE) {
 		return kIOReturnBadArgument;
 	}
+	queueByteCount += DATA_QUEUE_MEMORY_HEADER_SIZE;
 	inst = OSTypeAlloc(IODataQueueDispatchSource);
 	if (!inst) {
 		return kIOReturnNoMemory;
@@ -311,7 +314,7 @@ IODataQueueDispatchSource::Peek(IODataQueueClientDequeueEntryBlock callback)
 	if (headOffset != tailOffset) {
 		IODataQueueEntry *  head        = NULL;
 		uint32_t            headSize    = 0;
-		uint32_t            queueSize   = ivars->queueByteCount;
+		uint32_t            queueSize   = ivars->queueByteCount - DATA_QUEUE_MEMORY_HEADER_SIZE;
 
 		if (headOffset > queueSize) {
 			return kIOReturnError;
@@ -398,7 +401,7 @@ IODataQueueDispatchSource::DequeueWithCoalesce(bool * sendDataServiced,
 	if (headOffset != tailOffset) {
 		IODataQueueEntry *  head        = NULL;
 		uint32_t            headSize    = 0;
-		uint32_t            queueSize   = ivars->queueByteCount;
+		uint32_t            queueSize   = ivars->queueByteCount - DATA_QUEUE_MEMORY_HEADER_SIZE;
 
 		if (headOffset > queueSize) {
 			return kIOReturnError;
@@ -504,7 +507,7 @@ IODataQueueDispatchSource::EnqueueWithCoalesce(uint32_t callerDataSize,
 	if (!dataQueue) {
 		return kIOReturnNoMemory;
 	}
-	queueSize = ivars->queueByteCount;
+	queueSize = ivars->queueByteCount - DATA_QUEUE_MEMORY_HEADER_SIZE;
 
 	// Force a single read of head and tail
 	tail = __c11_atomic_load((_Atomic uint32_t *)&dataQueue->tail, __ATOMIC_RELAXED);
@@ -634,7 +637,7 @@ IODataQueueDispatchSource::CanEnqueueData(uint32_t callerDataSize, uint32_t data
 	if (!dataQueue) {
 		return kIOReturnNoMemory;
 	}
-	queueSize = ivars->queueByteCount;
+	queueSize = ivars->queueByteCount - DATA_QUEUE_MEMORY_HEADER_SIZE;
 
 	// Force a single read of head and tail
 	tail = __c11_atomic_load((_Atomic uint32_t *)&dataQueue->tail, __ATOMIC_RELAXED);

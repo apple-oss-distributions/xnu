@@ -73,6 +73,7 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	memory.py \
 	memorystatus.py \
 	mbufs.py \
+	microstackshot.py \
 	net.py \
 	skywalk.py \
 	ioreg.py \
@@ -84,7 +85,6 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	misc.py \
 	apic.py \
 	kasan.py \
-	kauth.py \
 	usertaskgdbserver.py \
 	waitq.py \
 	xnutriage.py \
@@ -108,6 +108,13 @@ ifneq ($(PLATFORM),MacOSX)
 		plugins/iosspeedtracer.sh
 endif
 
+
+# Adding plugin with macros to test all LLDB macros.
+LLDBMACROS_PYTHON_FILES += \
+	tests/integration_smoke/__init__.py \
+	tests/integration_smoke/lldb_session.py \
+	tests/integration_smoke/conftest.py \
+	tests/integration_smoke/test_lldb_macros.py
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

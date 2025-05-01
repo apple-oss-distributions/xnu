@@ -144,6 +144,10 @@ typedef struct {
  *	Similar to @c Z_REALLOCF: if the call is failing,
  *	then free the old allocation too.
  *
+ * @const KMEM_NOSOFTLIMIT (alloc, realloc)
+ *  Kernel private.
+ *  Override soft allocation size limits and attempt to make the allocation
+ *  anyways.
  *
  * <h2>How the entry is populated</h2>
  *
@@ -222,8 +226,8 @@ typedef struct {
  *	In user maps, permanent entries will only be deleted
  *	whenthe map is terminated.
  *
- * @const KMEM_GUARD_FIRST (alloc, realloc)
- * @const KMEM_GUARD_LAST (alloc, realloc)
+ * @const KMEM_GUARD_FIRST (alloc, realloc, free)
+ * @const KMEM_GUARD_LAST (alloc, realloc, free)
  *	Asks @c kmem_* to put a guard page at the beginning (resp. end)
  *	of the allocation.
  *
@@ -238,8 +242,8 @@ typedef struct {
  *	The returned address for allocation will pointing at the entry start,
  *	which is the address of the left guard page if any.
  *
- *	Note that if @c kmem_realloc* is called, the *exact* same
- *	guard flags must be passed for this entry. The KMEM subsystem
+ *	Note that if @c kmem_realloc* or @c kmem_free* is called, the *exact*
+ *	same guard flags must be passed for this entry. The KMEM subsystem
  *	is generally oblivious to guards, and passing inconsistent flags
  *	will cause pages to be moved incorrectly.
  *
@@ -268,11 +272,12 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_NOPAGEWAIT     = 0x00000002,
 	KMEM_FREEOLD        = 0x00000004,
 	KMEM_REALLOCF       = 0x00000008,
+	KMEM_NOSOFTLIMIT    = 0x00000010,
 
 	/* How the entry is populated */
-	KMEM_VAONLY         = 0x00000010,
-	KMEM_PAGEABLE       = 0x00000020,
-	KMEM_ZERO           = 0x00000040,
+	KMEM_VAONLY         = 0x00000020,
+	KMEM_PAGEABLE       = 0x00000040,
+	KMEM_ZERO           = 0x00000080,
 
 	/* VM object to use for the entry */
 	KMEM_KOBJECT        = 0x00000100,
@@ -283,16 +288,17 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_LAST_FREE      = 0x00002000,
 	KMEM_GUESS_SIZE     = 0x00004000,
 	KMEM_DATA           = 0x00008000,
-	KMEM_SPRAYQTN       = 0x00010000,
+	KMEM_DATA_SHARED    = 0x00010000,
+	KMEM_SPRAYQTN       = 0x00020000,
 
 	/* Entry properties */
-	KMEM_PERMANENT      = 0x00100000,
-	KMEM_GUARD_FIRST    = 0x00200000,
-	KMEM_GUARD_LAST     = 0x00400000,
-	KMEM_KSTACK         = 0x00800000,
-	KMEM_NOENCRYPT      = 0x01000000,
-	KMEM_KASAN_GUARD    = 0x02000000,
-	KMEM_TAG            = 0x04000000,
+	KMEM_PERMANENT      = 0x00200000,
+	KMEM_GUARD_FIRST    = 0x00400000,
+	KMEM_GUARD_LAST     = 0x00800000,
+	KMEM_KSTACK         = 0x01000000,
+	KMEM_NOENCRYPT      = 0x02000000,
+	KMEM_KASAN_GUARD    = 0x04000000,
+	KMEM_TAG            = 0x08000000,
 });
 
 
@@ -342,6 +348,7 @@ __options_decl(kmem_claims_flags_t, uint32_t, {
 #define ZSECURITY_CONFIG2(v)     ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__##v()
 #define ZSECURITY_CONFIG1(v)     ZSECURITY_CONFIG2(v)
 #define ZSECURITY_CONFIG(opt)    ZSECURITY_CONFIG1(ZSECURITY_CONFIG_##opt)
+
 
 struct kmem_range_startup_spec {
 	const char             *kc_name;
@@ -458,6 +465,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_VAONLY          = KMEM_VAONLY,
 	KMA_PAGEABLE        = KMEM_PAGEABLE,
 	KMA_ZERO            = KMEM_ZERO,
+	KMA_NOSOFTLIMIT     = KMEM_NOSOFTLIMIT,
 
 	/* VM object to use for the entry */
 	KMA_KOBJECT         = KMEM_KOBJECT,
@@ -467,6 +475,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_LOMEM           = KMEM_LOMEM,
 	KMA_LAST_FREE       = KMEM_LAST_FREE,
 	KMA_DATA            = KMEM_DATA,
+	KMA_DATA_SHARED     = KMEM_DATA_SHARED,
 	KMA_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
@@ -612,6 +621,7 @@ __options_decl(kms_flags_t, uint32_t, {
 
 	/* Call behavior */
 	KMS_NOFAIL          = KMEM_NOFAIL,
+	KMS_NOSOFTLIMIT     = KMEM_NOSOFTLIMIT,
 
 	/* How to look for addresses */
 	KMS_LAST_FREE       = KMEM_LAST_FREE,
@@ -671,6 +681,7 @@ __options_decl(kmr_flags_t, uint32_t, {
 	KMR_LOMEM           = KMEM_LOMEM,
 	KMR_LAST_FREE       = KMEM_LAST_FREE,
 	KMR_DATA            = KMEM_DATA,
+	KMR_DATA_SHARED     = KMEM_DATA_SHARED,
 	KMR_SPRAYQTN        = KMEM_SPRAYQTN,
 
 	/* Entry properties */
@@ -681,7 +692,9 @@ __options_decl(kmr_flags_t, uint32_t, {
 });
 
 #define KMEM_REALLOC_FLAGS_VALID(flags) \
-	(((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD | KMR_DATA)) == KMR_DATA || ((flags) & KMR_FREEOLD))
+	(((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD | KMR_DATA)) == KMR_DATA \
+	|| ((flags) & (KMR_KOBJECT | KMEM_GUARD_LAST | KMEM_KASAN_GUARD | KMR_DATA_SHARED)) == KMR_DATA_SHARED \
+	|| ((flags) & KMR_FREEOLD))
 
 /*!
  * @function kmem_realloc_guard()
@@ -768,6 +781,10 @@ __options_decl(kmf_flags_t, uint32_t, {
 
 	/* How to look for addresses */
 	KMF_GUESS_SIZE      = KMEM_GUESS_SIZE,
+
+	/* Entry properties */
+	KMF_GUARD_FIRST     = KMEM_GUARD_FIRST,
+	KMF_GUARD_LAST      = KMEM_GUARD_LAST,
 	KMF_KASAN_GUARD     = KMEM_KASAN_GUARD,
 	KMF_TAG             = KMEM_TAG,
 });
@@ -795,13 +812,25 @@ extern vm_size_t kmem_free_guard(
 	kmf_flags_t             flags,
 	kmem_guard_t            guard);
 
+__attribute__((overloadable))
+static inline void
+kmem_free(
+	vm_map_t                map,
+	vm_offset_t             addr,
+	vm_size_t               size,
+	kmf_flags_t             flags)
+{
+	kmem_free_guard(map, addr, size, flags, KMEM_GUARD_NONE);
+}
+
+__attribute__((overloadable))
 static inline void
 kmem_free(
 	vm_map_t                map,
 	vm_offset_t             addr,
 	vm_size_t               size)
 {
-	kmem_free_guard(map, addr, size, KMF_NONE, KMEM_GUARD_NONE);
+	kmem_free(map, addr, size, KMF_NONE);
 }
 
 
@@ -1191,9 +1220,8 @@ extern kern_return_t    vm_map_wire_kernel(
 	vm_tag_t                tag,
 	boolean_t               user_wire);
 
-
 /*!
- * @function vm_purgable_control()
+ * @function vm_map_purgable_control()
  *
  * @brief
  * Perform a purgeability operation on a VM object at a given address
@@ -1213,17 +1241,17 @@ extern kern_return_t    vm_map_wire_kernel(
  * @param control       a purgeability operation to perform.
  * @param state         an in/out parameter that is operation dependent.
  */
-extern kern_return_t vm_purgable_control(
+extern kern_return_t vm_map_purgable_control(
 	vm_map_t                map,
-	vm_offset_t             address,
+	vm_map_offset_ut        address,
 	vm_purgable_t           control,
-	int                     *state);
+	int                    *state);
 
 extern kern_return_t mach_vm_purgable_control(
 	vm_map_t                map,
-	mach_vm_offset_t        address,
+	mach_vm_offset_ut       address_u,
 	vm_purgable_t           control,
-	int                     *state);
+	int                    *state);
 
 
 #ifdef MACH_KERNEL_PRIVATE
@@ -1739,6 +1767,11 @@ extern void             vm_init_before_launchd(void);
 extern void             vm_allocation_zones_init(void);
 
 #endif /* VM_TAG_SIZECLASSES */
+
+extern memory_object_t device_pager_setup(memory_object_t, uintptr_t, vm_size_t, int);
+
+extern kern_return_t device_pager_populate_object( memory_object_t device,
+    memory_object_offset_t offset, ppnum_t page_num, vm_size_t size);
 
 #endif /* XNU_KERNEL_PRIVATE */
 #pragma GCC visibility pop

@@ -205,7 +205,7 @@ mac_label_set(struct label *label, int slot, intptr_t v)
 	/* can't modify a sealed label, see mac_cred_label_seal() */
 	assertf(label->l_owner != (struct label **)-1,
 	    "mac_label_set(%p, %d, 0x%lx) is sealed",
-	    label, slot, v);
+	    label, slot, (uintptr_t)v);
 #endif
 	if (v == MAC_LABEL_NULL_SLOT) {
 		panic_label_set_sentinel();

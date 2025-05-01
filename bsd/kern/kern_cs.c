@@ -719,6 +719,59 @@ csblob_get_validation_category(struct cs_blob *csblob)
 }
 
 /*
+ * Function: csblob_set_auxiliary_info
+ *
+ * Description: This function is used to set the auxiliary info
+ *              bits on a cs_blob.
+ *
+ * Return: 0 on success, otherwise -1.
+ */
+int
+csblob_set_auxiliary_info(struct cs_blob *csblob, uint64_t info)
+{
+	bool ro_blob = csblob == csblob->csb_ro_addr;
+
+	if (ro_blob == true) {
+		zalloc_ro_update_field(ZONE_ID_CS_BLOB, csblob, csb_auxiliary_info, &info);
+	} else {
+		csblob->csb_auxiliary_info = info;
+	}
+
+	return 0;
+}
+
+/*
+ * Function: csblob_get_auxiliary_info
+ *
+ * Description: This function is used to get the auxiliary info
+ *              bits on a cs_blob.
+ */
+uint64_t
+csblob_get_auxiliary_info(struct cs_blob *csblob)
+{
+	return csblob->csb_auxiliary_info;
+}
+
+/*
+ * Function: csblob_get_trust_level
+ *
+ * Description: This function is used to get the trust level set
+ *              on a cs_blob. This trust level is only set whe there
+ *              is a code-signing-monitor, and it is enabled. Otherwise,
+ *              this function returns a UINT32_MAX.
+ */
+uint32_t
+csblob_get_trust_level(__unused struct cs_blob *csblob)
+{
+#if CODE_SIGNING_MONITOR
+	if (csblob->csb_csm_obj != NULL) {
+		return csblob->csb_csm_trust_level;
+	}
+#endif
+	return UINT32_MAX;
+}
+
+/*
  * Function: csblob_get_code_directory
  *
  * Description: This function returns the best code directory

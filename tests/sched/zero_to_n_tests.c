@@ -11,7 +11,8 @@
 T_GLOBAL_META(
 	T_META_TAG_PERF,
 	T_META_RUN_CONCURRENTLY(false),
-	T_META_BOOTARGS_SET("enable_skstsct=1"),
+	/* <rdar://137716223> */
+	T_META_BOOTARGS_SET("enable_skstsct=1 cpu-dynamic-cluster-power-down=0"),
 	T_META_CHECK_LEAKS(false),
 	T_META_ASROOT(true),
 	T_META_REQUIRES_SYSCTL_EQ("kern.hv_vmm_present", 0),

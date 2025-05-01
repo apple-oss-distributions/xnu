@@ -590,10 +590,9 @@ ipc_kobject_server_internal(
 
 	/* Check kobject mig filter mask, if exists. */
 	if (filter_mask != NULL &&
-	    idx != KOBJ_IDX_NOT_SET &&
-	    !bitstr_test(filter_mask, idx) &&
+	    (idx == KOBJ_IDX_NOT_SET || !bitstr_test(filter_mask, idx)) &&
 	    mac_task_kobj_msg_evaluate != NULL) {
-		/* Not in filter mask, evaluate policy. */
+		/* No index registered by Sandbox, or not in filter mask: evaluate policy. */
 		kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
 		    request_msgh_id, idx);
 		if (kr != KERN_SUCCESS) {
@@ -1266,6 +1265,33 @@ ipc_kobject_nsrequest(
 	return kr;
 }
 
+kern_return_t
+ipc_typed_port_copyin_send(
+	ipc_space_t             space,
+	mach_port_name_t        name,
+	ipc_kobject_type_t      kotype,
+	ipc_port_t             *portp)
+{
+	kern_return_t kr;
+
+	kr = ipc_object_copyin(space, name, MACH_MSG_TYPE_COPY_SEND,
+	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND, NULL, portp);
+	if (kr != KERN_SUCCESS) {
+		*portp = IP_NULL;
+		return kr;
+	}
+
+	if (kotype != IKOT_UNKNOWN &&
+	    IP_VALID(*portp) &&
+	    ip_kotype(*portp) != kotype) {
+		ipc_port_release_send(*portp);
+		*portp = IP_NULL;
+		return KERN_INVALID_CAPABILITY;
+	}
+
+	return KERN_SUCCESS;
+}
+
 ipc_port_t
 ipc_kobject_copy_send(
 	ipc_port_t              port,
@@ -1308,6 +1334,19 @@ ipc_kobject_make_send(
 	}
 
 	return sright;
+}
+
+void
+ipc_typed_port_release_send(
+	ipc_port_t              port,
+	ipc_kobject_type_t      kotype)
+{
+	if (kotype != IKOT_UNKNOWN &&
+	    IP_VALID(port) &&
+	    ip_kotype(port) != kotype) {
+		ipc_kobject_require_panic(port, IKO_NULL, kotype);
+	}
+	ipc_port_release_send(port);
 }
 
 kern_return_t
@@ -1672,7 +1711,7 @@ ipc_kobject_destroy(
 	ipc_kobject_ops_t ops = ipc_kobject_ops_get(ip_kotype(port));
 
 	if (ops->iko_op_permanent) {
-		panic("trying to destroy an permanent port %p", port);
+		panic("trying to destroy a permanent port %p with kobject type: %d", port, ip_kotype(port));
 	}
 	if (ops->iko_op_destroy) {
 		ops->iko_op_destroy(port);

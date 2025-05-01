@@ -228,7 +228,7 @@ ml_static_mfree(
 		while (map_size > 0) {
 			assert(pmap_valid_page(ppn));
 			if (IS_MANAGED_PAGE(ppn)) {
-				vm_page_create(ppn, (ppn + 1));
+				vm_page_create_canonical(ppn);
 				freed_pages++;
 			}
 			map_size -= PAGE_SIZE;

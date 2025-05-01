@@ -64,8 +64,6 @@ static void nx_netif_driver_queue_init(struct netif_qset *,
 static struct netif_llink *nx_netif_llink_create_locked(struct nx_netif *,
     struct kern_nexus_netif_llink_init *);
 static void nx_netif_default_llink_add(struct nx_netif *);
-static int netif_qset_enqueue_single(struct netif_qset *,
-    struct __kern_packet *, uint32_t *, uint32_t *);
 static int nx_netif_llink_ext_init_queues(struct kern_nexus *,
     struct netif_llink *);
 static void nx_netif_llink_ext_fini_queues(struct kern_nexus *,
@@ -571,87 +569,76 @@ nx_netif_default_llink_remove(struct nx_netif *nif)
 	nx_netif_llink_destroy_locked(nif, &llink);
 }
 
-static int
-netif_qset_enqueue_single(struct netif_qset *qset, struct __kern_packet *pkt,
-    uint32_t *flowctl, uint32_t *dropped)
-{
-	struct ifnet *ifp = qset->nqs_ifcq->ifcq_ifp;
-	boolean_t pkt_drop = FALSE;
-	int err;
-
-	/*
-	 * we are using the first 4 bytes of flow_id as the AQM flow
-	 * identifier.
-	 */
-	ASSERT(!uuid_is_null(pkt->pkt_flow_id));
-	netif_ifp_inc_traffic_class_out_pkt(ifp, pkt->pkt_svc_class,
-	    1, pkt->pkt_length);
-
-	if (__improbable(pkt->pkt_trace_id != 0)) {
-		KDBG(SK_KTRACE_PKT_TX_FSW | DBG_FUNC_END, pkt->pkt_trace_id);
-		KDBG(SK_KTRACE_PKT_TX_AQM | DBG_FUNC_START, pkt->pkt_trace_id);
-	}
-
-	/* Only native path is supported */
-	ASSERT((pkt->pkt_pflags & PKT_F_MBUF_DATA) == 0);
-	ASSERT(pkt->pkt_mbuf == NULL);
-
-	err = ifnet_enqueue_ifcq_pkt(ifp, qset->nqs_ifcq, pkt, false,
-	    &pkt_drop);
-	if (__improbable(err != 0)) {
-		if ((err == EQFULL || err == EQSUSPENDED) && flowctl != NULL) {
-			(*flowctl)++;
-		}
-		if (pkt_drop && dropped != NULL) {
-			(*dropped)++;
-		}
-	}
-	return err;
-}
-
 int
-netif_qset_enqueue(struct netif_qset *qset, struct __kern_packet *pkt_chain,
-    struct __kern_packet *tail, uint32_t cnt, uint32_t bytes, uint32_t *flowctl,
-    uint32_t *dropped)
+netif_qset_enqueue(struct netif_qset *qset, bool chain,
+    struct __kern_packet *pkt_chain, struct __kern_packet *tail, uint32_t cnt,
+    uint32_t bytes, uint32_t *flowctl, uint32_t *dropped)
 {
-#pragma unused(tail)
 	struct __kern_packet *pkt = pkt_chain;
 	struct __kern_packet *next;
 	struct netif_stats *nifs = &qset->nqs_llink->nll_nif->nif_stats;
-	uint32_t c = 0, b = 0, drop_cnt = 0, flowctl_cnt = 0;
+	struct ifnet *ifp = qset->nqs_ifcq->ifcq_ifp;
+	uint32_t c = 0, b = 0;
+	boolean_t pkt_drop = FALSE;
 	int err = 0;
+
+	ASSERT(dropped != NULL && flowctl != NULL);
 
 	/* drop packets if logical link state is destroyed */
 	if (qset->nqs_llink->nll_state == NETIF_LLINK_STATE_DESTROYED) {
-		pp_free_packet_chain(pkt_chain, (int *)&drop_cnt);
-		STATS_ADD(nifs, NETIF_STATS_LLINK_TX_DROP_BAD_STATE, drop_cnt);
-		if (dropped != NULL) {
-			*dropped = drop_cnt;
-		}
+		pp_free_packet_chain(pkt_chain, (int *)dropped);
+		STATS_ADD(nifs, NETIF_STATS_LLINK_TX_DROP_BAD_STATE, *dropped);
 		return ENXIO;
 	}
 
-	/* We don't support chains for now */
-	while (pkt != NULL) {
-		next = pkt->pkt_nextpkt;
-		pkt->pkt_nextpkt = NULL;
-		c++;
-		b += pkt->pkt_length;
+	if (chain) {
+		/* all packets in this chain should have the same SVC */
+		netif_ifp_inc_traffic_class_out_pkt(ifp, pkt_chain->pkt_svc_class,
+		    cnt, bytes);
 
-		(void) netif_qset_enqueue_single(qset, pkt, &flowctl_cnt,
-		    &drop_cnt);
-		pkt = next;
+		err = ifnet_enqueue_pkt_chain(ifp, pkt_chain, tail, cnt,
+		    bytes, false, &pkt_drop);
+		if (__improbable(err != 0)) {
+			if ((err == EQFULL || err == EQSUSPENDED)) {
+				(*flowctl)++;
+			}
+			if (pkt_drop) {
+				*dropped = cnt;
+			}
+		}
+	} else {
+		while (pkt != NULL) {
+			next = pkt->pkt_nextpkt;
+			pkt->pkt_nextpkt = NULL;
+			c++;
+			b += pkt->pkt_length;
+
+			netif_ifp_inc_traffic_class_out_pkt(ifp, pkt->pkt_svc_class,
+			    1, pkt->pkt_length);
+
+			err = ifnet_enqueue_pkt(ifp, pkt, false, &pkt_drop);
+			if (__improbable(err != 0)) {
+				if ((err == EQFULL || err == EQSUSPENDED)) {
+					(*flowctl)++;
+				}
+				if (pkt_drop) {
+					(*dropped)++;
+				}
+			}
+
+			pkt = next;
+		}
+		VERIFY(c == cnt);
+		VERIFY(b == bytes);
 	}
-	VERIFY(c == cnt);
-	VERIFY(b == bytes);
-	if (flowctl != NULL && flowctl_cnt > 0) {
-		*flowctl = flowctl_cnt;
-		STATS_ADD(nifs, NETIF_STATS_LLINK_AQM_QFULL, flowctl_cnt);
+
+	if (*flowctl > 0) {
+		STATS_ADD(nifs, NETIF_STATS_LLINK_AQM_QFULL, *flowctl);
 		err = EIO;
 	}
-	if (dropped != NULL && drop_cnt > 0) {
-		*dropped = drop_cnt;
-		STATS_ADD(nifs, NETIF_STATS_LLINK_AQM_DROPPED, drop_cnt);
+	if (*dropped > 0) {
+		STATS_ADD(nifs, NETIF_STATS_LLINK_AQM_DROPPED, *dropped);
+		STATS_ADD(nifs, NETIF_STATS_DROP, *dropped);
 		err = EIO;
 	}
 	return err;

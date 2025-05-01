@@ -61,6 +61,7 @@
 #include <kern/assert.h>
 #include <kern/policy_internal.h>
 #include <kern/exc_guard.h>
+#include <kern/task.h>
 
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -102,6 +103,8 @@
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
+
+#include <os/log.h>
 
 struct pshmnode;
 struct psemnode;
@@ -217,6 +220,7 @@ static int proc_piduuidinfo(pid_t pid, uuid_t uuid_buf, uint32_t buffersize);
 
 extern int proc_pidpathinfo_internal(proc_t p, __unused uint64_t arg, char *buf, uint32_t buffersize, __unused int32_t *retval);
 extern int cansignal(struct proc *, kauth_cred_t, struct proc *, int);
+extern int cansignal_nomac(proc_t src, kauth_cred_t uc_src, proc_t dst, int signum);
 extern int proc_get_rusage(proc_t proc, int flavor, user_addr_t buffer, int is_zombie);
 
 #define CHECK_SAME_USER         TRUE
@@ -1417,10 +1421,10 @@ proc_pidpathinfo_internal(proc_t p, __unused uint64_t arg, char *buf, uint32_t b
 				}
 				if (error == EACCES) {
 					vfs_context_t ctx = vfs_context_current();
-#if DEVLOPMENT || DEBUG
-					printf("%s : EACCES returned vnode_lookup for path %s for uid %d\n", __FUNCTION__, buf, (int)kauth_cred_getuid(ctx->vc_ucred));
+#if DEVELOPMENT || DEBUG
+					os_log(OS_LOG_DEFAULT, "%s : EACCES returned by vnode_lookup for path %s for uid %d\n", __FUNCTION__, buf, (int)kauth_cred_getuid(ctx->vc_ucred));
 #else
-					printf("%s : EACCES returned by vnode_lookup for uid %d\n", __FUNCTION__, (int)kauth_cred_getuid(ctx->vc_ucred));
+					os_log(OS_LOG_DEFAULT, "%s : EACCES returned by vnode_lookup for uid %d\n", __FUNCTION__, (int)kauth_cred_getuid(ctx->vc_ucred));
 #endif
 
 					nvp = NULLVP;
@@ -1430,13 +1434,21 @@ proc_pidpathinfo_internal(proc_t p, __unused uint64_t arg, char *buf, uint32_t b
 						vnode_put(nvp);
 						nvp = NULLVP;
 					} else if (error == EACCES) {
-#if DEVLOPMENT || DEBUG
-						printf("%s : EACCES returned vnode_lookup for path %s for uid 0\n", __FUNCTION__, buf);
+#if DEVELOPMENT || DEBUG
+						os_log(OS_LOG_DEFAULT, "%s : EACCES returned by vnode_lookup for path %s for uid 0\n", __FUNCTION__, buf);
 #else
-						printf("%s : EACCES returned by vnode_lookup for uid 0\n", __FUNCTION__);
+						os_log(OS_LOG_DEFAULT, "%s : EACCES returned by vnode_lookup for uid 0\n", __FUNCTION__);
 #endif
 						/* This should be a panic for a local FS */
 						error = ENODEV;
+					} else {
+#if DEVELOPMENT || DEBUG
+						os_log(OS_LOG_DEFAULT, "%s : vnode_lookup for path %s returned error %d\n",
+						    __FUNCTION__, buf, error);
+#else
+						os_log(OS_LOG_DEFAULT, "%s : vnode_lookup returned error %d\n",
+						    __FUNCTION__, error);
+#endif
 					}
 				}
 			}
@@ -1474,9 +1486,9 @@ proc_piduniqidentifierinfo(proc_t p, struct proc_uniqidentifierinfo *p_uniqidinf
 	proc_getexecutableuuid(p, (unsigned char *)&p_uniqidinfo->p_uuid, sizeof(p_uniqidinfo->p_uuid));
 	p_uniqidinfo->p_puniqueid = proc_puniqueid(p);
 	p_uniqidinfo->p_idversion = proc_pidversion(p);
+	p_uniqidinfo->p_orig_ppidversion = proc_orig_ppidversion(p);
 	p_uniqidinfo->p_reserve2 = 0;
 	p_uniqidinfo->p_reserve3 = 0;
-	p_uniqidinfo->p_reserve4 = 0;
 }
 
 
@@ -2178,6 +2190,9 @@ proc_pidinfo(int pid, uint32_t flags, uint64_t ext_id, int flavor, uint64_t arg,
 
 	switch (flavor) {
 	case PROC_PIDLISTFDS: {
+		if ((error = proc_security_policy(p, PROC_INFO_CALL_PIDFDINFO, flavor, check_same_user))) {
+			goto out;
+		}
 		error = proc_pidfdlist(p, buffer, buffersize, retval);
 	}
 	break;
@@ -3388,13 +3403,7 @@ proc_dirtycontrol(__unused int pid, __unused int flavor, __unused uint64_t arg, 
 static int
 proc_terminate_with_proc(proc_t p, int32_t *retval)
 {
-	kauth_cred_t uc = kauth_cred_get();
 	int sig;
-
-	/* Check privileges; if SIGKILL can be issued, then SIGTERM is also OK */
-	if (!cansignal(current_proc(), uc, p, SIGKILL)) {
-		return EPERM;
-	}
 
 	/* Not allowed to sudden terminate yourself */
 	if (p == current_proc()) {
@@ -3427,6 +3436,7 @@ proc_terminate(int pid, int32_t *retval)
 {
 	int error = 0;
 	proc_t p;
+	kauth_cred_t uc = kauth_cred_get();
 
 #if 0
 	/* XXX: Check if these are necessary */
@@ -3445,6 +3455,12 @@ proc_terminate(int pid, int32_t *retval)
 	/* XXX: Check if these are necessary */
 	AUDIT_ARG(process, p);
 #endif
+
+	/* Check privileges; if SIGKILL can be issued, then SIGTERM is also OK */
+	if (!cansignal(current_proc(), uc, p, SIGKILL)) {
+		proc_rele(p);
+		return EPERM;
+	}
 
 	error = proc_terminate_with_proc(p, retval);
 	proc_rele(p);
@@ -3482,57 +3498,94 @@ struct proc_terminate_all_rsr_struct {
 };
 
 /**
- * @brief Wrapper for the majority of send signal methods. Validates signal number,
- * validates the target audit token, validates that current_proc() can send the signal.
- * Then invokes proc_terminate_with_proc if should_terminate is true, otherwise invokes
- * psignal with the signal.
+ * @brief Helper to obtain the proc_ident for a process given its audit_token_t
+ *
+ * @param out The output struct proc_ident
+ * @param token The audit token of the process to search for
+ * @return 0 on success, non-zero failure
  */
 static int
-_proc_signal_send(audit_token_t target, int signum, bool should_terminate, int32_t *retval)
+proc_ident_for_audit_token(proc_ident_t out, audit_token_t token)
+{
+	int result = 0;
+	proc_t p = PROC_NULL;
+
+	if ((p = proc_find_audit_token(token)) == PROC_NULL) {
+		result = -ESRCH;
+		goto out;
+	}
+
+	*out = proc_ident(p);
+out:
+	if (p != PROC_NULL) {
+		proc_rele(p);
+		p = PROC_NULL;
+	}
+	return result;
+}
+
+/**
+ * @brief Helper to signal a process by audit token.
+ *
+ * @note Invokes proc_terminate_with_proc if should_terminate is true, otherwise invokes
+ * psignal with the signal.
+ *
+ * @param instigator The instigator process (if applicable, may be NULL)
+ * @param target The target process audit token
+ * @param signum Signal number to send
+ * @param should_terminate Should the process be terminated
+ * @param retval Return value for libproc callers
+ */
+static int
+psignal_by_audit_token(audit_token_t *instigator, audit_token_t target, int signum, bool should_terminate, int32_t *retval)
 {
 	int error = 0;
-	pid_t pid = 0;
 	proc_t target_proc = PROC_NULL;
+	struct proc_ident i_ident;
+	struct proc_ident t_ident;
 	kauth_cred_t uc = kauth_cred_get();
 
-	/* defined in bsd/kern/kern_prot.c */
-	extern int get_audit_token_pid(audit_token_t *audit_token);
-
-	/* Check that the signal number is valid */
-	if (!((signum > 0) && (signum < NSIG))) {
+	// Check that the signal number is valid
+	if (!((signum > 0) && (signum < NSIG)) || retval == NULL) {
 		error = EINVAL;
 		goto out;
 	}
 
-	pid = get_audit_token_pid(&target);
-	if (pid <= 0) {
-		error = EINVAL;
-		goto out;
-	}
-
-	if ((target_proc = proc_find(pid)) == PROC_NULL) {
+	// If instigator is not NULL, successful lookup is required
+	if (instigator != NULL && (proc_ident_for_audit_token(&i_ident, *instigator) != 0)) {
 		error = ESRCH;
 		goto out;
 	}
 
-	/* Check the target proc pidversion */
-	int pidversion = proc_pidversion(target_proc);
-	if (pidversion != target.val[7]) {
+	// Lookup of target process must succeed
+	if (proc_ident_for_audit_token(&t_ident, target) != 0) {
 		error = ESRCH;
+		goto out;
+	}
+
+	// Check MACF policy without holding any refs, proceed if the signal is allowed to be sent.
+	if (mac_proc_check_signal(current_proc(), instigator == NULL ? NULL : &i_ident, &t_ident, signum) != 0) {
+		error = EPERM;
+		goto out;
+	}
+
+	// Acquire the target process ref to actually send the signal
+	if ((target_proc = proc_find_ident(&t_ident)) == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	// Check the calling process privileges
+	if (!cansignal_nomac(current_proc(), uc, target_proc, signum)) {
+		error = EPERM;
 		goto out;
 	}
 
 	// Determine if the process should be immediately terminated
-	// proc_terminate_with_proc() invokes `cansignal()` internally and sets
-	// retval to the signal that was sent (either SIGTERM or SIGKILL).
+	// proc_terminate_with_proc() sets retval to the signal that was
+	// sent (either SIGTERM or SIGKILL).
 	if (should_terminate) {
 		error = proc_terminate_with_proc(target_proc, retval);
-		goto out;
-	}
-
-	/* Check the calling process privileges, proceed if it can signal the target process */
-	if (!cansignal(current_proc(), uc, target_proc, signum)) {
-		error = EPERM;
 		goto out;
 	}
 
@@ -3542,6 +3595,7 @@ _proc_signal_send(audit_token_t target, int signum, bool should_terminate, int32
 out:
 	if (target_proc != PROC_NULL) {
 		proc_rele(target_proc);
+		target_proc = PROC_NULL;
 	}
 	return error;
 }
@@ -3567,14 +3621,8 @@ proc_signal_delegate(user_addr_t buffer, size_t buffersize, int signum, int32_t 
 		return error;
 	}
 
-#ifdef CONFIG_MACF
-	if ((error = mac_proc_check_delegated_signal(current_proc(), info.instigator, info.target, signum))) {
-		return error;
-	}
-#endif
-
 	/* Final signal checks on current_proc */
-	return _proc_signal_send(info.target, signum, false, retval);
+	return psignal_by_audit_token(&info.instigator, info.target, signum, false, retval);
 }
 
 static int
@@ -3597,14 +3645,8 @@ proc_terminate_delegate(user_addr_t buffer, size_t buffersize, int32_t *retval)
 		return error;
 	}
 
-#ifdef CONFIG_MACF
-	if ((error = mac_proc_check_delegated_signal(current_proc(), info.instigator, info.target, SIGKILL))) {
-		return error;
-	}
-#endif
-
 	/* Final signal checks on current_proc */
-	return _proc_signal_send(info.target, SIGTERM, true, retval);
+	return psignal_by_audit_token(&info.instigator, info.target, SIGTERM, true, retval);
 }
 
 static int
@@ -3623,7 +3665,7 @@ proc_signal_with_audittoken(user_addr_t buffer, size_t buffersize, int signum, i
 		goto out;
 	}
 
-	error = _proc_signal_send(target, signum, false, retval);
+	error = psignal_by_audit_token(NULL, target, signum, false, retval);
 out:
 	return error;
 }
@@ -3649,7 +3691,7 @@ proc_terminate_with_audittoken(user_addr_t buffer, size_t buffersize, int32_t *r
 		goto out;
 	}
 
-	error = _proc_signal_send(target, SIGTERM, true, retval);
+	error = psignal_by_audit_token(NULL, target, SIGTERM, true, retval);
 out:
 	return error;
 }

@@ -133,13 +133,11 @@ class KMem(object, metaclass=ABCMeta):
             for i in range(0, count, 2)
         ]
 
-        kmem_ranges = target.chkFindFirstGlobalVariable('gIOKitPageableFixedRanges')
-        count       = kmem_ranges.GetByteSize() // target.GetAddressByteSize()
-        addresses   = target.xIterAsUInt64(kmem_ranges.GetLoadAddress(), count)
-        self.iokit_ranges = [
-            MemoryRange(next(addresses), next(addresses))
-            for i in range(0, count, 2)
-        ]
+        iokit_mach_vm_range = target.chkFindFirstGlobalVariable('gIOKitPageableFixedRange')
+        self.iokit_range = MemoryRange(
+            start=iokit_mach_vm_range.xGetIntegerByName('min_address'),
+            end=iokit_mach_vm_range.xGetIntegerByName('max_address'),
+        )
 
         #
         # And other important globals
@@ -163,9 +161,9 @@ class KMem(object, metaclass=ABCMeta):
         #
         # Recognize whether the target is any form of KASAN kernel.
         #
-        if any(target.FindFirstGlobalVariable('kasan_enabled')):
+        if target.FindFirstGlobalVariable('kasan_enabled').IsValid():
             self.kasan         = True
-            self.kasan_tbi     = any(target.FindFirstGlobalVariable('kasan_tbi_enabled'))
+            self.kasan_tbi     = target.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
             self.kasan_classic = not self.kasan_tbi
         else:
             self.kasan         = False
@@ -177,7 +175,14 @@ class KMem(object, metaclass=ABCMeta):
         #
         self.kn_kq_packing = VMPointerUnpacker(target, 'kn_kq_packing_params')
         self.vm_page_packing = VMPointerUnpacker(target, 'vm_page_packing_params')
-        self.rwlde_caller_packing = VMPointerUnpacker(target, 'rwlde_caller_packing_params')
+        try:
+            self.rwlde_caller_packing = VMPointerUnpacker(target, 'rwlde_caller_packing_params')
+        except ValueError:
+            #
+            # Release kernel doesn't define DEBUG_RW thus rwlde_caller_packing_params is compiled out
+            #
+            self.rwlde_caller_packing = None
+
         self.c_slot_packing = VMPointerUnpacker(target, 'c_slot_packing_params')
 
     @staticmethod

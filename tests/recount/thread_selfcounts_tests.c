@@ -14,18 +14,22 @@ T_GLOBAL_META(
     T_META_OWNER("mwidmann"),
     T_META_CHECK_LEAKS(false));
 
+static char *amp_fail_reason = "P-binding on AMP scheduler";
+
 static void
 _check_cpi(struct thsc_cpi *before, struct thsc_cpi *after, const char *name)
 {
-	T_QUIET;
+	T_QUIET; T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_GT(before->tcpi_instructions, UINT64_C(0),
 	    "%s: instructions non-zero", name);
-	T_QUIET;
+	T_QUIET; T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_GT(before->tcpi_cycles, UINT64_C(0), "%s: cycles non-zero",
 	    name);
 
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_GT(after->tcpi_instructions, before->tcpi_instructions,
 	    "%s: instructions monotonically-increasing", name);
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_GT(after->tcpi_cycles, before->tcpi_cycles,
 	    "%s: cycles monotonically-increasing", name);
 }
@@ -33,8 +37,10 @@ _check_cpi(struct thsc_cpi *before, struct thsc_cpi *after, const char *name)
 static void
 _check_no_cpi(struct thsc_cpi *before, struct thsc_cpi *after, const char *name)
 {
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_EQ(after->tcpi_instructions, before->tcpi_instructions,
 	    "%s: instructions should not increase", name);
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_EQ(after->tcpi_cycles, before->tcpi_cycles,
 	    "%s: cycles should not increase", name);
 }
@@ -56,10 +62,12 @@ _check_time_cpi(struct thsc_time_cpi *before, struct thsc_time_cpi *after,
 	struct thsc_cpi after_cpi = _remove_time_from_cpi(after);
 	_check_cpi(&before_cpi, &after_cpi, name);
 
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_GT(after->ttci_user_time_mach, before->ttci_user_time_mach,
 			"%s: user time monotonically-increasing", name);
 
 	if (has_user_system_times()) {
+		T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 		T_EXPECT_GT(after->ttci_system_time_mach, before->ttci_system_time_mach,
 				"%s: system time monotonically-increasing", name);
 	}
@@ -73,10 +81,12 @@ _check_no_time_cpi(struct thsc_time_cpi *before, struct thsc_time_cpi *after,
 	struct thsc_cpi after_cpi = _remove_time_from_cpi(after);
 	_check_no_cpi(&before_cpi, &after_cpi, name);
 
+	T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 	T_EXPECT_EQ(after->ttci_user_time_mach, before->ttci_user_time_mach,
 			"%s: user time should not change", name);
 
 	if (has_user_system_times()) {
+		T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 		T_EXPECT_EQ(after->ttci_system_time_mach, before->ttci_system_time_mach,
 				"%s: system time should not change", name);
 	}
@@ -102,6 +112,7 @@ _check_usage(struct thsc_time_energy_cpi *before,
 	_check_time_cpi(&before_time, &after_time, name);
 
 	if (has_energy()) {
+		T_MAYFAIL_IF_ENABLED(amp_fail_reason);
 		T_EXPECT_GT(after->ttec_energy_nj, UINT64_C(0),
 				"%s: energy monotonically-increasing", name);
 	}
@@ -179,6 +190,8 @@ _expect_counts_on_perf_level(unsigned int perf_level_index,
 	T_ASSERT_POSIX_ZERO(err,
 			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
 	(void)getppid();
+	// Allow time for CLPC to read energy counters
+	usleep(10000);
 	err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, after,
 			level_count * sizeof(*after));
 	T_ASSERT_POSIX_ZERO(err,
@@ -199,6 +212,8 @@ _expect_no_counts_on_perf_level(unsigned int perf_level_index,
 	T_ASSERT_POSIX_ZERO(err,
 			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
 	(void)getppid();
+	// Allow time for CLPC to read energy counters
+	usleep(10000);
 	err = thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, after,
 			level_count * sizeof(*after));
 	T_ASSERT_POSIX_ZERO(err,
@@ -221,6 +236,8 @@ T_DECL(thread_selfcounts_perf_level_correct,
 	if (level_count < 2) {
 		T_SKIP("device is not eligible for checking perf levels because it is SMP");
 	}
+	T_LOG("Currently running the \"%s\" scheduler policy", sched_policy_name());
+	bool is_edge_scheduler = strcmp(sched_policy_name(), "edge") == 0;
 	for (unsigned int i = 0; i < level_count; i++) {
 		T_LOG("Level %d: %s", i, perf_level_name(i));
 	}
@@ -239,6 +256,12 @@ T_DECL(thread_selfcounts_perf_level_correct,
 	T_SETUPBEGIN;
 	bind_to_cluster('P');
 	T_SETUPEND;
+	if (!is_edge_scheduler) {
+		T_QUIET; T_EXPECT_EQ_STR(sched_policy_name(), "amp", "Unexpected multicluster scheduling policy");
+		T_LOG("The AMP scheduler doesn't guarantee that a P-bound thread will "
+		    "only run on P-cores, so the following expects may fail.");
+		set_expects_may_fail(true);
+	}
 	_expect_counts_on_perf_level(0, before, after);
 	_expect_no_counts_on_perf_level(1, before, after);
 

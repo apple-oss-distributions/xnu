@@ -1564,6 +1564,10 @@ ch_open(struct ch_init *init, struct proc *p, int fd, int *err)
 		*err = ENOENT;
 		goto done;
 	}
+	if ((nx->nx_flags & NXF_INVALIDATED) != 0) {
+		*err = EBUSY;
+		goto done;
+	}
 
 	/* port (zero-based) must be within the domain's range */
 	if (port >= NXDOM_MAX(NX_DOM(nx), ports)) {
@@ -1727,6 +1731,10 @@ ch_open_special(struct kern_nexus *nx, struct chreq *chr, boolean_t nonxref,
 	struct kern_channel *ch = NULL;
 
 	SK_LOCK_ASSERT_HELD();
+	if ((nx->nx_flags & NXF_INVALIDATED) != 0) {
+		*err = EBUSY;
+		goto done;
+	}
 	*err = 0;
 
 	ASSERT((chr->cr_mode & CHMODE_USER_PACKET_POOL) == 0);
@@ -1761,13 +1769,25 @@ ch_open_special(struct kern_nexus *nx, struct chreq *chr, boolean_t nonxref,
 
 #if SK_LOG
 	uuid_string_t uuidstr;
+	const char * na_name = NULL;
+	const char * nxdom_prov_name = NULL;
+
+	if (ch != NULL && ch->ch_na != NULL) {
+		na_name = ch->ch_na->na_name;
+	}
+	if (nx->nx_prov != NULL) {
+		nxdom_prov_name = NX_DOM_PROV(nx)->nxdom_prov_name;
+	}
 	SK_D("nx 0x%llx (%s:\"%s\":%d:%d) spec_uuid \"%s\" mode 0x%b err %d",
-	    SK_KVA(nx), NX_DOM_PROV(nx)->nxdom_prov_name, (ch != NULL ?
-	    ch->ch_na->na_name : ""), (int)chr->cr_port, (int)chr->cr_ring_id,
+	    SK_KVA(nx),
+	    (nxdom_prov_name != NULL) ? nxdom_prov_name : "",
+	    (na_name != NULL) ? na_name : "",
+	    (int)chr->cr_port, (int)chr->cr_ring_id,
 	    sk_uuid_unparse(chr->cr_spec_uuid, uuidstr), chr->cr_mode,
 	    CHMODE_BITS, *err);
 #endif /* SK_LOG */
 
+done:
 	return ch;
 }
 

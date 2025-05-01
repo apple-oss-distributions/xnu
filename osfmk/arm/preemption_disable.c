@@ -111,9 +111,6 @@ _enable_preemption_write_count(thread_t thread, unsigned int count)
  * LTO isn't smart enough to inline it, yet it is profitable because
  * the vast majority of callers use current_thread() already.
  *
- * TODO: It is unfortunate that we have to load
- *       sched_preemption_disable_debug_mode
- *
  * /!\ Breaking inlining causes zalloc to be roughly 10% slower /!\
  */
 OS_ALWAYS_INLINE
@@ -134,10 +131,12 @@ _disable_preemption(void)
 	 * increment/decrement being paired around their entry/exit means
 	 * that collection here is not desynced otherwise.
 	 */
-
-	if (__improbable(count == 0 && sched_preemption_disable_debug_mode)) {
-		__attribute__((musttail))
-		return _prepare_preemption_disable_measurement();
+	if (improbable_static_if(sched_debug_preemption_disable)) {
+		if (__improbable(count == 0 &&
+		    sched_preemption_disable_debug_mode)) {
+			__attribute__((musttail))
+			return _prepare_preemption_disable_measurement();
+		}
 	}
 #endif /* SCHED_HYGIENE_DEBUG */
 }
@@ -269,7 +268,7 @@ _preemption_disable_snap_start(void)
 	pcpu->pdp_start.pds_mach_time = ml_get_sched_hygiene_timebase();
 	pcpu->pdp_start.pds_int_mach_time = recount_current_processor_interrupt_duration_mach();
 #if CONFIG_CPU_COUNTERS
-	if (__probable(sched_hygiene_debug_pmc)) {
+	if (static_if(sched_debug_pmc)) {
 		mt_cur_cpu_cycles_instrs_speculative(&pcpu->pdp_start.pds_cycles,
 		    &pcpu->pdp_start.pds_instrs);
 	}
@@ -405,7 +404,7 @@ _collect_preemption_disable_measurement(void)
 		uint64_t average_cpi_fractional = 0;
 
 #if CONFIG_CPU_COUNTERS
-		if (__probable(sched_hygiene_debug_pmc)) {
+		if (static_if(sched_debug_pmc)) {
 			/*
 			 * We're getting these values a bit late, but getting them
 			 * is a bit expensive, so we take the slight hit in

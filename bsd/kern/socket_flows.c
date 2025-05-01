@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2021, 2023, 2024 Apple Inc. All rights reserved.
  * @APPLE_LICENSE_HEADER_START@
  *
  * This file contains Original Code and/or Modifications of Original Code
@@ -238,11 +238,12 @@ soflow_entry_log(int level, struct socket *so, struct soflow_hash_entry *entry, 
 		return;
 	}
 
-	SOFLOW_LOG(level, so, entry->soflow_debug, "<%s>: %s <%s(%d) entry %p, featureID %llu> outifp %d lport %d fport %d laddr %s faddr %s hash %X "
+	SOFLOW_LOG(level, so, entry->soflow_debug, "<%s>: %s <%s(%d) entry %p, featureID %llu, filter_ctl 0x%x> outifp %d lport %d fport %d laddr %s faddr %s hash %X "
 	    "<rx p %llu b %llu, tx p %llu b %llu>",
 	    msg, entry->soflow_outgoing ? "OUT" : "IN ",
 	    SOFLOW_IS_UDP(so) ? "UDP" : "proto", SOFLOW_GET_SO_PROTO(so),
 	    entry, entry->soflow_feat_ctxt_id,
+	    entry->soflow_filter_control_unit,
 	    entry->soflow_outifindex,
 	    ntohs(entry->soflow_lport), ntohs(entry->soflow_fport), local, remote,
 	    entry->soflow_flowhash,
@@ -743,6 +744,7 @@ soflow_db_add_entry(struct soflow_db *db, struct sockaddr *local, struct sockadd
 	entry->soflow_lastused = net_uptime();
 	entry->soflow_db = db;
 	entry->soflow_debug = SOFLOW_ENABLE_DEBUG(db->soflow_db_so, entry);
+	microuptime(&entry->soflow_timestamp);
 
 	if (inp->inp_vflag & INP_IPV6) {
 		hashkey_faddr = entry->soflow_faddr.addr6.s6_addr32[3];
@@ -1133,7 +1135,7 @@ soflow_update_flow_stats(struct soflow_hash_entry *hash_entry, size_t data_size,
 
 struct soflow_hash_entry *
 soflow_get_flow(struct socket *so, struct sockaddr *local, struct sockaddr *remote, struct mbuf *control,
-    size_t data_size, bool outgoing, uint16_t rcv_ifindex)
+    size_t data_size, soflow_direction_t direction, uint16_t rcv_ifindex)
 {
 	struct soflow_hash_entry *hash_entry = NULL;
 	struct inpcb *inp = sotoinpcb(so);
@@ -1172,14 +1174,23 @@ soflow_get_flow(struct socket *so, struct sockaddr *local, struct sockaddr *remo
 				soflow_entry_update_local(so->so_flow_db, hash_entry, local, control, rcv_ifindex);
 			}
 			hash_entry->soflow_lastused = net_uptime();
-			soflow_update_flow_stats(hash_entry, data_size, outgoing);
+			if (data_size > 0 && direction != SOFLOW_DIRECTION_UNKNOWN) {
+				soflow_update_flow_stats(hash_entry, data_size, direction == SOFLOW_DIRECTION_OUTBOUND);
+			}
 
 			SOFLOW_DB_FREE(so->so_flow_db);
 			return hash_entry;
 		}
 
 		SOFLOW_DB_FREE(so->so_flow_db);
-	} else {
+	}
+
+	// No flow was found. Only add a new flow if the direction is known.
+	if (direction == SOFLOW_DIRECTION_UNKNOWN) {
+		return NULL;
+	}
+
+	if (so->so_flow_db == NULL) {
 		// If new socket, allocate cfil db
 		if (soflow_db_init(so) != 0) {
 			return NULL;
@@ -1206,8 +1217,10 @@ soflow_get_flow(struct socket *so, struct sockaddr *local, struct sockaddr *remo
 	if (control != NULL) {
 		soflow_entry_update_local(so->so_flow_db, hash_entry, local, control, rcv_ifindex);
 	}
-	hash_entry->soflow_outgoing = outgoing;
-	soflow_update_flow_stats(hash_entry, data_size, outgoing);
+	hash_entry->soflow_outgoing = (direction == SOFLOW_DIRECTION_OUTBOUND);
+	if (data_size > 0) {
+		soflow_update_flow_stats(hash_entry, data_size, direction == SOFLOW_DIRECTION_OUTBOUND);
+	}
 
 	// Only report flow to NSTAT if unconnected UDP
 	if (!soflow_nstat_disable && SOFLOW_IS_UDP(so) && !(so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING))) {
@@ -1371,6 +1384,11 @@ soflow_gc_cleanup(struct socket *so)
 		return 0;
 	}
 	db = so->so_flow_db;
+
+	// Do not collect garbage for databases that have only one flow.
+	if (db->soflow_db_count == 1 && db->soflow_db_only_entry != NULL) {
+		return 0;
+	}
 
 	socket_lock_assert_owned(so);
 

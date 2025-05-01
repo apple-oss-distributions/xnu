@@ -89,9 +89,9 @@ def GetObjectSummary(obj):
         vtype_str = " <" + vtype[0].GetName() + ">"
     else:
         vtype_str = ""
-    if hasattr(obj, 'retainCount'):
-        retCount = (obj.retainCount & 0xffff)
-        cntnrRetCount = (obj.retainCount >> 16)
+    if (retainCount := get_field(obj, 'retainCount')) is not None:
+        retCount = (retainCount & 0xffff)
+        cntnrRetCount = (retainCount >> 16)
         out_string = "`object 0x{0: <16x}, vt 0x{1: <16x}{2:s}, retain count {3:d}, container retain {4:d}` ".format(obj, vt, vtype_str, retCount, cntnrRetCount)
     else:
         out_string = "`object 0x{0: <16x}, vt 0x{1: <16x}{2:s}` ".format(obj, vt, vtype_str)
@@ -172,8 +172,8 @@ def GetRegistryEntrySummary(entry):
     
     if name is not None:
         out_string += "+-o {0:s}  ".format(GetString(CastIOKitClass(name, 'OSString *')))
-    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
-        out_string += "+-o {0:s}  ".format(CastIOKitClass(entry, 'IOService *').pwrMgt.Name)
+    elif (pwrMgt := CastIOKitClass(entry, 'IOService *').pwrMgt) and (service_name := pwrMgt.Name):
+        out_string += "+-o {0:s}  ".format(service_name)
     else:
         out_string += "+-o ??  "
     
@@ -227,8 +227,8 @@ def ShowAllClasses(cmd_args=None):
 def ShowObject(cmd_args=None):
     """ Show info about an OSObject - its vtable ptr and retain count, & more info for simple container classes.
     """
-    if not cmd_args:
-        print("Please specify the address of the OSObject whose info you want to view. Type help showobject for help")
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the address of the OSObject whose info you want to view. Type help showobject for help")
         return
     
     obj = kern.GetValueFromAddress(cmd_args[0], 'OSObject *')
@@ -240,9 +240,8 @@ def DumpObject(cmd_args=None):
     """ Dumps object information if it is a valid object confirmed by showobject
         Usage: dumpobject <address of object to be dumped> [class/struct type of object]
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(DumpObject.__doc__)
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("No arguments passed")
         return False
 
     if len(cmd_args) == 1:
@@ -280,9 +279,8 @@ def SetRegistryPlane(cmd_args=None):
         syntax: (lldb) setregistryplane 0xaddr      - will set the registry plane to 0xaddr
         syntax: (lldb) setregistryplane gIODTPlane  - will set the registry plane to gIODTPlane
     """
-    if not cmd_args:
-        print("Please specify the name of the plane you want to use with the IOKit registry macros.")
-        print(SetRegistryPlane.__doc__)
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the name of the plane you want to use with the IOKit registry macros.")
     
     if cmd_args[0] == "0":
         print(GetObjectSummary(kern.globals.gIORegistryPlanes))
@@ -297,9 +295,8 @@ def ShowRegistryEntry(cmd_args=None):
         syntax: (lldb) showregistryentry 0xaddr
         syntax: (lldb) showregistryentry gIOPMRootDomain
     """
-    if not cmd_args:
-        print("Please specify the address of the registry entry whose info you want to view.")
-        print(ShowRegistryEntry.__doc__)
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the address of the registry entry whose info you want to view.")
         return
     
     entry = kern.GetValueFromAddress(cmd_args[0], 'IORegistryEntry *')
@@ -328,11 +325,9 @@ def FindRegistryEntry(cmd_args=None):
         using 'setregistryplane', the command defaults to searching entries from the IOService plane
         syntax: (lldb) findregistryentries AppleACPICPU - will find the first registry entry that matches AppleACPICPU
     """
-    if not cmd_args:
-        print("Please specify the name of the registry entry you want to find")
-        print(FindRegistryEntry.__doc__)
-        return
-    
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the name of the registry entry you want to find")
+        
     FindRegistryEntryRecurse(kern.globals.gRegistryRoot, cmd_args[0], True)
 
 @lldb_command('findregistryentries')
@@ -342,10 +337,8 @@ def FindRegistryEntries(cmd_args=None):
         using 'setregistryplane', the command defaults to searching entries from the IOService plane
         syntax: (lldb) findregistryentries AppleACPICPU - will find all registry entries that match AppleACPICPU
     """
-    if not cmd_args:
-        print("Please specify the name of the registry entry/entries you want to find")
-        print(FindRegistryEntries.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the name of the registry entry/entries you want to find")
     
     FindRegistryEntryRecurse(kern.globals.gRegistryRoot, cmd_args[0], False)
 
@@ -357,10 +350,8 @@ def FindRegistryProp(cmd_args=None):
         syntax: (lldb) findregistryprop gIOPMRootDomain IOSleepSupported
         syntax: (lldb) findregistryprop gIOPMRootDomain "Supported Features"
     """
-    if not cmd_args or len(cmd_args) < 2:
-        print("Please specify the address of a IORegistry entry and the property you're looking for")
-        print(FindRegistryProp.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) < 2:
+        raise ArgumentError("Please specify the address of a IORegistry entry and the property you're looking for")
     
     entry = kern.GetValueFromAddress(cmd_args[0], 'IOService *')
     propertyTable = entry.fPropertyTable
@@ -373,10 +364,8 @@ def ReadIOPort8(cmd_args=None):
         Prints 0xBAD10AD in case of a bad read
         Syntax: (lldb) readioport8 <port> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args:
-        print("Please specify a port to read out of")
-        print(ReadIOPort8.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify a port to read out of")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     if len(cmd_args) >= 2:
@@ -393,10 +382,8 @@ def ReadIOPort16(cmd_args=None):
         Prints 0xBAD10AD in case of a bad read
         Syntax: (lldb) readioport16 <port> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args:
-        print("Please specify a port to read out of")
-        print(ReadIOPort16.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify a port to read out of")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     if len(cmd_args) >= 2:
@@ -413,10 +400,8 @@ def ReadIOPort32(cmd_args=None):
         Prints 0xBAD10AD in case of a bad read
         Syntax: (lldb) readioport32 <port> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args:
-        print("Please specify a port to read out of")
-        print(ReadIOPort32.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify a port to read out of")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     if len(cmd_args) >= 2:
@@ -433,10 +418,8 @@ def WriteIOPort8(cmd_args=None):
         specified as well.
         Syntax: (lldb) writeioport8 <port> <value> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args or len(cmd_args) < 2:
-        print("Please specify a port to write to, followed by the value you want to write")
-        print(WriteIOPort8.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) < 2:
+        raise ArgumentError("Please specify a port to write to, followed by the value you want to write")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     value = ArgumentStringToInt(cmd_args[1])
@@ -455,10 +438,8 @@ def WriteIOPort16(cmd_args=None):
         specified as well.
         Syntax: (lldb) writeioport16 <port> <value> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args or len(cmd_args) < 2:
-        print("Please specify a port to write to, followed by the value you want to write")
-        print(WriteIOPort16.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) < 2:
+        raise ArgumentError("Please specify a port to write to, followed by the value you want to write")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     value = ArgumentStringToInt(cmd_args[1])
@@ -477,10 +458,8 @@ def WriteIOPort32(cmd_args=None):
         specified as well.
         Syntax: (lldb) writeioport32 <port> <value> [lcpu (kernel's numbering convention)]
     """
-    if not cmd_args or len(cmd_args) < 2:
-        print("Please specify a port to write to, followed by the value you want to write")
-        print(WriteIOPort32.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) < 2:
+        raise ArgumentError("Please specify a port to write to, followed by the value you want to write")
     
     portAddr = ArgumentStringToInt(cmd_args[0])
     value = ArgumentStringToInt(cmd_args[1])
@@ -497,10 +476,8 @@ def ShowIOServicePM(cmd_args=None):
     """ Routine to dump the IOServicePM object
         Syntax: (lldb) showioservicepm <IOServicePM pointer>
     """
-    if not cmd_args:
-        print("Please enter the pointer to the IOServicePM object you'd like to introspect")
-        print(ShowIOServicePM.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please enter the pointer to the IOServicePM object you'd like to introspect")
     
     iopmpriv = kern.GetValueFromAddress(cmd_args[0], 'IOServicePM *')
     out_string = "MachineState {0: <6d} (".format(iopmpriv.MachineState)
@@ -602,7 +579,7 @@ def ShowIOPMQueues(cmd_args=None):
 def GetIOPMInterest(service):
     iopm = CastIOKitClass(service.pwrMgt, 'IOServicePM *')
     if unsigned(iopm) == 0:
-        print("error: no IOServicePM")
+        raise ArgumentError("error: no IOServicePM")
         return
 
     list = CastIOKitClass(iopm.InterestedDrivers, 'IOPMinformeeList *')
@@ -628,10 +605,8 @@ def ShowIOPMInterest(cmd_args=None):
     """ Show the interested drivers for an IOService.
         syntax: (lldb) showiopminterest <IOService>
     """
-    if not cmd_args:
-        print("Please specify the address of the IOService")
-        print(ShowIOPMInterest.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the address of the IOService")
 
     obj = kern.GetValueFromAddress(cmd_args[0], 'IOService *')
     print(GetIOPMInterest(obj))
@@ -721,9 +696,8 @@ def ShowIOKitClassHierarchy(cmd_args=None):
     """
     Show class hierarchy for a IOKit class
     """
-    if not cmd_args:
-        print("Usage: showiokitclasshierarchy <IOKit class name>")
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Usage: showiokitclasshierarchy <IOKit class name>")
 
     class_name = cmd_args[0]
     metaclasses = GetMetaClasses()
@@ -773,11 +747,12 @@ def ShowRegistryEntryRecurse(entry, prefix, printProps):
         idx = 0
         ca = CastIOKitClass(childArray, 'OSArray *')
         count = unsigned(ca.count)
+        array = ca.array
         while idx < count:
             if plen != 0 and plen != 1 and (plen & (plen - 1)) == 0:
-                ShowRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), prefix + "| ", printProps)
+                ShowRegistryEntryRecurse(CastIOKitClass(array[idx], 'IORegistryEntry *'), prefix + "| ", printProps)
             else:
-                ShowRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), prefix + "  ", printProps)
+                ShowRegistryEntryRecurse(CastIOKitClass(array[idx], 'IORegistryEntry *'), prefix + "  ", printProps)
             idx += 1
 
 def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
@@ -803,8 +778,7 @@ def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
             print(GetRegistryEntrySummary(entry))
             if stopAfterFirst is True:
                 return True
-    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
-        name = CastIOKitClass(entry, 'IOService *').pwrMgt.Name
+    elif (pwrMgt := CastIOKitClass(entry, 'IOService *').pwrMgt) and (name := pwrMgt.Name):
         if str(name) == search_name:
             print(GetRegistryEntrySummary(entry))
             if stopAfterFirst is True:
@@ -819,9 +793,10 @@ def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
     if childArray is not None:
         idx = 0
         ca = CastIOKitClass(childArray, 'OSArray *')
+        array = ca.array
         count = unsigned(ca.count)
         while idx < count:
-            if FindRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), search_name, stopAfterFirst) is True:
+            if FindRegistryEntryRecurse(CastIOKitClass(array[idx], 'IORegistryEntry *'), search_name, stopAfterFirst) is True:
                 return True
             idx += 1
     return False
@@ -848,8 +823,7 @@ def FindRegistryObjectRecurse(entry, search_name):
     if name is not None:
         if str(CastIOKitClass(name, 'OSString *').string) == search_name:
             return entry
-    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
-        name = CastIOKitClass(entry, 'IOService *').pwrMgt.Name
+    elif (pwrMgt := CastIOKitClass(entry, 'IOService *').pwrMgt) and (name := pwrMgt.Name):
         if str(name) == search_name:
             return entry
     
@@ -861,8 +835,9 @@ def FindRegistryObjectRecurse(entry, search_name):
     childArray = LookupKeyInOSDict(registryTable, childKey)
     if childArray is not None:
         ca = CastIOKitClass(childArray, 'OSArray *')
+        array = ca.array
         for idx in range(ca.count):
-            registry_object = FindRegistryObjectRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), search_name)
+            registry_object = FindRegistryObjectRecurse(CastIOKitClass(array[idx], 'IORegistryEntry *'), search_name)
             if not registry_object or int(registry_object) == int(0):
                 continue
             else:
@@ -1363,12 +1338,15 @@ def LookupKeyInOSDict(osdict, key, comparer = None):
     result = None
     idx = 0
 
+    dictionary = osdict.dictionary
+    key_value = unsigned(key) if type(key) is value else key
     while idx < count and result is None:
+        elem = dictionary[idx]
         if comparer is not None:
-            if comparer(key, osdict.dictionary[idx].key) == 0:
-                result = osdict.dictionary[idx].value
-        elif key == osdict.dictionary[idx].key:
-            result = osdict.dictionary[idx].value
+            if comparer(key, elem.key) == 0:
+                result = elem.value
+        elif key_value == unsigned(elem.key):
+            result = elem.value
         idx += 1
     return result
 
@@ -1397,8 +1375,10 @@ def GetRegDictionary(osdict, prefix):
     idx = 0
     count = unsigned(osdict.count)
     
+    dictionary = osdict.dictionary
     while idx < count:
-        out_string += prefix + "  " + GetObjectSummary(osdict.dictionary[idx].key) + " = " + GetObjectSummary(osdict.dictionary[idx].value) + "\n"
+        entry = dictionary[idx]
+        out_string += prefix + "  " + GetObjectSummary(entry.key) + " = " + GetObjectSummary(entry.value) + "\n"
         idx += 1
     out_string += prefix + "}\n"
     return out_string
@@ -1436,11 +1416,12 @@ def GetArray(arr):
     idx = 0
     count = unsigned(arr.count)
     
+    array = arr.array
     while idx < count:
-        obj = arr.array[idx]
+        obj = array[idx]
         idx += 1
         out_string += GetObjectSummary(obj)
-        if idx < unsigned(arr.count):
+        if idx < count:
             out_string += ","
     return out_string
 
@@ -1452,10 +1433,11 @@ def GetDictionary(d):
     out_string = "{\n"
     idx = 0
     count = unsigned(d.count)
-
+    dictionary = d.dictionary
     while idx < count:
-        key = d.dictionary[idx].key
-        value = d.dictionary[idx].value
+        entry = dictionary[idx]
+        key = entry.key
+        value = entry.value
         out_string += "    \"{}\" = {}\n".format(GetString(key), GetObjectSummary(value))
         idx += 1
     out_string += "}"
@@ -1799,10 +1781,8 @@ def ShowEventSources(cmd_args=None):
     """ Show all event sources for a IOWorkLoop
         syntax: (lldb) showeventsources <IOWorkLoop *>
     """
-    if not cmd_args:
-        print("Please specify the address of the IOWorkLoop")
-        print(ShowEventSources.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please specify the address of the IOWorkLoop")
 
     obj = kern.GetValueFromAddress(cmd_args[0], 'IOWorkLoop *')
     idx = 0
@@ -1896,7 +1876,7 @@ def ShowCarveouts(cmd_args=None):
         size = unsigned(data[1])
 
         string = "0x{:x}-0x{:x} (size: 0x{:x})"
-        range_prop_list.append( string.format(paddr, paddr+size, size) );
+        range_prop_list.append(string.format(paddr, paddr+size, size));
 
     for namep, rangep in zip(name_prop_list, range_prop_list):
         print(namep, rangep)

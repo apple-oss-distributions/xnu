@@ -35,66 +35,28 @@
 #include <security/mac_framework.h>
 #include <libkern/OSKextLib.h>
 
-
 #ifdef PROFILE
-
-/* These __llvm functions are defined in InstrProfiling.h in compiler_rt.  That
- * is a internal header, so we need to re-prototype them here.  */
-
-uint64_t __llvm_profile_get_size_for_buffer(void);
-int __llvm_profile_write_buffer(char *Buffer);
-uint64_t __llvm_profile_get_size_for_buffer_internal(const char *DataBegin,
-    const char *DataEnd,
-    const char *CountersBegin,
-    const char *CountersEnd,
-    const char *NamesBegin,
-    const char *NamesEnd);
-int __llvm_profile_write_buffer_internal(char *Buffer,
-    const char *DataBegin,
-    const char *DataEnd,
-    const char *CountersBegin,
-    const char *CountersEnd,
-    const char *NamesBegin,
-    const char *NamesEnd);
-
-extern char __pgo_hib_DataStart __asm("section$start$__HIB$__llvm_prf_data");
-extern char __pgo_hib_DataEnd   __asm("section$end$__HIB$__llvm_prf_data");
-extern char __pgo_hib_NamesStart __asm("section$start$__HIB$__llvm_prf_names");
-extern char __pgo_hib_NamesEnd   __asm("section$end$__HIB$__llvm_prf_names");
-extern char __pgo_hib_CountersStart __asm("section$start$__HIB$__llvm_prf_cnts");
-extern char __pgo_hib_CountersEnd   __asm("section$end$__HIB$__llvm_prf_cnts");
-
 
 static uint64_t
 get_size_for_buffer(int flags)
 {
-	if (flags & PGO_HIB) {
-		return __llvm_profile_get_size_for_buffer_internal(
-			&__pgo_hib_DataStart, &__pgo_hib_DataEnd,
-			&__pgo_hib_CountersStart, &__pgo_hib_CountersEnd,
-			&__pgo_hib_NamesStart, &__pgo_hib_NamesEnd);
-	} else {
-		return __llvm_profile_get_size_for_buffer();
-	}
+	/* These __llvm functions are defined in InstrProfiling.h in compiler_rt.  That
+	 * is a internal header, so we need to re-prototype them here.  */
+	extern uint64_t __llvm_profile_get_size_for_buffer(void);
+
+	return __llvm_profile_get_size_for_buffer();
 }
 
 
 static int
 write_buffer(int flags, char *buffer)
 {
-	if (flags & PGO_HIB) {
-		return __llvm_profile_write_buffer_internal(
-			buffer,
-			&__pgo_hib_DataStart, &__pgo_hib_DataEnd,
-			&__pgo_hib_CountersStart, &__pgo_hib_CountersEnd,
-			&__pgo_hib_NamesStart, &__pgo_hib_NamesEnd);
-	} else {
-		return __llvm_profile_write_buffer(buffer);
-	}
+	extern int __llvm_profile_write_buffer(char *Buffer);
+
+	return __llvm_profile_write_buffer(buffer);
 }
 
-
-#endif
+#endif /* PROFILE */
 
 /* this variable is used to signal to the debugger that we'd like it to reset
  * the counters */
@@ -102,25 +64,21 @@ int kdp_pgo_reset_counters = 0;
 
 /* called in debugger context */
 kern_return_t
-do_pgo_reset_counters()
+do_pgo_reset_counters(void)
 {
-#ifdef PROFILE
-	memset(&__pgo_hib_CountersStart, 0,
-	    ((uintptr_t)(&__pgo_hib_CountersEnd)) - ((uintptr_t)(&__pgo_hib_CountersStart)));
-#endif
 	OSKextResetPgoCounters();
 	kdp_pgo_reset_counters = 0;
 	return KERN_SUCCESS;
 }
 
 static kern_return_t
-kextpgo_trap()
+kextpgo_trap(void)
 {
 	return DebuggerTrapWithState(DBOP_RESET_PGO_COUNTERS, NULL, NULL, NULL, 0, NULL, FALSE, 0, NULL);
 }
 
 static kern_return_t
-pgo_reset_counters()
+pgo_reset_counters(void)
 {
 	kern_return_t r;
 	boolean_t istate;
@@ -137,7 +95,6 @@ pgo_reset_counters()
 	OSKextResetPgoCountersUnlock();
 	return r;
 }
-
 
 /*
  * returns:
@@ -171,12 +128,17 @@ grab_pgo_data(struct proc *p,
 	if (err) {
 		goto out;
 	}
-#endif
+#endif /* CONFIG_MACF */
 
 	if (uap->flags & ~PGO_ALL_FLAGS ||
 	    uap->size < 0 ||
 	    (uap->size > 0 && uap->buffer == 0)) {
 		err = EINVAL;
+		goto out;
+	}
+
+	if (uap->flags & PGO_HIB) {
+		err = ENOTSUP;
 		goto out;
 	}
 
@@ -330,13 +292,13 @@ grab_pgo_data(struct proc *p,
 		goto out;
 	}
 
-#else
+#else /* PROFILE */
 
 	*retval = -1;
 	err = ENOSYS;
 	goto out;
 
-#endif
+#endif /* !PROFILE */
 
 out:
 	if (buffer) {

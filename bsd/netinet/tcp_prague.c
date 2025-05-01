@@ -373,7 +373,7 @@ prague_update_pacer_state(struct tcpcb *tp)
 	uint32_t burst = (uint32_t)(rate >> BURST_SHIFT);
 
 	tp->t_pacer.rate = rate;
-	tp->t_pacer.tso_burst_size = burst;
+	tp->t_pacer.tso_burst_size = max(tp->t_maxseg, burst);
 }
 
 /*
@@ -389,7 +389,7 @@ static void
 prague_ai_alpha_rate(struct tcpcb *tp)
 {
 	uint32_t srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-	if (srtt > REF_RTT_RATE) {
+	if (srtt == 0 || srtt > REF_RTT_RATE) {
 		tp->t_ccstate->prague_alpha_ai = (1 << CWND_SHIFT);
 		return;
 	}

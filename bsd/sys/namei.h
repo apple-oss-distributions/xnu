@@ -145,6 +145,7 @@ struct nameidata {
 
 #define NAMEI_NOFOLLOW_ANY      0x1000  /* no symlinks allowed in the path */
 #define NAMEI_ROOTDIR           0x2000  /* Limit lookup to ni_rootdir (similar to chroot) */
+#define NAMEI_RESOLVE_BENEATH   0x4000  /* path must reside in the hierarchy beneath the starting directory */
 
 #ifdef KERNEL
 /*

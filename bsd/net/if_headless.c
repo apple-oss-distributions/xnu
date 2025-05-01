@@ -279,7 +279,7 @@ struct if_headless {
 	uint16_t                iff_tx_headroom;
 };
 
-typedef struct if_headless * if_headless_ref;
+typedef struct if_headless * __single if_headless_ref;
 
 static if_headless_ref
 ifnet_get_if_headless(ifnet_t ifp);
@@ -438,7 +438,7 @@ headless_packet_pool_alloc(boolean_t multi_buflet, unsigned int max_mtu)
 {
 	headless_packet_pool_t              fpp = NULL;
 	errno_t                         error;
-	struct kern_pbufpool *          pp;
+	struct kern_pbufpool *          pp __single;
 	struct kern_pbufpool_init       pp_init;
 
 	bzero(&pp_init, sizeof(pp_init));
@@ -509,10 +509,11 @@ headless_register_nexus_domain_provider(void)
 	};
 	errno_t                         err = 0;
 
+	nexus_domain_provider_name_t headless_provider_name = "com.apple.headless";
+
 	/* headless_nxdp_init() is called before this function returns */
 	err = kern_nexus_register_domain_provider(NEXUS_TYPE_NET_IF,
-	    (const uint8_t *)
-	    "com.apple.headless",
+	    headless_provider_name,
 	    &dp_init, sizeof(dp_init),
 	    &headless_nx_dom_prov);
 	if (err != 0) {
@@ -567,7 +568,7 @@ headless_nx_ring_fini(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 {
 #pragma unused(nxprov, ring)
 	if_headless_ref     headlessif;
-	thread_call_t   tcall = NULL;
+	thread_call_t   tcall __single = NULL;
 
 	headless_lock();
 	headlessif = headless_nexus_context(nexus);
@@ -792,7 +793,9 @@ headless_nx_sync_rx(kern_nexus_provider_t nxprov,
 		kern_buflet_set_data_offset(buf, 0);
 		if (if_headless_create_payload) {
 			// This is a plain TCP SYN packet
-			void *addr = kern_buflet_get_data_address(buf);
+			uint64_t * addr = __unsafe_forge_bidi_indexable(uint64_t *,
+			    kern_buflet_get_data_address(buf),
+			    kern_buflet_get_data_limit(buf));
 			uint64_t *u64 = addr;
 			*(u64 + 0) = 0xc100d51dc3355b68ULL;
 			*(u64 + 1) = 0x004500084019c564ULL;
@@ -867,7 +870,7 @@ done:
 static void
 headless_schedule_async_doorbell(if_headless_ref headlessif)
 {
-	thread_call_t   tcall;
+	thread_call_t   __single tcall;
 
 	headless_lock();
 	if (headless_is_detaching(headlessif) ||
@@ -1102,7 +1105,7 @@ interface_link_event(ifnet_t ifp, u_int32_t event_code)
 	};
 	_Alignas(struct kern_event_msg) char message[sizeof(struct kern_event_msg) + sizeof(struct event)] = { 0 };
 	struct kern_event_msg *header = (struct kern_event_msg*)message;
-	struct event *data = (struct event *)(header + 1);
+	struct event *data = (struct event *)(message + KEV_MSG_HEADER_SIZE);
 
 	header->total_size   = sizeof(message);
 	header->vendor_code  = KEV_VENDOR_APPLE;
@@ -1126,14 +1129,14 @@ headless_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 {
 #pragma unused(params)
 	int                             error;
-	if_headless_ref                 headlessif;
+	if_headless_ref               headlessif;
 	struct ifnet_init_eparams       headless_init;
-	ifnet_t                         ifp;
+	ifnet_ref_t                     ifp;
 	uint8_t                         mac_address[ETHER_ADDR_LEN];
 
 	headlessif = kalloc_type(struct if_headless, Z_WAITOK_ZERO_NOFAIL);
 	headlessif->iff_retain_count = 1;
-	if (strcmp(ifc->ifc_name, HEADLESS_ZERO_IFNAME) == 0) {
+	if (strbufcmp(ifc->ifc_name, HEADLESS_ZERO_IFNAME) == 0) {
 		headlessif->iff_cloner = &headless_zero_cloner;
 		ASSERT(strlen(HEADLESS_ZERO_IFNAME) == 4);
 		bcopy(HEADLESS_ZERO_IFNAME, mac_address, 4);
@@ -1166,9 +1169,9 @@ headless_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	if (if_headless_nxattach == 0) {
 		headless_init.flags |= IFNET_INIT_NX_NOAUTO;
 	}
+	headless_init.uniqueid_len = (uint32_t)strbuflen(headlessif->iff_name);
 	headless_init.uniqueid = headlessif->iff_name;
-	headless_init.uniqueid_len = (uint32_t)strlen(headlessif->iff_name);
-	headless_init.name = ifc->ifc_name;
+	headless_init.name = __unsafe_null_terminated_from_indexable(ifc->ifc_name);
 	headless_init.unit = unit;
 	headless_init.family = IFNET_FAMILY_ETHERNET;
 	headless_init.type = IFT_ETHER;

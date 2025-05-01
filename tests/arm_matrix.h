@@ -29,6 +29,8 @@
 #ifndef __ARM_MATRIX_H
 #define __ARM_MATRIX_H
 
+#include <mach/mach_types.h>
+#include <mach/thread_status.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -46,6 +48,9 @@ struct arm_matrix_operations {
 	void (*load_one_vector)(const void *);
 	void (*load_data)(const void *);
 	void (*store_data)(void *);
+
+	kern_return_t (*thread_get_state)(thread_act_t, void *);
+	kern_return_t (*thread_set_state)(thread_act_t, const void *);
 };
 
 extern const struct arm_matrix_operations sme_operations;

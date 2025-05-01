@@ -486,7 +486,53 @@ extern kern_return_t uext_server(
 	ipc_kmsg_t                  *reply);
 
 #endif /* MACH_KERNEL_PRIVATE */
+#if XNU_KERNEL_PRIVATE
 
+/*!
+ * @function ipc_typed_port_copyin_send()
+ *
+ * @brief
+ * Copies in a naked send right for the specified typed port.
+ *
+ * @decription
+ * This function will validate that the specified port is pointing
+ * to the expected kobject type, unless @c kotype is IKOT_UNKNOWN,
+ * in which case any right is accepted.
+ *
+ * @param space         The space to copyin in from.
+ * @param name          The name to copyin.
+ * @param kotype        The kobject type this port should have.
+ * @param port          The resulting port or IP_NULL.
+ *
+ * @returns
+ * - KERN_SUCCESS       Acquired an object, possibly IP_DEAD.
+ * - KERN_INVALID_TASK  The space is dead.
+ * - KERN_INVALID_NAME  Name doesn't exist in space.
+ * - KERN_INVALID_RIGHT Name doesn't denote correct right.
+ * - KERN_INVALID_CAPABILITY
+ *                      The right isn't of the right kobject type.
+ */
+extern kern_return_t ipc_typed_port_copyin_send(
+	ipc_space_t                 space,
+	mach_port_name_t            name,
+	ipc_kobject_type_t          kotype,
+	ipc_port_t                 *port);
+
+/*!
+ * @function ipc_typed_port_release_send()
+ *
+ * @brief
+ * Release a send right for a typed port.
+ *
+ * @description
+ * This is an alias for ipc_port_release_send() that the BSD side can use.
+ * If @c kotype is IKOT_UNKNOWN, any right is accepted.
+ */
+extern void       ipc_typed_port_release_send(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          kotype);
+
+#endif /* XNU_KERNEL_PRIVATE */
 #pragma GCC visibility pop
 __END_DECLS
 

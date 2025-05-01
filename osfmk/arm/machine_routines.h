@@ -96,6 +96,8 @@ boolean_t ml_at_interrupt_context(void);
 /* Generate a fake interrupt */
 void ml_cause_interrupt(void);
 
+void siq_init(void);
+void siq_cpu_init(void);
 
 #ifdef XNU_KERNEL_PRIVATE
 
@@ -109,7 +111,7 @@ void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
 #if CONFIG_CPU_COUNTERS
 #define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)                                          \
-	    if (sched_hygiene_debug_pmc) {                                                      \
+	    if (static_if(sched_debug_pmc)) {                                                   \
 	        mt_cur_cpu_cycles_instrs_speculative(&thread->machine.intmask_cycles,           \
 	                &thread->machine.intmask_instr);                                        \
 	    }
@@ -119,7 +121,7 @@ void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)                                    \
 do {                                                                                        \
-	if ((interrupt_masked_debug_mode || sched_preemption_disable_debug_mode) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
+	if (static_if(sched_debug_interrupt_disable) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
 	    thread_t thread = current_thread();                                                 \
 	    thread->machine.int_type = type;                                                    \
 	    thread->machine.int_handler_addr = (uintptr_t)VM_KERNEL_STRIP_UPTR(handler_addr);   \
@@ -129,14 +131,14 @@ do {                                                                            
     }                                                                                       \
 } while (0)
 
-#define INTERRUPT_MASKED_DEBUG_END()                                                                                   \
+#define INTERRUPT_MASKED_DEBUG_END()                                                                               \
 do {                                                                                                               \
-	if ((interrupt_masked_debug_mode || sched_preemption_disable_debug_mode) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
-	    thread_t thread = current_thread();                                                                        \
-	    ml_handle_interrupt_handler_duration(thread);                                                               \
-	    thread->machine.inthandler_timestamp = 0;                                                                  \
-	    thread->machine.inthandler_abandon = false;                                                                    \
-	}                                                                                                              \
+	if (static_if(sched_debug_interrupt_disable) && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) {  \
+	    thread_t thread = current_thread();                                                                    \
+	    ml_handle_interrupt_handler_duration(thread);                                                          \
+	    thread->machine.inthandler_timestamp = 0;                                                              \
+	    thread->machine.inthandler_abandon = false;                                                            \
+	}                                                                                                          \
 } while (0)
 
 void ml_irq_debug_start(uintptr_t handler, uintptr_t vector);
@@ -365,7 +367,7 @@ struct ml_processor_info {
 	uint64_t                        regmap_paddr;
 	uint32_t                        phys_id;
 	uint32_t                        log_id;
-	uint32_t                        l2_access_penalty;
+	uint32_t                        l2_access_penalty; /* unused */
 	uint32_t                        cluster_id;
 	cluster_type_t                  cluster_type;
 	uint32_t                        l2_cache_id;
@@ -423,6 +425,7 @@ kern_return_t ml_mcache_flush_callback_register(mcache_flush_function func, void
 kern_return_t ml_mcache_flush(void);
 
 #if XNU_KERNEL_PRIVATE
+
 void ml_lockdown_init(void);
 
 /* Machine layer routine for intercepting panics */
@@ -434,7 +437,6 @@ void ml_panic_trap_to_debugger(const char *panic_format_str,
     uint64_t panic_options_mask,
     unsigned long panic_caller,
     const char *panic_initiator);
-#endif /* XNU_KERNEL_PRIVATE */
 
 /* Initialize Interrupts */
 void ml_install_interrupt_handler(
@@ -443,6 +445,8 @@ void ml_install_interrupt_handler(
 	void *target,
 	IOInterruptHandler handler,
 	void *refCon);
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 vm_offset_t
     ml_static_vtop(
@@ -659,6 +663,8 @@ uint32_t ml_get_decrementer(void);
 
 uint64_t ml_get_hwclock(void);
 
+uint64_t ml_get_hwclock_speculative(void);
+
 #ifdef __arm64__
 boolean_t ml_get_timer_pending(void);
 #endif
@@ -691,6 +697,8 @@ void bzero_phys(
 	vm_size_t length);
 
 void bzero_phys_nc(addr64_t src64, vm_size_t bytes);
+
+void bzero_phys_with_options(addr64_t src, vm_size_t bytes, int options);
 
 #if MACH_KERNEL_PRIVATE
 #ifdef __arm64__
@@ -1283,10 +1291,10 @@ void ml_thread_set_jop_pid(thread_t thread, task_t task);
  * the host CPU supports FPAC.
  */
 
-#if __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM
 void *
 ml_poison_ptr(void *ptr, ptrauth_key key);
 
+#if __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM
 /*
  * ptrauth_sign_unauthenticated() reimplemented using asm volatile, forcing the
  * compiler to assume this operation has side-effects and cannot be reordered
@@ -1386,7 +1394,7 @@ uint8_t user_timebase_type(void);
 boolean_t ml_thread_is64bit(thread_t thread);
 
 #ifdef __arm64__
-bool ml_feature_supported(uint32_t feature_bit);
+bool ml_feature_supported(uint64_t feature_bit);
 void ml_set_align_checking(void);
 extern void wfe_timeout_configure(void);
 extern void wfe_timeout_init(void);
@@ -1473,6 +1481,8 @@ bool ml_task_uses_1ghz_timebase(const task_t task);
  */
 bool ml_paddr_is_exclaves_owned(vm_offset_t paddr);
 #endif /* KERNEL_PRIVATE */
+
+
 
 __END_DECLS
 

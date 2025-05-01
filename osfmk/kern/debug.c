@@ -71,6 +71,7 @@
 #include <kern/misc_protos.h>
 #include <kern/clock.h>
 #include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
 #include <kern/ecc.h>
 #include <kern/kern_stackshot.h>
 #include <kern/kern_cdata.h>
@@ -149,6 +150,8 @@ extern int vsnprintf(char *, size_t, const char *, va_list);
 
 extern int IODTGetLoaderInfo( const char *key, void **infoAddr, int *infosize );
 extern void IODTFreeLoaderInfo( const char *key, void *infoAddr, int infoSize );
+extern unsigned int debug_boot_arg;
+extern int serial_init(void);
 
 unsigned int    halt_in_debugger = 0;
 unsigned int    current_debugger = 0;
@@ -206,6 +209,7 @@ struct debugger_state {
 	kern_return_t   db_op_return;
 };
 static struct debugger_state PERCPU_DATA(debugger_state);
+struct kernel_panic_reason PERCPU_DATA(panic_reason);
 
 /* __pure2 is correct if this function is called with preemption disabled */
 static inline __pure2 struct debugger_state *
@@ -321,6 +325,8 @@ boolean_t extended_debug_log_enabled = FALSE;
 #define KDBG_TRACE_PANIC_FILENAME "/var/log/panic.trace"
 #endif
 
+static inline void debug_fatal_panic_begin(void);
+
 /* Debugger state */
 atomic_int     debugger_cpu = DEBUGGER_NO_CPU;
 boolean_t      debugger_allcpus_halted = FALSE;
@@ -354,7 +360,7 @@ static boolean_t debugger_is_panic = TRUE;
 
 TUNABLE(unsigned int, debug_boot_arg, "debug", 0);
 
-TUNABLE(int, verbose_panic_flow_logging, "verbose_panic_flow_logging", 0);
+TUNABLE_DEV_WRITEABLE(unsigned int, verbose_panic_flow_logging, "verbose_panic_flow_logging", 0);
 
 char kernel_uuid_string[37]; /* uuid_string_t */
 char kernelcache_uuid_string[37]; /* uuid_string_t */
@@ -383,6 +389,15 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) phys_carveout = 0;
 SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_pa = 0;
 SECURITY_READ_ONLY_LATE(size_t) phys_carveout_size = 0;
 
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+/**
+ * Extra debug state which is set when panic lockdown is initiated.
+ * This information is intended to help when debugging issues with the panic
+ * path.
+ */
+struct panic_lockdown_initiator_state debug_panic_lockdown_initiator_state;
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 /*
  * Returns whether kernel debugging is expected to be restricted
@@ -571,18 +586,14 @@ phys_carveout_init(void)
 
 			kmem_alloc_contig(kernel_map, carveouts[i].va,
 			    temp_carveout_size, PAGE_MASK, 0, 0,
-			    KMA_NOFAIL | KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA,
+			    KMA_NOFAIL | KMA_PERMANENT | KMA_NOPAGEWAIT | KMA_DATA |
+			    KMA_NOSOFTLIMIT,
 			    VM_KERN_MEMORY_DIAG);
 
 			*carveouts[i].pa = kvtophys(*carveouts[i].va);
 			*carveouts[i].allocated_size = temp_carveout_size;
 		}
 	}
-
-#if __arm64__ && (DEVELOPMENT || DEBUG)
-	/* likely panic_trace boot-arg is also set so check and enable tracing if necessary into new carveout */
-	PE_arm_debug_enable_trace(true);
-#endif /* __arm64__ && (DEVELOPMENT || DEBUG) */
 }
 
 boolean_t
@@ -746,22 +757,50 @@ DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_
 }
 
 void __attribute__((noinline))
-Assert(
-	const char      *file,
-	int             line,
-	const char      *expression
-	)
+Assert(const char*file, int line, const char *expression)
 {
-#if CONFIG_NONFATAL_ASSERTS
-	static TUNABLE(bool, mach_assert, "assertions", true);
-
-	if (!mach_assert) {
-		kprintf("%s:%d non-fatal Assertion: %s", file, line, expression);
-		return;
-	}
-#endif
-
 	panic_plain("%s:%d Assertion failed: %s", file, line, expression);
+}
+
+void
+panic_assert_format(char *buf, size_t len, struct mach_assert_hdr *hdr, long a, long b)
+{
+	struct mach_assert_default *adef;
+	struct mach_assert_3x      *a3x;
+
+	static_assert(MACH_ASSERT_TRAP_CODE == XNU_HARD_TRAP_ASSERT_FAILURE);
+
+	switch (hdr->type) {
+	case MACH_ASSERT_DEFAULT:
+		adef = __container_of(hdr, struct mach_assert_default, hdr);
+		snprintf(buf, len, "%s:%d Assertion failed: %s",
+		    hdr->filename, hdr->lineno, adef->expr);
+		break;
+
+	case MACH_ASSERT_3P:
+		a3x = __container_of(hdr, struct mach_assert_3x, hdr);
+		snprintf(buf, len, "%s:%d Assertion failed: "
+		    "%s %s %s (%p %s %p)",
+		    hdr->filename, hdr->lineno, a3x->a, a3x->op, a3x->b,
+		    (void *)a, a3x->op, (void *)b);
+		break;
+
+	case MACH_ASSERT_3S:
+		a3x = __container_of(hdr, struct mach_assert_3x, hdr);
+		snprintf(buf, len, "%s:%d Assertion failed: "
+		    "%s %s %s (0x%lx %s 0x%lx, %ld %s %ld)",
+		    hdr->filename, hdr->lineno, a3x->a, a3x->op, a3x->b,
+		    a, a3x->op, b, a, a3x->op, b);
+		break;
+
+	case MACH_ASSERT_3U:
+		a3x = __container_of(hdr, struct mach_assert_3x, hdr);
+		snprintf(buf, len, "%s:%d Assertion failed: "
+		    "%s %s %s (0x%lx %s 0x%lx, %lu %s %lu)",
+		    hdr->filename, hdr->lineno, a3x->a, a3x->op, a3x->b,
+		    a, a3x->op, b, a, a3x->op, b);
+		break;
+	}
 }
 
 boolean_t
@@ -893,7 +932,12 @@ DebuggerWithContext(unsigned int reason, void *ctx, const char *message,
 	CPUDEBUGGERCOUNT++;
 
 	/* emit a tracepoint as early as possible in case of hang */
-	SOCD_TRACE_XNU(PANIC, PACK_2X32(VALUE(cpu_number()), VALUE(CPUDEBUGGERCOUNT)), VALUE(debugger_options_mask), ADDR(message), ADDR(debugger_caller));
+	SOCD_TRACE_XNU(PANIC,
+	    ((CPUDEBUGGERCOUNT <= 2) ? SOCD_TRACE_MODE_STICKY_TRACEPOINT : SOCD_TRACE_MODE_NONE),
+	    PACK_2X32(VALUE(cpu_number()), VALUE(CPUDEBUGGERCOUNT)),
+	    VALUE(debugger_options_mask),
+	    ADDR(message),
+	    ADDR(debugger_caller));
 
 	/* do max nested panic/debugger check, this will report nesting to the console and spin forever if we exceed a limit */
 	check_and_handle_nested_panic(debugger_options_mask, debugger_caller, message, NULL);
@@ -1035,14 +1079,26 @@ panic(const char *str, ...)
 }
 
 void
-panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *str, ...)
+panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint64_t debugger_options_mask, const char *str, ...)
 {
 	va_list panic_str_args;
 
 	ext_paniclog_panic_with_data(uuid, addr, len);
 
+#if CONFIG_EXCLAVES
+	/*
+	 * Before trapping, inform the exclaves scheduler that we're going down
+	 * so it can grab an exclaves stackshot.
+	 */
+	if ((debugger_options_mask & DEBUGGER_OPTION_USER_WATCHDOG) != 0 &&
+	    exclaves_get_boot_stage() != EXCLAVES_BOOT_STAGE_NONE) {
+		(void) exclaves_scheduler_request_watchdog_panic();
+	}
+#endif /* CONFIG_EXCLAVES */
+
 	va_start(panic_str_args, str);
-	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0), NULL);
+	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, (debugger_options_mask & ~DEBUGGER_INTERNAL_OPTIONS_MASK),
+	    NULL, (unsigned long)(char *)__builtin_return_address(0), NULL);
 	va_end(panic_str_args);
 }
 
@@ -1050,6 +1106,17 @@ void
 panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mask, const char *str, ...)
 {
 	va_list panic_str_args;
+
+#if CONFIG_EXCLAVES
+	/*
+	 * Before trapping, inform the exclaves scheduler that we're going down
+	 * so it can grab an exclaves stackshot.
+	 */
+	if ((debugger_options_mask & DEBUGGER_OPTION_USER_WATCHDOG) != 0 &&
+	    exclaves_get_boot_stage() != EXCLAVES_BOOT_STAGE_NONE) {
+		(void) exclaves_scheduler_request_watchdog_panic();
+	}
+#endif /* CONFIG_EXCLAVES */
 
 	va_start(panic_str_args, str);
 	panic_trap_to_debugger(str, &panic_str_args, reason, ctx, (debugger_options_mask & ~DEBUGGER_INTERNAL_OPTIONS_MASK),
@@ -1171,7 +1238,17 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	CPUDEBUGGERCOUNT++;
 
 	/* emit a tracepoint as early as possible in case of hang */
-	SOCD_TRACE_XNU(PANIC, PACK_2X32(VALUE(cpu_number()), VALUE(CPUDEBUGGERCOUNT)), VALUE(panic_options_mask), ADDR(panic_format_str), ADDR(panic_caller));
+	SOCD_TRACE_XNU(PANIC,
+	    ((CPUDEBUGGERCOUNT <= 2) ? SOCD_TRACE_MODE_STICKY_TRACEPOINT : SOCD_TRACE_MODE_NONE),
+	    PACK_2X32(VALUE(cpu_number()), VALUE(CPUDEBUGGERCOUNT)),
+	    VALUE(panic_options_mask),
+	    ADDR(panic_format_str),
+	    ADDR(panic_caller));
+
+	/* enable serial on the first panic if the always-on panic print flag is set */
+	if ((debug_boot_arg & DB_PRT) && (CPUDEBUGGERCOUNT == 1)) {
+		serial_init();
+	}
 
 	/* do max nested panic/debugger check, this will report nesting to the console and spin forever if we exceed a limit */
 	check_and_handle_nested_panic(panic_options_mask, panic_caller, panic_format_str, panic_args);
@@ -1203,24 +1280,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	ml_set_interrupts_enabled(FALSE);
 	disable_preemption();
 
-#if CONFIG_SPTM
-	/*
-	 * If SPTM has not itself already panicked, trigger a panic lockdown. This
-	 * check is necessary since attempting to re-enter the SPTM after it calls
-	 * panic will lead to a hang, which harms kernel field debugability.
-	 *
-	 * Whether or not this check can be subverted is murky. This doesn't really
-	 * matter, however, because any security critical panics events will have
-	 * already initiated lockdown before calling panic. Thus, lockdown from
-	 * panic itself is merely a "best effort".
-	 */
-	libsptm_error_t sptm_error = LIBSPTM_SUCCESS;
-	bool sptm_has_panicked = false;
-	if (((sptm_error = sptm_triggered_panic(&sptm_has_panicked)) == LIBSPTM_SUCCESS) &&
-	    !sptm_has_panicked) {
-		sptm_xnu_panic_begin();
-	}
-#endif /* CONFIG_SPTM */
+	debug_fatal_panic_begin();
 
 #if defined (__x86_64__)
 	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE);
@@ -1452,7 +1512,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 		extern uint8_t sptm_supports_local_coredump;
 		bool sptm_interrupted = false;
 		pmap_sptm_percpu_data_t *sptm_pcpu = PERCPU_GET(pmap_sptm_percpu);
-		sptm_get_cpu_state(sptm_pcpu->sptm_cpu_id, CPUSTATE_SPTM_INTERRUPTED, &sptm_interrupted);
+		(void)sptm_get_cpu_state(sptm_pcpu->sptm_cpu_id, CPUSTATE_SPTM_INTERRUPTED, &sptm_interrupted);
 #endif
 		if (!kdp_has_polled_corefile()) {
 			if (debug_boot_arg & (DB_KERN_DUMP_ON_PANIC | DB_KERN_DUMP_ON_NMI)) {
@@ -1506,9 +1566,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 				 */
 				debugger_safe_to_return = FALSE;
 				begin_panic_transfer();
-				vm_memtag_disable_checking();
 				ret = kern_dump(KERN_DUMP_DISK);
-				vm_memtag_enable_checking();
 				abort_panic_transfer();
 
 #if DEVELOPMENT || DEBUG
@@ -1686,19 +1744,7 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 #endif
 	} else {
 		/* note: this is the panic path...  */
-#if CONFIG_SPTM
-		/*
-		 * Debug trap panics do not go through the standard panic flows so we
-		 * have to notify the SPTM that we're going down now. This is not so
-		 * much for security (critical cases are handled elsewhere) but rather
-		 * to just keep the SPTM bit in sync with the actual XNU state.
-		 */
-		bool sptm_has_panicked = false;
-		if (sptm_triggered_panic(&sptm_has_panicked) == LIBSPTM_SUCCESS &&
-		    !sptm_has_panicked) {
-			sptm_xnu_panic_begin();
-		}
-#endif /* CONFIG_SPTM */
+		debug_fatal_panic_begin();
 #if defined(__arm64__) && (DEBUG || DEVELOPMENT)
 		if (!PE_arm_debug_and_trace_initialized()) {
 			paniclog_append_noflush("kernel panicked before debug and trace infrastructure initialized!\n"
@@ -2112,6 +2158,72 @@ telemetry_gather(user_addr_t buffer __unused, uint32_t *length __unused, bool ma
 
 TUNABLE(uint32_t, kern_feature_overrides, "validation_disables", 0);
 
+__startup_func
+static void
+kern_feature_override_init(void)
+{
+	/*
+	 * update kern_feature_override based on the serverperfmode=1 boot-arg
+	 * being present, but do not look at the device-tree setting on purpose.
+	 *
+	 * scale_setup() will update serverperfmode=1 based on the DT later.
+	 */
+
+	if (serverperfmode) {
+		kern_feature_overrides |= KF_SERVER_PERF_MODE_OVRD;
+	}
+}
+STARTUP(TUNABLES, STARTUP_RANK_LAST, kern_feature_override_init);
+
+#if MACH_ASSERT
+STATIC_IF_KEY_DEFINE_TRUE(mach_assert);
+#endif
+
+#if SCHED_HYGIENE_DEBUG
+STATIC_IF_KEY_DEFINE_TRUE(sched_debug_pmc);
+STATIC_IF_KEY_DEFINE_TRUE(sched_debug_preemption_disable);
+STATIC_IF_KEY_DEFINE_TRUE(sched_debug_interrupt_disable);
+#endif /* SCHED_HYGIENE_DEBUG */
+
+__static_if_init_func
+static void
+kern_feature_override_apply(const char *args)
+{
+	uint64_t kf_ovrd;
+
+	/*
+	 * Compute the value of kern_feature_override like it will look like
+	 * after kern_feature_override_init().
+	 */
+	kf_ovrd = static_if_boot_arg_uint64(args, "validation_disables", 0);
+	if (static_if_boot_arg_uint64(args, "serverperfmode", 0)) {
+		kf_ovrd |= KF_SERVER_PERF_MODE_OVRD;
+	}
+
+#if DEBUG_RW
+	lck_rw_assert_init(args, kf_ovrd);
+#endif /* DEBUG_RW */
+#if MACH_ASSERT
+	if (kf_ovrd & KF_MACH_ASSERT_OVRD) {
+		static_if_key_disable(mach_assert);
+	}
+#endif /* MACH_ASSERT */
+#if SCHED_HYGIENE_DEBUG
+	if ((int64_t)static_if_boot_arg_uint64(args, "wdt", 0) != -1) {
+		if (kf_ovrd & KF_SCHED_HYGIENE_DEBUG_PMC_OVRD) {
+			static_if_key_disable(sched_debug_pmc);
+		}
+		if (kf_ovrd & KF_PREEMPTION_DISABLED_DEBUG_OVRD) {
+			static_if_key_disable(sched_debug_preemption_disable);
+			if (kf_ovrd & KF_INTERRUPT_MASKED_DEBUG_OVRD) {
+				static_if_key_disable(sched_debug_interrupt_disable);
+			}
+		}
+	}
+#endif /* SCHED_HYGIENE_DEBUG */
+}
+STATIC_IF_INIT(kern_feature_override_apply);
+
 boolean_t
 kern_feature_override(uint32_t fmask)
 {
@@ -2324,3 +2436,26 @@ set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);
+
+/**
+ * Signal that the system is going down for a panic
+ */
+static inline void
+debug_fatal_panic_begin(void)
+{
+#if CONFIG_SPTM
+	/*
+	 * Since we're going down, initiate panic lockdown.
+	 *
+	 * Whether or not this call to panic lockdown can be subverted is murky.
+	 * This doesn't really matter, however, because any security critical panics
+	 * events will have already initiated lockdown from the exception vector
+	 * before calling panic. Thus, lockdown from panic itself is fine as merely
+	 * a "best effort".
+	 */
+#if DEVELOPMENT || DEBUG
+	panic_lockdown_record_debug_data();
+#endif /* DEVELOPMENT || DEBUG */
+	sptm_xnu_panic_begin();
+#endif /* CONFIG_SPTM */
+}

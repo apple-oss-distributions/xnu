@@ -108,6 +108,11 @@ extern void **compact_id_resolve(
 	compact_id_table_t      table,
 	compact_id_t            compact_id) __pure2;
 
+extern bool compact_id_slab_valid(
+	compact_id_table_t      table,
+	compact_id_t            compact_id) __stateful_pure;
+
+
 extern compact_id_t compact_id_get_locked(
 	compact_id_table_t      table,
 	compact_id_t            limit,

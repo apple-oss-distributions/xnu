@@ -227,6 +227,8 @@ machine_thread_inherit_taskwide(
 	thread_t thread,
 	task_t parent_task)
 {
+	kern_return_t kr = KERN_SUCCESS;
+
 	if (parent_task->task_debug) {
 		int flavor;
 		mach_msg_type_number_t count;
@@ -234,10 +236,10 @@ machine_thread_inherit_taskwide(
 		flavor = task_has_64Bit_data(parent_task) ? ARM_DEBUG_STATE64 : ARM_DEBUG_STATE32;
 		count = task_has_64Bit_data(parent_task) ? ARM_DEBUG_STATE64_COUNT : ARM_DEBUG_STATE32_COUNT;
 
-		return machine_thread_set_state(thread, flavor, parent_task->task_debug, count);
+		kr = machine_thread_set_state(thread, flavor, parent_task->task_debug, count);
 	}
 
-	return KERN_SUCCESS;
+	return kr;
 }
 
 

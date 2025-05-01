@@ -492,63 +492,57 @@ PE_panic_hook(const char *str __unused)
 }
 
 /*
- * Initialize the trace infrastructure.
+ * Early part of the debug system init.
+ * Ran on the boot CPU with VM system enabled, mappings to any region
+ * allowed, carveouts not yet enabled, SPR lockdown not applied.
  */
 void
-pe_arm_init_debug(void *args)
+pe_arm_debug_init_early(void *boot_cpu_data)
 {
 	DTEntry         entryP;
 	uintptr_t const *reg_prop;
 	uint32_t        prop_size;
 
-	/*
-	 * When args != NULL, this means we're being called from arm_init() on the
-	 * boot CPU; this controls one-time init of the panic trace infrastructure.
-	 * During one-time init, panic_trace_lock does not need to be held.
-	 */
-	const bool is_boot_cpu = (args != NULL);
-
+	/* Require gSocPhys to be initialized. */
 	if (gSocPhys == 0) {
-		kprintf("pe_arm_init_debug: failed to initialize gSocPhys == 0\n");
+		kprintf("pe_arm_init_debug: failed to initialize : gSocPhys == 0\n");
 		return;
 	}
 
+	/* Update the panic_trace start policy depending on the execution environment. */
 #if DEVELOPMENT || DEBUG
-	if (is_boot_cpu) {
-		if (panic_trace != 0) {
-			panic_trace_apply_stress_rack_policy();
-		}
+	if (panic_trace != 0) {
+		panic_trace_apply_stress_rack_policy();
+	}
 
-		if ((panic_trace & panic_trace_partial_policy) != 0) {
-			panic_trace_apply_partial_policy();
-		}
+	if ((panic_trace & panic_trace_partial_policy) != 0) {
+		panic_trace_apply_partial_policy();
 	}
 #endif /* DEVELOPMENT || DEBUG */
 
+	/* Lookup the cpu debug interface in the device tree. */
 	if (SecureDTFindEntry("device_type", "cpu-debug-interface", &entryP) == kSuccess) {
-		if (is_boot_cpu) {
-			if (SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size) == kSuccess) {
-				ml_init_arm_debug_interface(args, ml_io_map(gSocPhys + *reg_prop, *(reg_prop + 1)));
-			}
-#if DEVELOPMENT || DEBUG
-			simple_lock_init(&panic_hook_lock, 0); //assuming single threaded mode
-
-			if (panic_trace) {
-				kprintf("pe_arm_init_debug: panic_trace=%d\n", panic_trace);
-
-				// start tracing now
-				PE_arm_debug_enable_trace(true);
-			}
-			if (bootarg_stop_clocks) {
-				pe_init_debug_command(entryP, &enable_stop_clocks, "enable_stop_clocks");
-				pe_init_debug_command(entryP, &stop_clocks, "stop_clocks");
-			}
-#endif
+		/* Initialize the arm debug interface. */
+		if (SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size) == kSuccess) {
+			ml_init_arm_debug_interface(boot_cpu_data, ml_io_map(gSocPhys + *reg_prop, *(reg_prop + 1)));
 		}
+
+		/* Initialze the stop-clocks infrastructure. */
+#if DEVELOPMENT || DEBUG
+		if (bootarg_stop_clocks) {
+			pe_init_debug_command(entryP, &enable_stop_clocks, "enable_stop_clocks");
+			pe_init_debug_command(entryP, &stop_clocks, "stop_clocks");
+		}
+#endif
+
+		/* Initialize panic-trace. */
+#if DEVELOPMENT || DEBUG
+		simple_lock_init(&panic_hook_lock, 0); //assuming single threaded mode
+	#endif
 	} else {
 #if DEVELOPMENT || DEBUG
 		const uint32_t dependent_modes = (panic_trace_enabled | panic_trace_alt_enabled);
-		if (is_boot_cpu && (bootarg_stop_clocks || (panic_trace & dependent_modes))) {
+		if (bootarg_stop_clocks || (panic_trace & dependent_modes)) {
 			panic("failed to find cpu-debug-interface node in the EDT! "
 			    "(required by `panic_trace={0x01, 0x10}` or `stop_clocks=1`)");
 		} else
@@ -559,7 +553,17 @@ pe_arm_init_debug(void *args)
 	}
 
 
+	/* Report init. */
 	debug_and_trace_initialized = true;
+}
+
+/*
+ * Late part of the init of the debug system,
+ * when carveouts have been allocated.
+ */
+void
+pe_arm_debug_init_late(void)
+{
 }
 
 /*********************

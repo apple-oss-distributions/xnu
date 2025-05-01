@@ -659,7 +659,6 @@ sched_amp_choose_processor(processor_set_t pset, processor_t processor, thread_t
 	processor_set_t nset = pset;
 	bool choose_pcores;
 
-
 	choose_pcores = pcores_recommended(thread);
 
 	if (choose_pcores && (pset->pset_cluster_type != PSET_AMP_P)) {
@@ -681,7 +680,11 @@ sched_amp_choose_processor(processor_set_t pset, processor_t processor, thread_t
 		return PROCESSOR_NULL;
 	}
 
+#if CONFIG_SCHED_SMT
+	return choose_processor_smt(nset, processor, thread);
+#else /* CONFIG_SCHED_SMT */
 	return choose_processor(nset, processor, thread);
+#endif /* CONFIG_SCHED_SMT */
 }
 
 void

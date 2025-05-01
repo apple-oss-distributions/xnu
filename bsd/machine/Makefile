@@ -8,7 +8,7 @@ include $(MakeInc_def)
 
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
-	_limits.h
+	fasttrap_isa.h _limits.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -17,7 +17,7 @@ EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
 endif
 
 DATAFILES = $(sort \
-	byte_order.h  endian.h fasttrap_isa.h \
+	byte_order.h  endian.h \
 	limits.h param.h  profile.h \
 	signal.h  types.h \
 	vmparam.h _types.h _param.h \

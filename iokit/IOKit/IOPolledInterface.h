@@ -157,6 +157,8 @@ struct IOPolledFileIOVars {
 	uint32_t                         lastRead;
 	uint64_t                         readEnd;
 	uint32_t                            flags;
+	uint64_t                            fileSizeMin;
+	uint64_t                            fileSizeMax;
 	uint64_t                            fileSize;
 	uint64_t                            position;
 	uint64_t                            extentPosition;
@@ -179,20 +181,19 @@ typedef struct IOPolledFileCryptVars IOPolledFileCryptVars;
 
 #if defined(__cplusplus)
 
-IOReturn IOPolledFileOpen(const char * filename,
-    uint32_t flags,
-    uint64_t setFileSize, uint64_t fsFreeSize,
-    void * write_file_addr, size_t write_file_len,
-    IOPolledFileIOVars ** fileVars,
-    LIBKERN_RETURNS_RETAINED OSData ** imagePath,
-    uint8_t * volumeCryptKey, size_t * keySize);
+// IOPolledFileOpen setFileMinSize/setFileMaxSize:
+// passing zero for set_file_size_min (coredumps)
+// means caller only accepts set_file_size_max and disk free space is checked.
+// if set_file_size_min & set_file_size_max are passed (hibernation),
+// a file up to length set_file_size_max is created leaving fsFreeSize bytes free,
+// but length no smaller than set_file_size_min regardless of disk free space.
 
 IOReturn IOPolledFileOpen(const char * filename,
     uint32_t flags,
-    uint64_t setFileSize, uint64_t fsFreeSize,
+    uint64_t setFileMinSize, uint64_t setFileMaxSize, uint64_t fsFreeSize,
     void * write_file_addr, size_t write_file_len,
     IOPolledFileIOVars ** fileVars,
-    OSSharedPtr<OSData>& imagePath,
+    LIBKERN_RETURNS_RETAINED OSData ** imagePath,
     uint8_t * volumeCryptKey, size_t * keySize);
 
 IOReturn IOPolledFileClose(IOPolledFileIOVars ** pVars,
@@ -242,7 +243,8 @@ kern_open_file_for_direct_io(const char * name,
     uint32_t flags,
     kern_get_file_extents_callback_t callback,
     void * callback_ref,
-    off_t set_file_size,
+    off_t set_file_size_min,
+    off_t set_file_size_max,
     off_t fs_free_size,
     off_t write_file_offset,
     void * write_file_addr,

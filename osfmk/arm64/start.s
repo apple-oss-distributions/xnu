@@ -229,6 +229,7 @@ LEXT(ResetHandlerData)
 	.align	3
 	.globl EXT(_start)
 LEXT(_start)
+	ARM64_PROLOG
 	b	EXT(start_first_cpu)
 
 
@@ -398,7 +399,8 @@ start_cpu:
 	lsr		$4, $4, #(ARM_TTE_BLOCK_L2_SHIFT)	// Get index in L2 table for block entry
 	lsl		$4, $4, #(TTE_SHIFT)				// Convert index into pointer offset
 	add		$4, $2, $4							// Get L2 entry pointer
-	mov		$5, #(ARM_TTE_BOOT_BLOCK)			// Get L2 block entry template
+	mov		$5, #(ARM_TTE_BOOT_BLOCK_LOWER)		// Get L2 block entry template
+	orr		$5, $5, #(ARM_TTE_BOOT_BLOCK_UPPER)
 	and		$6, $1, #(ARM_TTE_BLOCK_L2_MASK)	// Get address bits of block mapping
 	orr		$6, $5, $6
 	mov		$5, $3
@@ -749,7 +751,7 @@ common_start:
 	isb		sy
 
 #if !VMAPPLE
-	MOV64   x1, SCTLR_EL1_DEFAULT
+	MOV64	x1, SCTLR_EL1_DEFAULT
 	cmp		x0, x1
 	bne		.
 #endif /* !VMAPPLE */

@@ -56,8 +56,7 @@ public:
 
     /*!
      * @brief Represents the size of the data queue entry header independent of the actual size of the data in the entry.  This is the overhead of each entry in the queue.
-     * @param       dataQueueEntryHeaderSize  Out parameter for data queue entry header size
-     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     * @return      Size of the entry header.
      */
     static size_t
     GetDataQueueEntryHeaderSize() LOCALONLY;

@@ -82,12 +82,6 @@ extern kern_return_t device_close(
 
 extern boolean_t vm_swap_files_pinned(void);
 
-extern kern_return_t vm_map_purgable_control(
-	vm_map_t                map,
-	vm_map_offset_t         address,
-	vm_purgable_t           control,
-	int                     *state);
-
 extern kern_return_t device_pager_populate_object(
 	memory_object_t         device,
 	memory_object_offset_t  offset,
@@ -107,7 +101,11 @@ extern kern_return_t vm_map_range_physical_size(
 
 
 #if defined(__arm64__)
-extern void vm_panic_hibernate_write_image_failed(int err);
+extern void vm_panic_hibernate_write_image_failed(
+	int err,
+	uint64_t file_size_min,
+	uint64_t file_size_max,
+	uint64_t file_size);
 #endif /* __arm64__ */
 
 

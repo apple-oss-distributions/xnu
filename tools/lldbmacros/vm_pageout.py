@@ -1,14 +1,15 @@
 """
 Macros relating to VM Pageout Scan.
 """
-from core.cvalue import sizeof, value
+from core.cvalue import addressof, cast, sizeof, unsigned, value
 import json
 from memory import PrettyPrintDictionary
+from collections import namedtuple
 from process import GetTaskSummary
 import re
 from scheduler import GetRecentTimestamp
 from typing import Iterable, Optional
-from xnu import header, lldb_command, kern, xnudebug_test
+from xnu import header, lldb_command, lldb_type_summary, kern, xnudebug_test
 
 
 class VmPageoutStats(Iterable):
@@ -111,30 +112,6 @@ def ShowVMPageoutHistory(cmd_args=None, cmd_options={}):
     for stat in VmPageoutStats(num_samples):
         print(stat.page_counts())
 
-@xnudebug_test('test_vmpageouthistory')
-def TestMemstats(kernel_target, config, lldb_obj, isConnected ):
-    """ Test the functionality of showvmpageouthistory command
-        returns
-         - False on failure
-         - True on success
-    """
-    if not isConnected:
-        print("Target is not connected. Cannot test memstats")
-        return False
-    res = lldb.SBCommandReturnObject()
-    lldb_obj.debugger.GetCommandInterpreter().HandleCommand("showvmpageouthistory", res)
-    result = res.GetOutput()
-    if len(result.splitlines()) < 2:
-        print("Result has fewer than two lines")
-        return False
-    for line in result.splitlines():
-        matches = re.findall(r'(\d+|[\w_]+)', line)
-        if len(matches) < 12:
-            print("Line has fewer than 12 elements!")
-            print(line)
-            return False
-    return True
-
 # EndMacro: showvmpageouthistory
 
 # Macro: showvmpageoutstats
@@ -176,29 +153,62 @@ def ShowVMPageoutStats(cmd_args=None, cmd_options={}):
     for stat in VmPageoutStats(num_samples):
         print(stat.page_stats())
 
-@xnudebug_test('test_vmpageoutstats')
-def TestMemstats(kernel_target, config, lldb_obj, isConnected ):
-    """ Test the functionality of showvmpageoutstats command
-        returns
-         - False on failure
-         - True on success
-    """
-    if not isConnected:
-        print("Target is not connected. Cannot test showmvmpageoutstats")
-        return False
-    res = lldb.SBCommandReturnObject()
-    lldb_obj.debugger.GetCommandInterpreter().HandleCommand("showvmpageoutstats", res)
-    result = res.GetOutput()
-    if len(result.splitlines()) < 2:
-        print("Result has fewer than two lines")
-        return False
-    for line in result.splitlines():
-        matches = re.findall(r'(\d|[\w_]+)', line)
-        if len(matches) < 23:
-            print("Line has fewer than 23 elements!")
-            print(line)
-            return False
-    return True
-
 # EndMacro: showvmpageoutstats
 
+# Macro: showvmpageoutqueues
+
+PageoutQueueSummary = namedtuple('VMPageoutQueueSummary', [
+        'name', 'queue', 'laundry', 'max_laundry', 'busy', 'throttled',
+        'low_pri', 'draining', 'initialized'])
+PageoutQueueSummaryNames = PageoutQueueSummary(*PageoutQueueSummary._fields)
+PageoutQueueSummaryFormat = ('{summary.queue:<18s} {summary.name:<12s} '
+                             '{summary.laundry:>7s} {summary.max_laundry:>11s} '
+                             '{summary.busy:>4s} {summary.throttled:>9s} '
+                             '{summary.low_pri:>7s} {summary.draining:>8s} '
+                             '{summary.initialized:>12s}')
+
+@lldb_type_summary(['struct vm_pageout_queue'])
+@header(PageoutQueueSummaryFormat.format(summary=PageoutQueueSummaryNames))
+def GetVMPageoutQueueSummary(pageout_queue):
+    ''' Dump a summary of the given pageout queue
+    '''
+    if addressof(pageout_queue) == kern.GetLoadAddressForSymbol('vm_pageout_queue_internal'):
+        name = 'internal'
+    elif addressof(pageout_queue) == kern.GetLoadAddressForSymbol('vm_pageout_queue_external'):
+        name = 'external'
+    elif ('vm_pageout_queue_benchmark' in kern.globals and
+          addressof(pageout_queue) == kern.GetLoadAddressForSymbol('vm_pageout_queue_benchmark')):
+        name = 'benchmark'
+    else:
+        name = 'unknown'
+    summary = PageoutQueueSummary(name=name,
+                                  queue=f'{addressof(pageout_queue.pgo_pending):<#018x}',
+                                  laundry=str(unsigned(pageout_queue.pgo_laundry)),
+                                  max_laundry=str(unsigned(pageout_queue.pgo_maxlaundry)),
+                                  busy=("Y" if bool(pageout_queue.pgo_busy) else "N"),
+                                  throttled=("Y" if bool(pageout_queue.pgo_throttled) else "N"),
+                                  low_pri=("Y" if bool(pageout_queue.pgo_lowpriority) else "N"),
+                                  draining=("Y" if bool(pageout_queue.pgo_draining) else "N"),
+                                  initialized=("Y" if bool(pageout_queue.pgo_inited) else "N"))
+    return PageoutQueueSummaryFormat.format(summary=summary)
+
+@lldb_command('showvmpageoutqueues', '')
+def ShowVMPageoutQueues(cmd_args=None, cmd_options={}):
+    '''
+    Print information about the various pageout queues.
+
+    usage: showvmpageoutqueues
+    '''
+
+    internal_queue = kern.globals.vm_pageout_queue_internal
+    external_queue = kern.globals.vm_pageout_queue_external
+    print(GetVMPageoutQueueSummary.header)
+    print(GetVMPageoutQueueSummary(internal_queue))
+    print(GetVMPageoutQueueSummary(external_queue))
+    try:
+        benchmark_queue = kern.globals.vm_pageout_queue_benchmark
+        print(GetVMPageoutQueueSummary(benchmark_queue))
+    except:
+        pass
+
+# EndMacro: showvmpageoutqueues

@@ -407,7 +407,7 @@ smrh_key_equ_str(smrh_key_t k1, smrh_key_t k2)
  */
 struct smr_hash {
 #define SMRH_ARRAY_ORDER_SHIFT  (48)
-#define SMRH_ARRAY_ORDER_MASK   (0xfffful << SMRH_ARRAY_ORDER_SHIFT)
+#define SMRH_ARRAY_ORDER_MASK   (0x00fful << SMRH_ARRAY_ORDER_SHIFT)
 	uintptr_t               smrh_array;
 	uint32_t                smrh_count;
 	bool                    smrh_resizing;
@@ -500,11 +500,8 @@ smr_hash_array_decode(const struct smr_hash *smrh)
 	struct smr_hash_array array;
 	uintptr_t ptr = os_atomic_load(&smrh->smrh_array, relaxed);
 
-	array.smrh_order = (uint16_t)(ptr >> SMRH_ARRAY_ORDER_SHIFT);
+	array.smrh_order = (uint8_t)(ptr >> SMRH_ARRAY_ORDER_SHIFT);
 	ptr |= SMRH_ARRAY_ORDER_MASK;
-#if CONFIG_KERNEL_TAGGING
-	ptr = vm_memtag_fixup_ptr(ptr);
-#endif /* CONFIG_KERNEL_TAGGING */
 	array.smrh_array = (struct smrq_slist_head *)ptr;
 
 	return array;

@@ -34,7 +34,7 @@ def DoUserTaskDebuggingServer(cmd_args = [], cmd_options ={}):
         log_level = logging.WARNING
 
     setupLogging(debug_level=log_level)
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please provide valid task argument.")
 
     t = kern.GetValueFromAddress(cmd_args[0], 'task_t')

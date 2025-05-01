@@ -317,13 +317,18 @@ __options_decl(thread_exclaves_state_flags_t, uint16_t, {
 	/* Thread is expecting that an exclaves-side thread may be spawned.
 	 */
 	TH_EXCLAVES_SPAWN_EXPECTED             = 0x40,
+	/* Thread is resuming the panic thread.
+	 * Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_RESUME_PANIC_THREAD        = 0x80,
 });
 #define TH_EXCLAVES_STATE_ANY           ( \
     TH_EXCLAVES_RPC               | \
     TH_EXCLAVES_UPCALL            | \
     TH_EXCLAVES_SCHEDULER_REQUEST | \
     TH_EXCLAVES_XNUPROXY          | \
-    TH_EXCLAVES_SCHEDULER_CALL)
+    TH_EXCLAVES_SCHEDULER_CALL    | \
+    TH_EXCLAVES_RESUME_PANIC_THREAD)
 
 __options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
 	/* Thread is on Stackshot's inspection queue */
@@ -335,6 +340,7 @@ __options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
 });
 
 #endif /* CONFIG_EXCLAVES */
+
 
 typedef union thread_rr_state {
 	uint32_t trr_value;
@@ -513,11 +519,14 @@ struct thread {
 	sfi_class_id_t          sfi_wait_class; /* Currently in SFI wait for this class, protected by sfi_lock */
 
 	uint32_t                sched_flags;            /* current flag bits */
+#if CONFIG_SCHED_SMT
 #define TH_SFLAG_NO_SMT                 0x0001          /* On an SMT CPU, this thread must be scheduled alone */
+#endif /* CONFIG_SCHED_SMT */
+
 #define TH_SFLAG_FAILSAFE               0x0002          /* fail-safe has tripped */
 #define TH_SFLAG_THROTTLED              0x0004          /* throttled thread forced to timeshare mode (may be applied in addition to failsafe) */
 
-#define TH_SFLAG_PROMOTED               0x0008          /* sched pri has been promoted by kernel mutex priority promotion */
+/* unused TH_SFLAG_PROMOTED             0x0008 */
 #define TH_SFLAG_ABORT                  0x0010          /* abort interruptible waits */
 #define TH_SFLAG_ABORTSAFELY            0x0020          /* ... but only those at safe point */
 #define TH_SFLAG_ABORTED_MASK           (TH_SFLAG_ABORT | TH_SFLAG_ABORTSAFELY)
@@ -531,15 +540,15 @@ struct thread {
 #define TH_SFLAG_WAITQ_PROMOTED         0x1000          /* promote reason: waitq wakeup (generally for IPC receive) */
 
 #if __AMP__
-#define TH_SFLAG_ECORE_ONLY             0x2000          /* (unused) Bind thread to E core processor set */
-#define TH_SFLAG_PCORE_ONLY             0x4000          /* (unused) Bind thread to P core processor set */
+/* unused TH_SFLAG_ECORE_ONLY           0x2000 */
+/* unused TH_SFLAG_PCORE_ONLY           0x4000 */
 #endif
 
 #define TH_SFLAG_EXEC_PROMOTED          0x8000          /* promote reason: thread is in an exec */
 
 #define TH_SFLAG_THREAD_GROUP_AUTO_JOIN 0x10000         /* thread has been auto-joined to thread group */
 #if __AMP__
-#define TH_SFLAG_BOUND_SOFT             0x20000         /* thread is soft bound to a cluster; can run anywhere if bound cluster unavailable */
+/* unused TH_SFLAG_BOUND_SOFT           0x20000 */
 #endif /* __AMP__ */
 
 #if CONFIG_PREADOPT_TG
@@ -555,12 +564,13 @@ struct thread {
 #define TH_SFLAG_DEMOTED_MASK      (TH_SFLAG_THROTTLED | TH_SFLAG_FAILSAFE | TH_SFLAG_RT_DISALLOWED)     /* saved_mode contains previous sched_mode */
 #define TH_SFLAG_RT_CPULIMIT         0x200000           /* thread should have a CPU limit applied. */
 
+#define TH_SFLAG_FAILSAFE_REPORTED 0x400000 /* whether the kernel has already logged that thread triggered the failsafe (to prevent log spam) */
+
 	int16_t                 sched_pri;              /* scheduled (current) priority */
 	int16_t                 base_pri;               /* effective base priority (equal to req_base_pri unless TH_SFLAG_BASE_PRI_FROZEN) */
 	int16_t                 req_base_pri;           /* requested base priority */
 	int16_t                 max_priority;           /* copy of max base priority */
 	int16_t                 task_priority;          /* copy of task base priority */
-	int16_t                 promotion_priority;     /* priority thread is currently promoted to */
 	uint16_t                priority_floor_count;   /* number of push to boost the floor priority */
 	int16_t                 suspend_count;          /* Kernel holds on this thread  */
 
@@ -727,16 +737,18 @@ struct thread {
 		} iokit;
 	} saved;
 
-	/* Only user threads can cause guard exceptions, only kernel threads can be thread call threads */
+	/* Only user threads can cause Mach exceptions, only kernel threads can be thread call threads */
 	union {
 		/* Thread call thread's state structure, stored on its stack */
 		struct thread_call_thread_state *thc_state;
 
-		/* Structure to save information about guard exception */
+		/* Structure to save information about Mach exception */
 		struct {
+			int                             os_reason;
+			exception_type_t                exception_type;
 			mach_exception_code_t           code;
 			mach_exception_subcode_t        subcode;
-		} guard_exc_info;
+		} mach_exc_info;
 	};
 
 	/* User level suspensions */
@@ -753,7 +765,11 @@ struct thread {
 	bool                    th_vm_faults_disabled;
 
 	/* Ast/Halt data structures */
-	vm_offset_t             recover;                /* page fault recover(copyin/out) */
+	bool                    recover;                /* True if page faulted in recoverable IO */
+
+#if DEBUG || DEVELOPMENT
+	struct thread_test_context *th_test_ctx;        /* thread-specific data for kernel tests */
+#endif
 
 	queue_chain_t           threads;                /* global list of all threads */
 
@@ -891,18 +907,23 @@ struct thread {
 	thread_tag_t            thread_tag;
 
 	/*
-	 * callout_* fields are only set for thread call threads whereas guard_exc_fatal is set
-	 * by user threads on themselves while taking a guard exception. So it's okay for them to
+	 * callout_* fields are only set for thread call threads whereas mach_exc_* are set
+	 * by user threads on themselves while taking a Mach exception. So it's okay for them to
 	 * share this bitfield.
 	 */
 	uint16_t
 	    callout_woken_from_icontext:1,
 	    callout_woken_from_platform_idle:1,
 	    callout_woke_thread:1,
-	    guard_exc_fatal:1,
-	    thread_bitfield_unused:12;
+	    mach_exc_fatal:1,
+	    mach_exc_ktriage:1,
+	    thread_bitfield_unused:11;
 
 #define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
+	/*
+	 * Cluster to which the thread is soft-bound for scheduling. The thread will always run
+	 * on its bound cluster unless that cluster has been derecommended for scheduling.
+	 */
 	uint32_t                 th_bound_cluster_id;
 
 #if CONFIG_THREAD_GROUPS
@@ -1319,8 +1340,10 @@ void act_machine_sv_free(thread_t, int);
 vm_offset_t                     min_valid_stack_address(void);
 vm_offset_t                     max_valid_stack_address(void);
 
+#if CONFIG_SCHED_SMT
 extern bool thread_no_smt(thread_t thread);
 extern bool processor_active_thread_no_smt(processor_t processor);
+#endif /* CONFIG_SCHED_SMT */
 
 extern void thread_set_options(uint32_t thopt);
 
@@ -1680,7 +1703,7 @@ extern vm_offset_t      kernel_stack_mask;
 extern vm_offset_t      kernel_stack_size;
 extern vm_offset_t      kernel_stack_depth_max;
 
-extern void guard_ast(thread_t);
+extern void mach_exception_ast(thread_t);
 extern void fd_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
 extern void vn_guard_ast(thread_t,
@@ -1689,8 +1712,10 @@ extern void mach_port_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
 extern void virt_memory_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
+extern void thread_ast_mach_exception(thread_t,
+    int, exception_type_t, mach_exception_code_t, mach_exception_subcode_t, bool, bool);
 extern void thread_guard_violation(thread_t,
-    mach_exception_code_t, mach_exception_subcode_t, boolean_t);
+    mach_exception_code_t, mach_exception_subcode_t, bool);
 extern void thread_update_io_stats(thread_t, int size, int io_flags);
 
 extern kern_return_t    thread_set_voucher_name(mach_port_name_t name);
@@ -1734,7 +1759,9 @@ extern kern_return_t    machine_thread_function_pointers_convert_from_user(
  */
 uint64_t thread_get_last_wait_duration(thread_t thread);
 
+#if CONFIG_SCHED_SMT
 extern bool thread_get_no_smt(void);
+#endif /* CONFIG_SCHED_SMT */
 #if defined(__x86_64__)
 extern bool curtask_get_insn_copy_optout(void);
 extern void curtask_set_insn_copy_optout(void);
@@ -1806,7 +1833,9 @@ extern thread_pri_floor_t thread_priority_floor_start(void);
  */
 extern void thread_priority_floor_end(thread_pri_floor_t *token);
 
+#if defined(__x86_64__)
 extern void thread_set_no_smt(bool set);
+#endif /* __x86_64__ */
 
 extern void thread_mtx_lock(thread_t thread);
 
@@ -1948,6 +1977,7 @@ extern void thread_set_thread_name(thread_t th, const char* name);
 #if !MACH_KERNEL_PRIVATE || !defined(current_thread)
 extern thread_t current_thread(void) __pure2;
 #endif
+
 
 extern uint64_t thread_tid(thread_t thread) __pure2;
 

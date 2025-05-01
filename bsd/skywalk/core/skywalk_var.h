@@ -354,6 +354,7 @@ extern uint32_t sk_netif_rx_mit;
 extern uint32_t sk_rx_sync_packets;
 extern uint32_t sk_channel_buflet_alloc;
 extern uint32_t sk_min_pool_size;
+extern uint32_t sk_netif_queue_stat_enable;
 
 struct sk_protect;
 typedef const struct sk_protect *__single sk_protect_t;

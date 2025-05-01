@@ -49,17 +49,19 @@ errno_t ether_add_proto(ifnet_t interface, protocol_family_t protocol,
 errno_t ether_del_proto(ifnet_t interface, protocol_family_t protocol);
 #if KPI_INTERFACE_EMBEDDED
 errno_t ether_frameout(ifnet_t interface, mbuf_t *packet,
-    const struct sockaddr *dest, const char *dest_lladdr,
-    const char *frame_type, u_int32_t *prepend_len, u_int32_t *postpend_len);
+    const struct sockaddr *dest, IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type,
+    u_int32_t *prepend_len, u_int32_t *postpend_len);
 #else /* !KPI_INTERFACE_EMBEDDED */
 errno_t ether_frameout(ifnet_t interface, mbuf_t *packet,
-    const struct sockaddr *dest, const char *dest_lladdr,
-    const char *frame_type);
+    const struct sockaddr *dest, IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type);
 #endif /* !KPI_INTERFACE_EMBEDDED */
 #ifdef KERNEL_PRIVATE
 errno_t ether_frameout_extended(ifnet_t interface, mbuf_t *packet,
-    const struct sockaddr *dest, const char *dest_lladdr,
-    const char *frame_type, u_int32_t *prepend_len, u_int32_t *postpend_len);
+    const struct sockaddr *dest, IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type,
+    u_int32_t *prepend_len, u_int32_t *postpend_len);
 #endif /* KERNEL_PRIVATE */
 errno_t ether_ioctl(ifnet_t interface, u_int32_t command, void* data);
 errno_t ether_check_multi(ifnet_t ifp, const struct sockaddr *multicast);

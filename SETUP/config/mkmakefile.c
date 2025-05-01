@@ -419,6 +419,15 @@ nextopt:
 		f_flags |= BOUND_CHECKS_SEED;
 		goto nextopt;
 	}
+	if (eq(wd, "bound-checks-new-checks")) {
+		if (!(f_flags & BOUND_CHECKS_MASK)) {
+			printf("%s: cannot use bound-checks-new-checks without a "
+			    "bound-check* option\n", fname);
+			exit(1);
+		}
+		f_flags |= BOUND_CHECKS_NEW_CHECKS;
+		goto nextopt;
+	}
 	nreqs++;
 	if (needs == 0 && nreqs == 1) {
 		needs = ns(wd);
@@ -565,6 +574,16 @@ checkdev:
 					exit(1);
 				}
 				f_flags |= BOUND_CHECKS_SEED;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks-new-checks")) {
+				if (!(f_flags & BOUND_CHECKS_MASK)) {
+					printf("%s: cannot use bound-checks-new-checks without a "
+					    "bound-check* option\n", fname);
+					exit(1);
+				}
+				f_flags |= BOUND_CHECKS_NEW_CHECKS;
 				next_word(fp, wd);
 				continue;
 			}
@@ -761,6 +780,34 @@ tail(const char *fn)
 	return cp + 1;
 }
 
+void emit_bounds_checks_new_checks_lines(struct file_list * ftp, FILE *f, const char* tp);
+void
+emit_bounds_checks_new_checks_lines(struct file_list * ftp, FILE *f, const char* tp)
+{
+	// We don't specify `-fbounds-safety-bringup-missing-checks` directly
+	// here because `-fbounds-safety` is dynamically disabled at build time for
+	// x86_64. Instead `CFLAGS_BOUND_CHECKS_ENABLE_NEW_CHECKS` and
+	// `CFLAGS_BOUND_CHECKS_DISABLE_NEW_CHECKS` will be set to the appropriate
+	// flag name if the `BOUND_CHECKS` make file variable is not `0`. See
+	// `MakeInc.def`.
+
+	if (!(ftp->f_flags & BOUND_CHECKS_NEW_CHECKS)) {
+		// Explicitly disable the new checks when building with
+		// `-fbounds-safety`.
+		//
+		// While this is technically unnecessary (this is currently clang's
+		// default) the behavior will eventually change (rdar://134095657).
+		// Explicitly setting the flag means that when clang's behavior changes
+		// the semantics of the conf files will remain the same (i.e. not
+		// specifiying `bound-checks-new-checks` means new checks are disabled).
+		fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_DISABLE_NEW_CHECKS}\n", tp);
+		return;
+	}
+
+	// Enable all new checks
+	fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_ENABLE_NEW_CHECKS}\n", tp);
+}
+
 /*
  * Create the makerules for each file
  * which is part of the system.
@@ -810,6 +857,7 @@ do_rules(FILE *f)
 			break;
 		case BOUND_CHECKS:
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+			emit_bounds_checks_new_checks_lines(ftp, f, tp);
 			break;
 		case BOUND_CHECKS_SOFT:
 			fprintf(f, "ifeq ($(CURRENT_KERNEL_CONFIG),RELEASE)\n");
@@ -817,11 +865,13 @@ do_rules(FILE *f)
 			fprintf(f, "else\n");
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
+			emit_bounds_checks_new_checks_lines(ftp, f, tp);
 			fprintf(f, "endif # CURRENT_KERNEL_CONFIG\n");
 			break;
 		case BOUND_CHECKS_DEBUG:
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_DEBUG}\n", tp);
+			emit_bounds_checks_new_checks_lines(ftp, f, tp);
 			break;
 		case BOUND_CHECKS_SEED:
 			fprintf(f, "ifeq ($(CURRENT_KERNEL_CONFIG),RELEASE)\n");
@@ -830,6 +880,7 @@ do_rules(FILE *f)
 			fprintf(f, "else\n");
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
 			fprintf(f, "endif # CURRENT_KERNEL_CONFIG\n");
+			emit_bounds_checks_new_checks_lines(ftp, f, tp);
 			break;
 		}
 		fprintf(f, "%so: %s%s%c\n", tp, source_dir, np, och);
@@ -875,13 +926,7 @@ common:
 
 			fprintf(f, "\t${%c_RULE_2%s}%s\n", och_upper, extras, nl);
 			fprintf(f, "\t${%c_RULE_3%s}%s\n", och_upper, extras, nl);
-			fprintf(f, "\t$(if ${%c_RULE_4A%s},${%c_RULE_4A%s}",
-			    och_upper, extras, och_upper, extras);
-			if (ftp->f_extra) {
-				fprintf(f, "%s", ftp->f_extra);
-			}
-			fprintf(f, "%s%.*s${%c_RULE_4B%s}%s)\n",
-			    source_dir, (int)(tp - np), np, och_upper, extras, nl);
+			fprintf(f, "\t${%c_RULE_4%s}%s\n", och_upper, extras, nl);
 			break;
 
 		default:

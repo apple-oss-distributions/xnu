@@ -33,7 +33,7 @@ def Recount(cmd_args=None, cmd_options={}, O=None):  # noqa: E741
                 - Print out statistics useful for general panic triage.
 
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('subcommand required')
 
     if cmd_args[0] == 'coalition':
@@ -569,7 +569,7 @@ def RecountDiagnoseTask(task_ptrs, cmd_options={}, O=None):  # noqa: E74
 
 
 def RecountDiagnose(cmd_args=[], cmd_options={}, O=None):  # noqa: E741
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('diagnose subcommand required')
 
     if cmd_args[0] == 'task':

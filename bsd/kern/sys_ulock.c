@@ -318,7 +318,7 @@ ull_hash_dump(task_t task)
 static ull_t *
 ull_alloc(ulk_t *key)
 {
-	ull_t *ull = (ull_t *)zalloc_flags(ull_zone, Z_SET_NOTSHARED);
+	ull_t *ull = (ull_t *)zalloc_flags(ull_zone, Z_SET_NOTEARLY);
 	assert(ull != NULL);
 
 	ull->ull_refcount = 1;

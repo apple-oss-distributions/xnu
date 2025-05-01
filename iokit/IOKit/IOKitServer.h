@@ -187,7 +187,7 @@ extern void iokit_release_port_send( ipc_port_t port );
 extern void iokit_lock_port(ipc_port_t port);
 extern void iokit_unlock_port(ipc_port_t port);
 
-extern ipc_port_t iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t * type);
+extern kern_return_t iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t type, ipc_port_t *port);
 
 #ifndef MACH_KERNEL_PRIVATE
 typedef struct ipc_kmsg * ipc_kmsg_t;

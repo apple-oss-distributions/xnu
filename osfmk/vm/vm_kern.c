@@ -76,11 +76,13 @@
 #include <vm/vm_init_xnu.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_memtag.h>
+#include <vm/vm_far.h>
 #include <kern/misc_protos.h>
 #include <vm/cpm_internal.h>
 #include <kern/ledger.h>
 #include <kern/bits.h>
 #include <kern/startup.h>
+#include <kern/telemetry.h>
 
 #include <string.h>
 
@@ -115,6 +117,7 @@ static TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges",
 btlog_t kmem_outlier_log;
 #endif /* DEBUG || DEVELOPMENT */
 
+__startup_data static vm_map_size_t iokit_range_size;
 __startup_data static vm_map_size_t data_range_size;
 __startup_data static vm_map_size_t ptr_range_size;
 __startup_data static vm_map_size_t sprayqtn_range_size;
@@ -207,7 +210,7 @@ __kmem_object(kmem_flags_t flags)
 static inline pmap_mapping_type_t
 __kmem_mapping_type(kmem_flags_t flags)
 {
-	if (flags & (KMEM_DATA | KMEM_COMPRESSOR)) {
+	if (flags & (KMEM_DATA | KMEM_COMPRESSOR | KMEM_DATA_SHARED)) {
 		return PMAP_MAPPING_TYPE_DEFAULT;
 	} else {
 		return PMAP_MAPPING_TYPE_RESTRICTED;
@@ -249,16 +252,8 @@ __kmem_entry_orig_size(vm_map_entry_t entry)
 
 #pragma mark kmem range methods
 
-#if __arm64__
-// <rdar://problem/48304934> arm64 doesn't use ldp when I'd expect it to
-#define mach_vm_range_load(r, r_min, r_max) \
-	asm("ldp %[rmin], %[rmax], [%[range]]" \
-	    : [rmin] "=r"(r_min), [rmax] "=r"(r_max) \
-	    : [range] "r"(r), "m"((r)->min_address), "m"((r)->max_address))
-#else
 #define mach_vm_range_load(r, rmin, rmax) \
-	({ rmin = (r)->min_address; rmax = (r)->max_address; })
-#endif
+	({ (rmin) = (r)->min_address; (rmax) = (r)->max_address; })
 
 __abortlike
 static void
@@ -297,7 +292,7 @@ mach_vm_range_contains(const struct mach_vm_range *r, mach_vm_offset_t addr)
 
 #if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = vm_memtag_canonicalize_address(addr);
+		addr = vm_memtag_canonicalize_kernel(addr);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
@@ -320,16 +315,21 @@ mach_vm_range_contains(
 
 #if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = vm_memtag_canonicalize_address(addr);
+		addr = vm_memtag_canonicalize_kernel(addr);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
+	mach_vm_offset_t end;
+	if (__improbable(os_add_overflow(addr, size, &end))) {
+		return false;
+	}
+
 	/*
-	 * The `&` is not a typo: we really expect the check to pass,
-	 * so encourage the compiler to eagerly load and test without branches
+	 *	 The `&` is not a typo: we really expect the check to pass,
+	 *   so encourage the compiler to eagerly load and test without branches
 	 */
 	mach_vm_range_load(r, rmin, rmax);
-	return (addr >= rmin) & (addr + size >= rmin) & (addr + size <= rmax);
+	return (addr >= rmin) & (end >= rmin) & (end <= rmax);
 }
 
 __attribute__((overloadable))
@@ -365,7 +365,10 @@ mach_vm_range_intersects(
 {
 	struct mach_vm_range r2;
 
+#if CONFIG_KERNEL_TAGGING
 	addr = VM_KERNEL_STRIP_UPTR(addr);
+#endif /* CONFIG_KERNEL_TAGGING */
+
 	r2.min_address = addr;
 	if (os_add_overflow(addr, size, &r2.max_address)) {
 		__mach_vm_range_overflow(addr, size);
@@ -416,7 +419,7 @@ kmem_range_contains_fully(
 	bool result = false;
 
 	if (VM_KERNEL_ADDRESS(addr)) {
-		addr = vm_memtag_canonicalize_address(addr);
+		addr = vm_memtag_canonicalize_kernel(addr);
 	}
 
 	/*
@@ -625,7 +628,7 @@ kmem_size_guard(
 #if KASAN_CLASSIC
 	addr -= PAGE_SIZE;
 #endif /* KASAN_CLASSIC */
-	addr = vm_memtag_canonicalize_address(addr);
+	addr = vm_memtag_canonicalize_kernel(addr);
 
 	if (!vm_map_lookup_entry(map, addr, &entry)) {
 		__kmem_entry_not_found_panic(map, addr);
@@ -721,12 +724,12 @@ kmem_apply_security_policy(
 	 * A non-zero type-hash must be passed by krealloc_type
 	 */
 #if (DEBUG || DEVELOPMENT)
-	if (assert_dir && !(kma_flags & KMA_DATA)) {
+	if (assert_dir && !(kma_flags & (KMA_DATA | KMA_DATA_SHARED))) {
 		assert(type_hash != 0);
 	}
 #endif
 
-	if (kma_flags & KMA_DATA) {
+	if (kma_flags & (KMA_DATA | KMA_DATA_SHARED)) {
 		range_id  = KMEM_RANGE_ID_DATA;
 		/*
 		 * As an optimization in KMA_DATA to avoid fragmentation,
@@ -805,6 +808,23 @@ kmem_alloc_guard_internal(
 		goto out_error;
 	}
 
+#if 136275805
+	/*
+	 * XXX: Redundantly check the mapping size here so that failure stack traces
+	 *      are more useful. This has no functional value but is helpful because
+	 *      telemetry traps can currently only capture the last five calls and
+	 *      so we want to trap as shallow as possible in a select few cases
+	 *      where we anticipate issues.
+	 *
+	 *      When telemetry collection is complete, this will be removed.
+	 */
+	if (__improbable(!vm_map_is_map_size_valid(
+		    kernel_map, size, flags & KMA_NOSOFTLIMIT))) {
+		kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
+		goto out_error;
+	}
+#endif /* 136275805 */
+
 	/*
 	 * Guard pages:
 	 *
@@ -849,15 +869,18 @@ kmem_alloc_guard_internal(
 		vmk_flags.vmkf_guard_before = true;
 		fill_start += PAGE_SIZE;
 	}
+	if (flags & KMA_NOSOFTLIMIT) {
+		vmk_flags.vmkf_no_soft_limit = true;
+	}
 	if ((flags & KMA_GUARD_FIRST) && !skip_guards) {
-		guard_left = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+		guard_left = vm_page_create_guard((flags & KMA_NOPAGEWAIT) == 0);
 		if (__improbable(guard_left == VM_PAGE_NULL)) {
 			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
 			goto out_error;
 		}
 	}
 	if ((flags & KMA_GUARD_LAST) && !skip_guards) {
-		guard_right = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+		guard_right = vm_page_create_guard((flags & KMA_NOPAGEWAIT) == 0);
 		if (__improbable(guard_right == VM_PAGE_NULL)) {
 			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
 			goto out_error;
@@ -998,10 +1021,10 @@ kmem_alloc_guard_internal(
 #endif /* KASAN_CLASSIC */
 #if CONFIG_KERNEL_TAGGING
 	if (!(flags & KMA_VAONLY) && (flags & KMA_TAG)) {
-		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, size);
-		vm_memtag_set_tag((vm_offset_t)kmr.kmr_address, size);
+		kmr.kmr_ptr = vm_memtag_generate_and_store_tag((caddr_t)kmr.kmr_address + fill_start, fill_size);
+		kmr.kmr_ptr = (caddr_t)kmr.kmr_ptr - fill_start;
 #if KASAN_TBI
-		kasan_tbi_retag_unused_space((vm_offset_t)kmr.kmr_address, map_size, size);
+		kasan_tbi_retag_unused_space(kmr.kmr_ptr, map_size, size);
 #endif /* KASAN_TBI */
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
@@ -1115,6 +1138,9 @@ kmem_suballoc(
 	if (flags & KMS_DATA) {
 		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
 	}
+	if (flags & KMS_NOSOFTLIMIT) {
+		vmk_flags.vmkf_no_soft_limit = true;
+	}
 
 	kmr.kmr_return = vm_map_enter(parent, &map_addr, size, 0,
 	    vmk_flags, (vm_object_t)map, 0, FALSE,
@@ -1225,7 +1251,8 @@ kmem_alloc_pageable_external(
 	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_vm_allocate_kernel_sanitize(
 	vm_map_t                map,
 	mach_vm_offset_ut       addr_u,
@@ -1434,7 +1461,7 @@ kernel_memory_populate_object_and_unlock(
 
 		assert(mem->vmp_wire_count == 0);
 		assert(mem->vmp_q_state == VM_PAGE_NOT_ON_Q);
-		assert(!mem->vmp_fictitious && !mem->vmp_private);
+		assert(vm_page_is_canonical(mem));
 
 		if (flags & KMA_COMPRESSOR) {
 			mem->vmp_q_state = VM_PAGE_USED_BY_COMPRESSOR;
@@ -1451,6 +1478,7 @@ kernel_memory_populate_object_and_unlock(
 		} else {
 			mem->vmp_q_state = VM_PAGE_IS_WIRED;
 			mem->vmp_wire_count = 1;
+
 
 			vm_page_insert_wired(mem, object, offset + pg_offset, tag);
 		}
@@ -1678,7 +1706,7 @@ kmem_realloc_shrink_guard(
 #endif /* KASAN_CLASSIC */
 
 	if (flags & KMR_TAG) {
-		oldaddr = vm_memtag_canonicalize_address(req_oldaddr);
+		oldaddr = vm_memtag_canonicalize_kernel(req_oldaddr);
 	}
 
 	vm_map_lock_assert_exclusive(map);
@@ -1709,7 +1737,7 @@ kmem_realloc_shrink_guard(
 #endif
 #if KASAN_TBI
 	if (flags & KMR_TAG) {
-		kasan_tbi_mark_free_space(req_oldaddr + newsize, oldsize - newsize);
+		kasan_tbi_mark_free_space((caddr_t)req_oldaddr + newsize, oldsize - newsize);
 	}
 #endif /* KASAN_TBI */
 #endif /* KASAN */
@@ -1727,8 +1755,9 @@ kmem_realloc_shrink_guard(
 	 */
 	if (flags & KMR_KOBJECT) {
 		if (flags & KMR_GUARD_LAST) {
+			kma_flags_t dflags = KMA_KOBJECT;
 			kernel_memory_depopulate(oldaddr + newsize - PAGE_SIZE,
-			    PAGE_SIZE, KMA_KOBJECT, guard.kmg_tag);
+			    PAGE_SIZE, dflags, guard.kmg_tag);
 		}
 	} else {
 		vm_page_t guard_right = VM_PAGE_NULL;
@@ -1736,7 +1765,7 @@ kmem_realloc_shrink_guard(
 
 		if (flags & KMR_GUARD_LAST) {
 			if (!map->never_faults) {
-				guard_right = vm_page_grab_guard(true);
+				guard_right = vm_page_create_guard(true);
 			}
 			remove_start -= PAGE_SIZE;
 		}
@@ -1768,9 +1797,8 @@ kmem_realloc_shrink_guard(
 #endif /* KASAN_CLASSIC */
 #if KASAN_TBI
 	if ((flags & KMR_TAG) && (flags & KMR_FREEOLD)) {
-		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
-		vm_memtag_set_tag(kmr.kmr_address, req_newsize);
-		kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
+		kmr.kmr_ptr = vm_memtag_generate_and_store_tag(kmr.kmr_ptr, req_newsize);
+		kasan_tbi_retag_unused_space(kmr.kmr_ptr, newsize, req_newsize);
 	}
 #endif /* KASAN_TBI */
 
@@ -1804,9 +1832,17 @@ kmem_realloc_guard(
 	};
 
 	assert(KMEM_REALLOC_FLAGS_VALID(flags));
-	if (!guard.kmg_atomic && (flags & (KMR_DATA | KMR_KOBJECT)) != KMR_DATA) {
-		__kmem_invalid_arguments_panic("realloc", map, req_oldaddr,
-		    req_oldsize, flags);
+
+	if (!guard.kmg_atomic) {
+		if (!(flags & (KMR_DATA | KMR_DATA_SHARED))) {
+			__kmem_invalid_arguments_panic("realloc", map, req_oldaddr,
+			    req_oldsize, flags);
+		}
+
+		if (flags & KMR_KOBJECT) {
+			__kmem_invalid_arguments_panic("realloc", map, req_oldaddr,
+			    req_oldsize, flags);
+		}
 	}
 
 	if (req_oldaddr == 0ul) {
@@ -1840,8 +1876,8 @@ kmem_realloc_guard(
 #endif /* KASAN_CLASSIC */
 #if CONFIG_KERNEL_TAGGING
 	if (flags & KMR_TAG) {
-		vm_memtag_verify_tag(req_oldaddr);
-		oldaddr = vm_memtag_canonicalize_address(req_oldaddr);
+		vm_memtag_verify_tag(req_oldaddr + __kmem_guard_left(ANYF(flags)));
+		oldaddr = vm_memtag_canonicalize_kernel(req_oldaddr);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
@@ -1880,7 +1916,8 @@ kmem_realloc_guard(
 		if (__improbable(kmr.kmr_return != KERN_SUCCESS)) {
 			if (flags & KMR_REALLOCF) {
 				kmem_free_guard(map, req_oldaddr, req_oldsize,
-				    KMF_NONE, guard);
+				    flags & (KMF_TAG | KMF_GUARD_FIRST |
+				    KMF_GUARD_LAST | KMF_KASAN_GUARD), guard);
 			}
 			if (page_list) {
 				vm_page_free_list(page_list, FALSE);
@@ -1948,9 +1985,8 @@ again:
 #endif /* KASAN_CLASSIC */
 #if KASAN_TBI
 		if ((flags & KMR_TAG) && (flags & KMR_FREEOLD)) {
-			kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
-			vm_memtag_set_tag(kmr.kmr_address, req_newsize);
-			kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
+			kmr.kmr_ptr = vm_memtag_generate_and_store_tag(kmr.kmr_ptr, req_newsize);
+			kasan_tbi_retag_unused_space(kmr.kmr_ptr, newsize, req_newsize);
 		}
 #endif /* KASAN_TBI */
 		return kmr;
@@ -2072,7 +2108,7 @@ again:
 		 */
 		if ((flags & KMR_GUARD_LAST) && !map->never_faults) {
 			guard_right = vm_page_lookup(object, oldsize - PAGE_SIZE);
-			assert(guard_right->vmp_fictitious);
+			assert(vm_page_is_guard(guard_right));
 			guard_right->vmp_busy = true;
 			vm_page_remove(guard_right, true);
 		}
@@ -2098,7 +2134,7 @@ again:
 				assertf(!VM_PAGE_PAGEABLE(mem),
 				    "mem %p qstate %d",
 				    mem, mem->vmp_q_state);
-				if (VM_PAGE_GET_PHYS_PAGE(mem) == vm_page_guard_addr) {
+				if (vm_page_is_guard(mem)) {
 					/* guard pages are not wired */
 				} else {
 					assertf(VM_PAGE_WIRED(mem),
@@ -2166,7 +2202,7 @@ again:
 #endif
 #if KASAN_TBI
 		if (flags & KMR_TAG) {
-			kasan_tbi_mark_free_space(req_oldaddr, oldsize);
+			kasan_tbi_mark_free_space((caddr_t)req_oldaddr, oldsize);
 		}
 #endif /* KASAN_TBI */
 		if (flags & KMR_GUARD_LAST) {
@@ -2211,7 +2247,7 @@ again:
 				assertf(!VM_PAGE_PAGEABLE(mem),
 				    "mem %p qstate %d",
 				    mem, mem->vmp_q_state);
-				if (VM_PAGE_GET_PHYS_PAGE(mem) == vm_page_guard_addr) {
+				if (vm_page_is_guard(mem)) {
 					/* guard pages are not wired */
 				} else {
 					assertf(VM_PAGE_WIRED(mem),
@@ -2251,13 +2287,19 @@ again:
 		kasan_alloc_large(kmr.kmr_address, req_newsize);
 	}
 #endif /* KASAN_CLASSIC */
-#if KASAN_TBI
+#if CONFIG_KERNEL_TAGGING
 	if (flags & KMR_TAG) {
-		kmr.kmr_address = vm_memtag_assign_tag(kmr.kmr_address, req_newsize);
-		vm_memtag_set_tag(kmr.kmr_address, req_newsize);
-		kasan_tbi_retag_unused_space(kmr.kmr_address, newsize, req_newsize);
-	}
+#if   KASAN_TBI
+		/*
+		 * Validate the current buffer, then generate a new tag,
+		 * even if the address is stable, it's a "new" allocation.
+		 */
+		__asan_loadN((vm_offset_t)kmr.kmr_address, oldsize);
+		kmr.kmr_ptr = vm_memtag_generate_and_store_tag(kmr.kmr_ptr, req_newsize);
+		kasan_tbi_retag_unused_space(kmr.kmr_ptr, newsize, req_newsize);
 #endif /* KASAN_TBI */
+	}
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	return kmr;
 }
@@ -2378,8 +2420,8 @@ kmem_free_guard(
 #endif /* KASAN_CLASSIC */
 #if CONFIG_KERNEL_TAGGING
 	if (flags & KMF_TAG) {
-		vm_memtag_verify_tag(req_addr);
-		addr = vm_memtag_canonicalize_address(req_addr);
+		vm_memtag_verify_tag(req_addr + __kmem_guard_left(ANYF(flags)));
+		addr = vm_memtag_canonicalize_kernel(req_addr);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
@@ -2424,7 +2466,7 @@ kmem_free_guard(
 #endif
 #if KASAN_TBI
 	if (flags & KMF_TAG) {
-		kasan_tbi_mark_free_space(req_addr, size);
+		kasan_tbi_mark_free_space((caddr_t)req_addr, size);
 	}
 #endif /* KASAN_TBI */
 
@@ -2665,7 +2707,7 @@ kmem_addr_to_meta(
 
 	*range_start = kmem_ranges[range_id].min_address;
 	*meta_idx = (addr - *range_start) / KMEM_CHUNK_SIZE_MIN;
-	return &meta_base[*meta_idx];
+	return VM_FAR_ADD_PTR_UNBOUNDED(meta_base, *meta_idx);
 }
 
 /*
@@ -2683,7 +2725,7 @@ kmem_addr_to_meta_start(
 
 	meta = kmem_addr_to_meta(addr, range_id, &range_start, &meta_idx);
 	meta_idx -= kmem_get_page_idx(meta);
-	meta -= kmem_get_page_idx(meta);
+	meta = VM_FAR_ADD_PTR_UNBOUNDED(meta, -(ptrdiff_t)kmem_get_page_idx(meta));
 	assert(meta->km_page_marker == KMEM_META_PRIMARY);
 	*chunk_start = range_start + (meta_idx * KMEM_CHUNK_SIZE_MIN);
 	return meta;
@@ -2718,7 +2760,8 @@ kmem_metadata_init(void)
 		vm_map_will_allocate_early_map(&kmem_meta_map[i]);
 		kmem_meta_map[i] = kmem_suballoc(kernel_map, &addr, kmem_meta_size,
 		    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
-		    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
+		    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+		    KMS_PERMANENT | KMS_NOFAIL | KMS_NOSOFTLIMIT,
 		    VM_KERN_MEMORY_OSFMK).kmr_submap;
 
 		kmem_meta_range[i].min_address = addr;
@@ -3596,6 +3639,11 @@ static vm_map_size_t wire_limit_percents[] =
 { 70, 73, 76, 79, 82, 85, 88, 91, 94, 97};
 #endif /* CONFIG_JETSAM */
 
+/* Set limit to 95% of DRAM if serverperfmode=1 */
+#define VM_USER_SERVERPERF_WIRE_LIMIT_PERCENT 95
+/* Use special serverperfmode behavior iff DRAM > 2^35 = 32GiB of RAM. */
+#define VM_USER_SERVERPERF_WIREABLE_MIN_CONFIG 35
+
 /*
  * Sets the default global user wire limit which limits the amount of
  * memory that can be locked via mlock() based on the above algorithm..
@@ -3616,15 +3664,20 @@ kmem_set_user_wire_limits(void)
 
 	available_mem_log = bit_floor(config_memsize);
 
-	if (available_mem_log < VM_USER_WIREABLE_MIN_CONFIG) {
-		available_mem_log = 0;
+	if (serverperfmode &&
+	    (available_mem_log >= VM_USER_SERVERPERF_WIREABLE_MIN_CONFIG)) {
+		max_wire_percent = VM_USER_SERVERPERF_WIRE_LIMIT_PERCENT;
 	} else {
-		available_mem_log -= VM_USER_WIREABLE_MIN_CONFIG;
+		if (available_mem_log < VM_USER_WIREABLE_MIN_CONFIG) {
+			available_mem_log = 0;
+		} else {
+			available_mem_log -= VM_USER_WIREABLE_MIN_CONFIG;
+		}
+		if (available_mem_log >= wire_limit_percents_length) {
+			available_mem_log = wire_limit_percents_length - 1;
+		}
+		max_wire_percent = wire_limit_percents[available_mem_log];
 	}
-	if (available_mem_log >= wire_limit_percents_length) {
-		available_mem_log = wire_limit_percents_length - 1;
-	}
-	max_wire_percent = wire_limit_percents[available_mem_log];
 
 	limit = config_memsize * max_wire_percent / 100;
 	/* Cap the number of non lockable bytes at VM_NOT_USER_WIREABLE_MAX */
@@ -3642,8 +3695,55 @@ kmem_set_user_wire_limits(void)
 #define KMEM_MAX_CLAIMS 50
 __startup_data
 struct kmem_range_startup_spec kmem_claims[KMEM_MAX_CLAIMS] = {};
+
+#if !MACH_ASSERT
 __startup_data
+#endif /* !MACH_ASSERT */
 uint32_t kmem_claim_count = 0;
+
+#if MACH_ASSERT
+/**
+ * Save off some minimal information about the ranges for consumption by
+ * post-lockdown tests.
+ */
+static struct mach_vm_range kmem_test_saved_ranges[KMEM_MAX_CLAIMS];
+#endif /* MACH_ASSERT */
+
+/**
+ * For a requested claim size (i.e. kc_size), get the number of bytes which
+ * should actually be allocated for a region in order to be able to properly
+ * provide the requested size (the allocation size).
+ *
+ * This allocation size is always greater or equal to the claim size. It can,
+ * for example, include additional space as required by the kernel memory
+ * configuration.
+ *
+ * @param known_last Is the claim in question known to be the last region after
+ * all placing has completed? The size for a known_last allocation is always
+ * less than or equal to a non-known_last allocation of the same size.
+ */
+__startup_func
+static vm_map_size_t
+kmem_claim_to_allocation_size(vm_map_size_t claim_size, bool known_last)
+{
+	(void)known_last;
+	/*
+	 * Allocation size and claim size are identical.
+	 */
+	return claim_size;
+}
+
+/**
+ * Compute the largest claim which can be made from a given allocation size.
+ */
+static vm_map_size_t
+kmem_allocation_to_claim_size(vm_map_size_t allocation_size)
+{
+	/*
+	 * Allocation size and claim size are identical.
+	 */
+	return allocation_size;
+}
 
 __startup_func
 void
@@ -3664,12 +3764,17 @@ static vm_offset_t
 kmem_fuzz_start(void)
 {
 	vm_offset_t kmapoff_kaddr = 0;
-	uint32_t kmapoff_pgcnt = (early_random() & 0x1ff) + 1; /* 9 bits */
+	uint32_t kmapoff_pgcnt;
+
+	kmapoff_pgcnt = (early_random() & 0x1ff) + 1; /* 9 bits */
+
 	vm_map_size_t kmapoff_size = ptoa(kmapoff_pgcnt);
 
 	kmem_alloc(kernel_map, &kmapoff_kaddr, kmapoff_size,
 	    KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT | KMA_VAONLY,
 	    VM_KERN_MEMORY_OSFMK);
+
+
 	return kmapoff_kaddr + kmapoff_size;
 }
 
@@ -3715,6 +3820,19 @@ kmem_readjust_ranges(
 	uint32_t j = cur_idx - 1, random;
 	struct kmem_range_startup_spec sp = kmem_claims[cur_idx];
 	struct mach_vm_range *sp_range = sp.kc_range;
+	/*
+	 * Even if sp is currently last, it will never be last after it is moved.
+	 * As such, we want to bump other claims over it and include any necessary
+	 * padding for a non-last claim.
+	 *
+	 * While changing which claim is last can impact the total VA usage, since a
+	 * known_last allocation size is guaranteed to always be less-than-or-equal
+	 * to a non-known_last allocation (which is used for pre-placement sizing),
+	 * we will always have enough space so long as the pre-placement sizing had
+	 * enough space.
+	 */
+	vm_map_offset_t sp_allocation_size =
+	    kmem_claim_to_allocation_size(sp.kc_size, /* known_last */ false);
 
 	/*
 	 * Find max index where restriction is met
@@ -3743,21 +3861,23 @@ kmem_readjust_ranges(
 	for (j = cur_idx - 1; j >= random && j != UINT32_MAX; j--) {
 		struct kmem_range_startup_spec spj = kmem_claims[j];
 		struct mach_vm_range *range = spj.kc_range;
-		range->min_address += sp.kc_size;
-		range->max_address += sp.kc_size;
+		range->min_address += sp_allocation_size;
+		range->max_address += sp_allocation_size;
 		kmem_claims[j + 1] = spj;
 	}
 
-	sp.kc_flags = KC_NO_MOVE;
+	sp.kc_flags |= KC_NO_MOVE;
 	kmem_claims[random] = sp;
 }
 
 __startup_func
-static vm_map_size_t
+static void
 kmem_add_ptr_claims(void)
 {
 	uint64_t kmem_meta_num, kmem_ptr_chunks;
-	vm_map_size_t org_ptr_range_size = ptr_range_size;
+	vm_map_size_t org_ptr_range_size __assert_only;
+
+	org_ptr_range_size = ptr_range_size;
 
 	ptr_range_size -= PAGE_SIZE;
 	ptr_range_size *= KMEM_CHUNK_SIZE_MIN;
@@ -3790,8 +3910,6 @@ kmem_add_ptr_claims(void)
 		};
 		kmem_claims[kmem_claim_count++] = kmem_meta_spec;
 	}
-	return (org_ptr_range_size - ptr_range_size - kmem_meta_size) *
-	       kmem_ptr_ranges;
 }
 
 __startup_func
@@ -3799,6 +3917,8 @@ static void
 kmem_add_extra_claims(void)
 {
 	vm_map_size_t largest_free_size = 0, total_claims = 0;
+	vm_map_size_t sane_sprayqtn_size = 0, sprayqtn_allocation_size = 0;
+	vm_map_size_t ptr_total_allocation_size = 0;
 
 	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
 	largest_free_size = trunc_page(largest_free_size);
@@ -3814,9 +3934,14 @@ kmem_add_extra_claims(void)
 	 * Determine size of data and pointer kmem_ranges
 	 */
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
-		total_claims += kmem_claims[i].kc_size;
+		struct kmem_range_startup_spec sp_i = kmem_claims[i];
+
+		total_claims += kmem_claim_to_allocation_size(
+			sp_i.kc_size, /* known_last */ false);
 	}
 	assert((total_claims & PAGE_MASK) == 0);
+
+
 	largest_free_size -= total_claims;
 
 	/*
@@ -3825,26 +3950,77 @@ kmem_add_extra_claims(void)
 	 * ranges divide the available VA by 8.
 	 */
 	ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
-	sprayqtn_range_size = ptr_range_size;
 
-	if (sprayqtn_range_size > (sane_size / 2)) {
-		sprayqtn_range_size = sane_size / 2;
+	sprayqtn_range_size = ptr_range_size;
+	sane_sprayqtn_size = kmem_claim_to_allocation_size(
+		/* claim_size */ sane_size / 2, /* known_last */ false);
+	if (sprayqtn_range_size > sane_sprayqtn_size) {
+		vm_map_size_t sprayqtn_extra;
+
+		/*
+		 * Spray quarantine doesn't need that much space.
+		 * Shrink it to something reasonable and equally share the leftover VA
+		 * with the other pointer ranges.
+		 */
+		sprayqtn_extra = sprayqtn_range_size - sane_sprayqtn_size;
+		sprayqtn_range_size -= sprayqtn_extra;
+		ptr_range_size += sprayqtn_extra / kmem_ptr_ranges;
 	}
 
 	ptr_range_size = round_page(ptr_range_size);
 	sprayqtn_range_size = round_page(sprayqtn_range_size);
 
+	iokit_range_size = 0;
 
-	data_range_size = largest_free_size
-	    - (ptr_range_size * kmem_ptr_ranges)
-	    - sprayqtn_range_size;
+	/* Less any necessary allocation padding... */
+	ptr_range_size = kmem_allocation_to_claim_size(ptr_range_size);
+	sprayqtn_range_size = kmem_allocation_to_claim_size(sprayqtn_range_size);
 
 	/*
-	 * Add claims for kmem's ranges
+	 * Add the pointer and metadata claims
+	 * Note: this call modifies ptr_range_size and may, depending on the padding
+	 * requirements, slightly increase or decrease the overall allocation size
+	 * of the pointer+metadata region.
 	 */
-	data_range_size += kmem_add_ptr_claims();
-	assert(data_range_size + sprayqtn_range_size +
-	    ((ptr_range_size + kmem_meta_size) * kmem_ptr_ranges) <=
+	kmem_add_ptr_claims();
+
+	sprayqtn_allocation_size = kmem_claim_to_allocation_size(
+		sprayqtn_range_size, /* known_last */ false);
+	ptr_total_allocation_size =
+	    (kmem_claim_to_allocation_size(ptr_range_size, /* known_last */ false) +
+	    kmem_claim_to_allocation_size(kmem_meta_size, /* known_last */ false)) *
+	    kmem_ptr_ranges;
+
+	/*
+	 * Check: spray and ptr_range are minimally valid.
+	 * This is a useful assert as it should catch us if we were to end up with a
+	 * "negative" (or extremely large) data_range_size.
+	 */
+	assert(sprayqtn_allocation_size + ptr_total_allocation_size < largest_free_size);
+
+	/*
+	 * Finally, give any remaining allocable space to the data region.
+	 */
+	data_range_size = largest_free_size - sprayqtn_allocation_size -
+	    ptr_total_allocation_size;
+
+#if defined(ARM_LARGE_MEMORY)
+	/*
+	 * Reserve space for our dedicated IOKit carveout.
+	 * Currently, we carve off a quarter of the data region.
+	 */
+	iokit_range_size = round_page(data_range_size / 4);
+	data_range_size -= kmem_claim_to_allocation_size(
+		iokit_range_size, /* known_last */ false);
+#endif /* defined(ARM_LARGE_MEMORY) */
+
+	/* Less any necessary allocation padding... */
+	data_range_size = kmem_allocation_to_claim_size(data_range_size);
+
+	/* Check: our allocations should all still fit in the free space */
+	assert(sprayqtn_allocation_size + ptr_total_allocation_size +
+	    kmem_claim_to_allocation_size(iokit_range_size, /* known_last */ false) +
+	    kmem_claim_to_allocation_size(data_range_size, /* known_last */ false) <=
 	    largest_free_size);
 
 	struct kmem_range_startup_spec kmem_spec_sprayqtn = {
@@ -3854,6 +4030,21 @@ kmem_add_extra_claims(void)
 		.kc_flags = KC_NO_ENTRY,
 	};
 	kmem_claims[kmem_claim_count++] = kmem_spec_sprayqtn;
+
+	/*
+	 * If !defined(ARM_LARGE_MEMORY), KMEM_RANGE_ID_IOKIT is coalesced into the data range.
+	 * This is to minimize wasted translation tables in constrained environments.
+	 * The coalescing happens during kmem_scramble_ranges.
+	 */
+#if defined(ARM_LARGE_MEMORY)
+	struct kmem_range_startup_spec kmem_spec_iokit = {
+		.kc_name = "kmem_iokit_range",
+		.kc_range = &kmem_ranges[KMEM_RANGE_ID_IOKIT],
+		.kc_size = iokit_range_size,
+		.kc_flags = KC_NO_ENTRY,
+	};
+	kmem_claims[kmem_claim_count++] = kmem_spec_iokit;
+#endif /* defined(ARM_LARGE_MEMORY) */
 
 	struct kmem_range_startup_spec kmem_spec_data = {
 		.kc_name = "kmem_data_range",
@@ -3868,7 +4059,7 @@ __startup_func
 static void
 kmem_scramble_ranges(void)
 {
-	vm_map_offset_t start = 0;
+	vm_map_offset_t va_alloc_head = 0;
 
 	/*
 	 * Initiatize KMEM_RANGE_ID_NONE range to use the entire map so that
@@ -3894,12 +4085,35 @@ kmem_scramble_ranges(void)
 	 * pointer packing schemes using KERNEL_PMAP_HEAP_RANGE_START as a base
 	 * do not admit this address to be part of any zone submap.
 	 */
-	start = kmem_fuzz_start();
+	va_alloc_head = kmem_fuzz_start();
 
 	/*
 	 * Add claims for ptr and data kmem_ranges
 	 */
 	kmem_add_extra_claims();
+
+	/*
+	 * Minimally verify that our placer will be able to resolve the constraints
+	 * of all claims
+	 */
+	bool has_min_address = false;
+	for (uint32_t i = 0; i < kmem_claim_count; i++) {
+		struct kmem_range_startup_spec sp_i = kmem_claims[i];
+
+		/* Verify that we have only one claim with a min address constraint */
+		if (sp_i.kc_range->min_address) {
+			if (has_min_address) {
+				panic("Cannot place with multiple min_address constraints");
+			} else {
+				has_min_address = true;
+			}
+		}
+
+		if (sp_i.kc_range->max_address) {
+			panic("Cannot place with a max_address constraint");
+		}
+	}
+
 
 	/*
 	 * Shuffle registered claims
@@ -3911,27 +4125,40 @@ kmem_scramble_ranges(void)
 	 * Apply restrictions and determine range for each claim
 	 */
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
-		vm_map_offset_t end = 0;
 		struct kmem_range_startup_spec sp = kmem_claims[i];
 		struct mach_vm_range *sp_range = sp.kc_range;
 
-		if (vm_map_locate_space_anywhere(kernel_map, sp.kc_size, 0,
-		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
-			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
-			    sp.kc_name);
+		/*
+		 * Find space using the allocation size (rather than the claim size) in
+		 * order to ensure we provide any applicable padding.
+		 */
+		bool is_last = (i == kmem_claim_count - 1);
+		vm_map_offset_t sp_allocation_size =
+		    kmem_claim_to_allocation_size(sp.kc_size, is_last);
+
+		if (vm_map_locate_space_anywhere(kernel_map, sp_allocation_size, 0,
+		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_no_soft_limit = true),
+		    &va_alloc_head, NULL) != KERN_SUCCESS) {
+			panic("kmem_range_init: vm_map_locate_space failing for claim %s, "
+			    "size 0x%llx",
+			    sp.kc_name, sp_allocation_size);
 		}
 
-		end = start + sp.kc_size;
 		/*
 		 * Re-adjust ranges if restriction not met
 		 */
-		if (sp_range->min_address && start > sp_range->min_address) {
+		if (sp_range->min_address && va_alloc_head > sp_range->min_address) {
 			kmem_readjust_ranges(i);
 		} else {
-			sp_range->min_address = start;
-			sp_range->max_address = end;
+			/*
+			 * Though the actual allocated space may be larger, provide only the
+			 * size requested by the original claim.
+			 */
+			sp_range->min_address = va_alloc_head;
+			sp_range->max_address = va_alloc_head + sp.kc_size;
 		}
-		start = end;
+
+		va_alloc_head += sp_allocation_size;
 	}
 
 	/*
@@ -3940,12 +4167,23 @@ kmem_scramble_ranges(void)
 	 */
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
 		struct kmem_range_startup_spec sp = kmem_claims[i];
+		bool is_last = (i == kmem_claim_count - 1);
+		vm_map_offset_t sp_allocation_size =
+		    kmem_claim_to_allocation_size(sp.kc_size, is_last);
 		vm_map_entry_t entry = NULL;
 		if (sp.kc_flags & KC_NO_ENTRY) {
 			continue;
 		}
-		if (vm_map_find_space(kernel_map, sp.kc_range->min_address, sp.kc_size, 0,
-		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &entry) != KERN_SUCCESS) {
+
+
+		/*
+		 * We reserve the full allocation size (rather than the claim size) so
+		 * that nothing ends up placed in the padding space (if applicable).
+		 */
+		if (vm_map_find_space(kernel_map, sp.kc_range->min_address,
+		    sp_allocation_size, 0,
+		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_no_soft_limit = true),
+		    &entry) != KERN_SUCCESS) {
 			panic("kmem_range_init: vm_map_find_space failing for claim %s",
 			    sp.kc_name);
 		}
@@ -3954,6 +4192,15 @@ kmem_scramble_ranges(void)
 		VME_OFFSET_SET(entry, entry->vme_start);
 		vm_map_unlock(kernel_map);
 	}
+
+	/*
+	 * If we're not on a large memory system KMEM_RANGE_ID_IOKIT acts as a synonym for KMEM_RANGE_ID_DATA.
+	 * On large memory systems KMEM_RANGE_ID_IOKIT is a dedicated carveout.
+	 */
+#if !defined(ARM_LARGE_MEMORY)
+	kmem_ranges[KMEM_RANGE_ID_IOKIT] = kmem_ranges[KMEM_RANGE_ID_DATA];
+#endif /* !defined(ARM_LARGE_MEMORY) */
+
 	/*
 	 * Now that we are done assigning all the ranges, reset
 	 * kmem_ranges[KMEM_RANGE_ID_NONE]
@@ -3971,6 +4218,17 @@ kmem_scramble_ranges(void)
 		    mach_vm_size_unit(sp.kc_size));
 	}
 #endif /* DEBUG || DEVELOPMENT */
+
+#if MACH_ASSERT
+	/*
+	 * Since many parts of the claim infrastructure are marked as startup data
+	 * (and are thus unavailable post-lockdown), save off information our tests
+	 * need now.
+	 */
+	for (uint32_t i = 0; i < kmem_claim_count; i++) {
+		kmem_test_saved_ranges[i] = *(kmem_claims[i].kc_range);
+	}
+#endif /* MACH_ASSERT */
 }
 
 __startup_func
@@ -3986,6 +4244,12 @@ kmem_range_init(void)
 	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address + range_adjustment;
 	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address =
 	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address;
+
+	range_adjustment = iokit_range_size >> 3;
+	kmem_large_ranges[KMEM_RANGE_ID_IOKIT].min_address =
+	    kmem_ranges[KMEM_RANGE_ID_IOKIT].min_address + range_adjustment;
+	kmem_large_ranges[KMEM_RANGE_ID_IOKIT].max_address =
+	    kmem_ranges[KMEM_RANGE_ID_IOKIT].max_address;
 
 	range_adjustment = data_range_size >> 3;
 	kmem_large_ranges[KMEM_RANGE_ID_DATA].min_address =
@@ -4123,7 +4387,9 @@ kmem_init(
 			    vm_map_round_page(region_size,
 			    VM_MAP_PAGE_MASK(kernel_map)),
 			    (vm_map_offset_t) 0,
-			    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(.vmkf_no_pmap_check = true),
+			    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(
+				    .vmkf_no_pmap_check = true,
+				    .vmkf_no_soft_limit = true),
 			    VM_OBJECT_NULL,
 			    (vm_object_offset_t) 0, FALSE, VM_PROT_NONE, VM_PROT_NONE,
 			    VM_INHERIT_DEFAULT);
@@ -4174,6 +4440,12 @@ kmem_init(
 
 
 #pragma mark map copyio
+static inline void
+current_thread_set_sec_override(bool val)
+{
+#pragma unused(val)
+}
+
 /*
  * Note: semantic types aren't used as `copyio` already validates.
  */
@@ -4185,8 +4457,8 @@ copyinmap(
 	void                   *todata,
 	vm_size_t               length)
 {
-	kern_return_t   kr = KERN_SUCCESS;
-	vm_map_t oldmap;
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_switch_context_t switch_ctx;
 
 	if (vm_map_pmap(map) == pmap_kernel()) {
 		/* assume a correct copy */
@@ -4197,11 +4469,13 @@ copyinmap(
 		}
 	} else {
 		vm_map_reference(map);
-		oldmap = vm_map_switch(map);
+		current_thread_set_sec_override(true);
+		switch_ctx = vm_map_switch_to(map);
 		if (copyin(fromaddr, todata, length) != 0) {
 			kr = KERN_INVALID_ADDRESS;
 		}
-		vm_map_switch(oldmap);
+		current_thread_set_sec_override(false);
+		vm_map_switch_back(switch_ctx);
 		vm_map_deallocate(map);
 	}
 	return kr;
@@ -4214,8 +4488,8 @@ copyoutmap(
 	vm_map_address_t        toaddr,
 	vm_size_t               length)
 {
-	kern_return_t   kr = KERN_SUCCESS;
-	vm_map_t        oldmap;
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_switch_context_t switch_ctx;
 
 	if (vm_map_pmap(map) == pmap_kernel()) {
 		/* assume a correct copy */
@@ -4231,7 +4505,8 @@ copyoutmap(
 		}
 	} else {
 		vm_map_reference(map);
-		oldmap = vm_map_switch(map);
+		current_thread_set_sec_override(true);
+		switch_ctx = vm_map_switch_to(map);
 		if (copyout(fromdata, toaddr, length) != 0) {
 			ktriage_record(thread_tid(current_thread()),
 			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
@@ -4240,7 +4515,8 @@ copyoutmap(
 			    KERN_INVALID_ADDRESS /* arg */);
 			kr = KERN_INVALID_ADDRESS;
 		}
-		vm_map_switch(oldmap);
+		current_thread_set_sec_override(false);
+		vm_map_switch_back(switch_ctx);
 		vm_map_deallocate(map);
 	}
 	return kr;
@@ -4252,8 +4528,8 @@ copyoutmap_atomic32(
 	uint32_t                value,
 	vm_map_address_t        toaddr)
 {
-	kern_return_t   kr = KERN_SUCCESS;
-	vm_map_t        oldmap;
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_switch_context_t switch_ctx;
 
 	if (vm_map_pmap(map) == pmap_kernel()) {
 		/* assume a correct toaddr */
@@ -4264,11 +4540,13 @@ copyoutmap_atomic32(
 		}
 	} else {
 		vm_map_reference(map);
-		oldmap = vm_map_switch(map);
+		current_thread_set_sec_override(true);
+		switch_ctx = vm_map_switch_to(map);
 		if (copyout_atomic32(value, toaddr) != 0) {
 			kr = KERN_INVALID_ADDRESS;
 		}
-		vm_map_switch(oldmap);
+		current_thread_set_sec_override(false);
+		vm_map_switch_back(switch_ctx);
 		vm_map_deallocate(map);
 	}
 	return kr;
@@ -4280,8 +4558,8 @@ copyoutmap_atomic64(
 	uint64_t                value,
 	vm_map_address_t        toaddr)
 {
-	kern_return_t   kr = KERN_SUCCESS;
-	vm_map_t        oldmap;
+	kern_return_t kr = KERN_SUCCESS;
+	vm_map_switch_context_t switch_ctx;
 
 	if (vm_map_pmap(map) == pmap_kernel()) {
 		/* assume a correct toaddr */
@@ -4292,11 +4570,13 @@ copyoutmap_atomic64(
 		}
 	} else {
 		vm_map_reference(map);
-		oldmap = vm_map_switch(map);
+		current_thread_set_sec_override(true);
+		switch_ctx = vm_map_switch_to(map);
 		if (copyout_atomic64(value, toaddr) != 0) {
 			kr = KERN_INVALID_ADDRESS;
 		}
-		vm_map_switch(oldmap);
+		current_thread_set_sec_override(false);
+		vm_map_switch_back(switch_ctx);
 		vm_map_deallocate(map);
 	}
 	return kr;
@@ -4328,6 +4608,8 @@ vm_kernel_addrhash_internal(vm_offset_t addr, uint64_t salt)
 	if (VM_KERNEL_IS_SLID(addr)) {
 		return VM_KERNEL_UNSLIDE(addr);
 	}
+
+	addr = VM_KERNEL_STRIP_UPTR(addr);
 
 	vm_offset_t sha_digest[SHA256_DIGEST_LENGTH / sizeof(vm_offset_t)];
 	SHA256_CTX sha_ctx;
@@ -4464,6 +4746,37 @@ can_write_at(vm_offset_t offs, uint32_t page)
 #define poke(offs, page, v) \
 	(*(uint32_t *)((offs) + ptoa(page)) = (v))
 
+#if CONFIG_SPTM
+__attribute__((noinline))
+static void
+kmem_test_verify_type_policy(vm_offset_t addr, kmem_flags_t flags)
+{
+	extern bool use_xnu_restricted;
+	pmap_mapping_type_t expected_type = PMAP_MAPPING_TYPE_RESTRICTED;
+
+	/* Explicitly state the expected policy */
+	if (flags & (KMEM_DATA | KMEM_COMPRESSOR | KMEM_DATA_SHARED)) {
+		expected_type = PMAP_MAPPING_TYPE_DEFAULT;
+	}
+
+	/* If X_K_R is disabled, DEFAULT is the only possible mapping */
+	if (!use_xnu_restricted) {
+		expected_type = PMAP_MAPPING_TYPE_DEFAULT;
+	}
+
+	/* Verify if derived correctly */
+	assert3u(expected_type, ==, __kmem_mapping_type(flags));
+
+	pmap_paddr_t pa = kvtophys(addr);
+	if (pa == 0) {
+		return;
+	}
+
+	/* Verify if the mapped address actually got the expected type */
+	assert3u(expected_type, ==, sptm_get_frame_type(pa));
+}
+#endif /* CONFIG_SPTM */
+
 __attribute__((noinline))
 static void
 kmem_alloc_basic_test(vm_map_t map)
@@ -4516,7 +4829,8 @@ kmem_alloc_basic_test(vm_map_t map)
 		assert_writeable(addr, i);
 	}
 
-	kmem_free(map, addr, ptoa(10));
+	kmem_free_guard(map, addr, ptoa(10),
+	    KMF_GUARD_FIRST | KMF_GUARD_LAST, guard);
 	kmem_test_assert_map(map, 0, 0);
 }
 
@@ -4540,24 +4854,27 @@ kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 	 *	However, this is what the implementation does today.
 	 */
 	bool realloc_growth_changes_address = true;
+	bool GF = (kind & KMR_GUARD_FIRST);
 	bool GL = (kind & KMR_GUARD_LAST);
 
 	/*
 	 *	Initial N page allocation
 	 */
 	addr = kmem_alloc_guard(map, ptoa(N), 0,
-	    (kind & (KMA_KOBJECT | KMA_GUARD_LAST | KMA_DATA)) | KMA_ZERO,
-	    guard).kmr_address;
+	    (kind & ~KMEM_FREEOLD) | KMA_ZERO, guard).kmr_address;
 	assert3u(addr, !=, 0);
+
 	kmem_test_assert_map(map, N, 1);
-	for (int pg = 0; pg < N - GL; pg++) {
+	for (int pg = GF; pg < N - GL; pg++) {
 		poke(addr, pg, 42 + pg);
 	}
 	for (int pg = N - GL; pg < N; pg++) {
 		assert_faults(addr, pg);
 	}
 
-
+#if CONFIG_SPTM
+	kmem_test_verify_type_policy(addr, ANYF(kind));
+#endif /* CONFIG_SPTM */
 	/*
 	 *	Grow to N + 3 pages
 	 */
@@ -4572,21 +4889,22 @@ kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 	} else {
 		kmem_test_assert_map(map, 2 * N + 3, 2);
 	}
-	for (int pg = 0; pg < N - GL; pg++) {
+	for (int pg = GF; pg < N - GL; pg++) {
 		assert3u(peek(newaddr, pg), ==, 42 + pg);
 	}
 	if ((kind & KMR_FREEOLD) == 0) {
-		for (int pg = 0; pg < N - GL; pg++) {
+		for (int pg = GF; pg < N - GL; pg++) {
 			assert3u(peek(addr, pg), ==, 42 + pg);
 		}
 		/* check for tru-share */
 		poke(addr + 16, 0, 1234);
 		assert3u(peek(newaddr + 16, 0), ==, 1234);
-		kmem_free_guard(map, addr, ptoa(N), KMF_NONE, guard);
+		kmem_free_guard(map, addr, ptoa(N),
+		    kind & (KMF_TAG | KMF_GUARD_FIRST | KMF_GUARD_LAST), guard);
 		kmem_test_assert_map(map, N + 3, 1);
 	}
 	if (addr != newaddr) {
-		for (int pg = 0; pg < N - GL; pg++) {
+		for (int pg = GF; pg < N - GL; pg++) {
 			assert_faults(addr, pg);
 		}
 	}
@@ -4608,14 +4926,15 @@ kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 	assert3u(newaddr, ==, addr);
 	kmem_test_assert_map(map, N - 2, 1);
 
-	for (int pg = 0; pg < N - 2 - GL; pg++) {
+	for (int pg = GF; pg < N - 2 - GL; pg++) {
 		assert3u(peek(addr, pg), ==, 42 + pg);
 	}
 	for (int pg = N - 2 - GL; pg < N + 3; pg++) {
 		assert_faults(addr, pg);
 	}
 
-	kmem_free_guard(map, addr, ptoa(N - 2), KMF_NONE, guard);
+	kmem_free_guard(map, addr, ptoa(N - 2),
+	    kind & (KMF_TAG | KMF_GUARD_FIRST | KMF_GUARD_LAST), guard);
 	kmem_test_assert_map(map, 0, 0);
 }
 
@@ -4667,6 +4986,7 @@ kmem_basic_test(__unused int64_t in, int64_t *out)
 	kmem_realloc_basic_test(map, KMR_FREEOLD | KMR_GUARD_FIRST | KMR_GUARD_LAST);
 	printf("%s:     PASS\n", __func__);
 
+
 	/* using KMR_DATA signals to test the non atomic realloc path */
 	printf("%s: kmem_realloc (KMR_DATA | KMR_FREEOLD) ...\n", __func__);
 	kmem_realloc_basic_test(map, KMR_DATA | KMR_FREEOLD);
@@ -4674,6 +4994,11 @@ kmem_basic_test(__unused int64_t in, int64_t *out)
 
 	printf("%s: kmem_realloc (KMR_DATA) ...\n", __func__);
 	kmem_realloc_basic_test(map, KMR_DATA);
+	printf("%s:     PASS\n", __func__);
+
+	/* test KMR_SHARED_DATA for the new shared kheap */
+	printf("%s: kmem_realloc (KMR_DATA_SHARED) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_DATA_SHARED);
 	printf("%s:     PASS\n", __func__);
 
 	kmem_free_guard(kernel_map, addr, 64U << 20, KMF_NONE, KMEM_GUARD_SUBMAP);
@@ -4722,4 +5047,6 @@ kmem_guard_obj_test(__unused int64_t in, int64_t *out)
 	return 0;
 }
 SYSCTL_TEST_REGISTER(kmem_guard_obj, kmem_guard_obj_test);
+
+
 #endif /* MACH_ASSERT */

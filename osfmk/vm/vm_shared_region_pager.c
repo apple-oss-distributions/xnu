@@ -68,6 +68,8 @@
 extern boolean_t diversify_user_jop;
 #endif /* __has_feature(ptrauth_calls) */
 
+extern int panic_on_dyld_issue;
+
 /*
  * SHARED REGION MEMORY PAGER
  *
@@ -501,6 +503,7 @@ shared_region_pager_data_request(
 	unsigned int            pl_count;
 	vm_object_t             src_top_object, src_page_object, dst_object;
 	kern_return_t           kr, retval;
+	vm_fault_return_t       vmfr;
 	vm_offset_t             src_vaddr, dst_vaddr;
 	vm_offset_t             cur_offset;
 	vm_offset_t             offset_in_page;
@@ -550,7 +553,11 @@ shared_region_pager_data_request(
 	    offset, upl_size,
 	    &upl, NULL, NULL, upl_flags, VM_KERN_MEMORY_SECURITY);
 	if (kr != KERN_SUCCESS) {
-		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_SHARED_REGION, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_SHARED_REGION_NO_UPL), 0 /* arg */);
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_SHARED_REGION, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_SHARED_REGION_NO_UPL), kr /* arg */);
+		if (panic_on_dyld_issue) {
+			panic("%s(): upl_request(%p, 0x%llx, 0x%llx) ret %d", __func__,
+			    mo_control, offset, (uint64_t)upl_size, kr);
+		}
 		retval = kr;
 		goto done;
 	}
@@ -598,7 +605,7 @@ retry_src_fault:
 		error_code = 0;
 		prot = VM_PROT_READ;
 		src_page = VM_PAGE_NULL;
-		kr = vm_fault_page(src_top_object,
+		vmfr = vm_fault_page(src_top_object,
 		    pager->srp_backing_offset + offset + cur_offset,
 		    VM_PROT_READ,
 		    FALSE,
@@ -610,7 +617,7 @@ retry_src_fault:
 		    &error_code,
 		    FALSE,
 		    &fault_info);
-		switch (kr) {
+		switch (vmfr) {
 		case VM_FAULT_SUCCESS:
 			break;
 		case VM_FAULT_RETRY:
@@ -637,10 +644,9 @@ retry_src_fault:
 				retval = KERN_MEMORY_ERROR;
 			}
 			goto done;
-		default:
-			panic("shared_region_pager_data_request: "
-			    "vm_fault_page() unexpected error 0x%x\n",
-			    kr);
+		case VM_FAULT_BUSY:
+			retval = KERN_ALREADY_WAITING;
+			goto done;
 		}
 		assert(src_page != VM_PAGE_NULL);
 		assert(src_page->vmp_busy);
@@ -772,7 +778,11 @@ retry_src_fault:
 				    kr);
 			}
 			if (kr != KERN_SUCCESS) {
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_SHARED_REGION, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_SHARED_REGION_SLIDE_ERROR), 0 /* arg */);
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_SHARED_REGION, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_SHARED_REGION_SLIDE_ERROR), kr /* arg */);
+				if (panic_on_dyld_issue) {
+					panic("%s(): shared region slide error %d",
+					    __func__, kr);
+				}
 				shared_region_pager_slid_error++;
 				retval = KERN_MEMORY_ERROR;
 				break;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -76,8 +76,10 @@
 #include <net/network_agent.h>
 #include <net/necp.h>
 #include <netinet/flow_divert_proto.h>
+#include <kern/socket_flows.h>
 
 #include <net/sockaddr_utils.h>
+#include <net/trie_utility.h>
 
 /*
  * NECP - Network Extension Control Policy database
@@ -171,6 +173,7 @@ os_log_t necp_log_handle = NULL;
 os_log_t necp_data_trace_log_handle = NULL;
 
 u_int32_t necp_session_count = 0;
+u_int32_t necp_trie_count = 0;
 
 static KALLOC_TYPE_DEFINE(necp_session_policy_zone,
     struct necp_session_policy, NET_KT_DEFAULT);
@@ -268,6 +271,7 @@ static KALLOC_TYPE_DEFINE(necp_ip_policy_zone,
 #define NECP_MAX_POLICY_LIST_COUNT                                      1024
 
 #define NECP_MAX_DOMAIN_FILTER_SIZE                             65536 // Allows room for 100K domains
+#define NECP_MAX_DOMAIN_TRIE_SIZE                               (1024 * 512) // Allows 5000+ domains
 
 typedef enum {
 	NECP_BYPASS_TYPE_NONE = 0,
@@ -294,6 +298,26 @@ struct necp_domain_filter {
 };
 static LIST_HEAD(necp_domain_filter_list, necp_domain_filter) necp_global_domain_filter_list;
 
+/*
+ * Filter id space is split between domain bloom filter id and domain trie filter id.
+ * id <= 10000 - bloom filter ids
+ * id > 10000 - trie filter ids
+ */
+#define NECP_DOMAIN_FILTER_ID_MAX           10000
+#define NECP_DOMAIN_TRIE_ID_START           NECP_DOMAIN_FILTER_ID_MAX
+#define NECP_IS_DOMAIN_FILTER_ID(id)        (id <= NECP_DOMAIN_FILTER_ID_MAX)
+
+struct necp_domain_trie {
+	LIST_ENTRY(necp_domain_trie) owner_chain;
+	LIST_ENTRY(necp_domain_trie) chain;
+	u_int32_t       id;
+	struct necp_domain_trie_request *trie_request;
+	size_t trie_request_size;
+	struct net_trie trie;
+	os_refcnt_t     refcount;
+};
+static LIST_HEAD(necp_domain_trie_list, necp_domain_trie) necp_global_domain_trie_list;
+
 struct necp_session {
 	u_int8_t                                        necp_fd_type;
 	u_int32_t                                       control_unit;
@@ -313,6 +337,7 @@ struct necp_session {
 
 	LIST_HEAD(_services, necp_service_registration) services;
 	struct necp_domain_filter_list domain_filters;
+	struct necp_domain_trie_list domain_tries;
 
 	TAILQ_ENTRY(necp_session) chain;
 };
@@ -343,6 +368,7 @@ struct necp_socket_info {
 	u_int32_t client_flags;
 	char *domain __null_terminated;
 	char *url __null_terminated;
+	struct soflow_hash_entry *soflow_entry;
 	unsigned is_entitled : 1;
 	unsigned has_client : 1;
 	unsigned has_system_signed_result : 1;
@@ -523,6 +549,13 @@ static u_int32_t necp_create_domain_filter(struct necp_domain_filter_list *list,
 static bool necp_remove_domain_filter(struct necp_domain_filter_list *list, struct necp_domain_filter_list *owner_list, u_int32_t filter_id);
 static struct necp_domain_filter *necp_lookup_domain_filter(struct necp_domain_filter_list *list, u_int32_t filter_id);
 
+static u_int32_t necp_create_domain_trie(struct necp_domain_trie_list *list, struct necp_domain_trie_list *owner_list,
+    struct necp_domain_trie_request *necp_trie_request, size_t necp_trie_request_size);
+static bool necp_remove_domain_trie(struct necp_domain_trie_list *list, __unused struct necp_domain_trie_list *owner_list, u_int32_t id);
+static void necp_free_domain_trie(struct necp_domain_trie *trie);
+static struct necp_domain_trie *necp_lookup_domain_trie(struct necp_domain_trie_list *list, u_int32_t id);
+static Boolean necp_match_domain_with_trie(struct necp_domain_trie_list *list, u_int32_t id, char * __sized_by(length) domain, size_t length);
+
 static struct necp_kernel_socket_policy *necp_kernel_socket_policy_find(necp_kernel_policy_id policy_id);
 static struct necp_kernel_ip_output_policy *necp_kernel_ip_output_policy_find(necp_kernel_policy_id policy_id);
 
@@ -596,6 +629,7 @@ SYSCTL_LONG(_net_necp, NECPCTL_SOCKET_POLICY_COUNT, socket_policy_count, CTLFLAG
 SYSCTL_LONG(_net_necp, NECPCTL_SOCKET_NON_APP_POLICY_COUNT, socket_non_app_policy_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_kernel_socket_policies_non_app_count, "");
 SYSCTL_LONG(_net_necp, NECPCTL_IP_POLICY_COUNT, ip_policy_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_kernel_ip_output_policies_count, "");
 SYSCTL_INT(_net_necp, NECPCTL_SESSION_COUNT, session_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_session_count, 0, "");
+SYSCTL_INT(_net_necp, NECPCTL_TRIE_COUNT, trie_count, CTLFLAG_LOCKED | CTLFLAG_RD, &necp_trie_count, 0, "");
 
 static struct necp_drop_dest_policy necp_drop_dest_policy;
 static int necp_drop_dest_debug = 0;    // 0: off, 1: match, >1: every evaluation
@@ -935,6 +969,13 @@ sysctl_handle_necp_management_level SYSCTL_HANDLER_ARGS
 	necp_drop_management_order = necp_get_first_order_for_priority(necp_drop_management_level);
 	return error;
 }
+
+static inline bool
+necp_socket_is_connected(struct inpcb *inp)
+{
+	return inp->inp_socket->so_state & (SS_ISCONNECTING | SS_ISCONNECTED | SS_ISDISCONNECTING);
+}
+
 
 // Session fd
 
@@ -1585,6 +1626,171 @@ necp_session_remove_all_domain_filters(struct necp_session *session, struct necp
 	return 0;
 }
 
+static int
+necp_session_add_domain_trie(struct necp_session *session, struct necp_session_action_args *uap, int *retval)
+{
+	int error = 0;
+
+	struct necp_domain_trie_request *domain_trie_request = NULL;
+	const size_t in_buffer_length = (size_t)uap->in_buffer_length;
+	const size_t out_buffer_length = (size_t)uap->out_buffer_length;
+
+	if (in_buffer_length < sizeof(struct necp_domain_trie_request) ||
+	    in_buffer_length > NECP_MAX_DOMAIN_TRIE_SIZE ||
+	    uap->in_buffer == 0) {
+		NECPLOG(LOG_ERR, "necp_session_add_domain_trie invalid input (%zu)", (size_t)in_buffer_length);
+		error = EINVAL;
+		goto done;
+	}
+
+	if (out_buffer_length < sizeof(u_int32_t) || uap->out_buffer == 0) {
+		NECPLOG(LOG_ERR, "necp_session_add_domain_trie buffer not large enough (%zu)", (size_t)out_buffer_length);
+		error = EINVAL;
+		goto done;
+	}
+
+	domain_trie_request = (struct necp_domain_trie_request *)kalloc_data(in_buffer_length, Z_WAITOK | Z_ZERO);
+	if (domain_trie_request == NULL) {
+		NECPLOG(LOG_ERR, "necp_session_add_domain_trie allocate trie request error (%zu)", in_buffer_length);
+		error = ENOMEM;
+		goto done;
+	}
+
+	error = copyin(uap->in_buffer, domain_trie_request, in_buffer_length);
+	if (error != 0) {
+		NECPLOG(LOG_ERR, "necp_session_add_domain_trie filter copyin error (%d)", error);
+		goto done;
+	}
+
+	NECPLOG(LOG_INFO, "necp_session_add_domain_trie received %zu bytes <trie mem size %d>", in_buffer_length, domain_trie_request->total_mem_size);
+
+	lck_rw_lock_exclusive(&necp_kernel_policy_lock);
+	u_int32_t id = necp_create_domain_trie(&necp_global_domain_trie_list, &session->domain_tries, domain_trie_request, in_buffer_length);
+	lck_rw_done(&necp_kernel_policy_lock);
+
+	if (id == 0) {
+		error = ENOMEM;
+	} else {
+		error = copyout(&id, uap->out_buffer, sizeof(id));
+		if (error != 0) {
+			NECPLOG(LOG_ERR, "necp_session_add_domain_trie ID copyout error (%d)", error);
+			goto done;
+		}
+	}
+
+done:
+	*retval = error;
+	if (error != 0 && domain_trie_request != NULL) {
+		uint8_t * __single domain_buffer = (uint8_t *)domain_trie_request;
+		kfree_data(domain_buffer, in_buffer_length);
+		domain_trie_request = NULL;
+	}
+	return error;
+}
+
+static int
+necp_session_remove_domain_trie(struct necp_session *session, struct necp_session_action_args *uap, int *retval)
+{
+	int error = 0;
+
+	const size_t in_buffer_length = (size_t)uap->in_buffer_length;
+	if (in_buffer_length < sizeof(u_int32_t) || uap->in_buffer == 0) {
+		NECPLOG(LOG_ERR, "necp_session_remove_domain_trie invalid input (%zu)", (size_t)in_buffer_length);
+		error = EINVAL;
+		goto done;
+	}
+
+	u_int32_t id;
+	error = copyin(uap->in_buffer, &id, sizeof(id));
+	if (error != 0) {
+		NECPLOG(LOG_ERR, "necp_session_remove_domain_trie uuid copyin error (%d)", error);
+		goto done;
+	}
+
+	lck_rw_lock_exclusive(&necp_kernel_policy_lock);
+	bool removed = necp_remove_domain_trie(&necp_global_domain_trie_list, &session->domain_tries, id);
+	if (!removed) {
+		error = ENOENT;
+	}
+	lck_rw_done(&necp_kernel_policy_lock);
+
+done:
+	*retval = error;
+	return error;
+}
+
+static int
+necp_session_remove_all_domain_tries(struct necp_session *session, struct necp_session_action_args *uap, int *retval)
+{
+#pragma unused(uap)
+	struct necp_domain_trie* __single trie = NULL;
+	struct necp_domain_trie* __single temp_trie = NULL;
+	LIST_FOREACH_SAFE(trie, &session->domain_tries, owner_chain, temp_trie) {
+		if (os_ref_release_locked(&trie->refcount) == 0) {
+			lck_rw_lock_exclusive(&necp_kernel_policy_lock);
+			LIST_REMOVE(trie, chain);
+			lck_rw_done(&necp_kernel_policy_lock);
+			LIST_REMOVE(trie, owner_chain);
+			necp_free_domain_trie(trie);
+		}
+	}
+	*retval = 0;
+	return 0;
+}
+
+static int
+necp_session_trie_dump_all(struct necp_session *session, struct necp_session_action_args *uap, int *retval)
+{
+#pragma unused(session)
+
+	int error = 0;
+
+	uint8_t request_buffer[2000] = { 0 };
+	uint8_t *ptr = NULL;
+	uint32_t count = 0;
+	int output_length = 0;
+
+	lck_rw_lock_shared(&necp_kernel_policy_lock);
+	count = necp_trie_count;
+	lck_rw_done(&necp_kernel_policy_lock);
+
+	if (count == 0) {
+		error = ENOENT;
+		goto done;
+	}
+
+	output_length = sizeof(count) + (count * sizeof(struct necp_domain_trie_request)); // first byte contains count
+	if (output_length > uap->out_buffer_length) {
+		NECPLOG(LOG_ERR, "necp_session_trie_dump_all out_buffer not large enough for %zu", (size_t)output_length);
+		error = EINVAL;
+		goto done;
+	}
+	if (output_length > sizeof(request_buffer)) {
+		NECPLOG(LOG_ERR, "necp_session_trie_dump_all temporary buffer not large enough for %zu", (size_t)output_length);
+		error = EINVAL;
+		goto done;
+	}
+
+	memcpy(request_buffer, (u_int8_t *)&count, sizeof(count));
+	ptr = request_buffer + sizeof(count);
+
+	lck_rw_lock_shared(&necp_kernel_policy_lock);
+	struct necp_domain_trie* __single trie = NULL;
+	LIST_FOREACH(trie, &necp_global_domain_trie_list, chain) {
+		if (trie->trie_request != NULL) {
+			memcpy((u_int8_t *)ptr, (u_int8_t *)trie->trie_request, sizeof(struct necp_domain_trie_request));
+			ptr += sizeof(struct necp_domain_trie_request);
+		}
+	}
+	lck_rw_done(&necp_kernel_policy_lock);
+
+	error = copyout(request_buffer, uap->out_buffer, output_length);
+
+done:
+	*retval = error;
+	return error;
+}
+
 int
 necp_session_action(struct proc *p, struct necp_session_action_args *uap, int *retval)
 {
@@ -1671,6 +1877,22 @@ necp_session_action(struct proc *p, struct necp_session_action_args *uap, int *r
 	}
 	case NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_FILTERS: {
 		return_value = necp_session_remove_all_domain_filters(session, uap, retval);
+		break;
+	}
+	case NECP_SESSION_ACTION_ADD_DOMAIN_TRIE: {
+		return_value = necp_session_add_domain_trie(session, uap, retval);
+		break;
+	}
+	case NECP_SESSION_ACTION_REMOVE_DOMAIN_TRIE: {
+		return_value = necp_session_remove_domain_trie(session, uap, retval);
+		break;
+	}
+	case NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_TRIES: {
+		return_value = necp_session_remove_all_domain_tries(session, uap, retval);
+		break;
+	}
+	case NECP_SESSION_ACTION_TRIE_DUMP_ALL: {
+		return_value = necp_session_trie_dump_all(session, uap, retval);
 		break;
 	}
 	default: {
@@ -1904,6 +2126,7 @@ necp_init(void)
 	LIST_INIT(&necp_aggregate_route_rules);
 
 	LIST_INIT(&necp_global_domain_filter_list);
+	LIST_INIT(&necp_global_domain_trie_list);
 
 	necp_generate_resolver_key();
 	necp_generate_application_id_key();
@@ -2242,6 +2465,7 @@ necp_create_session(void)
 	LIST_INIT(&new_session->policies);
 	LIST_INIT(&new_session->services);
 	LIST_INIT(&new_session->domain_filters);
+	LIST_INIT(&new_session->domain_tries);
 	lck_mtx_init(&new_session->lock, &necp_kernel_policy_mtx_grp, &necp_kernel_policy_mtx_attr);
 
 	// Take the lock
@@ -5744,7 +5968,10 @@ necp_get_new_domain_filter_id(void)
 
 	bool wrapped = FALSE;
 	do {
-		necp_last_filter_id++;
+		// Scope id within its space
+		if (++necp_last_filter_id > NECP_DOMAIN_FILTER_ID_MAX) {
+			necp_last_filter_id = 0;
+		}
 		if (necp_last_filter_id < 1) {
 			if (wrapped) {
 				// Already wrapped, give up
@@ -5802,6 +6029,132 @@ necp_remove_domain_filter(struct necp_domain_filter_list *list, __unused struct 
 	}
 
 	return false;
+}
+
+static struct necp_domain_trie *
+necp_lookup_domain_trie(struct necp_domain_trie_list *list, u_int32_t id)
+{
+	struct necp_domain_trie *searchTrie = NULL;
+	struct necp_domain_trie *foundTrie = NULL;
+
+	LIST_FOREACH(searchTrie, list, chain) {
+		if (searchTrie->id == id) {
+			foundTrie = searchTrie;
+			break;
+		}
+	}
+
+	return foundTrie;
+}
+
+static u_int32_t
+necp_get_new_domain_trie_id(void)
+{
+	static u_int32_t necp_last_trie_id = NECP_DOMAIN_TRIE_ID_START;
+	u_int32_t newid = necp_last_trie_id;
+
+	LCK_RW_ASSERT(&necp_kernel_policy_lock, LCK_RW_ASSERT_EXCLUSIVE);
+
+	bool wrapped = FALSE;
+	do {
+		if (++necp_last_trie_id < NECP_DOMAIN_TRIE_ID_START + 1) {
+			if (wrapped) {
+				// Already wrapped, give up
+				NECPLOG0(LOG_ERR, "Failed to find a free trie ID.\n");
+				return 0;
+			}
+			necp_last_trie_id = NECP_DOMAIN_TRIE_ID_START + 1;
+			wrapped = TRUE;
+		}
+		newid = necp_last_trie_id;
+	} while (necp_lookup_domain_trie(&necp_global_domain_trie_list, newid) != NULL); // If already used, keep trying
+
+	if (newid == NECP_DOMAIN_TRIE_ID_START) {
+		NECPLOG0(LOG_ERR, "Allocate trie id failed.\n");
+		return 0;
+	}
+
+	return newid;
+}
+
+static u_int32_t
+necp_create_domain_trie(struct necp_domain_trie_list *list,
+    struct necp_domain_trie_list *owner_list,
+    struct necp_domain_trie_request *trie_request, size_t trie_request_size)
+{
+	LCK_RW_ASSERT(&necp_kernel_policy_lock, LCK_RW_ASSERT_EXCLUSIVE);
+
+	struct necp_domain_trie *new_trie = NULL;
+	new_trie = kalloc_type(struct necp_domain_trie, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	if (new_trie == NULL) {
+		NECPLOG0(LOG_ERR, "Failed to allow domain trie\n");
+		return 0;
+	}
+
+	if (net_trie_init_with_mem(&new_trie->trie, trie_request->data, trie_request->total_mem_size,
+	    trie_request->nodes_mem_size, trie_request->maps_mem_size, trie_request->bytes_mem_size,
+	    trie_request->nodes_count, trie_request->maps_count, trie_request->bytes_count) == false) {
+		NECPLOG0(LOG_ERR, "Failed to initialize domain trie\n");
+		kfree_type(struct necp_domain_trie, new_trie);
+		return 0;
+	}
+	new_trie->trie_request = trie_request;
+	new_trie->trie_request_size = trie_request_size;
+	new_trie->id = necp_get_new_domain_trie_id();
+	new_trie->trie_request->id = new_trie->id;
+	LIST_INSERT_HEAD(list, new_trie, chain);
+	LIST_INSERT_HEAD(owner_list, new_trie, owner_chain);
+
+	os_ref_init(&new_trie->refcount, &necp_refgrp);
+	necp_trie_count++;
+	return new_trie->id;
+}
+
+static void
+necp_free_domain_trie(struct necp_domain_trie *existing_trie)
+{
+	if (existing_trie != NULL) {
+		uint8_t *necp_trie_request_buffer = (uint8_t *)existing_trie->trie_request;
+		kfree_data(necp_trie_request_buffer, existing_trie->trie_request_size);
+		kfree_type(struct necp_domain_trie, existing_trie);
+	}
+}
+
+static bool
+necp_remove_domain_trie(struct necp_domain_trie_list *list, __unused struct necp_domain_trie_list *owner_list, u_int32_t id)
+{
+	struct necp_domain_trie * __single existing_trie = NULL;
+
+	LCK_RW_ASSERT(&necp_kernel_policy_lock, LCK_RW_ASSERT_EXCLUSIVE);
+
+	existing_trie = necp_lookup_domain_trie(list, id);
+	if (existing_trie != NULL) {
+		if (os_ref_release_locked(&existing_trie->refcount) == 0) {
+			LIST_REMOVE(existing_trie, chain);
+			LIST_REMOVE(existing_trie, owner_chain);
+			necp_free_domain_trie(existing_trie);
+			necp_trie_count--;
+		}
+		return true;
+	}
+
+	return false;
+}
+
+static Boolean
+necp_match_domain_with_trie(struct necp_domain_trie_list *list, u_int32_t id, char * __sized_by(length) domain, size_t length)
+{
+	size_t metadata_length = 0;
+	const uint8_t * __sized_by(metadata_length) metadata = NULL;
+
+	struct necp_domain_trie *necp_trie = necp_lookup_domain_trie(list, id);
+	if (necp_trie == NULL || necp_trie->trie_request == NULL) {
+		return false;
+	}
+	Boolean reverse = (necp_trie->trie_request->flags & NECP_DOMAIN_TRIE_FLAG_REVERSE_SEARCH);
+	Boolean allow_partial_match  = (necp_trie->trie_request->flags & NECP_DOMAIN_TRIE_FLAG_ALLOW_PARTIAL_MATCH);
+	return net_trie_search(&necp_trie->trie, (const uint8_t *)domain, length,
+	           &metadata, &metadata_length, reverse, allow_partial_match, necp_trie->trie_request->partial_match_terminator, NULL, NULL) != NULL_TRIE_IDX;
 }
 
 #define NECP_FIRST_VALID_ROUTE_RULE_ID 1
@@ -8330,6 +8683,10 @@ necp_application_find_policy_match_internal(proc_t proc,
 					*flags |= NECP_CLIENT_RESULT_FLAG_PROBE_CONNECTIVITY;
 				}
 
+				if (if_link_heuristics_enabled(rt->rt_ifp)) {
+					*flags |= NECP_CLIENT_RESULT_FLAG_LINK_HEURISTICS;
+				}
+
 				if (rt->rt_ifp->if_type == IFT_CELLULAR) {
 					struct if_cellular_status_v1 *ifsr;
 
@@ -8578,6 +8935,7 @@ necp_application_find_policy_match_internal(proc_t proc,
 					*reason = NECP_CLIENT_RESULT_REASON_CONSTRAINED_PROHIBITED;
 				} else if (ultra_constrained_not_allowed) {
 					*reason = NECP_CLIENT_RESULT_REASON_ULTRA_CONSTRAINED_NOT_ALLOWED;
+					necp_send_network_denied_event(pid, application_uuid, NETPOLICY_NETWORKTYPE_ULTRA_CONSTRAINED);
 				}
 			}
 			if (expensive_prohibited || constrained_prohibited || ultra_constrained_not_allowed || interface_type_blocked) {
@@ -8924,19 +9282,31 @@ necp_socket_check_policy(struct necp_kernel_socket_policy *kernel_policy,
 	}
 
 	if (kernel_policy->condition_mask & NECP_KERNEL_CONDITION_DOMAIN_FILTER) {
-		struct necp_domain_filter *filter = necp_lookup_domain_filter(&necp_global_domain_filter_list, kernel_policy->cond_domain_filter);
-		if (filter != NULL && filter->filter != NULL) {
-			bool domain_matches = (domain.string != NULL && domain.length > 0) ? net_bloom_filter_contains(filter->filter, domain.string, domain.length) : FALSE;
-			if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_DOMAIN_FILTER) {
-				if (domain_matches) {
-					// No match, matches forbidden domain
-					return FALSE;
-				}
-			} else {
-				if (!domain_matches) {
-					// No match, does not match required domain
-					return FALSE;
-				}
+		NECP_DATA_TRACE_LOG_CONDITION_SOCKET(debug, socket, "SOCKET", kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_DOMAIN_FILTER,
+		    "NECP_KERNEL_CONDITION_DOMAIN_FILTER (ID)", kernel_policy->cond_domain_filter, 0);
+		NECP_DATA_TRACE_LOG_CONDITION_SOCKET_STR(debug, socket, "SOCKET", kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_DOMAIN_FILTER,
+		    "NECP_KERNEL_CONDITION_DOMAIN_FILTER (domain)", "<n/a>", domain.string);
+		bool domain_matches = false;
+		if (NECP_IS_DOMAIN_FILTER_ID(kernel_policy->cond_domain_filter)) {
+			struct necp_domain_filter *filter = necp_lookup_domain_filter(&necp_global_domain_filter_list, kernel_policy->cond_domain_filter);
+			if (filter != NULL && filter->filter != NULL) {
+				domain_matches = (domain.string != NULL && domain.length > 0) ? net_bloom_filter_contains(filter->filter, domain.string, domain.length) : FALSE;
+			}
+		} else {
+			domain_matches = necp_match_domain_with_trie(&necp_global_domain_trie_list, kernel_policy->cond_domain_filter, domain.string, domain.length);
+			if (debug) {
+				NECPLOG(LOG_ERR, "DATA-TRACE: matching <%s %zu> with trie id %d - matched %d", domain.string, domain.length, kernel_policy->cond_domain_filter, domain_matches);
+			}
+		}
+		if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_DOMAIN_FILTER) {
+			if (domain_matches) {
+				// No match, matches forbidden domain
+				return FALSE;
+			}
+		} else {
+			if (!domain_matches) {
+				// No match, does not match required domain
+				return FALSE;
 			}
 		}
 	}
@@ -9318,7 +9688,7 @@ necp_socket_calc_flowhash_locked(struct necp_socket_info *info)
 }
 
 static void
-necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_local_addr, struct sockaddr *override_remote_addr, u_int32_t override_bound_interface, bool override_is_inbound, u_int32_t drop_order, proc_t *socket_proc, struct necp_socket_info *info, bool is_loopback)
+necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_local_addr, struct sockaddr *override_remote_addr, u_int32_t override_bound_interface, soflow_direction_t override_direction, u_int32_t drop_order, proc_t *socket_proc, struct necp_socket_info *info, bool is_loopback, int input_ifindex)
 {
 	struct socket *so = NULL;
 	proc_t sock_proc = NULL;
@@ -9346,45 +9716,10 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		info->has_client = !uuid_is_null(inp->necp_client_uuid);
 	}
 
-	if (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_CLIENT_FLAGS) {
-		info->client_flags = 0;
-		if (INP_NO_CONSTRAINED(inp)) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_CONSTRAINED;
-		}
-		if (INP_NO_EXPENSIVE(inp)) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_EXPENSIVE;
-		}
-		if (inp->inp_socket->so_flags1 & SOF1_CELLFALLBACK) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_FALLBACK_TRAFFIC;
-		}
-		if (inp->inp_socket->so_flags1 & SOF1_KNOWN_TRACKER) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_KNOWN_TRACKER;
-		}
-		if (inp->inp_socket->so_flags1 & SOF1_APPROVED_APP_DOMAIN) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN;
-		}
-		if (inp->inp_socket->so_flags1 & SOF1_INBOUND || override_is_inbound) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
-		}
-		if (inp->inp_socket->so_options & SO_ACCEPTCONN ||
-		    inp->inp_flags2 & INP2_EXTERNAL_PORT) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_LISTENER;
-		}
-		if (inp->inp_socket->so_options & SO_NOWAKEFROMSLEEP) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP;
-		}
-		if (inp->inp_socket->so_options & SO_REUSEPORT) {
-			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL;
-		}
-	}
-
-	if ((necp_data_tracing_level && necp_data_tracing_proto) ||
-	    necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_PROTOCOL) {
-		if (inp->inp_ip_p) {
-			info->protocol = inp->inp_ip_p;
-		} else {
-			info->protocol = SOCK_PROTO(so);
-		}
+	if (inp->inp_ip_p) {
+		info->protocol = inp->inp_ip_p;
+	} else {
+		info->protocol = SOCK_PROTO(so);
 	}
 
 	if (inp->inp_flags2 & INP2_WANT_APP_POLICY && necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_APP_ID) {
@@ -9525,7 +9860,8 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 	if ((necp_data_tracing_level && necp_data_tracing_port) ||
 	    necp_restrict_multicast ||
 	    needs_address_for_signature ||
-	    (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_ADDRESS_TYPE_CONDITIONS)) {
+	    (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_ADDRESS_TYPE_CONDITIONS) ||
+	    NEED_DGRAM_FLOW_TRACKING(so)) {
 		if (override_local_addr != NULL) {
 			if (override_local_addr->sa_family == AF_INET6 && override_local_addr->sa_len <= sizeof(struct sockaddr_in6)) {
 				SOCKADDR_COPY(override_local_addr, &info->local_addr, override_local_addr->sa_len);
@@ -9605,6 +9941,57 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 			info->has_system_signed_result = true;
 		} else {
 			info->has_system_signed_result = necp_socket_resolver_signature_matches_address(inp, &info->remote_addr);
+		}
+	}
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		info->soflow_entry = soflow_get_flow(so, NULL, &(info->remote_addr.sa), NULL, 0, override_direction, input_ifindex);
+	} else {
+		info->soflow_entry = NULL;
+	}
+
+	if (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_CLIENT_FLAGS) {
+		info->client_flags = 0;
+		if (INP_NO_CONSTRAINED(inp)) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_CONSTRAINED;
+		}
+		if (INP_NO_EXPENSIVE(inp)) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_EXPENSIVE;
+		}
+		if (inp->inp_socket->so_flags1 & SOF1_CELLFALLBACK) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_FALLBACK_TRAFFIC;
+		}
+		if (inp->inp_socket->so_flags1 & SOF1_KNOWN_TRACKER) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_KNOWN_TRACKER;
+		}
+		if (inp->inp_socket->so_flags1 & SOF1_APPROVED_APP_DOMAIN) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN;
+		}
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			// If the socket has a flow entry for this 4-tuple then check if the flow is outgoing
+			// and set the inbound flag accordingly. Otherwise use the direction to set the inbound flag.
+			if (info->soflow_entry != NULL) {
+				if (!info->soflow_entry->soflow_outgoing) {
+					info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
+				}
+			} else if (override_direction == SOFLOW_DIRECTION_INBOUND) {
+				info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
+			}
+		} else {
+			// If the socket is explicitly marked as inbound then set the inbound flag.
+			if (inp->inp_socket->so_flags1 & SOF1_INBOUND) {
+				info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
+			}
+		}
+		if (inp->inp_socket->so_options & SO_ACCEPTCONN ||
+		    inp->inp_flags2 & INP2_EXTERNAL_PORT) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_LISTENER;
+		}
+		if (inp->inp_socket->so_options & SO_NOWAKEFROMSLEEP) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP;
+		}
+		if (inp->inp_socket->so_options & SO_REUSEPORT) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL;
 		}
 	}
 }
@@ -9819,7 +10206,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 							}
 						}
 						if (necp_debug > 1 || NECP_DATA_TRACE_POLICY_ON(debug)) {
-							NECPLOG(LOG_DEBUG, "DATA-TRACE: Socket Policy <so %llx>: (Application %d Real Application %d BoundInterface %d Proto %d) Filter %d", (uint64_t)VM_KERNEL_ADDRPERM(so), info->application_id, info->real_application_id, info->bound_interface_index, info->protocol, policy_search_array[i]->result_parameter.filter_control_unit);
+							NECPLOG(LOG_DEBUG, "DATA-TRACE: Socket Policy <so %llx>: (Application %d Real Application %d BoundInterface %d Proto %d) Filter %d", (uint64_t)VM_KERNEL_ADDRPERM(so), info->application_id, info->real_application_id, info->bound_interface_index, info->protocol, *return_filter);
 						}
 					}
 					continue;
@@ -9993,12 +10380,6 @@ necp_socket_uses_interface(struct inpcb *inp, u_int32_t interface_index)
 	ifnet_lock_done(interface);
 
 	return found_match;
-}
-
-static inline bool
-necp_socket_is_connected(struct inpcb *inp)
-{
-	return inp->inp_socket->so_state & (SS_ISCONNECTING | SS_ISCONNECTED | SS_ISDISCONNECTING);
 }
 
 static inline necp_socket_bypass_type_t
@@ -10200,7 +10581,7 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 
 	// Lock
 	lck_rw_lock_shared(&necp_kernel_policy_lock);
-	necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, override_bound_interface, false, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK));
+	necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, override_bound_interface, SOFLOW_DIRECTION_UNKNOWN, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK), 0);
 
 	int debug = NECP_ENABLE_DATA_TRACE((&info.local_addr), (&info.remote_addr), info.protocol, info.pid, info.bound_interface_index);
 	NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "START", 0, 0);
@@ -10211,6 +10592,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 	    inp->inp_policyresult.policy_gencount == necp_kernel_socket_policies_gencount &&
 	    inp->inp_policyresult.flowhash == flowhash) {
 		// If already matched this socket on this generation of table, skip
+
+		if (info.soflow_entry != NULL) {
+			soflow_free_flow(info.soflow_entry);
+		}
 
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
@@ -10277,6 +10662,11 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_PASS;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+			info.soflow_entry->soflow_policies_gencount = 0;
+			soflow_free_flow(info.soflow_entry);
+		}
 
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
@@ -10304,6 +10694,11 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			soflow_free_flow(info.soflow_entry);
+		}
 
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
@@ -10345,6 +10740,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.route_rule_id = route_rule_id;
 		inp->inp_policyresult.results.result = matched_policy->result;
 		memcpy(&inp->inp_policyresult.results.result_parameter, &matched_policy->result_parameter, sizeof(matched_policy->result_parameter));
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 
 		if (info.used_responsible_pid && (matched_policy->condition_mask & NECP_KERNEL_CONDITION_REAL_APP_ID)) {
 			inp->inp_policyresult.app_id = info.real_application_id;
@@ -10394,6 +10793,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.route_rule_id = route_rule_id;
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT;
 			inp->inp_policyresult.results.result_parameter.flow_divert_control_unit = flow_divert_control_unit;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "FLOW DIVERT <ROUTE RULE>", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
 		} else if (drop_all && drop_all_bypass == NECP_DROP_ALL_BYPASS_CHECK_RESULT_FALSE) {
 			inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
@@ -10405,6 +10808,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.route_rule_id = 0;
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - DROP <NO MATCH>", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = 0;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 		} else {
 			// Mark non-matching socket so we don't re-check it
 			necp_unscope(inp);
@@ -10422,6 +10829,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
 			inp->inp_policyresult.results.route_rule_id = route_rule_id; // We may have matched a route rule, so mark it!
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_NONE;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - NO MATCH", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
 		}
 	}
@@ -10437,9 +10848,17 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 		if (necp_debug > 1 || NECP_DATA_TRACE_POLICY_ON(debug)) {
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - DROP <MISSING CLIENT>", 0, 0);
 		}
+	}
+
+	if (info.soflow_entry != NULL) {
+		soflow_free_flow(info.soflow_entry);
 	}
 
 	// Unlock
@@ -12389,7 +12808,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 
 		if (!policies_have_changed) {
 			if (debug) {
-				necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, 0, input_interface != NULL ? true : false, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK));
+				necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, 0, input_interface != NULL ? SOFLOW_DIRECTION_INBOUND : SOFLOW_DIRECTION_OUTBOUND, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK), verifyifindex);
 				debug = NECP_ENABLE_DATA_TRACE((&info.local_addr), (&info.remote_addr), info.protocol, info.pid, info.bound_interface_index);
 			}
 
@@ -12432,7 +12851,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 
 	// Actually calculate policy result
 	lck_rw_lock_shared(&necp_kernel_policy_lock);
-	necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, 0, input_interface != NULL ? true : false, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK));
+	necp_socket_fillout_info_locked(inp, override_local_addr, override_remote_addr, 0, input_interface != NULL ? SOFLOW_DIRECTION_INBOUND : SOFLOW_DIRECTION_OUTBOUND, drop_order, &socket_proc, &info, (bypass_type == NECP_BYPASS_TYPE_LOOPBACK), verifyifindex);
 
 	debug = NECP_ENABLE_DATA_TRACE((&info.local_addr), (&info.remote_addr), info.protocol, info.pid, info.bound_interface_index);
 	NECP_DATA_TRACE_LOG_SOCKET_DP(debug, so, "SOCKET - DATA PATH", "START", 0, 0);
@@ -12513,9 +12932,20 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		// If policies haven't changed since last evaluation, do not update filter result in order to
 		// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 		// allow content filter to detect and drop pre-existing flows.
-		if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-		    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+		uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+		int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+		if (info.soflow_entry != NULL) {
+			current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+			current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+		}
+		if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+		    current_filter_control_unit != filter_control_unit) {
 			inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+			inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 		}
 		if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 			inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12546,6 +12976,10 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 
 		// Unlock
 		allowed_to_receive = FALSE;
@@ -12595,9 +13029,20 @@ skip_agent_check:
 			// If policies haven't changed since last evaluation, do not update filter result in order to
 			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 			// allow content filter to detect and drop pre-existing flows.
-			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+			int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+			if (info.soflow_entry != NULL) {
+				current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+				current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+			}
+			if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+			    current_filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+				if (info.soflow_entry != NULL) {
+					info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+					info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+				}
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12630,9 +13075,20 @@ skip_agent_check:
 			// If policies haven't changed since last evaluation, do not update filter result in order to
 			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 			// allow content filter to detect and drop pre-existing flows.
-			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+			int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+			if (info.soflow_entry != NULL) {
+				current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+				current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+			}
+			if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+			    current_filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+				if (info.soflow_entry != NULL) {
+					info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+					info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+				}
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12677,6 +13133,10 @@ done:
 
 	if (socket_proc) {
 		proc_rele(socket_proc);
+	}
+
+	if (info.soflow_entry != NULL) {
+		soflow_free_flow(info.soflow_entry);
 	}
 
 	return allowed_to_receive;
@@ -12967,6 +13427,17 @@ necp_socket_get_content_filter_control_unit(struct socket *so)
 		return 0;
 	}
 	return inp->inp_policyresult.results.filter_control_unit;
+}
+
+u_int32_t
+necp_socket_get_policy_gencount(struct socket *so)
+{
+	struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+
+	if (inp == NULL) {
+		return 0;
+	}
+	return inp->inp_policyresult.policy_gencount;
 }
 
 bool

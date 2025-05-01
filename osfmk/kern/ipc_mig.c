@@ -456,7 +456,7 @@ kernel_mach_msg_rpc_common(
 		self->ith_recv_bufs = (mach_msg_recv_bufs_t){
 			.recv_msg_size = MACH_MSG_SIZE_MAX,
 		};
-		self->ith_object = IO_NULL;
+		self->ith_object = IPC_OBJECT_NULL;
 		self->ith_option = MACH64_MSG_OPTION_NONE;
 		self->ith_knote  = ITH_KNOTE_NULL; /* not part of ith_receive */
 
@@ -600,8 +600,7 @@ mach_msg_destroy_from_kernel(mach_msg_header_t *msg)
 	ipc_port_t      port = msg->msgh_remote_port;
 
 	if (IP_VALID(port)) {
-		ipc_object_destroy(ip_to_object(port),
-		    MACH_MSGH_BITS_REMOTE(mbits));
+		ipc_object_destroy(port, MACH_MSGH_BITS_REMOTE(mbits));
 		msg->msgh_remote_port = IP_NULL;
 	}
 

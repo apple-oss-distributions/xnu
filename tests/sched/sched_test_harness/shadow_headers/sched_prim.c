@@ -75,6 +75,7 @@
 #endif
 
 #include <kern/sched_prim.h>
+#include <kern/processor.h>
 
 boolean_t
 priority_is_urgent(int priority)
@@ -315,4 +316,85 @@ sched_timeshare_timebase_init(void)
 	sched_fixed_shift = shift;
 
 	default_timeshare_constraint = std_quantum;
+}
+
+/* Returns the scheduling type for the pset */
+cluster_type_t
+pset_type_for_id(uint32_t cluster_id)
+{
+	return pset_array[cluster_id]->pset_type;
+}
+
+#if CONFIG_SCHED_EDGE
+
+uint64_t
+sched_pset_cluster_shared_rsrc_load(processor_set_t pset, cluster_shared_rsrc_type_t shared_rsrc_type)
+{
+	/* Prevent migrations to derecommended clusters */
+	if (!pset_is_recommended(pset)) {
+		return UINT64_MAX;
+	}
+	return os_atomic_load(&pset->pset_cluster_shared_rsrc_load[shared_rsrc_type], relaxed);
+}
+
+#endif /* CONFIG_SCHED_EDGE */
+
+/* Mocked version */
+processor_t
+choose_processor(
+	processor_set_t         starting_pset,
+	processor_t             processor,
+	thread_t                thread)
+{
+	(void)processor;
+	if (thread->bound_processor != NULL) {
+		return thread->bound_processor;
+	}
+	/* Choose the first-indexed processor in the pset */
+	return processor_array[starting_pset->cpu_set_low];
+}
+
+static cpumap_t
+pset_available_cpumap(processor_set_t pset)
+{
+	return pset->cpu_available_map & pset->recommended_bitmask;
+}
+
+int
+pset_available_cpu_count(processor_set_t pset)
+{
+	return bit_count(pset_available_cpumap(pset));
+}
+
+bool
+pset_is_recommended(processor_set_t pset)
+{
+	if (!pset) {
+		return false;
+	}
+	return pset_available_cpu_count(pset) > 0;
+}
+
+bool
+pset_type_is_recommended(processor_set_t pset)
+{
+	if (!pset) {
+		return false;
+	}
+	pset_map_t recommended_psets = os_atomic_load(&pset->node->pset_recommended_map, relaxed);
+	return bit_count(recommended_psets) > 0;
+}
+
+void
+sched_update_pset_load_average(processor_set_t pset, uint64_t curtime)
+{
+	(void)pset;
+	(void)curtime;
+}
+
+int
+rt_runq_count(processor_set_t pset)
+{
+	(void)pset;
+	return 0;
 }

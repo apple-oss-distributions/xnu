@@ -248,6 +248,128 @@ still allowed to write to `SMPRI_EL1`, but currently this has no effect on
 the actual hardware priority.
 
 
+Appendix: Mach thread-state APIs
+--------------------------------
+
+Low-level tools (e.g., debuggers) may access thread SVE and SME state through
+the standard Mach APIs `thread_{get,set}_state`.  But because SVE and SME
+register state are large and have implementation-defined size, accessing this
+state can be more complicated than other thread state flavors.
+
+xnu splits the SVE and SME thread state into several flavors:
+
+| Flavor                                       | C thread-state type   | Description               |
+|----------------------------------------------|-----------------------|---------------------------|
+| `ARM_SME_STATE`                              | `arm_sme_state_t`     | SVCR, TPIDR2_EL0, and SVL |
+| `ARM_SVE_Z_STATE1`, `ARM_SME_Z_STATE2`       | `arm_sve_z_state_t`   | Z register file           |
+| `ARM_SVE_P_STATE`                            | `arm_sve_p_state_t`   | P register file           |
+| `ARM_SME_ZA_STATE1` ... `ARM_SME_ZA_STATE16` | `arm_sme_za_state_t`  | ZA register file          |
+| `ARM_SME2_STATE`                             | `arm_sme2_state_t`    | ZT0 register file         |
+
+`arm_sve_z_state_t`, `arm_sve_p_state_t`, and `arm_sme_za_state_t` are
+statically sized for a vector length of 2048 bits, the largest vector length
+allowed by the ARM architecture.  In practice, all Apple CPUs currently use a
+smaller vector length.  In this case `thread_get_state` will pad the unused
+upper bits of each `z`, `p`, and `za` field with zeroes.  Likewise,
+`thread_set_state` will ignore any unused upper bits.
+
+`Z` can architecturally be up to 8 kilobytes in size.  Since this is too large
+to fit in a single Mach message, xnu's Mach thread-state APIs divide the `Z`
+register space into two different thread-state flavors.  Thread-state flavor
+`ARM_SME_ZA_STATE1` accesses Z0-Z15, and thread-state flavor `ARM_SME_ZA_STATE2`
+accesses Z16-Z31.
+
+xnu likewise divides `ZA` into 4-kilobyte windows.  Thread-state flavor
+`ARM_SME_ZA_STATE1` accesses the first 4 kilobytes of ZA space,
+`ARM_SME_ZA_STATE2` accesses the next 4 kilobytes of ZA space, and so on up to
+`ARM_SME_ZA_STATE16`.  When `ZA` is smaller than 4 kilobytes, `thread_get_state`
+will pad the unused upper bytes of `arm_sme_za_state_t::za` with zeroes, and
+`thread_set_state` will ignore any unused upper bytes.
+
+`thread_{get,set}_state` will return `KERN_INVALID_ARGUMENT` if software tries
+to do any of the following:
+
+* Access SME or SME2 state on a CPU that doesn't implement FEAT_SME or FEAT_SME2
+  (respectively)
+* Access `Z` or `P` state when the target thread's `SVCR.SM` bit is cleared
+* Access `ZA` or `ZT0` state when the target thread's `SVCR.ZA` bit is cleared
+* Change the current `svl` value while setting `ARM_SME_STATE`
+
+xnu does not currently support sending SME or SVE thread state with Mach
+exception messages.  Mach APIs that set exception ports, such as
+`thread_set_exception_ports`, will return `KERN_INVALID_ARGUMENT` if the
+requested `flavor` is one of the values described in this appendix.
+
+### Sample code
+
+The following C code illustrates how to interpret SME and SME2 state returned by
+`thread_get_state`.  (To keep the code as simple as possible, it ignores all of
+the possible error cases listed above.)
+
+```c
+arm_sme_state_t sme_state; mach_msg_type_number_t sme_state_count = ARM_SME_STATE_COUNT;
+// Read SVL_B and SVCR
+thread_get_state(thread, ARM_SME_STATE, &sme_state, &sme_state_count);
+
+const uint64_t SVCR_SM = (1 << 0);
+// Are Z and P valid?
+if (sme_state.__svcr & SVCR_SM) {
+    size_t z_element_size = sme_state.__svl_b;
+    char z[32][z_element_size];
+    size_t p_element_size = sme_state.__svl_b / 8;
+    char p[16][p_element_size];
+
+    arm_sve_z_state_t z_state; mach_msg_type_number_t z_state_count = ARM_SVE_Z_STATE_COUNT;
+    // Read Z0-Z15 and copy active bits
+    thread_get_state(thread, ARM_SVE_Z_STATE1, &z_state, &z_state_count);
+    for (int i = 0; i < 16; i++) {
+       memcpy(z[i], z_state.__z[i], z_element_size);
+    }
+    // Read Z16-Z32 and copy active bits
+    thread_get_state(thread, ARM_SVE_Z_STATE2, &z_state, &z_state_count);
+    for (int i = 0; i < 16; i++) {
+       memcpy(z[i + 16], z_state.__z[i], z_element_size);
+    }
+
+    arm_sve_p_state_t p_state; mach_msg_type_number_t p_state_count = ARM_SVE_P_STATE_COUNT;
+    // Read P0-P15 and copy active bits
+    thread_get_state(thread, ARM_SVE_P_STATE, &p_state, &p_state_count);
+    for (int i = 0; i < 16; i++) {
+       memcpy(p[i], p_state.__p[i], p_element_size);
+    }
+}
+
+const uint64_t SVCR_ZA = (1 << 1);
+// Are ZA and ZT0 valid?
+if (sme_state.__svcr & SVCR_ZA) {
+    size_t za_size = sme_state.__svl_b * sme_state.__svl_b;
+    char za[za_size];
+    const size_t zt0_size = 64;
+    char zt0[zt0_size];
+
+    const size_t max_chunk_size = 4096;
+    int n_chunks; size_t chunk_size;
+    if (za_size <= max_chunk_size) {
+        n_chunks = 1;
+        chunk_size = za_size;
+    } else {
+        n_chunks = za_size / max_chunk_size;
+        chunk_size = max_chunk_size;
+    }
+
+    for (int i = 0; i < n_chunks; i++) {
+        arm_sme_za_state_t za_state; mach_msg_type_number_t za_state_count = ARM_SME_ZA_STATE_COUNT;
+        // Read next chunk of ZA
+        thread_get_state(thread, ARM_SME_ZA_STATE1 + i, &za_state, &za_state_count);
+        memcpy(&za[chunk_size * i], za_state.__za, chunk_size);
+    }
+
+    arm_sme2_state_t sme2_state; mach_msg_type_number_t sme2_state_count = ARM_SME2_STATE;
+    thread_get_state(thread, ARM_SME2_STATE, &sme2_state, &sme2_state_count);
+    memcpy(zt0, sme2_state.__zt0, zt0_size);
+}
+```
+
 
 Footnotes
 ---------

@@ -1564,17 +1564,16 @@ T_DECL(phys_footprint_purgeable_iokit,
 	uint64_t        footprint_after, pagetable_after;
 	uint64_t        footprint_expected, footprint_delta_slop;
 	int64_t         footprint_delta;
-	IOSurfaceRef    surface;
+	IOSurfaceRef    init_surface, surface;
 	uint32_t        old_state;
 	uint64_t        surface_size;
 
 	T_SETUPBEGIN;
 	footprint_delta_slop = 8 * vm_kernel_page_size;
 	ledger_init();
-	surface = CreateSurface(1024, 1024, 0, 32, true, true);
-	IOSurfaceSetPurgeable(surface, kIOSurfacePurgeableVolatile, &old_state);
-	IOSurfaceSetPurgeable(surface, kIOSurfacePurgeableNonVolatile, &old_state);
-	CFRelease(surface);
+	init_surface = CreateSurface(1024, 1024, 0, 32, true, true);
+	IOSurfaceSetPurgeable(init_surface, kIOSurfacePurgeableVolatile, &old_state);
+	IOSurfaceSetPurgeable(init_surface, kIOSurfacePurgeableNonVolatile, &old_state);
 	T_SETUPEND;
 
 	surface_size = 1024 * 1024 * 4;
@@ -1680,6 +1679,8 @@ T_DECL(phys_footprint_purgeable_iokit,
 		    surface_size, footprint_before, footprint_after,
 		    footprint_expected, footprint_after - footprint_expected);
 	}
+
+	CFRelease(init_surface);
 }
 
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
@@ -1691,7 +1692,7 @@ T_DECL(phys_footprint_nonpurgeable_iokit,
 	uint64_t        footprint_after, pagetable_after;
 	uint64_t        footprint_expected, footprint_delta_slop;
 	int64_t         footprint_delta;
-	IOSurfaceRef    surface;
+	IOSurfaceRef    init_surface, surface;
 	uint64_t        surface_size;
 	void            *map_base;
 	size_t          map_size;
@@ -1703,8 +1704,7 @@ T_DECL(phys_footprint_nonpurgeable_iokit,
 
 	T_SETUPBEGIN;
 	ledger_init();
-	surface = CreateSurface(1024, 1024, 0, 32, false, true);
-	CFRelease(surface);
+	init_surface = CreateSurface(1024, 1024, 0, 32, false, true);
 	footprint_delta_slop = 8 * vm_kernel_page_size;
 	T_SETUPEND;
 
@@ -1811,6 +1811,8 @@ T_DECL(phys_footprint_nonpurgeable_iokit,
 	    "footprint %lld -> %lld expected %lld delta %lld",
 	    surface_size, footprint_before, footprint_after,
 	    footprint_expected, footprint_after - footprint_expected);
+
+	CFRelease(init_surface);
 }
 #endif /* (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 

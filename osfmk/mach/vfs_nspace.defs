@@ -65,7 +65,7 @@ routine nspace_resolve_path(
         pid                 : uint32_t;
         op                  : uint32_t;
      in path                : nspace_path_t;
-    out xxx_rdar44371223    : int
+    out resolve_error       : int
 );
 
 /*

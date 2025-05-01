@@ -24,7 +24,7 @@ T_DECL(PR_35136664_utun,
 
 	memset(&kernctl_info, 0, sizeof(kernctl_info));
 	strlcpy(kernctl_info.ctl_name, UTUN_CONTROL_NAME, sizeof(kernctl_info.ctl_name));
-	T_ASSERT_POSIX_ZERO(ioctl(tunsock, CTLIOCGINFO, &kernctl_info), NULL);
+	T_ASSERT_POSIX_SUCCESS(ioctl(tunsock, CTLIOCGINFO, &kernctl_info), NULL);
 
 	memset(&kernctl_addr, 0, sizeof(kernctl_addr));
 	kernctl_addr.sc_len = sizeof(kernctl_addr);
@@ -33,9 +33,9 @@ T_DECL(PR_35136664_utun,
 	kernctl_addr.sc_id = kernctl_info.ctl_id;
 	kernctl_addr.sc_unit = 0;
 
-	T_ASSERT_POSIX_ZERO(bind(tunsock, (struct sockaddr *)&kernctl_addr, sizeof(kernctl_addr)), NULL);
+	T_ASSERT_POSIX_SUCCESS(bind(tunsock, (struct sockaddr *)&kernctl_addr, sizeof(kernctl_addr)), NULL);
 
-	T_ASSERT_POSIX_ZERO(close(tunsock), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(tunsock), NULL);
 }
 
 T_DECL(PR_35136664_ipsec,
@@ -49,7 +49,7 @@ T_DECL(PR_35136664_ipsec,
 
 	memset(&kernctl_info, 0, sizeof(kernctl_info));
 	strlcpy(kernctl_info.ctl_name, IPSEC_CONTROL_NAME, sizeof(kernctl_info.ctl_name));
-	T_ASSERT_POSIX_ZERO(ioctl(tunsock, CTLIOCGINFO, &kernctl_info), NULL);
+	T_ASSERT_POSIX_SUCCESS(ioctl(tunsock, CTLIOCGINFO, &kernctl_info), NULL);
 
 	memset(&kernctl_addr, 0, sizeof(kernctl_addr));
 	kernctl_addr.sc_len = sizeof(kernctl_addr);
@@ -58,7 +58,7 @@ T_DECL(PR_35136664_ipsec,
 	kernctl_addr.sc_id = kernctl_info.ctl_id;
 	kernctl_addr.sc_unit = 0;
 
-	T_ASSERT_POSIX_ZERO(bind(tunsock, (struct sockaddr *)&kernctl_addr, sizeof(kernctl_addr)), NULL);
+	T_ASSERT_POSIX_SUCCESS(bind(tunsock, (struct sockaddr *)&kernctl_addr, sizeof(kernctl_addr)), NULL);
 
-	T_ASSERT_POSIX_ZERO(close(tunsock), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(tunsock), NULL);
 }

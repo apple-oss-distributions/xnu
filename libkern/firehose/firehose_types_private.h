@@ -108,6 +108,7 @@ OS_ENUM(firehose_tracepoint_code, uint32_t,
     firehose_tracepoint_code_unload               = 0x02,
     firehose_tracepoint_code_load_memory          = 0x08,
     firehose_tracepoint_code_load_filesystem_ftab = 0x10,
+    firehose_tracepoint_code_load_exclavekit_dsc  = 0x20,
     );
 
 /*!

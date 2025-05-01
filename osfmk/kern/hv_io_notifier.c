@@ -27,12 +27,12 @@
  */
 
 #include <kern/hv_support.h>
+#include <kern/ipc_kobject.h>
 #include <kern/ipc_mig.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <mach/port.h>
 #include <sys/queue.h>
-#include <ipc/ipc_port.h>
 
 #include <stdbool.h>
 
@@ -111,9 +111,13 @@ hv_io_notifier_grp_add(hv_ion_grp_t *grp, const hv_ion_t *notifier)
 	ion->flags = notifier->flags;
 	ion->port_name = notifier->port_name;
 
-	kern_return_t ret = ipc_object_copyin(current_task()->itk_space,
-	    ion->port_name, MACH_MSG_TYPE_COPY_SEND, (ipc_object_t *)&ion->port, 0,
-	    NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+	kern_return_t ret = ipc_typed_port_copyin_send(current_task()->itk_space,
+	    ion->port_name, IKOT_UNKNOWN, &ion->port);
+
+	if (!IP_VALID(ion->port)) {
+		ret = KERN_FAILURE;
+	}
+
 	if (ret != KERN_SUCCESS) {
 		kfree_type(hv_ion_entry_t, ion);
 		return ret;
@@ -123,7 +127,7 @@ hv_io_notifier_grp_add(hv_ion_grp_t *grp, const hv_ion_t *notifier)
 
 	if (hv_io_notifier_grp_lookup(grp, ion) != NULL) {
 		lck_rw_done(&grp->lock);
-		ipc_port_release_send(ion->port);
+		ipc_typed_port_release_send(ion->port, IKOT_UNKNOWN);
 		kfree_type(hv_ion_entry_t, ion);
 		return KERN_FAILURE;
 	}
@@ -163,7 +167,7 @@ hv_io_notifier_grp_remove(hv_ion_grp_t *grp, const hv_ion_t *notifier)
 
 	lck_rw_done(&grp->lock);
 
-	ipc_port_release_send(entry->port);
+	ipc_typed_port_release_send(entry->port, IKOT_UNKNOWN);
 	kfree_type(hv_ion_entry_t, entry);
 
 	return KERN_SUCCESS;
@@ -258,7 +262,7 @@ hv_io_notifier_grp_free(hv_ion_grp_t **grp_p)
 
 		LIST_REMOVE(ion, list);
 
-		ipc_port_release_send(ion->port);
+		ipc_typed_port_release_send(ion->port, IKOT_UNKNOWN);
 		kfree_type(hv_ion_entry_t, ion);
 	}
 

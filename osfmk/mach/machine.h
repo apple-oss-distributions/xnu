@@ -450,6 +450,7 @@ __END_DECLS
 #define CPUFAMILY_ARM_COLL 0x2876f5b5
 #define CPUFAMILY_ARM_LOBOS 0x5f4dea93
 #define CPUFAMILY_ARM_DONAN 0x6f5129ac
+#define CPUFAMILY_ARM_BRAVA 0x17d5b93a
 
 /* Described in rdar://64125549 */
 #define CPUSUBFAMILY_UNKNOWN            0

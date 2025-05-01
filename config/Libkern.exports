@@ -658,7 +658,9 @@ __ZTVN8OSString9MetaClassE
 __ZTVN8OSSymbol9MetaClassE
 __ZTVN9OSBoolean9MetaClassE
 __ZdaPv
+__ZdaPvm
 __ZdlPv
+__ZdlPvm
 __Znam
 __Znwm
 ___bzero

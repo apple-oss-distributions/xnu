@@ -66,6 +66,7 @@
 #ifndef _MACH_VM_STATISTICS_H_
 #define _MACH_VM_STATISTICS_H_
 
+#include <stdbool.h>
 #include <sys/cdefs.h>
 
 #include <mach/machine/vm_types.h>
@@ -360,14 +361,36 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 #define GUARD_TYPE_VIRT_MEMORY  0x5
 
 /* Reasons for exception for virtual memory */
-enum virtual_memory_guard_exception_codes {
-	kGUARD_EXC_DEALLOC_GAP  = 1u << 0,
-	kGUARD_EXC_RECLAIM_COPYIO_FAILURE = 1u << 1,
-	kGUARD_EXC_RECLAIM_INDEX_FAILURE = 1u << 2,
-	kGUARD_EXC_RECLAIM_DEALLOCATE_FAILURE = 1u << 3,
-};
+__enum_decl(virtual_memory_guard_exception_code_t, uint32_t, {
+	kGUARD_EXC_DEALLOC_GAP  = 1,
+	kGUARD_EXC_RECLAIM_COPYIO_FAILURE = 2,
+	kGUARD_EXC_SEC_LOOKUP_DENIED = 3,
+	kGUARD_EXC_RECLAIM_INDEX_FAILURE = 4,
+	kGUARD_EXC_SEC_RANGE_DENIED = 6,
+	kGUARD_EXC_SEC_ACCESS_FAULT = 7,
+	kGUARD_EXC_RECLAIM_DEALLOCATE_FAILURE = 8,
+	kGUARD_EXC_SEC_COPY_DENIED = 16,
+	kGUARD_EXC_SEC_SHARING_DENIED = 32,
+	kGUARD_EXC_SEC_ASYNC_ACCESS_FAULT = 64,
+});
 
 #ifdef XNU_KERNEL_PRIVATE
+
+static inline bool
+vm_guard_is_sec_access(uint32_t flavor)
+{
+	return flavor == kGUARD_EXC_SEC_ACCESS_FAULT ||
+	       flavor == kGUARD_EXC_SEC_ASYNC_ACCESS_FAULT;
+}
+
+static inline bool
+vm_guard_is_sec_policy(uint32_t flavor)
+{
+	return flavor == kGUARD_EXC_SEC_LOOKUP_DENIED ||
+	       flavor == kGUARD_EXC_SEC_RANGE_DENIED ||
+	       flavor == kGUARD_EXC_SEC_COPY_DENIED ||
+	       flavor == kGUARD_EXC_SEC_SHARING_DENIED;
+}
 
 /*!
  * @enum vm_map_range_id_t
@@ -397,6 +420,9 @@ enum virtual_memory_guard_exception_codes {
  * - OOBs on the allocation is carefully considered and sufficiently
  *   addressed.
  *
+ * @const KMEM_RANGE_ID_IOKIT
+ * Range containing memory mappings belonging to IOKit.
+ *
  * @const KMEM_RANGE_ID_DATA
  * Range containing allocations that are bags of bytes and contain no
  * pointers.
@@ -407,6 +433,7 @@ __enum_decl(vm_map_range_id_t, uint8_t, {
 	KMEM_RANGE_ID_PTR_1,
 	KMEM_RANGE_ID_PTR_2,
 	KMEM_RANGE_ID_SPRAYQTN,
+	KMEM_RANGE_ID_IOKIT,
 	KMEM_RANGE_ID_DATA,
 
 	KMEM_RANGE_ID_FIRST   = KMEM_RANGE_ID_PTR_0,
@@ -483,6 +510,7 @@ typedef union {
 		    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
 		    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
 		    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
+		    vmkf_remap_legacy_mode:1,   /* vm_remap, not vm_remap_new */
 		    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
 		    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
 		    vmkf_nested_pmap:1,         /* use a nested pmap */
@@ -492,6 +520,7 @@ typedef union {
 		    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
 		    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
 		    vmkf_tpro_enforcement_override:1,   /* override TPRO propagation */
+		    vmkf_no_soft_limit:1,       /* override soft allocation size limit */
 
 		/*
 		 * Submap creation, altering vm_map_enter() only
@@ -506,9 +535,10 @@ typedef union {
 		    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
 		    vmkf_guard_before:1,        /* guard page before the mapping */
 		    vmkf_last_free:1,           /* find space from the end */
-		    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
+		    vmkf_range_id:KMEM_RANGE_BITS;      /* kmem range to allocate in */
 
-		    __vmkf_unused:2;
+		unsigned long long
+		__vmkf_unused2:64;
 	};
 
 	/*
@@ -547,7 +577,7 @@ typedef struct {
 	unsigned int
 	    vmnekf_ledger_tag:3,
 	    vmnekf_ledger_no_footprint:1,
-	    __vmnekf_unused:28;
+	__vmnekf_unused:28;
 } vm_named_entry_kernel_flags_t;
 #define VM_NAMED_ENTRY_KERNEL_FLAGS_NONE (vm_named_entry_kernel_flags_t) {    \
 	.vmnekf_ledger_tag = 0,                                                \
@@ -560,6 +590,12 @@ typedef struct {
 /* current accounting postmark */
 #define __VM_LEDGER_ACCOUNTING_POSTMARK 2019032600
 
+/*
+ *  When making a new VM_LEDGER_TAG_* or VM_LEDGER_FLAG_*, update tests
+ *  vm_parameter_validation_[user|kern] and their expected results; they
+ *  deliberately call VM functions with invalid ledger values and you may
+ *  be turning one of those invalid tags/flags valid.
+ */
 /* discrete values: */
 #define VM_LEDGER_TAG_NONE      0x00000000
 #define VM_LEDGER_TAG_DEFAULT   0x00000001
@@ -793,6 +829,11 @@ typedef struct {
 
 /* kernel map tags */
 /* please add new definition strings to zprint */
+/*
+ *  When making a new VM_KERN_MEMORY_*, update tests vm_parameter_validation_[user|kern]
+ *  and their expected results; they deliberately call VM functions with invalid
+ *  kernel tag values and you may be turning one of those invalid tags valid.
+ */
 
 #define VM_KERN_MEMORY_NONE             0
 
@@ -830,8 +871,10 @@ typedef struct {
 #define VM_KERN_MEMORY_TRIAGE           32
 #define VM_KERN_MEMORY_RECOUNT          33
 #define VM_KERN_MEMORY_EXCLAVES         35
+#define VM_KERN_MEMORY_EXCLAVES_SHARED  36
+#define VM_KERN_MEMORY_KALLOC_SHARED    37
 /* add new tags here and adjust first-dynamic value */
-#define VM_KERN_MEMORY_FIRST_DYNAMIC    36
+#define VM_KERN_MEMORY_FIRST_DYNAMIC    38
 
 /* out of tags: */
 #define VM_KERN_MEMORY_ANY              255
@@ -873,7 +916,12 @@ typedef struct {
 #define VM_KERN_COUNT_MAP_KALLOC_LARGE_DATA     12
 #define VM_KERN_COUNT_MAP_KERNEL_DATA   13
 
-#define VM_KERN_COUNTER_COUNT           14
+/* The size of the exclaves iboot carveout (exclaves memory not from XNU) in bytes. */
+#define VM_KERN_COUNT_EXCLAVES_CARVEOUT 14
+
+/* The number of VM_KERN_COUNT_ stats. New VM_KERN_COUNT_ entries should be less than this. */
+#define VM_KERN_COUNTER_COUNT           15
+
 
 #endif /* KERNEL_PRIVATE */
 

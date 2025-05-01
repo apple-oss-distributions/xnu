@@ -40,7 +40,6 @@ __BEGIN_DECLS
 
 #define VM_PAGEOUT_GC_INIT      ((void *)0)
 #define VM_PAGEOUT_GC_COLLECT   ((void *)1)
-#define VM_PAGEOUT_GC_EVENT     ((event_t)&vm_pageout_garbage_collect)
 extern void vm_pageout_garbage_collect(void *, wait_result_t);
 
 /* UPL exported routines and structures */
@@ -64,6 +63,16 @@ extern void vm_object_set_pmap_cache_attr(
 	upl_page_info_array_t   user_page_list,
 	unsigned int            num_pages,
 	boolean_t               batch_pmap_op);
+
+extern kern_return_t vm_object_iopl_request(
+	vm_object_t             object,
+	vm_object_offset_t      offset,
+	upl_size_t              size,
+	upl_t                  *upl_ptr,
+	upl_page_info_array_t   user_page_list,
+	unsigned int           *page_list_count,
+	upl_control_flags_t     cntrl_flags,
+	vm_tag_t                tag);
 
 /* should be just a regular vm_map_enter() */
 extern kern_return_t vm_map_enter_upl(

@@ -31,7 +31,7 @@
 
 #define KPERF_PET_DEFAULT_IDLE_RATE 15
 
-extern bool kppet_lightweight_active;
+extern uint64_t kppet_lightweight_start_time;
 extern _Atomic uint32_t kppet_gencount;
 
 /*
@@ -52,6 +52,11 @@ void kppet_on_cpu(thread_t thread, thread_continue_t continuation,
     uintptr_t *starting_frame);
 
 /*
+ * Mark a thread as sampled by PET.
+ */
+void kppet_mark_sampled(thread_t thread);
+
+/*
  * Wake the PET thread from its timer handler.
  */
 void kppet_wake_thread(void);
@@ -68,3 +73,8 @@ int kppet_set_lightweight_pet(int on);
  * Update whether lightweight PET is active when turning sampling on and off.
  */
 void kppet_lightweight_active_update(void);
+
+/*
+ * Notify from kptimer what the PET period is.
+ */
+void kppet_set_period(uint64_t period);

@@ -37,7 +37,8 @@ from xnu import (
     GetObjectAtIndexFromArray,
     ResolveFSPath,
     uuid_regex,
-    GetLLDBThreadForKernelThread
+    GetLLDBThreadForKernelThread,
+    CommandOutput
 )
 
 import kmemory
@@ -229,20 +230,19 @@ def GetUUIDSummary(uuid):
 
 
 @lldb_type_summary(['kmod_info_t *'])
-@header((
-    "{0: <20s} {1: <20s} {2: <20s} {3: >3s} {4: >5s} {5: <20s} {6: <20s} "
-    "{7: >20s} {8: <30s}"
-).format('kmod_info', 'address', 'size', 'id', 'refs', 'TEXT exec', 'size',
-         'version', 'name'))
+@header(
+    f"{'kmod_info': <20s} {'address': <20s} {'size': <12s} {'id': <5s} {'refs': <5s} {'TEXT exec': <20s} {'size': <15s} "
+    f"{'version': <15s} {'name': <30s}"
+)
 def GetKextSummary(kmod):
     """ returns a string representation of kext information """
     if not kmod:
         return "kmod info missing"
     
     format_string = (
-        "{mod: <#020x} {mod.address: <#020x} {mod.size: <#020x} "
-        "{mod.id: >3d} {mod.reference_count: >5d} {seg.vmaddr: <#020x} "
-        "{seg.vmsize: <#020x} {mod.version: >20s} {mod.name: <30s}"
+        "{mod: <#020x} {mod.address: <#020x} {mod.size: <#012x} "
+        "{mod.id: <5d} {mod.reference_count: <5d} {seg.vmaddr: <#020x} "
+        "{seg.vmsize: <#015x} {mod.version: <15s} {mod.name: <30s}"
     )
 
     # Try to obtain text segment from kext summary
@@ -348,23 +348,25 @@ def FindKmodNameForAddr(addr):
     return next(names, None)
 
 
-@lldb_command('showallkmods')
-def ShowAllKexts(cmd_args=None):
+@header(
+    f"{'UUID': <36s} {GetKextSummary.header}"
+)
+@lldb_command('showallkmods', fancy=True)
+def ShowAllKexts(cmd_args=None, cmd_options={}, O: CommandOutput=None):
     """ Display a summary listing of all loaded kexts (alias: showallkmods) """
 
-    print("{: <36s} ".format("UUID") + GetKextSummary.header)
+    with O.table(ShowAllKexts.header):
+        for kmod in IterateLinkedList(kern.globals.kmod, 'next'):
+            sum = FindKextSummary(unsigned(kmod.address))
 
-    for kmod in IterateLinkedList(kern.globals.kmod, 'next'):
-        sum = FindKextSummary(unsigned(kmod.address))
+            if sum:
+                _ksummary = GetKextSummary(sum.kmod)
+                uuid = sum.uuid
+            else:
+                _ksummary = GetKextSummary(kmod)
+                uuid = _UNKNOWN_UUID
 
-        if sum:
-            _ksummary = GetKextSummary(sum.kmod)
-            uuid = sum.uuid
-        else:
-            _ksummary = GetKextSummary(kmod)
-            uuid = _UNKNOWN_UUID
-
-        print(uuid + " " + _ksummary)
+            print(uuid + " " + _ksummary)
 
 
 @lldb_command('showallknownkmods')
@@ -502,6 +504,9 @@ def AddKextByThread(addr: str):
     """ Given a thread, load all kexts needed to symbolicate its backtrace """
 
     thread_value = kern.GetValueFromAddress(addr, "thread_t")
+    if not thread_value:
+        raise ArgumentError(f"Bad thread given ('{addr}') - see doc for expected input")
+
     thread_lldb_SBThread = GetLLDBThreadForKernelThread(thread_value)
 
     kexts_needed = dict()
@@ -561,7 +566,7 @@ def AddKextSyms(cmd_args=[], cmd_options={}):
             addkext -F <abs/path/to/executable> <load_address> : Load kext with executable at specified load address
             addkext -N <name> : Load one kext that matches the name provided. eg. (lldb) addkext -N corecrypto
             addkext -N <name> -A: Load all kext that matches the name provided. eg. to load all kext with Apple in name do (lldb) addkext -N Apple -A
-            addkext -T <thread>: Given a thread, load all kexts needed to symbolicate its backtrace
+            addkext -T <thread_address>: Given a thread_t address(e.g. '0xffffffe0cbf18df0'), load all kexts needed to symbolicate its backtrace
             addkext all    : Will load all the kext symbols - SLOW
     """
 

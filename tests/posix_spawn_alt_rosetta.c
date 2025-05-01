@@ -9,8 +9,11 @@
 
 #include <TargetConditionals.h>
 
-T_DECL(posix_spawn_alt_rosetta, "verify posix_spawn_set_alt_rosetta_np switches to alternative rosetta runtime",
-    T_META_ASROOT(true), T_META_REQUIRES_SYSCTL_EQ("kern.development", 1))
+T_DECL(posix_spawn_alt_rosetta,
+    "verify posix_spawn_set_alt_rosetta_np switches to alternative rosetta runtime",
+    T_META_ASROOT(true),
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_ENABLED(false /* rdar://133955592 */))
 {
 #if TARGET_OS_OSX && defined(__arm64__)
 	int ret, pid;

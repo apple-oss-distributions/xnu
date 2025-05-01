@@ -230,6 +230,8 @@ STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, unp_gc_setup);
 static void
 unp_get_locks_in_order(struct socket *so, struct socket *conn_so)
 {
+	ASSERT(so != conn_so);
+
 	if (so < conn_so) {
 		socket_lock(conn_so, 1);
 	} else {
@@ -404,7 +406,7 @@ uipc_peeraddr(struct socket *so, struct sockaddr **nam)
 		return EINVAL;
 	}
 	so2 = unp->unp_conn != NULL ? unp->unp_conn->unp_socket : NULL;
-	if (so2 != NULL) {
+	if (so2 != NULL && so != so2) {
 		unp_get_locks_in_order(so, so2);
 	}
 
@@ -413,7 +415,7 @@ uipc_peeraddr(struct socket *so, struct sockaddr **nam)
 	} else {
 		*nam = dup_sockaddr(SA(&sun_noname), 1);
 	}
-	if (so2 != NULL) {
+	if (so2 != NULL && so != so2) {
 		socket_unlock(so2, 1);
 	}
 	return 0;
@@ -436,11 +438,16 @@ uipc_rcvd(struct socket *so, __unused int flags)
 			break;
 		}
 		so2 = unp->unp_conn->unp_socket;
-		unp_get_locks_in_order(so, so2);
+
+		if (so != so2) {
+			unp_get_locks_in_order(so, so2);
+		}
 		if (sb_notify(&so2->so_snd)) {
 			sowakeup(so2, &so2->so_snd, so);
 		}
-		socket_unlock(so2, 1);
+		if (so != so2) {
+			socket_unlock(so2, 1);
+		}
 		break;
 	case SOCK_STREAM:
 		if (unp->unp_conn == NULL) {
@@ -448,7 +455,9 @@ uipc_rcvd(struct socket *so, __unused int flags)
 		}
 
 		so2 = unp->unp_conn->unp_socket;
-		unp_get_locks_in_order(so, so2);
+		if (so != so2) {
+			unp_get_locks_in_order(so, so2);
+		}
 		/*
 		 * Adjust backpressure on sender
 		 * and wakeup any waiting to write.
@@ -460,7 +469,9 @@ uipc_rcvd(struct socket *so, __unused int flags)
 		if (sb_notify(&so2->so_snd)) {
 			sowakeup(so2, &so2->so_snd, so);
 		}
-		socket_unlock(so2, 1);
+		if (so != so2) {
+			socket_unlock(so2, 1);
+		}
 #undef snd
 #undef rcv
 		break;
@@ -613,7 +624,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		}
 
 		so2 = unp->unp_conn->unp_socket;
-		unp_get_locks_in_order(so, so2);
+		if (so != so2) {
+			unp_get_locks_in_order(so, so2);
+		}
 
 		/* Check socket state again as we might have unlocked the socket
 		 * while trying to get the locks in order
@@ -621,7 +634,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 
 		if ((so->so_state & SS_CANTSENDMORE)) {
 			error = EPIPE;
-			socket_unlock(so2, 1);
+			if (so != so2) {
+				socket_unlock(so2, 1);
+			}
 			break;
 		}
 
@@ -667,7 +682,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			control = NULL;
 		}
 
-		socket_unlock(so2, 1);
+		if (so != so2) {
+			socket_unlock(so2, 1);
+		}
 		m = NULL;
 #undef snd
 #undef rcv
@@ -841,14 +858,18 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 			if (peerso == NULL) {
 				panic("peer is connected but has no socket?");
 			}
-			unp_get_locks_in_order(so, peerso);
+			if (so != peerso) {
+				unp_get_locks_in_order(so, peerso);
+			}
 			if (sopt->sopt_name == LOCAL_PEEREPID &&
 			    peerso->so_flags & SOF_DELEGATED) {
 				peerpid = peerso->e_pid;
 			} else {
 				peerpid = peerso->last_pid;
 			}
-			socket_unlock(peerso, 1);
+			if (so != peerso) {
+				socket_unlock(peerso, 1);
+			}
 			error = sooptcopyout(sopt, &peerpid, sizeof(peerpid));
 			break;
 		case LOCAL_PEERUUID:
@@ -861,7 +882,9 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 			if (peerso == NULL) {
 				panic("peer is connected but has no socket?");
 			}
-			unp_get_locks_in_order(so, peerso);
+			if (so != peerso) {
+				unp_get_locks_in_order(so, peerso);
+			}
 			if (sopt->sopt_name == LOCAL_PEEREUUID &&
 			    peerso->so_flags & SOF_DELEGATED) {
 				error = sooptcopyout(sopt, &peerso->e_uuid,
@@ -870,7 +893,9 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = sooptcopyout(sopt, &peerso->last_uuid,
 				    sizeof(peerso->last_uuid));
 			}
-			socket_unlock(peerso, 1);
+			if (so != peerso) {
+				socket_unlock(peerso, 1);
+			}
 			break;
 		case LOCAL_PEERTOKEN:
 			if (unp->unp_conn == NULL) {
@@ -881,7 +906,9 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 			if (peerso == NULL) {
 				panic("peer is connected but has no socket?");
 			}
-			unp_get_locks_in_order(so, peerso);
+			if (so != peerso) {
+				unp_get_locks_in_order(so, peerso);
+			}
 			peerpid = peerso->last_pid;
 			p = proc_find(peerpid);
 			if (p != PROC_NULL) {
@@ -901,7 +928,9 @@ uipc_ctloutput(struct socket *so, struct sockopt *sopt)
 			} else {
 				error = EINVAL;
 			}
-			socket_unlock(peerso, 1);
+			if (so != peerso) {
+				socket_unlock(peerso, 1);
+			}
 			break;
 		default:
 			error = EOPNOTSUPP;
@@ -2196,9 +2225,13 @@ unp_shutdown(struct unpcb *unp)
 	struct socket *so2;
 	if (unp->unp_socket->so_type == SOCK_STREAM && unp->unp_conn) {
 		so2 = unp->unp_conn->unp_socket;
-		unp_get_locks_in_order(so, so2);
+		if (so != so2) {
+			unp_get_locks_in_order(so, so2);
+		}
 		socantrcvmore(so2);
-		socket_unlock(so2, 1);
+		if (so != so2) {
+			socket_unlock(so2, 1);
+		}
 	}
 }
 

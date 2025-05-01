@@ -34,13 +34,14 @@
 #include <stdint.h>
 #include <uuid/uuid.h>
 
+/* No longer supported. */
 #define PGO_HIB (1)
+
 #define PGO_WAIT_FOR_UNLOAD (2)
 #define PGO_METADATA (4)
 #define PGO_RESET_ALL (8)
 
 #define PGO_ALL_FLAGS (PGO_HIB | PGO_WAIT_FOR_UNLOAD | PGO_METADATA | PGO_RESET_ALL)
-
 
 /**
  * This is a serialization format for metadata related to a profile data buffer.
@@ -75,7 +76,7 @@ struct pgo_metadata_footer {
 	/**
 	 * magic number
 	 *
-	 * This should be  htonl(0x6d657461);
+	 * This should be htonl(0x6d657461);
 	 */
 	uint32_t magic;
 };
@@ -88,12 +89,10 @@ ssize_t grab_pgo_data(
 	unsigned char *buffer,
 	ssize_t size);
 
-
-#endif
+#endif /* !defined(KERNEL) */
 
 #ifdef XNU_KERNEL_PRIVATE
 kern_return_t do_pgo_reset_counters(void);
-#endif
+#endif /* defined(XNU_KERNEL_PRIVATE) */
 
-
-#endif
+#endif /* !defined(XNU_KERNEL_PRIVATE) */

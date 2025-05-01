@@ -2242,7 +2242,7 @@ bufinit(void)
 #define MINMETA 512
 #define MAXMETA 16384
 
-KALLOC_HEAP_DEFINE(KHEAP_VFS_BIO, "vfs_bio", KHEAP_ID_DATA_BUFFERS);
+KALLOC_HEAP_DEFINE(KHEAP_VFS_BIO, "vfs_bio", KHEAP_ID_DATA_SHARED);
 
 static struct buf *
 bio_doread(vnode_t vp, daddr64_t blkno, int size, kauth_cred_t cred, int async, int queuetype)

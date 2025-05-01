@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -417,6 +417,12 @@ bif_has_mac_nat(struct bridge_iflist * bif)
 	return bif_ifflags_are_set(bif, IFBIF_MAC_NAT);
 }
 
+static inline bool
+bif_uses_virtio(struct bridge_iflist * bif)
+{
+	return bif_ifflags_are_set(bif, IFBIF_USES_VIRTIO);
+}
+
 /* fake errors to make the code clearer */
 #define _EBADIP                 EJUSTRETURN
 #define _EBADIPCHECKSUM         EJUSTRETURN
@@ -608,6 +614,8 @@ typedef struct {
 
 struct bridge_hostfilter_stats bridge_hostfilter_stats;
 
+typedef uint8_t ether_type_flag_t;
+
 static LCK_GRP_DECLARE(bridge_lock_grp, "if_bridge");
 #if BRIDGE_LOCK_DEBUG
 static LCK_ATTR_DECLARE(bridge_lock_attr, 0, 0);
@@ -637,31 +645,32 @@ static void     bridge_ifstop(struct ifnet *, int);
 static int      bridge_output(struct ifnet *, struct mbuf *);
 static void     bridge_finalize_cksum(struct ifnet *, struct mbuf *);
 static void     bridge_start(struct ifnet *);
-static errno_t  bridge_input(struct ifnet *, mbuf_t *);
+static mblist   bridge_input_list(struct bridge_softc *, ifnet_t,
+    struct ether_header *, mblist, bool);
 static errno_t  bridge_iff_input(void *, ifnet_t, protocol_family_t,
     mbuf_t *, char **);
 static errno_t  bridge_iff_output(void *, ifnet_t, protocol_family_t,
     mbuf_t *);
 static errno_t  bridge_member_output(struct bridge_softc *sc, ifnet_t ifp,
     mbuf_t *m);
-
-static int      bridge_enqueue(ifnet_t, struct ifnet *,
-    struct ifnet *, struct mbuf *, ChecksumOperation);
+static int      bridge_enqueue(ifnet_t, ifnet_t, ifnet_t,
+    ether_type_flag_t, mbuf_t, ChecksumOperation);
+static mbuf_t   bridge_checksum_offload_list(ifnet_t, struct bridge_iflist *,
+    mbuf_t, bool);
+static mbuf_t   bridge_filter_checksum(ifnet_t, struct bridge_iflist * bif,
+    mbuf_t m, bool, bool, bool);
 static void     bridge_rtdelete(struct bridge_softc *, struct ifnet *ifp, int);
-
-static void     bridge_forward(struct bridge_softc *, struct bridge_iflist *,
-    struct mbuf *);
 
 static void     bridge_aging_timer(struct bridge_softc *sc);
 
 static void     bridge_broadcast(struct bridge_softc *, struct bridge_iflist *,
-    struct mbuf *);
-static void     bridge_span(struct bridge_softc *, struct mbuf *);
+    ether_type_flag_t, mbuf_t);
+static void     bridge_span(struct bridge_softc *, ether_type_flag_t, struct mbuf *);
 
 static int      bridge_rtupdate(struct bridge_softc *, const uint8_t[ETHER_ADDR_LEN],
     uint16_t, struct bridge_iflist *, int, uint8_t);
-static struct ifnet *bridge_rtlookup(struct bridge_softc *, const uint8_t[ETHER_ADDR_LEN],
-    uint16_t);
+static struct bridge_iflist * bridge_rtlookup_bif(struct bridge_softc *,
+    const uint8_t[ETHER_ADDR_LEN], uint16_t);
 static void     bridge_rttrim(struct bridge_softc *);
 static void     bridge_rtage(struct bridge_softc *);
 static void     bridge_rtflush(struct bridge_softc *, int);
@@ -756,7 +765,6 @@ static int interface_media_active(struct ifnet *);
 static void bridge_schedule_delayed_call(struct bridge_delayed_call *);
 static void bridge_cancel_delayed_call(struct bridge_delayed_call *);
 static void bridge_cleanup_delayed_call(struct bridge_delayed_call *);
-static int bridge_host_filter(struct bridge_iflist *, mbuf_t *);
 
 static errno_t bridge_mac_nat_enable(struct bridge_softc *,
     struct bridge_iflist *);
@@ -782,7 +790,20 @@ static mbuf_t bridge_mac_nat_copy_and_translate_list(struct bridge_softc * sc,
 static mbuf_t   bridge_pf_list(mbuf_t m, ifnet_t ifp,
     uint32_t sc_filter_flags, bool input);
 
-static bool is_broadcast_ip_packet(mbuf_t *);
+static inline ifnet_t
+bridge_rtlookup(struct bridge_softc *sc, const uint8_t addr[ETHER_ADDR_LEN],
+    uint16_t vlan)
+{
+	struct bridge_iflist *  bif;
+	ifnet_t                 ifp = NULL;
+
+	bif = bridge_rtlookup_bif(sc, addr, vlan);
+	if (bif != NULL) {
+		ifp = bif->bif_ifp;
+	}
+	return ifp;
+}
+
 static bool in_addr_is_ours(const struct in_addr);
 static bool in6_addr_is_ours(const struct in6_addr *, uint32_t);
 
@@ -791,11 +812,9 @@ static bool in6_addr_is_ours(const struct in6_addr *, uint32_t);
 static mblist
 gso_tcp(ifnet_t ifp, mbuf_t m, u_int mac_hlen, bool is_ipv4, bool is_tx);
 
-static inline mblist
-gso_tcp_receive(ifnet_t ifp, mbuf_t m, u_int mac_hlen, bool is_ipv4)
-{
-	return gso_tcp(ifp, m, mac_hlen, is_ipv4, false);
-}
+static mblist
+gso_tcp_with_info(ifnet_t ifp, mbuf_t m, ip_packet_info_t info_p,
+    u_int mac_hlen, bool is_ipv4, bool is_tx);
 
 static inline mblist
 gso_tcp_transmit(ifnet_t ifp, mbuf_t m, u_int mac_hlen, bool is_ipv4)
@@ -1107,11 +1126,6 @@ SYSCTL_INT(_net_link_bridge, OID_AUTO, log_level,
     CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_bridge_log_level, 0, "Bridge log level");
 
-static int if_bridge_segmentation = 1;
-SYSCTL_INT(_net_link_bridge, OID_AUTO, segmentation,
-    CTLFLAG_RW | CTLFLAG_LOCKED,
-    &if_bridge_segmentation, 0, "Bridge interface enable segmentation");
-
 static int if_bridge_output_skip_filters = 1;
 SYSCTL_INT(_net_link_bridge, OID_AUTO, output_skip_filters,
     CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -1122,6 +1136,12 @@ SYSCTL_INT(_net_link_bridge, OID_AUTO, enable_early_input,
     CTLFLAG_RW | CTLFLAG_LOCKED,
     &bridge_enable_early_input, 0,
     "Bridge enable early input");
+
+int bridge_allow_lro_num_seg = 1;   /* allow LRO_NUM_SEG to keep LRO enabled */
+SYSCTL_INT(_net_link_bridge, OID_AUTO, allow_lro_num_seg,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &bridge_allow_lro_num_seg, 0,
+    "Bridge allow LRO_NUM_SEG to keep LRO enabled");
 
 #define BRIDGE_TSO_REDUCE_MSS_FORWARDING_MAX            256
 #define BRIDGE_TSO_REDUCE_MSS_FORWARDING_DEFAULT        110
@@ -1436,6 +1456,17 @@ brlog_link(struct bridge_softc * sc)
 	    sdl->sdl_alen, sdl->sdl_slen, lladdr_str);
 }
 
+static int
+_mbuf_get_tso_mss(mbuf_t m)
+{
+	int     mss = 0;
+
+#define _TSO_CSUM       (CSUM_TSO_IPV4 | CSUM_TSO_IPV6)
+	if ((m->m_pkthdr.csum_flags & _TSO_CSUM) != 0) {
+		mss = m->m_pkthdr.tso_segsz;
+	}
+	return mss;
+}
 
 /*
  * bridgeattach:
@@ -2066,6 +2097,13 @@ bridge_set_lro(struct ifnet * ifp, boolean_t enable)
 		    ifp->if_xname);
 		goto done;
 	}
+	if (bridge_allow_lro_num_seg != 0 &&
+	    (cap_supported & IFCAP_LRO_NUM_SEG) != 0) {
+		BRIDGE_LOG(LOG_NOTICE, BR_DBGF_LIFECYCLE,
+		    "%s supports LRO_NUM_SEG, leaving LRO enabled",
+		    ifp->if_xname);
+		goto done;
+	}
 	cap_enable = ifnet_capabilities_enabled(ifp);
 	lro_enabled = (cap_enable & IFCAP_LRO) != 0;
 	if (lro_enabled != enable) {
@@ -2240,6 +2278,22 @@ bridge_lookup_member_if(struct bridge_softc *sc, struct ifnet *member_ifp)
 	return NULL;
 }
 
+static inline bool
+get_and_clear_promisc(mbuf_t m)
+{
+	bool    is_promisc;
+
+	/*
+	 * Need to clear the promiscuous flag otherwise the packet will be
+	 * dropped by DLIL after processing filters
+	 */
+	is_promisc = (mbuf_flags(m) & MBUF_PROMISC) != 0;
+	if (is_promisc) {
+		mbuf_setflags_mask(m, 0, MBUF_PROMISC);
+	}
+	return is_promisc;
+}
+
 static errno_t
 bridge_iff_input(void *cookie, ifnet_t ifp, protocol_family_t protocol,
     mbuf_t *data, char **frame_ptr)
@@ -2249,7 +2303,10 @@ bridge_iff_input(void *cookie, ifnet_t ifp, protocol_family_t protocol,
 	struct bridge_iflist *bif = (struct bridge_iflist *)cookie;
 	struct bridge_softc *sc = bif->bif_sc;
 	int included = 0;
+	struct ether_header * eh_p;
 	size_t frmlen = 0;
+	bool is_promisc;
+	mblist list;
 	mbuf_t m = *data;
 
 	if ((m->m_flags & M_PROTO1)) {
@@ -2304,19 +2361,15 @@ bridge_iff_input(void *cookie, ifnet_t ifp, protocol_family_t protocol,
 			*frame_ptr = mtod(m, char *);
 		}
 	}
-
-	error = bridge_input(ifp, data);
-
-	/* Adjust packet back to original */
-	if (error == 0) {
-		/* bridge_input might have modified *data */
-		if (*data != m) {
-			m = *data;
-			*frame_ptr = mtod(m, char *);
-		}
-		_mbuf_adjust_pkthdr_and_data(m, frmlen);
+	mblist_init(&list);
+	mblist_append(&list, m);
+	is_promisc = get_and_clear_promisc(m);
+	eh_p = __unsafe_forge_single(struct ether_header *, *frame_ptr);
+	list = bridge_input_list(sc, ifp, eh_p, list, is_promisc);
+	m = *data = list.head;
+	if (m == NULL) {
+		error = EJUSTRETURN;
 	}
-
 	if (BRIDGE_DBGF_ENABLED(BR_DBGF_MBUF) &&
 	    BRIDGE_DBGF_ENABLED(BR_DBGF_INPUT)) {
 		brlog_mbuf(m, "bridge_iff_input]", "");
@@ -2900,7 +2953,7 @@ bridge_ioctl_add(struct bridge_softc *sc, void *__sized_by(arg_len) arg, size_t 
 
 	media_active = interface_media_active(ifs);
 
-	/* disable LRO */
+	/* disable LRO if needed */
 	if (bridge_set_lro(ifs, FALSE)) {
 		bif->bif_flags |= BIFF_LRO_DISABLED;
 	}
@@ -3048,17 +3101,18 @@ bridge_ioctl_sifflags(struct bridge_softc *sc, void *__sized_by(arg_len) arg, si
 		/* SPAN is readonly */
 		return EINVAL;
 	}
-
-#define CHECKSUM_OR_MAC_NAT     (IFBIF_CHECKSUM_OFFLOAD | IFBIF_MAC_NAT)
-	if ((ifsflags & CHECKSUM_OR_MAC_NAT) == CHECKSUM_OR_MAC_NAT) {
-		/* can't specify both MAC-NAT and checksum offload */
+#define CHECKSUM_VIRTIO (IFBIF_CHECKSUM_OFFLOAD | IFBIF_USES_VIRTIO)
+	if ((ifsflags & CHECKSUM_VIRTIO) == CHECKSUM_VIRTIO) {
+		/* can't specify checksum and virtio */
+		return EINVAL;
+	}
+	if ((ifsflags & IFBIF_MAC_NAT) != 0 &&
+	    ((ifsflags & CHECKSUM_VIRTIO) != 0 ||
+	    (bif->bif_flags & BIFF_HOST_FILTER) != 0)) {
+		/* MAC-NAT can't be used with checksum, host filter, or virtio */
 		return EINVAL;
 	}
 	if ((ifsflags & IFBIF_MAC_NAT) != 0) {
-		if ((bif->bif_flags & BIFF_HOST_FILTER) != 0) {
-			/* no host filter with MAC-NAT */
-			return EINVAL;
-		}
 		error = bridge_mac_nat_enable(sc, bif);
 		if (error != 0) {
 			return error;
@@ -4374,6 +4428,13 @@ bridge_ifstop(struct ifnet *ifp, int disable)
 	(void) ifnet_set_flags(ifp, 0, IFF_RUNNING);
 }
 
+static const uint32_t checksum_request_flags = (MBUF_CSUM_REQ_TCP |
+    MBUF_CSUM_REQ_UDP | MBUF_CSUM_REQ_TCPIPV6 | MBUF_CSUM_REQ_UDPIPV6);
+
+static const mbuf_csum_performed_flags_t checksum_performed_all_good =
+    (MBUF_CSUM_DID_IP | MBUF_CSUM_IP_GOOD
+    | MBUF_CSUM_DID_DATA | MBUF_CSUM_PSEUDO_HDR);
+
 /*
  * bridge_compute_cksum:
  *
@@ -4712,8 +4773,6 @@ proto_csum_stats_increment(uint8_t proto, struct brcsumstats * stats_p)
 #define ETHER_TYPE_FLAG_IP      (ETHER_TYPE_FLAG_IPV4 | ETHER_TYPE_FLAG_IPV6)
 #define ETHER_TYPE_FLAG_IP_ARP  (ETHER_TYPE_FLAG_IP | ETHER_TYPE_FLAG_ARP)
 
-typedef uint8_t ether_type_flag_t;
-
 static inline bool
 ether_type_flag_is_ip(ether_type_flag_t flag)
 {
@@ -4888,7 +4947,8 @@ done:
 }
 
 static mbuf_t
-bridge_verify_checksum_list(mbuf_t in_list, struct bridge_iflist * dbif)
+bridge_verify_checksum_list(ifnet_t bridge_ifp, struct bridge_iflist * dbif,
+    mbuf_t in_list, bool is_ipv4)
 {
 	mbuf_t          next_packet;
 	mblist          ret;
@@ -4901,12 +4961,18 @@ bridge_verify_checksum_list(mbuf_t in_list, struct bridge_iflist * dbif)
 		next_packet = scan->m_nextpkt;
 		scan->m_nextpkt = NULL;
 
-		/* verify checksum */
-		error = bridge_verify_checksum(&scan, &dbif->bif_stats);
-		if (error != 0) {
-			if (scan != NULL) {
-				m_freem(scan);
-				scan = NULL;
+		if (scan->m_pkthdr.rx_seg_cnt > 1) {
+			/* LRO packet, compute checksum on large packet */
+			scan = bridge_filter_checksum(bridge_ifp, dbif, scan,
+			    is_ipv4, false, true);
+		} else {
+			/* verify checksum */
+			error = bridge_verify_checksum(&scan, &dbif->bif_stats);
+			if (error != 0) {
+				if (scan != NULL) {
+					m_freem(scan);
+					scan = NULL;
+				}
 			}
 		}
 
@@ -5014,6 +5080,9 @@ bridge_offload_checksum(struct mbuf * * mp, ip_packet_info * info_p,
 	proto_csum_stats_increment(info_p->ip_proto,
 	    &stats_p->brms_in_computed_cksum);
 
+	/* indicate that the checksum is good */
+	mbuf_set_csum_performed(m0, checksum_performed_all_good, 0xffff);
+
 	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
 	    "IPv%c %s set checksum 0x%x",
 	    info_p->ip_is_ipv4 ? '4' : '6',
@@ -5046,70 +5115,6 @@ bridge_handle_checksum_op(ifnet_t src_ifp, ifnet_t dst_ifp,
 	return;
 }
 
-static errno_t
-bridge_send(ifnet_t src_ifp, ifnet_t dst_ifp,
-    mbuf_t m, ChecksumOperation cksum_op)
-{
-	bridge_handle_checksum_op(src_ifp, dst_ifp, m, cksum_op);
-#if HAS_IF_CAP
-	/*
-	 * If underlying interface can not do VLAN tag insertion itself
-	 * then attach a packet tag that holds it.
-	 */
-	if ((m->m_flags & M_VLANTAG) &&
-	    (dst_ifp->if_capenable & IFCAP_VLAN_HWTAGGING) == 0) {
-		m = ether_vlanencap(m, m->m_pkthdr.ether_vtag);
-		if (m == NULL) {
-			BRIDGE_LOG(LOG_NOTICE, BR_DBGF_CHECKSUM,
-			    "%s: unable to prepend VLAN header",
-			    dst_ifp->if_xname);
-			(void) ifnet_stat_increment_out(dst_ifp,
-			    0, 0, 1);
-			return 0;
-		}
-		m->m_flags &= ~M_VLANTAG;
-	}
-#endif /* HAS_IF_CAP */
-	return bridge_transmit(dst_ifp, m);
-}
-
-static errno_t
-bridge_send_tso(struct ifnet *dst_ifp, struct mbuf *m, bool is_ipv4)
-{
-	errno_t                 error = 0;
-	u_int                   mac_hlen;
-	mblist                  segs;
-
-	mac_hlen = sizeof(struct ether_header);
-
-#if HAS_IF_CAP
-	/*
-	 * If underlying interface can not do VLAN tag insertion itself
-	 * then attach a packet tag that holds it.
-	 */
-	if ((m->m_flags & M_VLANTAG) &&
-	    (dst_ifp->if_capenable & IFCAP_VLAN_HWTAGGING) == 0) {
-		m = ether_vlanencap(m, m->m_pkthdr.ether_vtag);
-		if (m == NULL) {
-			BRIDGE_LOG(LOG_NOTICE, BR_DBGF_CHECKSUM,
-			    "%s: unable to prepend VLAN header",
-			    dst_ifp->if_xname);
-			(void) ifnet_stat_increment_out(dst_ifp,
-			    0, 0, 1);
-			error = ENOBUFS;
-			goto done;
-		}
-		m->m_flags &= ~M_VLANTAG;
-		mac_hlen += ETHER_VLAN_ENCAP_LEN;
-	}
-#endif /* HAS_IF_CAP */
-	segs = gso_tcp_transmit(dst_ifp, m, mac_hlen, is_ipv4);
-	if (segs.head != NULL) {
-		error = bridge_transmit(dst_ifp, segs.head);
-	}
-	return error;
-}
-
 static uint32_t
 get_if_tso_mtu(struct ifnet * ifp, bool is_ipv4)
 {
@@ -5140,15 +5145,21 @@ get_if_tso_mtu(struct ifnet * ifp, bool is_ipv4)
  */
 static int
 tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
-    bool * need_sw_tso, bool * is_large_tcp)
+    int * mss_p, bool * need_gso, bool * is_large_tcp)
 {
-	int             error = 0;
-	u_int32_t       if_csum;
-	u_int32_t       if_tso;
-	u_int32_t       mbuf_tso;
-	bool            supports_cksum = false;
+	uint32_t                csum_flags;
+	int                     error = 0;
+	ip_packet_info          info;
+	u_int32_t               if_csum;
+	u_int32_t               if_tso;
+	u_int32_t               mbuf_tso;
+	int                     mss = *mss_p;
+	uint8_t                 seg_cnt = 0;
+	bool                    supports_cksum = false;
+	uint32_t                pkt_mtu;
+	struct bripstats        stats;
 
-	*need_sw_tso = false;
+	*need_gso = false;
 	*is_large_tcp = false;
 	if (is_ipv4) {
 		/*
@@ -5161,8 +5172,8 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		if_tso = IFNET_TSO_IPV4;
 		mbuf_tso = CSUM_TSO_IPV4;
 	} else {
-		supports_cksum = (ifp->if_hwassist & CSUM_TCPIPV6) != 0;
-		if_csum = CSUM_TCPIPV6;
+		if_csum = (ifp->if_hwassist & CSUM_TCPIPV6);
+		supports_cksum = (if_csum & CSUM_TCPIPV6) != 0;
 		if_tso = IFNET_TSO_IPV6;
 		mbuf_tso = CSUM_TSO_IPV6;
 	}
@@ -5170,51 +5181,50 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 	    "%s: does%s support checksum 0x%x if_csum 0x%x",
 	    ifp->if_xname, supports_cksum ? "" : " not",
 	    ifp->if_hwassist, if_csum);
-	if ((ifp->if_hwassist & if_tso) != 0 &&
-	    ((*mp)->m_pkthdr.csum_flags & mbuf_tso) != 0) {
-		/* hardware TSO, mbuf already marked */
-	} else {
-		/* verify that this is a large TCP frame */
-		uint32_t                csum_flags;
-		ip_packet_info          info;
-		int                     mss;
-		uint32_t                pkt_mtu;
-		struct bripstats        stats;
-		struct tcphdr *         tcp;
-		uint32_t                tso_mtu;
 
-		error = bridge_get_tcp_header(mp, mac_hlen, is_ipv4,
-		    &info, &stats);
-		if (error != 0) {
-			/* bad packet */
-			goto done;
-		}
-		if (info.ip_proto_hdr == NULL) {
-			/* not a TCP packet */
-			goto done;
-		}
-		pkt_mtu = info.ip_hlen + info.ip_pay_len + info.ip_opt_len;
-		if (pkt_mtu <= ifp->if_mtu) {
+	/* verify that this is a large TCP frame */
+	error = bridge_get_tcp_header(mp, mac_hlen, is_ipv4,
+	    &info, &stats);
+	if (error != 0) {
+		/* bad packet */
+		goto done;
+	}
+	if (info.ip_proto_hdr == NULL) {
+		/* not a TCP packet */
+		goto done;
+	}
+	pkt_mtu = info.ip_hlen + info.ip_pay_len + info.ip_opt_len;
+	if (mss == 0) {
+		/* check for LRO */
+		seg_cnt = (*mp)->m_pkthdr.rx_seg_cnt;
+		if (seg_cnt == 1 || (seg_cnt == 0 && pkt_mtu <= ifp->if_mtu)) {
 			/* not actually a large packet */
 			goto done;
 		}
-		if ((ifp->if_hwassist & if_tso) == 0) {
-			/* hardware does not support TSO, enable sw tso */
-			*need_sw_tso = if_bridge_segmentation != 0;
-			goto done;
-		}
-		tso_mtu = get_if_tso_mtu(ifp, is_ipv4);
-		if (pkt_mtu > tso_mtu) {
-			/* hardware can't segment this, enable sw tso */
-			*need_sw_tso = if_bridge_segmentation != 0;
-			goto done;
-		}
+	}
+	*is_large_tcp = true;
+	(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
+	if (mss == 0) {
+		uint32_t            hdr_len;
+		struct tcphdr *     tcp;
 
-		/* use hardware TSO */
-		(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
 		tcp = (struct tcphdr *)info.ip_proto_hdr;
-		mss = ifp->if_mtu - info.ip_hlen - info.ip_opt_len
-		    - (tcp->th_off << 2) - if_bridge_tso_reduce_mss_tx;
+		hdr_len = info.ip_hlen + info.ip_opt_len + (tcp->th_off << 2);
+
+		/* packet isn't marked, mark it now */
+		if (seg_cnt != 0) {
+			uint32_t    len;
+
+			/* approximate the MSS using the LRO seg cnt */
+			len = mbuf_pkthdr_len(*mp) - hdr_len - ETHER_HDR_LEN;
+			mss = len / seg_cnt;
+			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+			    "%s: mss %d = len %d / seg cnt %d",
+			    ifp->if_xname, mss, len, seg_cnt);
+		} else {
+			mss = ifp->if_mtu - hdr_len
+			    - if_bridge_tso_reduce_mss_tx;
+		}
 		assert(mss > 0);
 		csum_flags = mbuf_tso;
 		if (supports_cksum) {
@@ -5223,95 +5233,35 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		(*mp)->m_pkthdr.tso_segsz = mss;
 		(*mp)->m_pkthdr.csum_flags |= csum_flags;
 		(*mp)->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
-		*is_large_tcp = true;
+	}
+	if ((ifp->if_hwassist & if_tso) == 0) {
+		/* need gso if no hardware support */
+		*need_gso = true;
+	} else {
+		uint32_t                tso_mtu = 0;
+
+		tso_mtu = get_if_tso_mtu(ifp, is_ipv4);
+		if (pkt_mtu > tso_mtu) {
+			/* need gso if tso_mtu too small */
+			*need_gso = true;
+		}
 	}
 done:
+	*mss_p = mss;
 	return error;
 }
 
 /*
  * bridge_enqueue:
  *
- *	Enqueue a packet on a bridge member interface.
+ *	Enqueue a packet list on a bridge member interface.
  *
  */
-static errno_t
-bridge_enqueue(ifnet_t bridge_ifp, struct ifnet *src_ifp,
-    struct ifnet *dst_ifp, struct mbuf *m, ChecksumOperation cksum_op)
-{
-	errno_t         error = 0;
-	int             len;
-
-	VERIFY(dst_ifp != NULL);
-
-	for (struct mbuf *next_m = NULL; m != NULL; m = next_m) {
-		bool            need_sw_tso = false;
-		bool            is_ipv4 = false;
-		bool            is_large_pkt;
-		errno_t         _error = 0;
-
-		len = m->m_pkthdr.len;
-		m->m_flags |= M_PROTO1; /* set to avoid loops */
-		next_m = m->m_nextpkt;
-		m->m_nextpkt = NULL;
-		/*
-		 * Need to segment the packet if it is a large frame
-		 * and the destination interface does not support TSO.
-		 *
-		 * Note that with trailers, it's possible for a packet to
-		 * be large but not actually require segmentation.
-		 */
-		is_large_pkt = (len > (bridge_ifp->if_mtu + ETHER_HDR_LEN));
-		if (is_large_pkt) {
-			struct ether_header     *eh;
-			bool                    is_large_tcp = false;
-
-			eh = mtod(m, struct ether_header *);
-			if (ether_header_type_is_ip(eh, &is_ipv4)) {
-				_error = tso_hwassist(&m, is_ipv4,
-				    dst_ifp, sizeof(struct ether_header),
-				    &need_sw_tso, &is_large_tcp);
-				if (is_large_tcp) {
-					cksum_op = CHECKSUM_OPERATION_NONE;
-				}
-			} else {
-				BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-				    "large non IP packet");
-			}
-		}
-		if (_error != 0) {
-			if (m != NULL) {
-				m_freem(m);
-			}
-		} else if (need_sw_tso) {
-			_error = bridge_send_tso(dst_ifp, m, is_ipv4);
-		} else {
-			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-			    "%s bridge_send(%s) len %d op %d",
-			    bridge_ifp->if_xname,
-			    dst_ifp->if_xname,
-			    len, cksum_op);
-			_error = bridge_send(src_ifp, dst_ifp, m, cksum_op);
-		}
-
-		/* Preserve first error value */
-		if (error == 0 && _error != 0) {
-			error = _error;
-		}
-		if (_error == 0) {
-			(void) ifnet_stat_increment_out(bridge_ifp, 1, len, 0);
-		} else {
-			(void) ifnet_stat_increment_out(bridge_ifp, 0, 0, 1);
-		}
-	}
-
-	return error;
-}
-
-static void
-bridge_enqueue_multi(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
+static int
+bridge_enqueue(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
     ether_type_flag_t etypef, mbuf_t in_list, ChecksumOperation orig_cksum_op)
 {
+	int             enqueue_error = 0;
 	mbuf_t          next_packet;
 	uint32_t        out_errors = 0;
 	mblist          out_list;
@@ -5320,40 +5270,46 @@ bridge_enqueue_multi(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
 
 	mblist_init(&out_list);
 	for (mbuf_ref_t scan = in_list; scan != NULL; scan = next_packet) {
+		bool            check_gso = false;
 		ChecksumOperation cksum_op = orig_cksum_op;
 		errno_t         error = 0;
 		bool            is_ipv4 = false;
-		bool            is_large_pkt;
 		int             len;
-		bool            need_sw_tso = false;
+		int             mss = 0;
+		bool            need_gso = false;
 
 		scan->m_flags |= M_PROTO1; /* set to avoid loops */
 		next_packet = scan->m_nextpkt;
 		scan->m_nextpkt = NULL;
 		len = mbuf_pkthdr_len(scan);
-
-		/*
-		 * Need to segment the packet if it is a large frame
-		 * and the destination interface does not support TSO.
-		 *
-		 * Note that with trailers, it's possible for a packet to
-		 * be large but not actually require segmentation.
-		 */
-		is_large_pkt = (len > (bridge_ifp->if_mtu + ETHER_HDR_LEN));
-		if (is_large_pkt) {
+		is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
+		mss = _mbuf_get_tso_mss(scan);
+		if (mss != 0) {
+			/* packet is marked for segmentation */
+			check_gso = true;
+		} else if (scan->m_pkthdr.rx_seg_cnt != 0) {
+			/* LRO packet */
+			check_gso = true;
+		} else if (ether_type_flag_is_ip(etypef) &&
+		    len > (bridge_ifp->if_mtu + ETHER_HDR_LEN)) {
+			/*
+			 * Need to segment the packet if it is a large frame
+			 * and the destination interface does not support TSO.
+			 *
+			 * Note that with trailers, it's possible for a packet to
+			 * be large but not actually require segmentation.
+			 */
+			check_gso = true;
+		}
+		if (check_gso) {
 			bool    is_large_tcp = false;
 
-			if (ether_type_flag_is_ip(etypef)) {
-				is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
-				error = tso_hwassist(&scan, is_ipv4,
-				    dst_if, sizeof(struct ether_header),
-				    &need_sw_tso, &is_large_tcp);
-				if (is_large_tcp) {
-					cksum_op = CHECKSUM_OPERATION_NONE;
-				}
-			} else {
-				BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-				    "large non IP packet");
+			error = tso_hwassist(&scan, is_ipv4,
+			    dst_if, sizeof(struct ether_header), &mss,
+			    &need_gso, &is_large_tcp);
+			if (is_large_tcp &&
+			    cksum_op == CHECKSUM_OPERATION_CLEAR_OFFLOAD) {
+				cksum_op = CHECKSUM_OPERATION_NONE;
 			}
 		}
 		if (error != 0) {
@@ -5362,7 +5318,7 @@ bridge_enqueue_multi(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
 				scan = NULL;
 			}
 			out_errors++;
-		} else if (need_sw_tso) {
+		} else if (need_gso) {
 			int             mac_hlen = sizeof(struct ether_header);
 			mblist          segs;
 
@@ -5381,33 +5337,31 @@ bridge_enqueue_multi(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
 			}
 		} else {
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-			    "%s (%s) append %d bytes op %d",
+			    "%s (%s) append %d bytes mss %d op %d",
 			    bridge_ifp->if_xname,
 			    dst_if->if_xname,
-			    len, cksum_op);
+			    len, mss, cksum_op);
 			bridge_handle_checksum_op(src_if, dst_if,
 			    scan, cksum_op);
 			mblist_append(&out_list, scan);
 		}
 	}
 	if (out_list.head != NULL) {
-		errno_t error;
-
-		error = bridge_transmit(dst_if, out_list.head);
-		if (error != 0) {
+		enqueue_error = bridge_transmit(dst_if, out_list.head);
+		if (enqueue_error != 0) {
 			out_errors++;
 		}
 		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
 		    "%s (%s) bridge_transmit packets %u bytes %u error %d",
 		    bridge_ifp->if_xname,
 		    dst_if->if_xname,
-		    out_list.count, out_list.bytes, error);
+		    out_list.count, out_list.bytes, enqueue_error);
 	}
 	if (out_list.count != 0 || out_errors != 0) {
 		ifnet_stat_increment_out(bridge_ifp, out_list.count,
 		    out_list.bytes, out_errors);
 	}
-	return;
+	return enqueue_error;
 }
 
 /*
@@ -5422,9 +5376,11 @@ bridge_enqueue_multi(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
 static errno_t
 bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 {
+	struct bridge_iflist * bif = NULL;
 	ifnet_t bridge_ifp;
 	struct ether_header *eh;
-	struct ifnet *dst_if;
+	ether_type_flag_t etypef;
+	struct ifnet *dst_if = NULL;
 	uint16_t vlan;
 	struct bridge_iflist *mac_nat_bif;
 	ifnet_t mac_nat_ifp;
@@ -5442,6 +5398,7 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 
 	eh = mtod(m, struct ether_header *);
 	vlan = VLANTAGOF(m);
+	etypef = ether_type_flag_get(eh->ether_type);
 
 	BRIDGE_LOCK(sc);
 	mac_nat_bif = sc->sc_mac_nat_bif;
@@ -5485,15 +5442,17 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 	if (ETHER_IS_MULTICAST(eh->ether_dhost)) {
 		dst_if = NULL;
 	} else {
-		dst_if = bridge_rtlookup(sc, eh->ether_dhost, vlan);
+		bif = bridge_rtlookup_bif(sc, eh->ether_dhost, vlan);
+		if (bif != NULL) {
+			dst_if = bif->bif_ifp;
+		}
 	}
 	if (dst_if == NULL) {
-		struct bridge_iflist *bif;
 		struct mbuf *mc;
 		errno_t error;
 
 
-		bridge_span(sc, m);
+		bridge_span(sc, etypef, m);
 
 		BRIDGE_LOCK2REF(sc, error);
 		if (error != 0) {
@@ -5545,7 +5504,7 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 				    0, 0, 1);
 				continue;
 			}
-			(void)bridge_enqueue(bridge_ifp, ifp, dst_if,
+			(void)bridge_enqueue(bridge_ifp, ifp, dst_if, etypef,
 			    mc, CHECKSUM_OPERATION_COMPUTE);
 		}
 		BRIDGE_UNREF(sc);
@@ -5563,7 +5522,7 @@ sendunicast:
 	 * XXX Spanning tree consideration here?
 	 */
 
-	bridge_span(sc, m);
+	bridge_span(sc, etypef, m);
 	if ((dst_if->if_flags & IFF_RUNNING) == 0) {
 		m_freem(m);
 		BRIDGE_UNLOCK(sc);
@@ -5576,7 +5535,7 @@ sendunicast:
 		return 0;
 	}
 	if (dst_if != mac_nat_ifp) {
-		(void) bridge_enqueue(bridge_ifp, ifp, dst_if, m,
+		(void) bridge_enqueue(bridge_ifp, ifp, dst_if, etypef, m,
 		    CHECKSUM_OPERATION_COMPUTE);
 	} else {
 		/*
@@ -5599,17 +5558,22 @@ sendunicast:
 static int
 bridge_output(struct ifnet *ifp, struct mbuf *m)
 {
+	struct bridge_iflist *bif;
 	struct bridge_softc * __single sc = ifnet_softc(ifp);
 	struct ether_header *eh;
+	ether_type_flag_t etypef;
 	struct ifnet *dst_if = NULL;
 	int error = 0;
 
 	eh = mtod(m, struct ether_header *);
-
+	etypef = ether_type_flag_get(eh->ether_type);
 	BRIDGE_LOCK(sc);
 
 	if (!IS_BCAST_MCAST(m)) {
-		dst_if = bridge_rtlookup(sc, eh->ether_dhost, 0);
+		bif = bridge_rtlookup_bif(sc, eh->ether_dhost, 0);
+		if (bif != NULL) {
+			dst_if = bif->bif_ifp;
+		}
 	}
 
 	(void) ifnet_stat_increment_out(ifp, 1, m->m_pkthdr.len, 0);
@@ -5618,14 +5582,14 @@ bridge_output(struct ifnet *ifp, struct mbuf *m)
 
 	if (dst_if == NULL) {
 		/* callee will unlock */
-		bridge_broadcast(sc, NULL, m);
+		bridge_broadcast(sc, NULL, etypef, m);
 	} else {
 		ifnet_t bridge_ifp;
 
 		bridge_ifp = sc->sc_ifp;
 		BRIDGE_UNLOCK(sc);
 
-		error = bridge_enqueue(bridge_ifp, NULL, dst_if, m,
+		error = bridge_enqueue(bridge_ifp, NULL, dst_if, etypef, m,
 		    CHECKSUM_OPERATION_FINALIZE);
 	}
 
@@ -5722,205 +5686,6 @@ bridge_start(struct ifnet *ifp)
 	}
 }
 
-/*
- * bridge_forward:
- *
- *	The forwarding function of the bridge.
- *
- *	NOTE: Releases the lock on return.
- */
-static void
-bridge_forward(struct bridge_softc *sc, struct bridge_iflist *sbif,
-    struct mbuf *m)
-{
-	struct bridge_iflist *dbif;
-	ifnet_t bridge_ifp;
-	struct ifnet *src_if, *dst_if;
-	struct ether_header *eh;
-	uint16_t vlan;
-	uint8_t *dst;
-	int error;
-	struct mac_nat_record mnr;
-	bool translate_mac = FALSE;
-	uint32_t sc_filter_flags;
-
-	BRIDGE_LOCK_ASSERT_HELD(sc);
-
-	bridge_ifp = sc->sc_ifp;
-	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_OUTPUT,
-	    "%s m 0x%llx", bridge_ifp->if_xname,
-	    (uint64_t)VM_KERNEL_ADDRPERM(m));
-
-	src_if = sbif->bif_ifp;
-	VERIFY(src_if == m->m_pkthdr.rcvif);
-
-	(void) ifnet_stat_increment_in(bridge_ifp, 1, m->m_pkthdr.len, 0);
-	vlan = VLANTAGOF(m);
-
-	eh = mtod(m, struct ether_header *);
-	dst = eh->ether_dhost;
-
-	/* If the interface is learning, record the address. */
-	if (sbif->bif_ifflags & IFBIF_LEARNING) {
-		error = bridge_rtupdate(sc, eh->ether_shost, vlan,
-		    sbif, 0, IFBAF_DYNAMIC);
-		/*
-		 * If the interface has addresses limits then deny any source
-		 * that is not in the cache.
-		 */
-		if (error && sbif->bif_addrmax) {
-			goto drop;
-		}
-	}
-
-	if ((sbif->bif_ifflags & IFBIF_STP) != 0 &&
-	    sbif->bif_stp.bp_state == BSTP_IFSTATE_LEARNING) {
-		goto drop;
-	}
-
-	/*
-	 * At this point, the port either doesn't participate
-	 * in spanning tree or it is in the forwarding state.
-	 */
-
-	/*
-	 * If the packet is unicast, destined for someone on
-	 * "this" side of the bridge, drop it.
-	 */
-	if (!IS_BCAST_MCAST(m)) {
-		/* unicast */
-		dst_if = bridge_rtlookup(sc, dst, vlan);
-		if (src_if == dst_if) {
-			goto drop;
-		}
-	} else {
-		/* broadcast/multicast */
-
-		/*
-		 * Check if it's a reserved multicast address, any address
-		 * listed in 802.1D section 7.12.6 may not be forwarded by the
-		 * bridge.
-		 * This is currently 01-80-C2-00-00-00 to 01-80-C2-00-00-0F
-		 */
-		if (dst[0] == 0x01 && dst[1] == 0x80 &&
-		    dst[2] == 0xc2 && dst[3] == 0x00 &&
-		    dst[4] == 0x00 && dst[5] <= 0x0f) {
-			goto drop;
-		}
-		/* ...forward it to all interfaces. */
-		os_atomic_inc(&bridge_ifp->if_imcasts, relaxed);
-		dst_if = NULL;
-	}
-
-	/*
-	 * If we have a destination interface which is a member of our bridge,
-	 * OR this is a unicast packet, push it through the bpf(4) machinery.
-	 * For broadcast or multicast packets, don't bother because it will
-	 * be reinjected into ether_input. We do this before we pass the packets
-	 * through the pfil(9) framework, as it is possible that pfil(9) will
-	 * drop the packet, or possibly modify it, making it difficult to debug
-	 * firewall issues on the bridge.
-	 */
-#if NBPFILTER > 0
-	if (eh->ether_type == htons(ETHERTYPE_RSN_PREAUTH) ||
-	    dst_if != NULL || !IS_BCAST_MCAST(m)) {
-		m->m_pkthdr.rcvif = bridge_ifp;
-		BRIDGE_BPF_TAP_IN(bridge_ifp, m);
-	}
-#endif /* NBPFILTER */
-
-	if (dst_if == NULL) {
-		/* bridge_broadcast will unlock */
-		bridge_broadcast(sc, sbif, m);
-		return;
-	}
-
-	/*
-	 * Unicast.
-	 */
-	/*
-	 * At this point, we're dealing with a unicast frame
-	 * going to a different interface.
-	 */
-	if ((dst_if->if_flags & IFF_RUNNING) == 0) {
-		goto drop;
-	}
-
-	dbif = bridge_lookup_member_if(sc, dst_if);
-	if (dbif == NULL) {
-		/* Not a member of the bridge (anymore?) */
-		goto drop;
-	}
-
-	/* Private segments can not talk to each other */
-	if (sbif->bif_ifflags & dbif->bif_ifflags & IFBIF_PRIVATE) {
-		goto drop;
-	}
-
-	if ((dbif->bif_ifflags & IFBIF_STP) &&
-	    dbif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING) {
-		goto drop;
-	}
-	if (dbif == sc->sc_mac_nat_bif) {
-		/* determine how to translate the packet */
-		translate_mac
-		        = bridge_mac_nat_output(sc, sbif, &m, &mnr);
-		if (m == NULL) {
-			/* packet was deallocated */
-			BRIDGE_UNLOCK(sc);
-			return;
-		}
-	} else if (bif_has_checksum_offload(dbif) &&
-	    !bif_has_checksum_offload(sbif)) {
-		/*
-		 * If the destination interface has checksum offload enabled,
-		 * verify the checksum now, unless the source interface also has
-		 * checksum offload enabled. The checksum in that case has
-		 * already just been computed and verifying it is unnecessary.
-		 */
-		error = bridge_verify_checksum(&m, &dbif->bif_stats);
-		if (error != 0) {
-			BRIDGE_UNLOCK(sc);
-			if (m != NULL) {
-				m_freem(m);
-			}
-			return;
-		}
-	}
-
-	sc_filter_flags = sc->sc_filter_flags;
-
-	BRIDGE_UNLOCK(sc);
-
-	if (translate_mac) {
-		/* if we need to, translate the MAC address */
-		bridge_mac_nat_translate(&m, &mnr, IF_LLADDR(dst_if));
-	}
-
-	if (m != NULL && PF_IS_ENABLED && (sc_filter_flags & IFBF_FILT_MEMBER)) {
-		if (bridge_pf(&m, dst_if, sc_filter_flags, false) != 0) {
-			return;
-		}
-		if (m == NULL) {
-			return;
-		}
-	}
-
-	/*
-	 * We're forwarding an inbound packet in which the checksum must
-	 * already have been computed and if required, verified.
-	 */
-	if (m != NULL) {
-		(void) bridge_enqueue(bridge_ifp, src_if, dst_if, m,
-		    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
-	}
-	return;
-
-drop:
-	BRIDGE_UNLOCK(sc);
-	m_freem(m);
-}
-
 static void
 prepare_input_packet(ifnet_t ifp, mbuf_t m)
 {
@@ -5931,12 +5696,12 @@ prepare_input_packet(ifnet_t ifp, mbuf_t m)
 }
 
 static void
-inject_input_packet(ifnet_t ifp, mbuf_t m)
+mark_tso_checksum_ok(mbuf_t m)
 {
-	prepare_input_packet(ifp, m);
-	m->m_flags |= M_PROTO1; /* set to avoid loops */
-	dlil_input_packet_list(ifp, m);
-	return;
+	if (_mbuf_get_tso_mss(m) != 0 ||
+	    (m->m_pkthdr.csum_flags & checksum_request_flags) != 0) {
+		mbuf_set_csum_performed(m, checksum_performed_all_good, 0xffff);
+	}
 }
 
 static void
@@ -5949,6 +5714,7 @@ inject_input_packet_list(ifnet_t ifp, mbuf_t in_list, bool m_proto1)
 			scan->m_flags |= M_PROTO1; /* set to avoid loops */
 		}
 		prepare_input_packet(ifp, scan);
+		mark_tso_checksum_ok(scan);
 	}
 	dlil_input_packet_list(ifp, in_list);
 	return;
@@ -6005,133 +5771,197 @@ in6_addr_is_ours(const struct in6_addr * ip6_p, uint32_t ifscope)
 	return ours;
 }
 
+static bool
+ip_packet_info_dst_is_our_ip(ip_packet_info_t info_p, int index)
+{
+	/* if the destination is our IP address, don't segment */
+	bool    our_ip = false;
+
+	if (info_p->ip_is_ipv4) {
+		struct ip *     hdr;
+		struct in_addr  dst_ip;
+
+		hdr = (struct ip *)(info_p->ip_hdr);
+		bcopy(&hdr->ip_dst, &dst_ip, sizeof(dst_ip));
+		our_ip = in_addr_is_ours(dst_ip);
+	} else {
+		struct ip6_hdr *        hdr;
+
+		hdr = (struct ip6_hdr *)(info_p->ip_hdr);
+		our_ip = in6_addr_is_ours(&hdr->ip6_dst, index);
+	}
+	return our_ip;
+}
+
+typedef union {
+	struct in_addr  ip;
+	struct in6_addr ip6;
+} ip_addr, *ip_addr_t;
 
 static void
-bridge_interface_input(ifnet_t bridge_ifp, mbuf_t m, bool has_address)
+ip_packet_info_copy_dst_ip_addr(ip_packet_info_t info_p, ip_addr_t ipaddr)
 {
-	bool                    do_segment;
-	struct ether_header     *eh;
-	uint32_t                in_bytes;
-	uint32_t                in_count;
-	uint32_t                in_errors = 0;
-	bool                    is_ipv4;
-	u_int                   mac_hlen;
-	mblist                  seg;
+	if (info_p->ip_is_ipv4) {
+		struct ip *     hdr;
 
-	/* segment large packets before sending them up */
-	in_count = 1;
-	in_bytes = mbuf_pkthdr_len(m);
-	if (!has_address) {
-		/* bridge has no address, so we're not forwarding */
-		goto done;
+		hdr = (struct ip *)(info_p->ip_hdr);
+		bcopy(&hdr->ip_dst, &ipaddr->ip, sizeof(ipaddr->ip));
+	} else {
+		struct ip6_hdr *        hdr;
+
+		hdr = (struct ip6_hdr *)(info_p->ip_hdr);
+		bcopy(&hdr->ip6_dst, &ipaddr->ip6, sizeof(ipaddr->ip6));
 	}
-	if (if_bridge_segmentation == 0) {
-		goto done;
-	}
-	if (in_bytes <= (bridge_ifp->if_mtu + ETHER_HDR_LEN)) {
-		goto done;
-	}
-	eh = mtod(m, struct ether_header *);
-	if (!ether_header_type_is_ip(eh, &is_ipv4)) {
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-		    "large non IPv4/IPv6 packet");
-		goto done;
-	}
-	/* no need to segment if the packet will not be forwarded */
+}
+
+static bool
+ip_addr_are_equal(ip_addr_t addr1, ip_addr_t addr2, bool is_ipv4)
+{
+	bool    equal;
+
 	if (is_ipv4) {
-		do_segment = (ipforwarding != 0);
+		equal = addr1->ip.s_addr == addr2->ip.s_addr;
 	} else {
-		do_segment = (ip6_forwarding != 0);
+		equal = IN6_ARE_ADDR_EQUAL(&addr1->ip6, &addr2->ip6);
 	}
-	if (!do_segment) {
-		goto done;
-	}
+	return equal;
+}
 
-	/*
-	 * We have a large IPv4/IPv6 TCP packet. Segment it if required.
-	 *
-	 * If gso_tcp_receive() returns non-NULL packets, the packet(s) are
-	 * ready to be passed up. If the destination is a local IP address,
-	 * the packet will not be segmented.
-	 */
-	mac_hlen = sizeof(*eh);
-	seg = gso_tcp_receive(bridge_ifp, m, mac_hlen, is_ipv4);
-	if (seg.head == NULL) {
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-		    "gso_tcp returned no packets");
-		in_errors++;
-		in_bytes = in_count = 0;
-		m = NULL;
+static bool
+ip_addr_is_ours(ip_addr_t ipaddr, int index, bool is_ipv4)
+{
+	bool    our_ip;
+
+	if (is_ipv4) {
+		our_ip = in_addr_is_ours(ipaddr->ip);
 	} else {
-		m = seg.head;
-		in_count = seg.count;
-		in_bytes = seg.bytes;
+		our_ip = in6_addr_is_ours(&ipaddr->ip6, index);
 	}
-
-done:
-	if (m != NULL) {
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_INPUT,
-		    "%s packets %d bytes %d",
-		    bridge_ifp->if_xname, in_count, in_bytes);
-		/* Mark the packets as arriving on the bridge interface */
-		inject_input_packet_list(bridge_ifp, m, false);
-	}
-	ifnet_stat_increment_in(bridge_ifp, in_count, in_bytes, in_errors);
-	return;
+	return our_ip;
 }
 
 static void
 bridge_interface_input_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
-    mblist list, bool has_address)
+    mblist list, bool bif_uses_virtio)
 {
-	bool            do_segment = false;
 	uint32_t        in_errors = 0;
 	bool            is_ipv4;
 	mblist          in_list;
+	ip_addr         last_ip;
+	bool            last_ip_ours = false;
+	bool            last_ip_valid = false;
 	u_int           mac_hlen;
+	bool            may_forward = false;
 	mbuf_t          next_packet;
 
-	if (has_address && if_bridge_segmentation != 0 &&
-	    ether_type_flag_is_ip(etypef)) {
-		if (etypef == ETHER_TYPE_FLAG_IPV4) {
-			is_ipv4 = true;
-			do_segment = (ipforwarding != 0);
-		} else {
-			is_ipv4 = false;
-			do_segment = (ip6_forwarding != 0);
-		}
+	switch (etypef) {
+	case ETHER_TYPE_FLAG_IPV4:
+		is_ipv4 = true;
+		may_forward = (ipforwarding != 0);
+		break;
+	case ETHER_TYPE_FLAG_IPV6:
+		is_ipv4 = false;
+		may_forward = (ip6_forwarding != 0);
+		break;
 	}
-	if (!do_segment) {
+	if (!may_forward) {
 		in_list = list;
 		goto done;
 	}
 
 	mblist_init(&in_list);
 	mac_hlen = sizeof(struct ether_header);
-	for (mbuf_t scan = list.head; scan != NULL; scan = next_packet) {
-		uint32_t        len;
-		mblist          seg;
+	bzero(&last_ip, sizeof(last_ip));
+	for (mbuf_ref_t scan = list.head; scan != NULL; scan = next_packet) {
+		int             error;
+		ip_packet_info  info;
+		bool            ip_ours;
+		struct ifbrmstats stats; /* XXX should really be accounted */
+		ip_addr         this_ip;
 
 		/* take it out of the list */
 		next_packet = scan->m_nextpkt;
 		scan->m_nextpkt = NULL;
 
-		/* check whether it might need segmentation */
-		len = mbuf_pkthdr_len(scan);
-		if (len <= (bridge_ifp->if_mtu + ETHER_HDR_LEN)) {
-			mblist_append(&in_list, scan);
+		/* check for TCP packet and get IP header */
+		error = bridge_get_tcp_header(&scan, mac_hlen, is_ipv4,
+		    &info, &stats.brms_in_ip);
+		if (error != 0) {
+			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+			    "%s bridge_get_tcp_header failed %d",
+			    bridge_ifp->if_xname, error);
+			if (scan != NULL) {
+				m_freem(scan);
+				scan = NULL;
+			}
+			in_errors++;
+			continue;
+		}
+		ip_packet_info_copy_dst_ip_addr(&info, &this_ip);
+		if (last_ip_valid &&
+		    ip_addr_are_equal(&last_ip, &this_ip, is_ipv4)) {
+			/* use cached result */
+			ip_ours = last_ip_ours;
 		} else {
-			/* segment before sending up */
-			seg = gso_tcp_receive(bridge_ifp, scan, mac_hlen,
+			ip_ours = ip_addr_is_ours(&this_ip,
+			    bridge_ifp->if_index,
 			    is_ipv4);
+			/* cache the result */
+			last_ip_valid = true;
+			last_ip_ours = ip_ours;
+			last_ip = this_ip;
+		}
+
+		/* if the packet is destined to us, just send it up */
+		if (ip_ours) {
+			mblist_append(&in_list, scan);
+			continue;
+		}
+		/*
+		 * If this is a TCP packet that's marked for TSO or LRO, or
+		 * we think it's a large packet, segment it.
+		 */
+		if (info.ip_proto_hdr != NULL &&
+		    (_mbuf_get_tso_mss(scan) != 0 ||
+		    scan->m_pkthdr.rx_seg_cnt > 1 ||
+		    (!bif_uses_virtio &&
+		    (mbuf_pkthdr_len(scan) >
+		    (bridge_ifp->if_mtu + ETHER_HDR_LEN))))) {
+			mblist          seg;
+
+			seg = gso_tcp_with_info(bridge_ifp, scan, &info,
+			    mac_hlen, is_ipv4, false);
 			if (seg.head == NULL) {
 				BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
 				    "gso_tcp returned no packets");
 				in_errors++;
-			} else {
+				continue;
+			}
+			if (seg.count > 1) {
+				/* packet was segmented+checksummed */
 				mblist_append_list(&in_list, seg);
+				continue;
+			}
+			/* there's just one packet, no segmentation */
+			scan = seg.head;
+		}
+		/* need checksum if it's marked for checksum offload */
+		if (bif_uses_virtio &&
+		    (scan->m_pkthdr.csum_flags & checksum_request_flags) != 0) {
+			error = bridge_offload_checksum(&scan, &info, &stats);
+			if (error != 0) {
+				BRIDGE_LOG(LOG_NOTICE, BR_DBGF_CHECKSUM,
+				    "%s bridge_offload_checksum failed %d",
+				    bridge_ifp->if_xname, error);
+				if (scan != NULL) {
+					m_freem(scan);
+					scan = NULL;
+				}
+				in_errors++;
+				continue;
 			}
 		}
+		mblist_append(&in_list, scan);
 	}
 
 done:
@@ -6144,355 +5974,10 @@ done:
 		inject_input_packet_list(bridge_ifp, in_list.head, false);
 		ifnet_stat_increment_in(bridge_ifp, in_list.count,
 		    in_list.bytes, in_errors);
+	} else if (in_errors != 0) {
+		ifnet_stat_increment_in(bridge_ifp, 0, 0, in_errors);
 	}
 	return;
-}
-
-/*
- * bridge_input:
- *
- *	Filter input from a member interface.  Queue the packet for
- *	bridging if it is not for us.
- */
-errno_t
-bridge_input(struct ifnet *ifp, mbuf_t *data)
-{
-	struct bridge_softc * __single sc = ifp->if_bridge;
-	struct bridge_iflist *bif, *bif2;
-	uint8_t *dhost;
-	struct ether_header eh_in;
-	bool is_ip = false;
-	bool is_ipv4 = false;
-	ifnet_t bridge_ifp;
-	unsigned int mac_hlen = sizeof(struct ether_header);
-	uint16_t vlan;
-	errno_t error;
-	ip_packet_info info;
-	bool is_broadcast;
-	bool is_ip_broadcast = false;
-	bool is_ifp_mac = false;
-	mbuf_t m;
-	uint32_t sc_filter_flags;
-	bool bridge_has_address;
-
-	if (sc == NULL) {
-		return 0;
-	}
-	m = *data;
-	is_broadcast = IS_BCAST_MCAST(m);
-
-	bridge_ifp = sc->sc_ifp;
-	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_INPUT,
-	    "%s %sfrom %s m 0x%llx data 0x%llx",
-	    bridge_ifp->if_xname, is_broadcast ? "bcast_mcast " : "",
-	    ifp->if_xname,
-	    (uint64_t)VM_KERNEL_ADDRPERM(m),
-	    (uint64_t)VM_KERNEL_ADDRPERM(mtod(m, void *)));
-	if ((bridge_ifp->if_flags & IFF_RUNNING) == 0) {
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_INPUT,
-		    "%s not running passing along",
-		    bridge_ifp->if_xname);
-		return 0;
-	}
-
-	vlan = VLANTAGOF(m);
-
-	if (!is_broadcast) {
-		/*
-		 * Need to clear the promiscuous flag otherwise it will be
-		 * dropped by DLIL after processing filters
-		 */
-		if ((m->m_flags & M_PROMISC) != 0) {
-			m->m_flags &= ~M_PROMISC;
-		} else {
-			is_ifp_mac = true;
-		}
-	}
-
-
-	/* copy the ethernet header */
-	eh_in = *(mtod(m, struct ether_header *));
-	dhost = eh_in.ether_dhost;
-
-	is_ip = ether_header_type_is_ip(&eh_in, &is_ipv4);
-
-	sc_filter_flags = sc->sc_filter_flags;
-	if (PF_IS_ENABLED && (sc_filter_flags & IFBF_FILT_MEMBER)) {
-		error = bridge_pf(data, ifp, sc_filter_flags, true);
-		m = *data;
-		if (error != 0 || m == NULL) {
-			return EJUSTRETURN;
-		}
-	}
-
-	BRIDGE_LOCK(sc);
-	bif = bridge_lookup_member_if(sc, ifp);
-	if (bif == NULL) {
-		BRIDGE_UNLOCK(sc);
-		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_INPUT,
-		    "%s bridge_lookup_member_if failed",
-		    bridge_ifp->if_xname);
-		return 0;
-	}
-	if (is_ip && bif_has_checksum_offload(bif)) {
-		error = bridge_get_ip_proto(data, mac_hlen, is_ipv4,
-		    &info, &bif->bif_stats.brms_in_ip);
-		if (error != 0) {
-			BRIDGE_LOG(LOG_NOTICE, BR_DBGF_CHECKSUM,
-			    "%s(%s) bridge_get_ip_proto failed %d",
-			    bridge_ifp->if_xname,
-			    bif->bif_ifp->if_xname, error);
-		} else {
-			/* need to compute IP/UDP/TCP/checksums */
-			error = bridge_offload_checksum(data, &info,
-			    &bif->bif_stats);
-			if (error != 0) {
-				BRIDGE_LOG(LOG_NOTICE, BR_DBGF_CHECKSUM,
-				    "%s(%s) bridge_offload_checksum failed %d",
-				    bridge_ifp->if_xname,
-				    bif->bif_ifp->if_xname, error);
-			}
-		}
-		if (error != 0) {
-			BRIDGE_UNLOCK(sc);
-			if (*data != NULL) {
-				m_freem(*data);
-				*data = NULL;
-			}
-			return EJUSTRETURN;
-		}
-		m = *data;
-	}
-
-	if (bif->bif_flags & BIFF_HOST_FILTER) {
-		error = bridge_host_filter(bif, data);
-		if (error != 0) {
-			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_INPUT,
-			    "%s bridge_host_filter failed",
-			    bif->bif_ifp->if_xname);
-			BRIDGE_UNLOCK(sc);
-			return EJUSTRETURN;
-		}
-		m = *data;
-	}
-
-	/*
-	 * A link-layer unicast packet directed at the MAC-NAT interface
-	 * could be an IP broadcast packet. An IP broadcast packet needs to
-	 * be forwarded like regular link-layer broadcast.
-	 */
-	if (sc->sc_mac_nat_bif == bif && is_ifp_mac && is_ip) {
-		is_ip_broadcast = is_broadcast_ip_packet(data);
-		m = *data;
-		if (m == NULL) {
-			BRIDGE_UNLOCK(sc);
-			return EJUSTRETURN;
-		}
-	}
-
-	bridge_span(sc, m);
-
-	if (is_broadcast || is_ip_broadcast) {
-		struct mbuf *mc;
-
-		if (IS_MCAST(m)) {
-			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MCAST,
-			    " multicast: "
-			    "%02x:%02x:%02x:%02x:%02x:%02x",
-			    dhost[0], dhost[1],
-			    dhost[2], dhost[3],
-			    dhost[4], dhost[5]);
-			/* Tap off 802.1D packets; they do not get forwarded. */
-			if (_ether_cmp(dhost, bstp_etheraddr) == 0) {
-#if BRIDGESTP
-				bstp_input(&bif->bif_stp, m);
-				m = NULL;
-#else /* !BRIDGESTP */
-				m_freem(m);
-				*data = m = NULL;
-#endif /* !BRIDGESTP */
-				if (m == NULL) {
-					BRIDGE_UNLOCK(sc);
-					return EJUSTRETURN;
-				}
-			}
-		} else if (is_broadcast) {
-			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MCAST,
-			    " broadcast: "
-			    "%02x:%02x:%02x:%02x:%02x:%02x",
-			    dhost[0], dhost[1],
-			    dhost[2], dhost[3],
-			    dhost[4], dhost[5]);
-		}
-
-		if ((bif->bif_ifflags & IFBIF_STP) &&
-		    bif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING) {
-			BRIDGE_UNLOCK(sc);
-			return 0;
-		}
-		/*
-		 * Make a deep copy of the packet and enqueue the copy
-		 * for bridge processing.
-		 */
-		mc = m_dup(m, M_DONTWAIT);
-		if (mc == NULL) {
-			BRIDGE_UNLOCK(sc);
-			return 0;
-		}
-		/*
-		 * Perform the bridge forwarding function with the copy.
-		 *
-		 * Note that bridge_forward calls BRIDGE_UNLOCK
-		 */
-		if (is_ip_broadcast) {
-			struct ether_header *eh;
-
-			/* make the copy look like it is actually broadcast */
-			mc->m_flags |= M_BCAST;
-			eh = mtod(mc, struct ether_header *);
-			bcopy(etherbroadcastaddr, eh->ether_dhost,
-			    ETHER_ADDR_LEN);
-		}
-
-		bridge_forward(sc, bif, mc);
-
-		/*
-		 * Reinject the mbuf as arriving on the bridge so we have a
-		 * chance at claiming multicast packets. We can not loop back
-		 * here from ether_input as a bridge is never a member of a
-		 * bridge.
-		 */
-		if (is_broadcast) {
-			VERIFY(bridge_ifp->if_bridge == NULL);
-			mc = m_dup(m, M_DONTWAIT);
-			if (mc != NULL) {
-				BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MCAST,
-				    "%s mcast for us", bridge_ifp->if_xname);
-				BRIDGE_BPF_TAP_IN(ifp, mc);
-				prepare_input_packet(bridge_ifp, mc);
-				ifnet_stat_increment_in(bridge_ifp, 1,
-				    mbuf_pkthdr_len(mc), 0);
-				dlil_input_packet_list(bridge_ifp, mc);
-			}
-		}
-
-		/* Return the original packet for local processing. */
-		return 0;
-	}
-
-	if ((bif->bif_ifflags & IFBIF_STP) &&
-	    bif->bif_stp.bp_state == BSTP_IFSTATE_DISCARDING) {
-		BRIDGE_UNLOCK(sc);
-		return 0;
-	}
-
-#define GRAB_OUR_PACKETS(iface)                                         \
-	/* It is destined for us. */                                    \
-	if (_ether_cmp(IF_LLADDR((iface)), dhost) == 0) {               \
-	        BRIDGE_BPF_TAP_IN(iface, m);                            \
-	        if (bif->bif_ifflags & IFBIF_LEARNING) {                \
-	                error = bridge_rtupdate(sc, eh_in.ether_shost,  \
-	                    vlan, bif, 0, IFBAF_DYNAMIC);               \
-	                if (error && bif->bif_addrmax) {                \
-	                        BRIDGE_UNLOCK(sc);                      \
-	                        m_freem(m);                             \
-	                        return (EJUSTRETURN);                   \
-	                }                                               \
-	        }                                                       \
-	        BRIDGE_UNLOCK(sc);                                      \
-	        inject_input_packet(iface, m);                          \
-	        return (EJUSTRETURN);                                   \
-	}                                                               \
-                                                                        \
-	/* We just received a packet that we sent out. */               \
-	if (_ether_cmp(IF_LLADDR((iface)), eh_in.ether_shost) == 0) {   \
-	        BRIDGE_UNLOCK(sc);                                      \
-	        m_freem(m);                                             \
-	        return (EJUSTRETURN);                                   \
-	}
-
-	/*
-	 * Unicast.
-	 */
-
-	/* handle MAC-NAT if enabled */
-	if (is_ifp_mac && sc->sc_mac_nat_bif == bif) {
-		ifnet_ref_t dst_if = NULL;
-
-		m = *data = bridge_mac_nat_input(sc, ifp, m, &dst_if);
-		if (m == NULL) {
-			/* packet was deallocated */
-			BRIDGE_UNLOCK(sc);
-			return EJUSTRETURN;
-		}
-		if (dst_if != NULL) {
-			/* need to forward the packet */
-			BRIDGE_UNLOCK(sc);
-			(void)bridge_enqueue(bridge_ifp, NULL,
-			    dst_if, m,
-			    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
-			return EJUSTRETURN;
-		}
-	}
-
-	/*
-	 * If the destination MAC matches the bridge interface, and
-	 * the bridge has an address assigned, or the address is
-	 * distinct from the receive interface, claim the packets
-	 * for the bridge interface.
-	 */
-	bridge_has_address = (sc->sc_flags & SCF_ADDRESS_ASSIGNED) != 0;
-	if (_ether_cmp(dhost, IF_LLADDR(bridge_ifp)) == 0 &&
-	    (bridge_has_address || _ether_cmp(dhost, IF_LLADDR(ifp)) != 0)) {
-		/*
-		 * If the interface is learning, and the source
-		 * address is valid and not multicast, record
-		 * the address.
-		 */
-		if (bif->bif_ifflags & IFBIF_LEARNING) {
-			(void) bridge_rtupdate(sc, eh_in.ether_shost,
-			    vlan, bif, 0, IFBAF_DYNAMIC);
-		}
-		BRIDGE_UNLOCK(sc);
-		bridge_interface_input(bridge_ifp, m, bridge_has_address);
-		return EJUSTRETURN;
-	}
-
-	/*
-	 * if the destination of the packet is for the MAC address of
-	 * the member interface itself, then we don't need to forward
-	 * it -- just pass it back.  Note that it'll likely just be
-	 * dropped by the stack, but if something else is bound to
-	 * the interface directly (for example, the wireless stats
-	 * protocol -- although that actually uses BPF right now),
-	 * then it will consume the packet
-	 *
-	 * ALSO, note that we do this check AFTER checking for the
-	 * bridge's own MAC address, because the bridge may be
-	 * using the SAME MAC address as one of its interfaces
-	 */
-	if (is_ifp_mac) {
-		BRIDGE_UNLOCK(sc);
-		return 0;
-	}
-
-	/* Now check the remaining bridge members. */
-	TAILQ_FOREACH(bif2, &sc->sc_iflist, bif_next) {
-		if (bif2->bif_ifp != ifp) {
-			GRAB_OUR_PACKETS(bif2->bif_ifp);
-		}
-	}
-
-#undef GRAB_OUR_PACKETS
-
-	/*
-	 * Perform the bridge forwarding function.
-	 *
-	 * Note that bridge_forward calls BRIDGE_UNLOCK
-	 */
-	bridge_forward(sc, bif, m);
-
-	return EJUSTRETURN;
 }
 
 /*
@@ -6506,7 +5991,7 @@ bridge_input(struct ifnet *ifp, mbuf_t *data)
  */
 static void
 bridge_broadcast(struct bridge_softc *sc, struct bridge_iflist * sbif,
-    struct mbuf *m)
+    ether_type_flag_t etypef, mbuf_t m)
 {
 	ifnet_t bridge_ifp;
 	struct bridge_iflist *dbif;
@@ -6661,7 +6146,7 @@ bridge_broadcast(struct bridge_softc *sc, struct bridge_iflist * sbif,
 			}
 			if (mc != NULL) {
 				(void) bridge_enqueue(bridge_ifp,
-				    NULL, dst_if, mc, cksum_op);
+				    NULL, dst_if, etypef, mc, cksum_op);
 			}
 		}
 
@@ -6712,13 +6197,13 @@ copy_packet_list(mbuf_t m)
  * bridge_broadcast_list:
  *
  *      Broadcast a list of packets to all members except `sbif`.
- *      If `need_copy` is false, consumes `m` before returning.
+ *      Consumes `m` before returning.
  *
  *	NOTE: Releases the lock on return.
  */
 static void
 bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
-    ether_type_flag_t etypef, mbuf_t m, bool need_copy)
+    ether_type_flag_t etypef, mbuf_t m)
 {
 	bool                    bridge_has_address;
 	ifnet_t                 bridge_ifp;
@@ -6737,7 +6222,21 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 	bridge_ifp = sc->sc_ifp;
 	if (sbif != NULL) {
 		src_if = sbif->bif_ifp;
-		cksum_op = CHECKSUM_OPERATION_CLEAR_OFFLOAD;
+
+		if (ether_type_flag_is_ip(etypef) && bif_uses_virtio(sbif)) {
+			bool    is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
+
+			/* compute checksum on packets marked with offload */
+			m = bridge_checksum_offload_list(bridge_ifp, sbif,
+			    m, is_ipv4);
+			if (m == NULL) {
+				BRIDGE_UNLOCK(sc);
+				goto done;
+			}
+			cksum_op = CHECKSUM_OPERATION_NONE;
+		} else {
+			cksum_op = CHECKSUM_OPERATION_CLEAR_OFFLOAD;
+		}
 
 		/*
 		 * If MAC-NAT is enabled and we'll be sending the packets
@@ -6827,7 +6326,7 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 			/* translated copy was created above, use that */
 			out_m = out_mac_nat;
 			out_mac_nat = NULL;
-		} else if (!need_copy && TAILQ_NEXT(dbif, bif_next) == NULL) {
+		} else if (TAILQ_NEXT(dbif, bif_next) == NULL) {
 			/* consume `m` */
 			out_m = m;
 			used = true;
@@ -6863,10 +6362,13 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 			    ether_type_flag_is_ip(etypef) &&
 			    bif_has_checksum_offload(dbif) &&
 			    !bif_has_checksum_offload(sbif)) {
-				out_m = bridge_verify_checksum_list(out_m, dbif);
+				bool is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
+
+				out_m = bridge_verify_checksum_list(bridge_ifp,
+				    dbif, out_m, is_ipv4);
 			}
 			if (out_m != NULL) {
-				bridge_enqueue_multi(bridge_ifp, src_if, dst_if,
+				bridge_enqueue(bridge_ifp, src_if, dst_if,
 				    etypef, out_m, cksum_op);
 			}
 		}
@@ -6883,16 +6385,34 @@ done:
 	if (out_mac_nat != NULL) {
 		m_freem_list(out_mac_nat);
 	}
-	if (!need_copy && !used) {
+	if (!used) {
 		m_freem_list(m);
 	}
 	return;
+}
+
+#define NEEDED_CSUM_IPV4   (IF_HWASSIST_CSUM_UDP | IF_HWASSIST_CSUM_TCP)
+#define NEEDED_CSUM_IPV6   (IF_HWASSIST_CSUM_UDPIPV6 | IF_HWASSIST_CSUM_TCPIPV6)
+
+static bool
+interface_supports_hw_checksum(ifnet_t ifp, bool is_ipv4)
+{
+	uint32_t        hwcap = IF_HWASSIST_CSUM_FLAGS(ifp->if_hwassist);
+	uint32_t        needed = is_ipv4 ? NEEDED_CSUM_IPV4 : NEEDED_CSUM_IPV6;
+	bool            supports;
+
+	supports = (hwcap & needed) == needed;
+	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM, "%s: does %ssupport checksum",
+	    ifp->if_xname, supports ? "" : "not ");
+	return supports;
 }
 
 static void
 bridge_forward_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
     ifnet_t dst_if, ether_type_flag_t etypef, mbuf_t m)
 {
+	bool                    checksum_ok = false;
+	ChecksumOperation       cksum_op;
 	ifnet_t                 bridge_ifp;
 	struct bridge_iflist *  dbif;
 	uint32_t                sc_filter_flags;
@@ -6911,25 +6431,42 @@ bridge_forward_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 	if ((sbif->bif_ifflags & dbif->bif_ifflags & IFBIF_PRIVATE) != 0) {
 		goto drop;
 	}
+	bridge_ifp = sc->sc_ifp;
+	src_if = sbif->bif_ifp;
+	cksum_op = CHECKSUM_OPERATION_CLEAR_OFFLOAD;
+	if (ether_type_flag_is_ip(etypef) && bif_uses_virtio(sbif)) {
+		bool    is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
+
+		if (dbif == sc->sc_mac_nat_bif ||
+		    (IFNET_IS_VMNET(dst_if) && !bif_uses_virtio(dbif)) ||
+		    !interface_supports_hw_checksum(dst_if, is_ipv4)) {
+			/* compute checksums now if necessary */
+			m = bridge_checksum_offload_list(bridge_ifp, sbif,
+			    m, is_ipv4);
+			checksum_ok = true;
+		} else {
+			cksum_op = CHECKSUM_OPERATION_NONE;
+		}
+	}
+
 	if (dbif == sc->sc_mac_nat_bif) {
 		/* translate the packets before forwarding them */
 		if ((etypef & ETHER_TYPE_FLAG_IP_ARP) != 0) {
 			m = bridge_mac_nat_translate_list(sc, sbif, dst_if, m);
 		}
-	} else if (ether_type_flag_is_ip(etypef) &&
-	    bif_has_checksum_offload(dbif) &&
-	    !bif_has_checksum_offload(sbif)) {
+	} else if (!checksum_ok && ether_type_flag_is_ip(etypef) &&
+	    bif_has_checksum_offload(dbif) && !bif_has_checksum_offload(sbif)) {
+		bool    is_ipv4 = (etypef == ETHER_TYPE_FLAG_IPV4);
+
 		/*
 		 * If the destination interface has checksum offload enabled,
 		 * verify the checksum now, unless the source interface also has
 		 * checksum offload enabled. The checksum in that case has
 		 * already just been computed and verifying it is unnecessary.
 		 */
-		m = bridge_verify_checksum_list(m, dbif);
+		m = bridge_verify_checksum_list(bridge_ifp, dbif, m, is_ipv4);
 	}
 	sc_filter_flags = sc->sc_filter_flags;
-	bridge_ifp = sc->sc_ifp;
-	src_if = sbif->bif_ifp;
 	BRIDGE_UNLOCK(sc);
 	if (PF_IS_ENABLED && (sc_filter_flags & IFBF_FILT_MEMBER)) {
 		m = bridge_pf_list(m, dst_if, sc_filter_flags, false);
@@ -6937,11 +6474,13 @@ bridge_forward_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 
 	/*
 	 * We're forwarding inbound packets for which the checksums must
-	 * already have been computed and if required, verified.
+	 * already have been computed and if required, verified, or
+	 * packets from a virtio-enabled interface for which we rely
+	 * on the packet containing appropriate offload flags.
 	 */
 	if (m != NULL) {
-		bridge_enqueue_multi(bridge_ifp, src_if, dst_if, etypef, m,
-		    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
+		bridge_enqueue(bridge_ifp, src_if, dst_if, etypef, m,
+		    cksum_op);
 	}
 	return;
 
@@ -6958,7 +6497,7 @@ drop:
  *	the original mbuf is unmodified.
  */
 static void
-bridge_span(struct bridge_softc *sc, struct mbuf *m)
+bridge_span(struct bridge_softc *sc, ether_type_flag_t etypef, struct mbuf *m)
 {
 	struct bridge_iflist *bif;
 	struct ifnet *dst_if;
@@ -6981,7 +6520,7 @@ bridge_span(struct bridge_softc *sc, struct mbuf *m)
 			continue;
 		}
 
-		(void) bridge_enqueue(sc->sc_ifp, NULL, dst_if, mc,
+		(void) bridge_enqueue(sc->sc_ifp, NULL, dst_if, etypef, mc,
 		    CHECKSUM_OPERATION_NONE);
 	}
 }
@@ -7088,8 +6627,9 @@ bridge_rtupdate(struct bridge_softc *sc, const uint8_t dst[ETHER_ADDR_LEN], uint
  *
  *	Lookup the destination interface for an address.
  */
-static struct ifnet *
-bridge_rtlookup(struct bridge_softc *sc, const uint8_t addr[ETHER_ADDR_LEN], uint16_t vlan)
+static struct bridge_iflist *
+bridge_rtlookup_bif(struct bridge_softc *sc, const uint8_t addr[ETHER_ADDR_LEN],
+    uint16_t vlan)
 {
 	struct bridge_rtnode *brt;
 
@@ -7099,7 +6639,7 @@ bridge_rtlookup(struct bridge_softc *sc, const uint8_t addr[ETHER_ADDR_LEN], uin
 		return NULL;
 	}
 
-	return brt->brt_ifp;
+	return brt->brt_dst;
 }
 
 /*
@@ -7707,57 +7247,6 @@ bridge_link_event(struct ifnet *ifp, u_int32_t event_code)
 	        error = EINVAL;                                         \
 	}
 
-/*
- * Make sure this is a DHCP or Bootp request that match the host filter
- */
-static int
-bridge_dhcp_filter(struct bridge_iflist *bif, struct mbuf *m, size_t offset)
-{
-	int error = EINVAL;
-	struct dhcp dhcp;
-
-	/*
-	 * Note: We use the dhcp structure because bootp structure definition
-	 * is larger and some vendors do not pad the request
-	 */
-	error = mbuf_copydata(m, offset, sizeof(struct dhcp), &dhcp);
-	if (error != 0) {
-		BRIDGE_HF_DROP(brhf_dhcp_too_small, __func__, __LINE__);
-		goto done;
-	}
-	if (dhcp.dp_op != BOOTREQUEST) {
-		BRIDGE_HF_DROP(brhf_dhcp_bad_op, __func__, __LINE__);
-		goto done;
-	}
-	/*
-	 * The hardware address must be an exact match
-	 */
-	if (dhcp.dp_htype != ARPHRD_ETHER) {
-		BRIDGE_HF_DROP(brhf_dhcp_bad_htype, __func__, __LINE__);
-		goto done;
-	}
-	if (dhcp.dp_hlen != ETHER_ADDR_LEN) {
-		BRIDGE_HF_DROP(brhf_dhcp_bad_hlen, __func__, __LINE__);
-		goto done;
-	}
-	if (bcmp(dhcp.dp_chaddr, bif->bif_hf_hwsrc,
-	    ETHER_ADDR_LEN) != 0) {
-		BRIDGE_HF_DROP(brhf_dhcp_bad_chaddr, __func__, __LINE__);
-		goto done;
-	}
-	/*
-	 * Client address must match the host address or be not specified
-	 */
-	if (dhcp.dp_ciaddr.s_addr != bif->bif_hf_ipsrc.s_addr &&
-	    dhcp.dp_ciaddr.s_addr != INADDR_ANY) {
-		BRIDGE_HF_DROP(brhf_dhcp_bad_ciaddr, __func__, __LINE__);
-		goto done;
-	}
-	error = 0;
-done:
-	return error;
-}
-
 static int
 bridge_host_filter_arp(struct bridge_iflist *bif, mbuf_t *data)
 {
@@ -7842,174 +7331,6 @@ bridge_host_filter_arp(struct bridge_iflist *bif, mbuf_t *data)
 	bridge_hostfilter_stats.brhf_arp_ok += 1;
 	error = 0;
 done:
-	return error;
-}
-
-static int
-bridge_host_filter(struct bridge_iflist *bif, mbuf_t *data)
-{
-	int error = EINVAL;
-	struct ether_header *eh;
-	mbuf_t m = *data;
-
-	eh = mtod(m, struct ether_header *);
-
-	/*
-	 * Restrict the source hardware address
-	 */
-	if ((bif->bif_flags & BIFF_HF_HWSRC) != 0 &&
-	    bcmp(eh->ether_shost, bif->bif_hf_hwsrc,
-	    ETHER_ADDR_LEN) != 0) {
-		BRIDGE_HF_DROP(brhf_bad_ether_srchw_addr, __func__, __LINE__);
-		goto done;
-	}
-
-	/*
-	 * Restrict Ethernet protocols to ARP and IP/IPv6
-	 */
-	if (eh->ether_type == htons(ETHERTYPE_ARP)) {
-		error = bridge_host_filter_arp(bif, data);
-		if (error != 0) {
-			goto done;
-		}
-	} else if (eh->ether_type == htons(ETHERTYPE_IP)) {
-		size_t minlen = sizeof(struct ether_header) + sizeof(struct ip);
-		struct ip iphdr;
-		size_t offset;
-
-		/*
-		 * Make the Ethernet and IP headers contiguous
-		 */
-		if (mbuf_pkthdr_len(m) < minlen) {
-			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
-			goto done;
-		}
-		offset = sizeof(struct ether_header);
-		error = mbuf_copydata(m, offset, sizeof(struct ip), &iphdr);
-		if (error != 0) {
-			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
-			goto done;
-		}
-		if ((bif->bif_flags & BIFF_HF_IPSRC) != 0) {
-			/*
-			 * Verify the source IP address
-			 */
-			if (iphdr.ip_p == IPPROTO_UDP) {
-				struct udphdr udp;
-
-				minlen += sizeof(struct udphdr);
-				if (mbuf_pkthdr_len(m) < minlen) {
-					BRIDGE_HF_DROP(brhf_ip_too_small,
-					    __func__, __LINE__);
-					goto done;
-				}
-
-				/*
-				 * Allow all zero addresses for DHCP requests
-				 */
-				if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr &&
-				    iphdr.ip_src.s_addr != INADDR_ANY) {
-					BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
-					    __func__, __LINE__);
-					goto done;
-				}
-				offset = sizeof(struct ether_header) +
-				    (IP_VHL_HL(iphdr.ip_vhl) << 2);
-				error = mbuf_copydata(m, offset,
-				    sizeof(struct udphdr), &udp);
-				if (error != 0) {
-					BRIDGE_HF_DROP(brhf_ip_too_small,
-					    __func__, __LINE__);
-					goto done;
-				}
-				/*
-				 * Either it's a Bootp/DHCP packet that we like or
-				 * it's a UDP packet from the host IP as source address
-				 */
-				if (udp.uh_sport == htons(IPPORT_BOOTPC) &&
-				    udp.uh_dport == htons(IPPORT_BOOTPS)) {
-					minlen += sizeof(struct dhcp);
-					if (mbuf_pkthdr_len(m) < minlen) {
-						BRIDGE_HF_DROP(brhf_ip_too_small,
-						    __func__, __LINE__);
-						goto done;
-					}
-					offset += sizeof(struct udphdr);
-					error = bridge_dhcp_filter(bif, m, offset);
-					if (error != 0) {
-						goto done;
-					}
-				} else if (iphdr.ip_src.s_addr == INADDR_ANY) {
-					BRIDGE_HF_DROP(brhf_ip_bad_srcaddr,
-					    __func__, __LINE__);
-					goto done;
-				}
-			} else if (iphdr.ip_src.s_addr != bif->bif_hf_ipsrc.s_addr) {
-				assert(bif->bif_hf_ipsrc.s_addr != INADDR_ANY);
-				BRIDGE_HF_DROP(brhf_ip_bad_srcaddr, __func__, __LINE__);
-				goto done;
-			}
-		}
-		/*
-		 * Allow only boring IP protocols
-		 */
-		if (iphdr.ip_p != IPPROTO_TCP &&
-		    iphdr.ip_p != IPPROTO_UDP &&
-		    iphdr.ip_p != IPPROTO_ICMP &&
-		    iphdr.ip_p != IPPROTO_IGMP) {
-			BRIDGE_HF_DROP(brhf_ip_bad_proto, __func__, __LINE__);
-			goto done;
-		}
-		bridge_hostfilter_stats.brhf_ip_ok += 1;
-		error = 0;
-	} else if (eh->ether_type == htons(ETHERTYPE_IPV6)) {
-		size_t minlen = sizeof(struct ether_header) + sizeof(struct ip6_hdr);
-		struct ip6_hdr ip6hdr;
-		size_t offset;
-
-		/*
-		 * Make the Ethernet and IP headers contiguous
-		 */
-		if (mbuf_pkthdr_len(m) < minlen) {
-			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
-			goto done;
-		}
-		offset = sizeof(struct ether_header);
-		error = mbuf_copydata(m, offset, sizeof(struct ip6_hdr), &ip6hdr);
-		if (error != 0) {
-			BRIDGE_HF_DROP(brhf_ip_too_small, __func__, __LINE__);
-			goto done;
-		}
-		/*
-		 * Allow only boring IPv6 protocols
-		 */
-		if (ip6hdr.ip6_nxt != IPPROTO_TCP &&
-		    ip6hdr.ip6_nxt != IPPROTO_UDP &&
-		    ip6hdr.ip6_nxt != IPPROTO_ICMPV6) {
-			BRIDGE_HF_DROP(brhf_ip_bad_proto, __func__, __LINE__);
-			goto done;
-		}
-		bridge_hostfilter_stats.brhf_ip_ok += 1;
-		error = 0;
-	} else {
-		BRIDGE_HF_DROP(brhf_bad_ether_type, __func__, __LINE__);
-		goto done;
-	}
-done:
-	if (error != 0) {
-		if (BRIDGE_DBGF_ENABLED(BR_DBGF_HOSTFILTER)) {
-			if (m) {
-				brlog_mbuf_data(m, 0,
-				    sizeof(struct ether_header) +
-				    sizeof(struct ip));
-			}
-		}
-
-		if (m != NULL) {
-			m_freem(m);
-			*data = NULL;
-		}
-	}
 	return error;
 }
 
@@ -8592,32 +7913,6 @@ get_ether_ip_header_ptr(mbuf_t *data, boolean_t is_output)
 	header = mtod(*data, uint8_t *);
 done:
 	return header;
-}
-
-static bool
-is_broadcast_ip_packet(mbuf_t *data)
-{
-	uint8_t                 *header;
-	struct ether_header     *eh;
-	bool                    is_broadcast = FALSE;
-
-	eh = mtod(*data, struct ether_header *);
-	switch (eh->ether_type) {
-	case HTONS_ETHERTYPE_IP:
-		header = get_ether_ip_header_ptr(data, FALSE);
-		if (header != NULL) {
-			struct in_addr  dst;
-			struct ip       *iphdr;
-
-			iphdr = (struct ip *)(header + sizeof(struct ether_header));
-			bcopy(&iphdr->ip_dst, &dst, sizeof(dst));
-			is_broadcast = (dst.s_addr == INADDR_BROADCAST);
-		}
-		break;
-	default:
-		break;
-	}
-	return is_broadcast;
 }
 
 static struct mac_nat_entry *
@@ -9290,7 +8585,7 @@ bridge_mac_nat_forward_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
 			    "(%s): sublist %u pkts %u",
 			    dst_if->if_xname, n_lists, count);
-			bridge_enqueue_multi(bridge_ifp, NULL,
+			bridge_enqueue(bridge_ifp, NULL,
 			    dst_if, etypef, list.head,
 			    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
 
@@ -9308,7 +8603,7 @@ bridge_mac_nat_forward_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_MAC_NAT,
 			    "(%s): sublist %u pkts %u",
 			    dst_if->if_xname, n_lists, count);
-			bridge_enqueue_multi(bridge_ifp, NULL,
+			bridge_enqueue(bridge_ifp, NULL,
 			    dst_if, etypef, list.head,
 			    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
 		}
@@ -9962,7 +9257,6 @@ bridge_filter_checksum(ifnet_t bridge_ifp, struct bridge_iflist * bif, mbuf_t m,
 	if (checksum) {
 		dbgf |= BR_DBGF_CHECKSUM;
 	}
-
 	/* get the IP protocol header */
 	error = bridge_get_ip_proto(&m, mac_hlen, is_ipv4, &info,
 	    &bif->bif_stats.brms_in_ip);
@@ -10047,6 +9341,38 @@ bridge_filter_checksum_list(ifnet_t bridge_ifp, struct bridge_iflist * bif,
 		}
 	}
 	return ret;
+}
+
+static mbuf_t
+bridge_checksum_offload_list(ifnet_t bridge_ifp, struct bridge_iflist * bif,
+    mbuf_t m, bool is_ipv4)
+{
+	mblist          ret;
+	mbuf_t          next_packet;
+
+	mblist_init(&ret);
+	for (mbuf_t scan = m; scan != NULL; scan = next_packet) {
+		uint32_t        csum_flags;
+
+		/* take it out of the list */
+		next_packet = scan->m_nextpkt;
+		scan->m_nextpkt = NULL;
+
+		csum_flags = scan->m_pkthdr.csum_flags;
+		if ((csum_flags & checksum_request_flags) != 0) {
+			/* compute the checksum now */
+			scan = bridge_filter_checksum(bridge_ifp, bif, scan,
+			    is_ipv4, false, true);
+			if (scan != NULL) {
+				/* clear offload now */
+				scan->m_pkthdr.csum_flags &= csum_flags;
+			}
+		}
+		if (scan != NULL) {
+			mblist_append(&ret, scan);
+		}
+	}
+	return ret.head;
 }
 
 static mbuf_t
@@ -10146,7 +9472,6 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
     struct ether_header * eh_in_p, mblist list, bool is_promisc)
 {
 	struct bridge_iflist *  bif;
-	bool                    bridge_has_address;
 	ifnet_t                 bridge_ifp;
 	bool                    checksum_offload;
 	uint8_t *               dhost;
@@ -10164,6 +9489,7 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 	bool                    is_ifp_mac;
 	ifnet_t                 member_input = NULL;
 	uint8_t *               shost;
+	bool                    uses_virtio = false;
 	uint16_t                vlan;
 
 	if (ifp->if_bridge == NULL) {
@@ -10201,6 +9527,8 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 		    bridge_ifp->if_xname);
 		goto done;
 	}
+
+	uses_virtio = bif_uses_virtio(bif);
 
 	/*
 	 * host filter drops packets that:
@@ -10341,15 +9669,12 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 	}
 
 	/*
-	 * If the destination MAC matches the bridge interface, and
-	 * the bridge has an address assigned, or the address is
-	 * distinct from the receive interface, claim the packets
-	 * for the bridge interface.
+	 * If the bridge has an address assigned, and the destination MAC
+	 * matches the bridge interface, claim the packets for the bridge
+	 * interface.
 	 */
-	bridge_has_address = (sc->sc_flags & SCF_ADDRESS_ASSIGNED) != 0;
-	if (!is_broadcast &&
-	    _ether_cmp(dhost, IF_LLADDR(bridge_ifp)) == 0 &&
-	    (bridge_has_address || _ether_cmp(dhost, IF_LLADDR(ifp)) != 0)) {
+	if ((sc->sc_flags & SCF_ADDRESS_ASSIGNED) != 0 &&
+	    !is_broadcast && _ether_cmp(dhost, IF_LLADDR(bridge_ifp)) == 0) {
 		is_bridge_mac = true;
 	}
 	if (is_ifp_mac) {
@@ -10365,8 +9690,8 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 			if (ip_bcast != NULL) {
 				/* forward to all members except this one */
 				/* bridge_broadcast_list unlocks */
-				bridge_broadcast_list(sc, bif, etypef, ip_bcast,
-				    false);
+				bridge_broadcast_list(sc, bif, etypef,
+				    ip_bcast);
 			} else {
 				BRIDGE_UNLOCK(sc);
 			}
@@ -10410,8 +9735,15 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 		}
 	}
 	if (dst_if == NULL) {
-		/* bridge_broadcast_list() copies list and unlocks */
-		bridge_broadcast_list(sc, bif, etypef, list.head, true);
+		mbuf_t  m;
+
+		m = copy_packet_list(list.head);
+		if (m != NULL) {
+			/* bridge_broadcast_list unlocks */
+			bridge_broadcast_list(sc, bif, etypef, m);
+		} else {
+			BRIDGE_UNLOCK(sc);
+		}
 	} else {
 		/* bridge_forward_list() consumes list and unlocks */
 		bridge_forward_list(sc, bif, dst_if, etypef, list.head);
@@ -10427,7 +9759,7 @@ done:
 		} else if (is_bridge_mac) {
 			/* bridge consumes all the unicast packets */
 			bridge_interface_input_list(bridge_ifp, etypef, list,
-			    bridge_has_address);
+			    uses_virtio);
 			list.head = list.tail = NULL;
 		} else {
 			adjust_input_packet_list(list.head);
@@ -10484,22 +9816,6 @@ bridge_pf_list(mbuf_t m, ifnet_t ifp, uint32_t sc_filter_flags, bool input)
 		}
 	}
 	return ret.head;
-}
-
-static inline bool
-get_and_clear_promisc(mbuf_t m)
-{
-	bool    is_promisc;
-
-	/*
-	 * Need to clear the promiscuous flag otherwise the packet will be
-	 * dropped by DLIL after processing filters
-	 */
-	is_promisc = (mbuf_flags(m) & MBUF_PROMISC) != 0;
-	if (is_promisc) {
-		mbuf_setflags_mask(m, 0, MBUF_PROMISC);
-	}
-	return is_promisc;
 }
 
 static inline bool
@@ -10676,7 +9992,7 @@ bridge_early_input(struct ifnet *ifp, mbuf_t in_list, u_int32_t cnt)
  */
 
 static mblist
-m_seg(struct mbuf *m0, int hdr_len, int mss, char * hdr2_buf, int hdr2_len)
+m_seg(struct mbuf *m0, int hdr_len, int mss, char * hdr2_buf __sized_by_or_null(hdr2_len), int hdr2_len)
 {
 	int off = 0, n, firstlen;
 	struct mbuf *mseg;
@@ -10701,7 +10017,7 @@ m_seg(struct mbuf *m0, int hdr_len, int mss, char * hdr2_buf, int hdr2_len)
 
 	off = hdr_len + mss;
 	firstlen = mss; /* first segment stored in the original mbuf */
-
+	ret.bytes = off;
 	for (n = 1; off < total_len; off += mss, n++) {
 		struct mbuf *m;
 		/*
@@ -10989,23 +10305,53 @@ gso_ip_tcp(ifnet_t ifp, mbuf_t m0, struct gso_ip_tcp_state *state, bool is_tx)
 #ifdef GSO_STATS
 	int total_len = m0->m_pkthdr.len;
 #endif /* GSO_STATS */
-	mblist seg;
+	mblist  seg;
 
-#if 1
-	/* hack: we don't get MSS via packet metadata */
-	u_int reduce_mss;
+	mss = _mbuf_get_tso_mss(m0);
+	if (mss == 0 && !is_tx) {
+		uint8_t seg_cnt = m0->m_pkthdr.rx_seg_cnt;
 
-	reduce_mss = is_tx ? if_bridge_tso_reduce_mss_tx
-	    : if_bridge_tso_reduce_mss_forwarding;
-	mss = ifp->if_mtu - state->ip_hlen - state->tcp_hlen - reduce_mss;
-	assert(mss > 0);
-#else
-	if (m0->m_pkthdr.csum_flags & ifp->if_hwassist & CSUM_TSO) {/* TSO with GSO */
-		mss = ifp->if_hw_tsomax - state->ip_hlen - state->tcp_hlen;
-	} else {
-		mss = m0->m_pkthdr.tso_segsz;
+		if (seg_cnt != 0) {
+			uint32_t        hdr_len;
+			uint32_t        len;
+
+			/* approximate the MSS using LRO seg cnt */
+			hdr_len = state->ip_hlen + state->tcp_hlen;
+			len = mbuf_pkthdr_len(m0) - hdr_len - ETHER_HDR_LEN;
+			mss = len / seg_cnt;
+			m0->m_pkthdr.rx_seg_cnt = 0;
+			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+			    "%s: mss %d = len %d / seg cnt %d",
+			    ifp->if_xname, mss, len, seg_cnt);
+		}
 	}
-#endif
+	if (mss == 0) {
+		/* hack: we don't have the actual MSS */
+		u_int reduce_mss;
+
+		reduce_mss = is_tx ? if_bridge_tso_reduce_mss_tx
+		    : if_bridge_tso_reduce_mss_forwarding;
+		mss = ifp->if_mtu - state->ip_hlen - state->tcp_hlen -
+		    reduce_mss;
+		assert(mss > 0);
+	} else if (is_tx) {
+		bool    is_ipv4;
+		bool    do_tso = true;
+
+		if (TSO_IPV4_OK(ifp, m0)) {
+			is_ipv4 = true;
+		} else if (TSO_IPV6_OK(ifp, m0)) {
+			is_ipv4 = false;
+		} else {
+			do_tso = false;
+		}
+		if (do_tso) { /* TSO with GSO */
+			uint32_t        if_tso_max;
+
+			if_tso_max = get_if_tso_mtu(ifp, is_ipv4);
+			mss = if_tso_max - state->ip_hlen - state->tcp_hlen;
+		}
+	}
 	seg = m_seg(m0, state->hlen, mss, 0, 0);
 	if (seg.head == NULL || seg.head->m_nextpkt == NULL) {
 		return seg;
@@ -11055,19 +10401,38 @@ gso_ip_tcp(ifnet_t ifp, mbuf_t m0, struct gso_ip_tcp_state *state, bool is_tx)
  * GSO for TCP/IPv[46]
  */
 static mblist
+gso_tcp_with_info(ifnet_t ifp, mbuf_t m, ip_packet_info_t info_p,
+    u_int mac_hlen, bool is_ipv4, bool is_tx)
+{
+	uint32_t csum_flags;
+	struct gso_ip_tcp_state state;
+	struct tcphdr *tcp;
+
+	assert(info_p->ip_proto_hdr != NULL);
+	tcp = (struct tcphdr *)(void *)info_p->ip_proto_hdr;
+	gso_ip_tcp_init_state(&state, ifp, is_ipv4, mac_hlen,
+	    info_p->ip_hlen + info_p->ip_opt_len,
+	    info_p->ip_hdr, info_p->ip_m0_len, tcp);
+	csum_flags = is_ipv4 ? CSUM_DELAY_DATA : CSUM_DELAY_IPV6_DATA; /* XXX */
+	m->m_pkthdr.csum_flags = csum_flags;
+	m->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
+	return gso_ip_tcp(ifp, m, &state, is_tx);
+}
+
+static mblist
 gso_tcp(ifnet_t ifp, mbuf_t m, u_int mac_hlen, bool is_ipv4, bool is_tx)
 {
 	int error;
-	ip_packet_info  info;
-	uint32_t csum_flags;
-	struct gso_ip_tcp_state state;
+	ip_packet_info info;
 	struct bripstats stats; /* XXX ignored */
-	struct tcphdr *tcp;
 	mblist ret;
 
-	mblist_init(&ret);
 	error = bridge_get_tcp_header(&m, mac_hlen, is_ipv4, &info, &stats);
 	if (error != 0) {
+		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+		    "%s bridge_get_tcp_header failed %d (%s)",
+		    ifp->if_xname, error,
+		    is_tx ? "TX" : "RX");
 		if (m != NULL) {
 			m_freem(m);
 			m = NULL;
@@ -11078,36 +10443,13 @@ gso_tcp(ifnet_t ifp, mbuf_t m, u_int mac_hlen, bool is_ipv4, bool is_tx)
 		/* not actually a TCP packet, no segmentation */
 		goto no_segment;
 	}
-	tcp = (struct tcphdr *)(void *)info.ip_proto_hdr;
-	gso_ip_tcp_init_state(&state, ifp, is_ipv4, mac_hlen,
-	    info.ip_hlen + info.ip_opt_len, info.ip_hdr, info.ip_m0_len, tcp);
-	if (is_ipv4) {
-		csum_flags = CSUM_DELAY_DATA; /* XXX */
-		if (!is_tx) {
-			/* if RX to our local IP address, don't segment */
-			struct in_addr  dst_ip;
-
-			bcopy(&((struct ip *)state.hdr)->ip_dst, &dst_ip, sizeof(dst_ip));
-			if (in_addr_is_ours(dst_ip)) {
-				goto no_segment;
-			}
-		}
-	} else {
-		csum_flags = CSUM_DELAY_IPV6_DATA; /* XXX */
-		if (!is_tx) {
-			/* if RX to our local IP address, don't segment */
-			if (in6_addr_is_ours(&((struct ip6_hdr *)state.hdr)->ip6_dst,
-			    ifp->if_index)) {
-				/* local IP address, no need to segment */
-				goto no_segment;
-			}
-		}
+	if (!is_tx && ip_packet_info_dst_is_our_ip(&info, ifp->if_index)) {
+		goto no_segment;
 	}
-	m->m_pkthdr.csum_flags = csum_flags;
-	m->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
-	return gso_ip_tcp(ifp, m, &state, is_tx);
+	return gso_tcp_with_info(ifp, m, &info, mac_hlen, is_ipv4, is_tx);
 
 no_segment:
+	mblist_init(&ret);
 	if (m != NULL) {
 		mblist_append(&ret, m);
 	}

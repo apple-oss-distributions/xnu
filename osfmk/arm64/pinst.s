@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <arm64/asm.h>
 #include <pexpert/arm64/board_config.h>
 #include <arm64/proc_reg.h>
 
@@ -84,21 +85,25 @@ _pinst_set_sctlr_trap_addr:
 
 	.globl _pinst_set_ttbr1
 _pinst_set_ttbr1:
+	ARM64_PROLOG
 	check_instruction x2, x3, __pinst_set_ttbr1, 0xd65f03c0d5182020
 	b __pinst_set_ttbr1
 
 	.globl _pinst_set_vbar
 _pinst_set_vbar:
+	ARM64_PROLOG
 	check_instruction x2, x3, __pinst_set_vbar, 0xd65f03c0d518c000
 	b __pinst_set_vbar
 
 	.globl _pinst_set_tcr
 _pinst_set_tcr:
+	ARM64_PROLOG
 	check_instruction x2, x3, __pinst_set_tcr, 0xd65f03c0d5182040
 	b __pinst_set_tcr
 
 	.globl _pinst_set_sctlr
 _pinst_set_sctlr:
+	ARM64_PROLOG
 	check_instruction x2, x3, __pinst_set_sctlr, 0xd65f03c0d5181000
 	b __pinst_set_sctlr
 
@@ -120,6 +125,7 @@ __pinst_spsel_1:
 
 	.globl _pinst_spsel_1
 _pinst_spsel_1:
+	ARM64_PROLOG
 	check_instruction x2, x3, __pinst_spsel_1, 0xd65f03c0d50041bf
 	b __pinst_spsel_1
 

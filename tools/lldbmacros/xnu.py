@@ -179,7 +179,7 @@ def _format_exc(exc, vt):
 
 _RADAR_URL = "rdar://new/problem?title=LLDB%20macro%20failed%3A%20{}&attachments={}"
 
-def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
+def diagnostic_report(result, exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
     """ Collect diagnostic report for radar submission.
 
         @param exc (Exception type)
@@ -205,6 +205,7 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
     print()
 
     if not debug_opts:
+        result.SetError(f"{type(exc).__name__}: {exc}")
         raise exc
 
     #
@@ -219,14 +220,14 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
         print()
 
     #
-    # Construct tar.gz bundle for radar attachement
+    # Construct tar bundle for radar attachement
     #
     if "--radar" in debug_opts:
         import tarfile, urllib.parse
         print("Creating radar bundle ...")
 
         itime = int(time.time())
-        tar_fname = "/tmp/debug.{:d}.tar.gz".format(itime)
+        tar_fname = "/tmp/debug.{:d}.tar".format(itime)
 
         with tarfile.open(tar_fname, "w") as tar:
             # Collect LLDB log. It can't be unlinked here because it is still used
@@ -244,14 +245,20 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
                 f.write(_format_exc(exc, NOVT()))
                 f.write("version:\n")
                 f.write(f"{lldb.SBDebugger.GetVersionString()}\n")
+                f.write("loaded images:\n")
+                f.write(lldb_run_command("image list") + "\n")
+                f.write("lldb settings:\n")
+                f.write(lldb_run_command("settings show") + "\n")
             tar.add(tb_fname, "radar/traceback.log")
             os.unlink(tb_fname)
 
         # Radar submission
         print()
-        print(stream.VT.DarkRed + "Please attach {} to your radar or open the URL below:".format(tar_fname) + stream.VT.Reset)
+        print(stream.VT.DarkRed + "Please attach {} to your radar or open the URL below to create one:".format(tar_fname) + stream.VT.Reset)
         print()
         print("  " + _RADAR_URL.format(urllib.parse.quote(cmd_name),urllib.parse.quote(tar_fname)))
+        print()
+        print("Don't forget to mention where the coredump came from (e.g. original Radar ID), or attach it :)")
         print()
 
     # Enter pdb when requested.
@@ -316,14 +323,16 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
                     obj(**args)
             except KeyboardInterrupt:
                 print("Execution interrupted by user")
-            except ArgumentError as arg_error:
-                if str(arg_error) != "HELP":
-                    print("Argument Error: " + str(arg_error))
+            except (ArgumentError, NotImplementedError) as arg_error:
+                if str(arg_error) != HELP_ARGUMENT_EXCEPTION_SENTINEL:
+                    formatted_err = f"{type(arg_error).__name__}: {arg_error}"
+                    print(formatted_err)
+                    result.SetError(formatted_err)
                 print("{0:s}:\n        {1:s}".format(cmd_name, obj.__doc__.strip()))
                 return False
             except Exception as exc:
                 if "--radar" in debug_opts: lldb_run_command("log disable")
-                return diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_filename)
+                return diagnostic_report(result, exc, stream, cmd_name, debug_opts, lldb_log_filename)
 
             if config['showTypeSummary']:
                 lldb.debugger.HandleCommand('type category enable kernel' )
@@ -346,20 +355,22 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
         myglobals = globals()
         command_function_name = obj.__name__+"Command"
         myglobals[command_function_name] =  _internal_command_function
+        myglobals[f"XnuCommandSentinel{cmd_name}"] = None
         command_function = myglobals[command_function_name]
-        if not obj.__doc__ :
+        if not obj.__doc__:
             print("ERROR: Cannot register command({:s}) without documentation".format(cmd_name))
             return obj
         obj.__doc__ += "\n" + COMMON_HELP_STRING
         command_function.__doc__ = obj.__doc__
         global lldb_command_documentation
-        if cmd_name in lldb_command_documentation:
-            lldb.debugger.HandleCommand("command script delete "+cmd_name)
         lldb_command_documentation[cmd_name] = (obj.__name__, obj.__doc__.lstrip(), option_string)
-        lldb.debugger.HandleCommand("command script add -f " + MODULE_NAME + "." + command_function_name + " " + cmd_name)
+
+        script_add_command = f"command script add -o -f {MODULE_NAME}.{command_function_name} {cmd_name}"
+        lldb.debugger.HandleCommand(script_add_command)
 
         setattr(obj, 'fancy', fancy)
         if fancy:
+            @wraps(obj)
             def wrapped_fun(cmd_args=None, cmd_options={}, O=None):
                 if O is None:
                     stream = CommandOutput(cmd_name, fhandle=sys.stdout)
@@ -370,6 +381,7 @@ def lldb_command(cmd_name, option_string = '', fancy=False):
             return wrapped_fun
         return obj
     return _cmd
+
 
 def lldb_alias(alias_name, cmd_line):
     """ define an alias in the lldb command line.
@@ -458,7 +470,7 @@ def xnudebug_test(test_name):
 
 # global access object for target kernel
 
-def GetObjectAtIndexFromArray(array_base, index):
+def GetObjectAtIndexFromArray(array_base: value, index: int):
     """ Subscript indexing for arrays that are represented in C as pointers.
         for ex. int *arr = malloc(20*sizeof(int));
         now to get 3rd int from 'arr' you'd do
@@ -471,11 +483,11 @@ def GetObjectAtIndexFromArray(array_base, index):
             core.value : core.value of the same type as array_base_val but pointing to index'th element
     """
     array_base_val = array_base.GetSBValue()
-    base_address = array_base_val.GetValueAsUnsigned()
+    base_address = array_base_val.GetValueAsAddress()
     size = array_base_val.GetType().GetPointeeType().GetByteSize()
     obj_address = base_address + (index * size)
-    obj = kern.GetValueFromAddress(obj_address, array_base_val.GetType().name)
-    return Cast(obj, array_base_val.GetType())
+    obj = kern.CreateValueFromAddress(obj_address, array_base_val.GetType().GetPointeeType().name)
+    return addressof(obj)
 
 
 kern: KernelTarget = None
@@ -536,7 +548,7 @@ def GetKextSymbolInfo(load_addr):
             break
     return "{:#018x} {:s} + {:#x} \n".format(load_addr, symbol_name, symbol_offset)
 
-def GetThreadBackTrace(thread_obj, verbosity = vHUMAN, prefix = ""):
+def GetThreadBackTrace(thread_obj: value, verbosity = vHUMAN, prefix = ""):
     """ Get a string to display back trace for a thread.
         params:
             thread_obj - core.cvalue : a thread object of type thread_t.
@@ -546,15 +558,15 @@ def GetThreadBackTrace(thread_obj, verbosity = vHUMAN, prefix = ""):
         returns:
             str - a multi line string showing each frame in backtrace.
     """
-    is_continuation = not bool(unsigned(thread_obj.kernel_stack))
+    kernel_stack = unsigned(thread_obj.kernel_stack)
+    is_continuation = not bool(kernel_stack)
     thread_val = GetLLDBThreadForKernelThread(thread_obj)
     out_string = ""
-    kernel_stack = unsigned(thread_obj.kernel_stack)
     reserved_stack = unsigned(thread_obj.reserved_stack)
     if not is_continuation:
         if kernel_stack and reserved_stack:
-            out_string += prefix + "reserved_stack = {:#018x}\n".format(reserved_stack)
-        out_string += prefix + "kernel_stack = {:#018x}\n".format(kernel_stack)
+            out_string += f"{prefix}reserved_stack = {reserved_stack:#018x}\n"
+        out_string += f"{prefix}kernel_stack = {kernel_stack:#018x}\n"
     else:
         out_string += prefix + "continuation ="
     iteration = 0
@@ -567,13 +579,13 @@ def GetThreadBackTrace(thread_obj, verbosity = vHUMAN, prefix = ""):
         mod_name = frame.GetModule().GetFileSpec().GetFilename()
 
         if iteration == 0 and not is_continuation:
-            out_string += prefix +"stacktop = {:#018x}\n".format(frame_p)
+            out_string += f"{prefix}stacktop = {frame_p:#018x}\n"
 
         if not function:
             # No debug info for 'function'.
             out_string += prefix
             if not is_continuation:
-                out_string += "{fp:#018x} ".format(fp = frame_p)
+                out_string += f"{frame_p:#018x} "
 
             symbol = frame.GetSymbol()
             if not symbol:
@@ -583,28 +595,25 @@ def GetThreadBackTrace(thread_obj, verbosity = vHUMAN, prefix = ""):
                 start_addr = symbol.GetStartAddress().GetFileAddress()
                 symbol_name = symbol.GetName()
                 symbol_offset = file_addr - start_addr
-                out_string += "{addr:#018x} {mod}`{symbol} + {offset:#x} \n".format(addr=load_addr,
-                    mod=mod_name, symbol=symbol_name, offset=symbol_offset)
+                out_string += f"{load_addr:#018x} {mod_name}`{symbol_name} + {symbol_offset:#x} \n"
         else:
             # Debug info is available for 'function'.
-            func_name = frame.GetFunctionName()
+            inlined_suffix= " [inlined]" if frame.IsInlined() else ''
+            func_name = f"{frame.GetFunctionName()}{inlined_suffix}"
             # file_name = frame.GetLineEntry().GetFileSpec().GetFilename()
             # line_num = frame.GetLineEntry().GetLine()
-            func_name = '%s [inlined]' % func_name if frame.IsInlined() else func_name
             if is_continuation and frame.IsInlined():
                 debuglog("Skipping frame for thread {:#018x} since its inlined".format(thread_obj))
                 continue
             out_string += prefix
             if not is_continuation:
-                out_string += "{fp:#018x} ".format(fp=frame_p)
+                out_string += f"{frame_p:#018x} "
 
             if len(frame.arguments) > 0:
-                strargs = "(" + str(frame.arguments).replace('\n', ', ') + ")"
-                out_string += "{addr:#018x} {func}{args} \n".format(
-                    addr=load_addr, func=func_name, args=strargs)
+                func_args = str(frame.arguments).replace('\n', ', ')
+                out_string += f"{load_addr:#018x} {func_name}({func_args}) \n"
             else:
-                out_string += "{addr:#018x} {func}(void) \n".format(
-                                addr=load_addr, func=func_name)
+                out_string += f"{load_addr:#018x} {func_name}(void) \n"
 
         iteration += 1
         if frame_p:
@@ -670,7 +679,12 @@ def KernelDebugCommandsHelp(cmd_args=None):
 def ShowRawCommand(cmd_args=None):
     """ A command to disable the kernel summaries and show data as seen by the system.
         This is useful when trying to read every field of a struct as compared to brief summary
+
+        Usage: showraw foo_command foo_arg1 foo_arg2 ...
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("'showraw' requires a command to run")
+
     command = " ".join(cmd_args)
     lldb.debugger.HandleCommand('type category disable kernel' )
     lldb.debugger.HandleCommand(command)
@@ -1211,7 +1225,7 @@ def ShowBootArgs(cmd_args=None):
 
 # The initialization code to add your commands
 _xnu_framework_init = False
-def __lldb_init_module(debugger, internal_dict):
+def __lldb_init_module(debugger: lldb.SBDebugger, internal_dict):
     global kern, lldb_command_documentation, config, _xnu_framework_init
     if _xnu_framework_init:
         return
@@ -1226,6 +1240,7 @@ def __lldb_init_module(debugger, internal_dict):
             warn_str = VT.DarkRed + warn_str + VT.Default
         print(warn_str)
     print("xnu debug macros loaded successfully. Run showlldbtypesummaries to enable type summaries.")
+    # print(f"xnu debugger ID: {debugger.GetID()}")
 
 __lldb_init_module(lldb.debugger, None)
 
@@ -1258,7 +1273,7 @@ def WalkQueueHead(cmd_args=[], cmd_options={}):
 
     """
     global lldb_summary_definitions
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("invalid arguments")
     if len(cmd_args) != 3:
         raise ArgumentError("insufficient arguments")
@@ -1295,7 +1310,7 @@ def WalkList(cmd_args=[], cmd_options={}):
 
     """
     global lldb_summary_definitions
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("invalid arguments")
     if len(cmd_args) != 3:
         raise ArgumentError("insufficient arguments")
@@ -1557,7 +1572,6 @@ def ShowExperiments(cmd_args=[], cmd_options={}):
         Arguments:
         -F: Scan for changed experiment values even if no trial identifiers have been set.
     """
-
     treatment_id = str(kern.globals.trial_treatment_id)
     experiment_id = str(kern.globals.trial_experiment_id)
     deployment_id = kern.globals.trial_deployment_id._GetValueAsSigned()
@@ -1601,6 +1615,7 @@ def ShowExperiments(cmd_args=[], cmd_options={}):
                     name = str(parentstr) + "." + str(sysctl.oid_name)
                     print("%s = %d (Default value is %d)" % (name, dereference(value), spec.original_value))
 
+
 from memory import *
 from process import *
 from ipc import *
@@ -1613,18 +1628,19 @@ from kext import *
 from kdp import *
 from userspace import *
 from pci import *
+from scheduler import *
+from recount import *
 from misc import *
 from apic import *
-from scheduler import *
 from structanalyze import *
 from ipcimportancedetail import *
 from bank import *
 from turnstile import *
 from kasan import *
-from kauth import *
 from waitq import *
 from usertaskgdbserver import *
 from ktrace import *
+from microstackshot import *
 from xnutriage import *
 from kmtriage import *
 from kevent import *
@@ -1636,7 +1652,9 @@ from sysreg import *
 from counter import *
 from refgrp import *
 from workload import *
-from recount import *
 from log import showLogStream, show_log_stream_info
 from nvram import *
 from exclaves import *
+from memorystatus import *
+from vm_pageout import *
+from taskinfo import *

@@ -179,6 +179,8 @@ get_apple_array(size_t *num_array_entries, const char * filename)
 
 #define HARDENED_RUNTIME_KEY "HardenedRuntime="
 
+#define HARDENED_HEAP_KEY "hardened_heap="
+
 
 /*
  * Get the value of the key in the apple array.
@@ -228,12 +230,46 @@ T_DECL(libmalloc_hardened_binary_present,
 	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_RUNTIME_KEY);
 	T_ASSERT_TRUE(found, "Found " HARDENED_RUNTIME_KEY " in apple array");
 	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
+	free(apple_array);
 
 	/* These are the entitlements on the HR2 binary */
 	mask_val = BrowserGPUEntitlementMask | BrowserNetworkEntitlementMask;
 	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_HR2");
 	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_RUNTIME_KEY);
 	T_ASSERT_TRUE(found, "Found " HARDENED_RUNTIME_KEY " in apple array");
+	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
+	free(apple_array);
+}
+
+T_DECL(libmalloc_hardened_heap_entitlements,
+    "hardened heap enablement via hardened process and hardened heap entitlements",
+    T_META_ASROOT(false))
+{
+	uint64_t apple_array_val = 0;
+	size_t num_array_entries = 0;
+	char **apple_array;
+	bool found = false;
+
+	uint32_t mask_val = 1;
+	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_proc");
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
+	T_ASSERT_FALSE(found, "Didn't find " HARDENED_HEAP_KEY " in apple array");
+	free(apple_array);
+
+	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_heap_disable");
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
+	T_ASSERT_FALSE(found, "Didn't find " HARDENED_HEAP_KEY " in apple array");
+	free(apple_array);
+
+	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_heap");
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
+	T_ASSERT_TRUE(found, "Found " HARDENED_HEAP_KEY " in apple array");
+	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
+	free(apple_array);
+
+	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_proc_all_subfeatures");
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
+	T_ASSERT_TRUE(found, "Found " HARDENED_HEAP_KEY " in apple array");
 	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
 	free(apple_array);
 }

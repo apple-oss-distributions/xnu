@@ -160,6 +160,10 @@ struct if_clonereq32 {
 #define IFXF_IS_VPN                     0x00010000 /* Is VPN */
 #define IFXF_DELAYWAKEPKTEVENT          0x00020000 /* Delay notification of wake packet events */
 #define IFXF_DISABLE_INPUT              0x00040000 /* Drop receive traffic */
+#define IFXF_CONGESTED_LINK             0x00080000 /* Link is congested */
+#define IFXF_LINK_HEURISTICS            0x00800000 /* Link heuristics enabled */
+#define IFXF_LINK_HEUR_OFF_PENDING      0x01000000 /* Link heurisitics delay disable */
+#define IFXF_POINTOPOINT_MDNS           0x02000000 /* Point-to-point interface supports mDNS */
 
 /*
  * Current requirements for an AWDL interface.  Setting/clearing IFEF_AWDL
@@ -310,6 +314,7 @@ struct  ifreq {
 #define IFRTYPE_QOSMARKING_CUSTOM       3       /* supported: socket/channel */
 		u_int32_t ifru_qosmarking_enabled;
 		u_int32_t ifru_disable_output;
+		int32_t   ifru_point_to_point_mdns;
 		u_int32_t ifru_low_internet;
 #define IFRTYPE_LOW_INTERNET_DISABLE_UL_DL      0x0000
 #define IFRTYPE_LOW_INTERNET_ENABLE_UL          0x0001
@@ -377,6 +382,7 @@ struct  ifreq {
 #define ifr_qosmarking_enabled  ifr_ifru.ifru_qosmarking_enabled
 #define ifr_fastlane_enabled    ifr_qosmarking_enabled
 #define ifr_disable_output      ifr_ifru.ifru_disable_output
+#define ifr_point_to_point_mdns ifr_ifru.ifru_point_to_point_mdns
 #define ifr_low_internet        ifr_ifru.ifru_low_internet
 #define ifr_low_power_mode      ifr_ifru.ifru_low_power_mode
 #define ifr_tcp_kao_max         ifr_ifru.ifru_tcp_kao_max
@@ -568,8 +574,6 @@ enum {
 	IFNET_RSSI_UNKNOWN      = ((-2147483647) - 1),    /* INT32_MIN */
 };
 
-
-#if !__has_ptrcheck
 /*
  * DLIL KEV_DL_NODE_PRESENCE/KEV_DL_NODE_ABSENCE event structures
  */
@@ -588,7 +592,6 @@ struct kev_dl_node_absence {
 	struct sockaddr_in6     sin6_node_address;
 	struct sockaddr_dl      sdl_node_address;
 };
-#endif
 
 /*
  * Structure for SIOC[SG]IFTHROTTLE
@@ -832,6 +835,47 @@ struct if_protolistreq64 {
  * Entitlement to allow socket access on ultra-constrained interfaces
  */
 #define ULTRA_CONSTRAINED_ENTITLEMENT "com.apple.private.network.ultraconstrained"
+
+#ifdef BSD_KERNEL_PRIVATE
+#include <sys/protosw.h>
+
+/*
+ * Link heuristics feature flags for variable if_link_heuristics_flags
+ */
+#define IF_LINK_HEURISTICS_CELLULAR        0x0001 /* for cellular only by default */
+#define IF_LINK_HEURISTICS_ANY             0x0002 /* for testing on any type of interface */
+#define IF_LINK_HEURISTICS_LQM             0x0004 /* take in account LQM threshold */
+#define IF_LINK_HEURISTICS_LINK_CONGESTED  0x0008 /* take in account link congestion indication */
+
+/*
+ * Time to wait before disabling the LQM heuristics after a
+ * change to IFNET_LQM_THRESH_GOOD to avoid to flip back and
+ * forth when the conditions are variable
+ */
+#define IF_LINK_HEURISTICS_DELAY_MSECS 30000
+
+extern uint32_t if_link_heuristics_flags;
+extern int if_link_heuristics_lqm_max;
+extern uint32_t if_link_heuristics_delay;
+
+/*
+ * Interface link heuristics are enabled when any of the following is true:
+ * - The interface link quality metric is below the threshold
+ * - The interface link is congested
+ */
+static inline bool
+if_link_heuristics_enabled(struct ifnet *ifp)
+{
+	if (ifp != NULL &&
+	    ((ifp->if_xflags & IFXF_LINK_HEURISTICS) != 0) &&
+	    ((if_link_heuristics_flags & IF_LINK_HEURISTICS_ANY) != 0 ||
+	    ((if_link_heuristics_flags & IF_LINK_HEURISTICS_CELLULAR) != 0 && IFNET_IS_CELLULAR(ifp)))) {
+		return true;
+	}
+	return false;
+}
+
+#endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* DRIVERKIT */
 #endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */

@@ -36,6 +36,40 @@
 #error architecture not supported
 #endif
 
+#define ml_trap_pin_value_1(a) ({ \
+	register long _a __asm__(ML_TRAP_REGISTER_1) = (long)(a);               \
+                                                                                \
+	__asm__ __volatile__ ("" : "+r"(_a));                                   \
+})
+#define ml_trap_pin_value_2(a, b) ({ \
+	register long _a __asm__(ML_TRAP_REGISTER_1) = (long)(a);               \
+	register long _b __asm__(ML_TRAP_REGISTER_2) = (long)(b);               \
+                                                                                \
+	__asm__ __volatile__ ("" : "+r"(_a), "+r"(_b));                         \
+})
+#define ml_trap_pin_value_3(a, b, c) ({ \
+	register long _a __asm__(ML_TRAP_REGISTER_1) = (long)(a);               \
+	register long _b __asm__(ML_TRAP_REGISTER_2) = (long)(b);               \
+	register long _c __asm__(ML_TRAP_REGISTER_3) = (long)(c);               \
+                                                                                \
+	__asm__ __volatile__ ("" : "+r"(_a), "+r"(_b), "+r"(_c));               \
+})
+
+#define ml_fatal_trap_with_value(code, a)  ({ \
+	ml_trap_pin_value_1(a); \
+	ml_fatal_trap(code); \
+})
+
+#define ml_fatal_trap_with_value2(code, a, b)  ({ \
+	ml_trap_pin_value_2(a, b); \
+	ml_fatal_trap(code); \
+})
+
+#define ml_fatal_trap_with_value3(code, a, b, c)  ({ \
+	ml_trap_pin_value_3(a, b, c); \
+	ml_fatal_trap(code); \
+})
+
 /*
  * Used for when `e` failed a linked list safe unlinking check.
  * On optimized builds, `e`'s value will be in:

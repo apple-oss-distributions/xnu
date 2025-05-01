@@ -136,6 +136,23 @@ typedef struct kalloc_heap {
 KALLOC_HEAP_DECLARE(KHEAP_DATA_BUFFERS);
 
 /**
+ * @const KHEAP_DATA_SHARED
+ *
+ * @brief
+ * The builtin heap for bags of pure bytes that get shared across components.
+ *
+ * @discussion
+ * There's a further distinction that we can make between kalloc zones that
+ * contain bag of bytes, which is based on their intended use. In particular
+ * a number of pure data allocations are intended to be shared between kernel
+ * and user or kernel and coprocessors (DMA). These allocations cannot
+ * sustain the security XNU_KERNEL_RESTRICTED checks, therefore we isolate
+ * them in a separated heap, to further increase the security guarantees
+ * around KHEAP_DATA_BUFFERS.
+ */
+KALLOC_HEAP_DECLARE(KHEAP_DATA_SHARED);
+
+/**
  * @const KHEAP_DEFAULT
  *
  * @brief
@@ -244,11 +261,11 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
  * changes to kalloc_type_view defintion should toggle this flag.
  *
  #if XNU_KERNEL_PRIVATE
- * @const KT_NOSHARED
- * This flags will force the callsite to bypass the shared zone and
+ * @const KT_NOEARLY
+ * This flags will force the callsite to bypass the early (shared) zone and
  * directly allocate from the assigned zone. This can only be used
  * with KT_PRIV_ACCT right now. If you still require this behavior
- * but don't want private stats use Z_SET_NOTSHARED at the allocation
+ * but don't want private stats use Z_SET_NOTEARLY at the allocation
  * callsite instead.
  *
  * @const KT_SLID
@@ -275,7 +292,7 @@ __options_decl(kalloc_type_flags_t, uint32_t, {
 	KT_CHANGED2       = 0x0040,
 	KT_PTR_ARRAY      = 0x0080,
 #if XNU_KERNEL_PRIVATE
-	KT_NOSHARED       = 0x2000,
+	KT_NOEARLY       = 0x2000,
 	KT_SLID           = 0x4000,
 	KT_PROCESSED      = 0x8000,
 	KT_HASH           = 0xffff0000,
@@ -306,7 +323,7 @@ struct kalloc_type_view {
 	const char             *kt_signature __unsafe_indexable;
 	kalloc_type_flags_t     kt_flags;
 	uint32_t                kt_size;
-	zone_t                  kt_zshared;
+	zone_t                  kt_zearly;
 	zone_t                  kt_zsig;
 };
 #else /* XNU_KERNEL_PRIVATE */
@@ -638,7 +655,7 @@ extern void kfree_data_addr(
  * @macro kfree_type
  *
  * @abstract
- * Allocates element of a particular type
+ * Frees element of a particular type
  *
  * @discussion
  * This pairs with the @c kalloc_type() that was made to allocate this element.

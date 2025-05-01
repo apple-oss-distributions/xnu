@@ -71,7 +71,7 @@ def ShowBankAccountsToPay(cmd_args=None, cmd_options={}):
     """ show a list of merchant bank tasks for a bank_task object.
         Usage: (lldb)showbankaccountstopay <bank_task_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
       raise ArgumentError("Please provide arguments")
 
     bank_task = kern.GetValueFromAddress(cmd_args[0], 'bank_task_t')
@@ -93,7 +93,7 @@ def ShowBankAccountsToCharge(cmd_args=None, cmd_options={}):
     """ show a list of holder bank tasks for a bank_task object.
         Usage: (lldb)showbankaccountstocharge <bank_task_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
       raise ArgumentError("Please provide arguments")
 
     bank_task = kern.GetValueFromAddress(cmd_args[0], 'bank_task_t')

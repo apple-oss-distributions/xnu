@@ -62,6 +62,7 @@ OS_ENUM(exclaves_sensor_status, uint32_t,
     EXCLAVES_SENSOR_STATUS_ALLOWED = 1,
     EXCLAVES_SENSOR_STATUS_DENIED = 2,
     EXCLAVES_SENSOR_STATUS_CONTROL = 3,
+    EXCLAVES_SENSOR_STATUS_PENDING = 4,
     );
 
 OS_CLOSED_OPTIONS(exclaves_buffer_perm, uint32_t,
@@ -71,7 +72,8 @@ OS_CLOSED_OPTIONS(exclaves_buffer_perm, uint32_t,
 
 OS_ENUM(exclaves_boot_stage, uint32_t,
     EXCLAVES_BOOT_STAGE_NONE = ~0u,
-    EXCLAVES_BOOT_STAGE_2 = 0,
+    EXCLAVES_BOOT_STAGE_2 = 0, /* Use EXCLAVECORE instead. */
+    EXCLAVES_BOOT_STAGE_EXCLAVECORE = 0,
     EXCLAVES_BOOT_STAGE_EXCLAVEKIT = 100,
 
     /* The EXCLAVEKIT boot stage failed in some way. */
@@ -127,6 +129,7 @@ OS_CLOSED_OPTIONS(exclaves_requirement, uint64_t,
      * Conclave support.
      * If this requirement is relaxed it allows tasks to attach to conclaves
      * even though there is no corresponding conclave manager available.
+     * No longer enforced.
      */
     EXCLAVES_R_CONCLAVE     = 0x20,
 
@@ -144,6 +147,25 @@ OS_CLOSED_OPTIONS(exclaves_requirement, uint64_t,
      * EXCLAVES_R_CONCLAVE above).
      */
     EXCLAVES_R_CONCLAVE_RESOURCES = 0x80,
+
+    /*
+     * Storage support.
+     * If relaxed and storage initialization fails, continue on without
+     * panicking. All storage upcalls will fail.
+     */
+    EXCLAVES_R_STORAGE      = 0x100,
+
+    /*
+     * Support for performance tests.
+     * If relaxed, it's not expected that performance tests will run.
+     */
+    EXCLAVES_R_TEST_PERF    = 0x200,
+
+    /*
+     * Support for stress tests.
+     * If relaxed, it's not expected that stress tests will run.
+     */
+    EXCLAVES_R_TEST_STRESS  = 0x400,
 
     );
 
@@ -493,6 +515,52 @@ exclaves_audio_buffer_copyout(mach_port_t audio_buffer_port,
     mach_vm_address_t dst_buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
     mach_vm_size_t size2, mach_vm_size_t offset2);
 
+
+/*!
+ * @function exclaves_audio_buffer_copyout_with_status
+ *
+ * @abstract
+ * Identical to exclaves_audio_buffer_copyout but also provides a means to get
+ * the sensor status.
+ *
+ * Audio buffers are arbitrated via the EIC and copies will return 0's when
+ * access to the sensor is not granted.
+ *
+ * Two size/offsets are provided to faciliate fast copy that wraps around a
+ * ring buffer that could be placed arbitrarily in the shared memory region.
+ *
+ * @param audio_buffer_port
+ * A named buffer port name returned from exclaves_audio_buffer_create()
+ *
+ * @param dst_buffer
+ * Pointer to userspace buffer to copy out from named buffer.
+ *
+ * @param size1
+ * Number of bytes to copy (<= size of specified userspace buffer).
+ *
+ * @param offset1
+ * Offset in shared memory buffer to start copy at.
+ *
+ * @param size2
+ * Number of bytes to copy (<= size of specified userspace buffer). Can be 0,
+ * in which case the 2nd range is not copied.
+ *
+ * @param offset2
+ * Offset in shared memory buffer to start copy at.
+ *
+ * @param status
+ * Out parameter filled in with the sensor status if the copyout succeeds.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(15.2), ios(18.2), tvos(18.2), watchos(11.2))
+kern_return_t
+exclaves_audio_buffer_copyout_with_status(mach_port_t audio_buffer_port,
+    mach_vm_address_t dst_buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
+    mach_vm_size_t size2, mach_vm_size_t offset2,
+    exclaves_sensor_status_t *status);
+
 /*!
  * @function exclaves_sensor_create
  *
@@ -806,8 +874,9 @@ OS_ENUM(exclaves_sensor_type, uint32_t,
     EXCLAVES_SENSOR_CAM = 1,
     EXCLAVES_SENSOR_MIC = 2,
     EXCLAVES_SENSOR_CAM_ALT_FACEID = 3,
+    EXCLAVES_SENSOR_CAM_ALT_FACEID_DELAYED = 4,
     /* update max if more sensors added */
-    EXCLAVES_SENSOR_MAX = 3,
+    EXCLAVES_SENSOR_MAX = 4,
     );
 
 /*!
@@ -979,7 +1048,7 @@ OS_NOT_TAIL_CALLED
 kern_return_t
 _exclaves_ctl_trap(mach_port_name_t name, uint32_t operation_and_flags,
     exclaves_id_t identifier, mach_vm_address_t buffer, mach_vm_size_t size,
-    mach_vm_size_t size2, mach_vm_size_t offset);
+    mach_vm_size_t size2, mach_vm_size_t offset, mach_vm_address_t status);
 
 #endif /* !defined(KERNEL) */
 
@@ -1080,6 +1149,9 @@ uint32_t exclaves_stack_offset(const uintptr_t *out_addr, size_t nframes,
 
 /* Check whether Exclave inspection got initialized */
 extern bool exclaves_inspection_is_initialized(void);
+
+/* Send a watchdog panic request to the exclaves scheduler */
+extern kern_return_t exclaves_scheduler_request_watchdog_panic(void);
 
 #endif /* defined(XNU_KERNEL_PRIVATE) */
 

@@ -84,12 +84,17 @@ to `output` (plus a NUL), `input` is read until reaching a NUL character. This
 is always a problem from the perspective of memory disclosures, and in some
 cases, it can also lead to stability issues.
 
+`strlcpy_ret` is a convenience wrapper around `strlcpy`, which returns
+a `__null_terminated` pointer to the output string instead of the length of the input string.
+Similarly to `strlcpy`, the `strlcpy_ret` will search for the NUL character
+in the input string.
+
 # Changes with -fbounds-safety
 
 When enabling -fbounds-safety, character buffers and NUL-terminated strings are
 two distinct types, and they do not implicitly convert to each other. This
-prevents confusing the two in the way that is problematic with `strlcpy`, for
-instance. However, it creates new problems:
+prevents confusing the two in the way that is problematic with `strlcpy`/`strlcpy_ret`,
+for instance. However, it creates new problems:
 
 * What is the correct way to transform a character buffer into a NUL-terminated
   string?
@@ -107,6 +112,8 @@ string is passed without bounds as a NUL-terminated string to downstream users.
   * `strbufcmp(a, alen, b, len)`: like `strcmp`;
   * `strbufcasecmp(a, alen, b, blen)`: like `strcasecmp`;
   * `strbufcpy(a, alen, b, blen)`: like `strlcpy` but returns `a` as a NUL-
+    terminated string;
+  * `strlcpy_ret(dst, src, n)`: like `strlcpy`, but returns `dst` as a NUL-
     terminated string;
   * `strbufcat(a, alen, b, blen)`: like `strlcat` but returns `a` as a NUL-
     terminated string;

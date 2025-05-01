@@ -604,9 +604,8 @@ def showMsgBuf(cmd_args=None, cmd_options=None):
         -F          Show the content even if the magic key indicates data corruption.
     """
 
-    if not cmd_args:
-        print(showMsgBuf.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     addr = kern.GetValueFromAddress(cmd_args[0], 'struct msgbuf *')
 

@@ -207,7 +207,7 @@ typedef int wait_timeout_urgency_t;
 #define TIMEOUT_NO_LEEWAY               (0ULL)
 #define TIMEOUT_WAIT_FOREVER            (0ULL)
 
-#ifdef  KERNEL_PRIVATE
+#if defined(KERNEL_PRIVATE) || SCHED_TEST_HARNESS
 
 /*
  * n.b. this is defined in thread_call.h, but in the TIMEOUT_URGENCY flags space:
@@ -379,6 +379,6 @@ __options_decl(cluster_shared_rsrc_type_t, uint32_t, {
 	CLUSTER_SHARED_RSRC_TYPE_NONE                   = CLUSTER_SHARED_RSRC_TYPE_COUNT,
 });
 
-#endif  /* KERNEL_PRIVATE */
+#endif  /* defined(KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 #endif  /* _KERN_KERN_TYPES_H_ */

@@ -615,8 +615,8 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.psynch_wait_update_owner = psynch_wait_update_owner,
 };
 
-pthread_callbacks_t pthread_kern = &pthread_callbacks;
-pthread_functions_t pthread_functions = NULL;
+SECURITY_READ_ONLY_LATE(pthread_callbacks_t) pthread_kern = &pthread_callbacks;
+SECURITY_READ_ONLY_LATE(pthread_functions_t) pthread_functions = NULL;
 
 /*
  * pthread_kext_register is called by pthread.kext upon load, it has to provide

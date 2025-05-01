@@ -761,7 +761,7 @@ hibernate_kernel_entrypoint(uint32_t p1,
 				ppnum = gIOHibernateHandoffPages[page];
 			} else if (stage == pal_hib_restore_stage_dram_pages) {
 				tag = *src++;
-				HIB_ASSERT((tag & ~kIOHibernateTagLength) == kIOHibernateTagSignature);
+				HIB_ASSERT((tag & kIOHibernateTagSigMask) == kIOHibernateTagSignature);
 //		debug_code(kIOHibernateRestoreCodeTag, (uintptr_t) tag);
 				srcPhys += sizeof(*src);
 				compressedSize = kIOHibernateTagLength & tag;

@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <mach/mach_time.h>
+#include <os/atomic_private.h>
+#include <sys/commpage.h>
+#include <machine/cpu_capabilities.h>
 
 #include <darwintest.h>
 #include <darwintest_utils.h>
@@ -51,17 +54,39 @@ abs_to_nanos(uint64_t abs)
 }
 
 static int num_perf_levels = 0;
-bool
-platform_is_amp(void)
+unsigned int
+platform_nperflevels(void)
 {
 	if (num_perf_levels == 0) {
 		int ret;
 		ret = sysctlbyname("hw.nperflevels", &num_perf_levels, &(size_t){ sizeof(num_perf_levels) }, NULL, 0);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "hw.nperflevels");
 	}
-	bool is_amp = num_perf_levels > 1;
-	if (verbosity_enabled) {
-		T_LOG("🛰️ Platform has %d perflevels (%s)", num_perf_levels, is_amp ? "AMP" : "SMP");
+	return (unsigned int)num_perf_levels;
+}
+
+static char perflevel_names[64][16];
+const char *
+platform_perflevel_name(unsigned int perflevel)
+{
+	if (perflevel_names[perflevel][0] == 0) {
+		int ret;
+		char sysctl_name[64] = { 0 };
+		snprintf(sysctl_name, sizeof(sysctl_name), "hw.perflevel%d.name", perflevel);
+		ret = sysctlbyname(sysctl_name, &perflevel_names[perflevel], &(size_t){ sizeof(perflevel_names[perflevel]) }, NULL, 0);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, sysctl_name);
+	}
+	return (const char *)perflevel_names[perflevel];
+}
+
+static bool reported_is_amp = false;
+bool
+platform_is_amp(void)
+{
+	bool is_amp = platform_nperflevels() > 1;
+	if (verbosity_enabled && !reported_is_amp) {
+		T_LOG("🛰️ Platform has %d perflevels (%s)", platform_nperflevels(), is_amp ? "AMP" : "SMP");
+		reported_is_amp = true;
 	}
 	return is_amp;
 }
@@ -92,6 +117,50 @@ platform_sched_policy(void)
 	return sched_policy_name;
 }
 
+static uint8_t num_clusters = 0;
+
+unsigned int
+platform_num_clusters(void)
+{
+	if (num_clusters == 0) {
+		num_clusters = COMM_PAGE_READ(uint8_t, CPU_CLUSTERS);
+		if (verbosity_enabled) {
+			T_LOG("🛰️ Platform has %u CPU clusters", num_clusters);
+		}
+	}
+	return num_clusters;
+}
+
+char
+bind_to_cluster_of_type(char type)
+{
+	int ret;
+	char old_type;
+	ret = sysctlbyname("kern.sched_thread_bind_cluster_type",
+	    &old_type, &(size_t){ sizeof(old_type) }, &type, sizeof(type));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.sched_thread_bind_cluster_type");
+	return old_type;
+}
+
+int
+bind_to_cluster_id(int cluster_id)
+{
+	int ret;
+	int old_cluster = 0;
+	ret = sysctlbyname("kern.sched_thread_bind_cluster_id", &old_cluster,
+	    &(size_t){ sizeof(old_cluster) }, &cluster_id, sizeof(cluster_id));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.sched_thread_bind_cluster_id");
+	return old_cluster;
+}
+
+static volatile _Atomic int stop_spinning_flag = 0;
+
+void
+stop_spinning_threads(void)
+{
+	os_atomic_store(&stop_spinning_flag, 1, release);
+}
+
 void
 spin_for_duration(uint32_t seconds)
 {
@@ -101,25 +170,118 @@ spin_for_duration(uint32_t seconds)
 
 	uint64_t spin_count = 0;
 
-	while (mach_absolute_time() < timeout) {
+	while ((mach_absolute_time() < timeout) &&
+	    (os_atomic_load(&stop_spinning_flag, acquire) == 0)) {
 		spin_count++;
 	}
+}
+
+pthread_attr_t *
+create_pthread_attr(int priority,
+    detach_state_t detach_state, qos_class_t qos_class,
+    sched_policy_t sched_policy, size_t stack_size)
+{
+	int ret;
+	pthread_attr_t *attr = (pthread_attr_t *)malloc(sizeof(pthread_attr_t));
+	ret = pthread_attr_init(attr);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_attr_init");
+
+	struct sched_param param = { .sched_priority = priority };
+	ret = pthread_attr_setschedparam(attr, &param);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "pthread_attr_setschedparam");
+
+	if (detach_state == eDetached) {
+		ret = pthread_attr_setdetachstate(attr, PTHREAD_CREATE_DETACHED);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_attr_setdetachstate");
+	}
+
+	if (qos_class != QOS_CLASS_UNSPECIFIED) {
+		ret = pthread_attr_set_qos_class_np(attr, qos_class, 0);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_attr_set_qos_class_np");
+	}
+
+	if (sched_policy != eSchedDefault) {
+		int sched_policy_val = 0;
+		switch (sched_policy) {
+		case eSchedFIFO:
+			sched_policy_val = SCHED_FIFO;
+			break;
+		case eSchedRR:
+			sched_policy_val = SCHED_RR;
+			break;
+		case eSchedOther:
+			sched_policy_val = SCHED_OTHER;
+			break;
+		case eSchedDefault:
+			T_QUIET; T_ASSERT_FAIL("unexpected sched_policy");
+			break;
+		}
+		ret = pthread_attr_setschedpolicy(attr, (int)sched_policy);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_attr_setschedpolicy");
+	}
+
+	if (stack_size != DEFAULT_STACK_SIZE) {
+		ret = pthread_attr_setstacksize(attr, stack_size);
+		T_QUIET; T_ASSERT_POSIX_ZERO(ret, "pthread_attr_setstacksize");
+	}
+	return attr;
+}
+
+void
+create_thread(pthread_t *thread_handle, pthread_attr_t *attr,
+    void *(*func)(void *), void *arg)
+{
+	int ret;
+	ret = pthread_create(thread_handle, attr, func, arg);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pthread_create");
+}
+
+void
+create_thread_pri(pthread_t *thread_handle, int priority,
+    void *(*func)(void *), void *arg)
+{
+	pthread_attr_t *attr = create_pthread_attr(priority, eJoinable,
+	    QOS_CLASS_UNSPECIFIED, eSchedDefault, DEFAULT_STACK_SIZE);
+	create_thread(thread_handle, attr, func, arg);
+}
+
+pthread_t *
+create_threads(int num_threads, int priority,
+    detach_state_t detach_state, qos_class_t qos_class,
+    sched_policy_t sched_policy, size_t stack_size,
+    void *(*func)(void *), void *arg_array[])
+{
+	pthread_attr_t *attr = create_pthread_attr(priority, detach_state,
+	    qos_class, sched_policy, stack_size);
+
+	pthread_t *thread_handles = (pthread_t *)malloc(sizeof(pthread_t) * (size_t)num_threads);
+	for (int i = 0; i < num_threads; i++) {
+		create_thread(&thread_handles[i], attr, func, arg_array == NULL ? NULL : arg_array[i]);
+	}
+	return thread_handles;
 }
 
 static const double default_idle_threshold = 0.9;
 static const int default_timeout_sec = 3;
 
 bool
-wait_for_quiescence_default(void)
+wait_for_quiescence_default(int argc, char *const argv[])
 {
-	return wait_for_quiescence(default_idle_threshold, default_timeout_sec);
+	return wait_for_quiescence(argc, argv, default_idle_threshold, default_timeout_sec);
 }
 
 /* Logic taken from __wait_for_quiescence in qos_tests.c */
 bool
-wait_for_quiescence(double idle_threshold, int timeout_seconds)
+wait_for_quiescence(int argc, char *const argv[], double idle_threshold, int timeout_seconds)
 {
 	kern_return_t kr;
+
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "--no-quiesce") == 0) {
+			T_LOG("🕒 Skipping quiescence due to \"--no-quiesce\"");
+			return true;
+		}
+	}
 
 	bool quiesced = false;
 	double idle_ratio = 0.0;
@@ -181,7 +343,7 @@ static void
 sched_utils_sigint_handler(int sig)
 {
 	T_QUIET; T_EXPECT_EQ(sig, SIGINT, "unexpected signal received");
-	T_FAIL("SIGINT received. Failing test to induce ATEND handlers for cleanup...");
+	T_ASSERT_TRUE(false, "SIGINT received. Failing test to induce ATEND handlers for cleanup...");
 }
 
 static void
@@ -194,13 +356,12 @@ register_atend_handler(void)
 }
 
 static char *clpcctrl_bin = "/usr/local/bin/clpcctrl";
-static bool running_clpcctrl_atend_handler = false;
+static bool setup_clpcctrl_atend = false;
 
 static void
 clpcctrl_cleanup(void)
 {
 	T_LOG("🏎️ Restoring CLPC state...");
-	running_clpcctrl_atend_handler = true;
 
 	char *recommend_all_cores_args[] = {"-C", "all", NULL};
 	execute_clpcctrl(recommend_all_cores_args, false);
@@ -215,9 +376,10 @@ execute_clpcctrl(char *clpcctrl_args[], bool read_value)
 	int ret;
 
 	/* Avoid recursion during teardown */
-	if (!running_clpcctrl_atend_handler) {
+	if (!setup_clpcctrl_atend) {
 		register_atend_handler();
 		T_ATEND(clpcctrl_cleanup);
+		setup_clpcctrl_atend = true;
 	}
 
 	/* Populate arg array with clpcctrl location */
@@ -240,11 +402,11 @@ execute_clpcctrl(char *clpcctrl_args[], bool read_value)
 		        token = strtok(NULL, " ");
 		        value = strtoull(token, NULL, 10);
 		}
-		return true;
+		return false;
 	},
 	    ^bool (char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
 		T_LOG("🏎️ [clpcctrl] Error msg: %s", data);
-		return true;
+		return false;
 	},
 	    BUFFER_PATTERN_LINE, NULL);
 
@@ -298,6 +460,25 @@ struct trace_handle {
 static struct trace_handle handles[MAX_TRACES];
 static int handle_ind = 0;
 
+/* Default setting is to record a trace but only save it if the test failed */
+static bool tracing_enabled = true;
+static bool trace_save_requested = false;
+
+static bool
+trace_requested(int argc, char *const argv[])
+{
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], "--save-trace") == 0) {
+			trace_save_requested = true;
+		}
+		if (strcmp(argv[i], "--no-trace") == 0) {
+			tracing_enabled = false;
+		}
+	}
+	T_QUIET; T_ASSERT_TRUE(tracing_enabled || !trace_save_requested, "Can't use both --save-trace and --no-trace");
+	return tracing_enabled;
+}
+
 static void
 atend_trace_cleanup(void)
 {
@@ -308,7 +489,7 @@ atend_trace_cleanup(void)
 			end_collect_trace(handle);
 		}
 		T_QUIET; T_EXPECT_EQ(handle->status, ENDED, "ended trace");
-		if (handle->status == ENDED && T_FAILCOUNT > 0) {
+		if (handle->status == ENDED && ((T_FAILCOUNT > 0) || trace_save_requested)) {
 			/* Save the trace as an artifact for debugging the failure(s) */
 			save_collected_trace(handle);
 		}
@@ -339,15 +520,19 @@ sched_utils_tracing_supported(void)
 }
 
 trace_handle_t
-begin_collect_trace(char *filename)
+begin_collect_trace(int argc, char *const argv[], char *filename)
 {
-	return begin_collect_trace_fmt(filename);
+	return begin_collect_trace_fmt(argc, argv, filename);
 }
 static bool first_trace = true;
 
 static char *trace_bin = "/usr/local/bin/trace";
 static char *notifyutil_bin = "/usr/bin/notifyutil";
-static char *tar_bin = "/usr/bin/tar";
+#if TARGET_OS_OSX
+static char *aa_bin = "/usr/bin/aa";
+#else
+static char *aa_bin = "/usr/local/bin/aa";
+#endif
 
 static char *begin_notification = "🖊️_trace_begun...";
 static char *end_notification = "🖊️_trace_ended...";
@@ -356,10 +541,10 @@ static char *trigger_end_notification = "🖊️_stopping_trace...";
 static const int waiting_timeout_sec = 60 * 2; /* 2 minutes, allows trace post-processing to finish */
 
 trace_handle_t
-begin_collect_trace_fmt(char *fmt, ...)
+begin_collect_trace_fmt(int argc, char *const argv[], char *fmt, ...)
 {
 	/* Check trace requirements */
-	if (sched_utils_tracing_supported() == false) {
+	if (!sched_utils_tracing_supported() || !trace_requested(argc, argv)) {
 		return NULL;
 	}
 	T_QUIET; T_ASSERT_EQ(geteuid(), 0, "🖊️ Tracing requires the test to be run as root user");
@@ -405,18 +590,19 @@ begin_collect_trace_fmt(char *fmt, ...)
 
 	/* Launch trace record */
 	char *trace_args[] = {trace_bin, "record", handle->abs_filename, "--plan", "default", "--unsafe",
-		              "--kdebug-filter-include", "C0x01", "--notify-after-start", begin_notification,
-		              "--notify-after-end", end_notification, "--end-on-notification", trigger_end_notification, "&", NULL};
+		              "--kdebug-filter-include", "C0x01", "--omit", "Logging", "--kdebug-buffer-size", "1gb",
+		              "--notify-after-start", begin_notification, "--notify-after-end", end_notification,
+		              "--end-on-notification", trigger_end_notification, "&", NULL};
 	pid_t trace_pid = dt_launch_tool_pipe(trace_args, false, NULL,
 	    ^bool (char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
 		T_LOG("🖊️ [trace] %s", data);
-		return true;
+		return false;
 	},
 	    ^bool (char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
 		T_LOG("🖊️ [trace] Error msg: %s", data);
-		return true;
+		return false;
 	},
-	    BUFFER_PATTERN_NONE, NULL);
+	    BUFFER_PATTERN_LINE, NULL);
 
 	T_LOG("🖊️ Starting trace collection for \"%s\" trace[%u]", handle->trace_filename, trace_pid);
 
@@ -434,7 +620,7 @@ begin_collect_trace_fmt(char *fmt, ...)
 void
 end_collect_trace(trace_handle_t handle)
 {
-	if (sched_utils_tracing_supported() == false) {
+	if (!sched_utils_tracing_supported() || !tracing_enabled) {
 		return;
 	}
 
@@ -451,8 +637,9 @@ end_collect_trace(trace_handle_t handle)
 	/* Wait for tracing to actually stop */
 	T_LOG("🖊️ Now waiting on trace to finish up...");
 	int signal_num;
-	ret = dt_waitpid(trace_state->wait_on_end_pid, NULL, &signal_num, waiting_timeout_sec);
-	T_QUIET; T_EXPECT_TRUE(ret, "dt_waitpid for trace stop signal_num %d", signal_num);
+	int exit_status;
+	ret = dt_waitpid(trace_state->wait_on_end_pid, &exit_status, &signal_num, waiting_timeout_sec);
+	T_QUIET; T_EXPECT_TRUE(ret, "dt_waitpid for trace stop, exit status %d signal_num %d", exit_status, signal_num);
 
 	trace_state->status = ENDED;
 }
@@ -460,7 +647,7 @@ end_collect_trace(trace_handle_t handle)
 void
 save_collected_trace(trace_handle_t handle)
 {
-	if (sched_utils_tracing_supported() == false) {
+	if (!sched_utils_tracing_supported() || !tracing_enabled) {
 		return;
 	}
 
@@ -470,26 +657,27 @@ save_collected_trace(trace_handle_t handle)
 
 	/* Generate compressed filepath and mark for upload */
 	char compressed_path[MAXPATHLEN];
-	snprintf(compressed_path, MAXPATHLEN, "%s.tar.gz", trace_state->short_name);
+	snprintf(compressed_path, MAXPATHLEN, "%s.aar", trace_state->short_name);
 	ret = dt_resultfile(compressed_path, MAXPATHLEN);
 	T_QUIET; T_WITH_ERRNO; T_EXPECT_POSIX_ZERO(ret, "dt_resultfile marking \"%s\" for collection", compressed_path);
 	T_LOG("🖊️ \"%s\" marked for upload", compressed_path);
 
-	char *tar_args[] = {tar_bin, "-czvf", compressed_path, "-C", (char *)dt_tmpdir(), trace_state->trace_filename, NULL};
-	pid_t tar_pid = dt_launch_tool_pipe(tar_args, false, NULL,
+	char *compress_args[] = {aa_bin, "archive", "-i", trace_state->trace_filename, "-d", (char *)dt_tmpdir(), "-o", compressed_path, NULL};
+	pid_t aa_pid = dt_launch_tool_pipe(compress_args, false, NULL,
 	    ^bool (__unused char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
-		T_LOG("🖊️ [tar] %s", data);
-		return true;
+		T_LOG("🖊️ [aa] %s", data);
+		return false;
 	},
 	    ^bool (char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
-		T_LOG("🖊️ [tar] Error msg: %s", data);
-		return true;
+		T_LOG("🖊️ [aa] Error/debug msg: %s", data);
+		return false;
 	},
 	    BUFFER_PATTERN_LINE, NULL);
-
-	T_QUIET; T_EXPECT_TRUE(tar_pid, "🖊️ [tar] pid %d", tar_pid);
-	ret = dt_waitpid(tar_pid, NULL, NULL, 0);
-	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "dt_waitpid for tar");
+	T_QUIET; T_EXPECT_TRUE(aa_pid, "🖊️ [aa] pid %d", aa_pid);
+	int exit_status = 0;
+	int signal_num = SIGPIPE;
+	ret = dt_waitpid(aa_pid, &exit_status, &signal_num, 0);
+	T_QUIET; T_WITH_ERRNO; T_EXPECT_TRUE(ret, "dt_waitpid for aa, exit status %d signal num %d", exit_status, signal_num);
 
 	/* Lax permissions in case a user wants to open the compressed file without sudo */
 	ret = chmod(compressed_path, 0666);
@@ -504,7 +692,7 @@ save_collected_trace(trace_handle_t handle)
 void
 discard_collected_trace(trace_handle_t handle)
 {
-	if (sched_utils_tracing_supported() == false) {
+	if (!sched_utils_tracing_supported() || !tracing_enabled || trace_save_requested) {
 		return;
 	}
 

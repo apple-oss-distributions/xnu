@@ -1,6 +1,7 @@
 from core.cvalue import sizeof, value
+from enum import Enum
 from memory import GetLedgerEntryWithName, Memstats
-from process import GetProcName, GetProcPID, GetTaskFromProc, GetTaskSummary
+from process import GetProcName, GetProcPID, GetTaskFromProc, GetTaskSummary, ledger_limit_infinity
 from scheduler import GetRecentTimestamp
 from utils import Cast
 from xnu import header, kern, lldb_command, unsigned
@@ -8,6 +9,20 @@ from xnudefines import JETSAM_PRIORITY_MAX, P_MEMSTAT_FROZEN
 
 
 # Macro: showmemorystatus
+
+class PControlAction(Enum):
+    # See proc_internal.h
+    NONE = 0
+    THROTTLE = 1
+    SUSPEND = 2
+    KILL = 3
+
+class RelaunchProbability(Enum):
+    # See kern_memorystatus.h
+    LOW = 1
+    MED = 2
+    HIGH = 4
+
 def CalculateLedgerPeak(phys_footprint_entry):
     """
     Internal function to calculate ledger peak value for the given phys footprint entry
@@ -16,30 +31,30 @@ def CalculateLedgerPeak(phys_footprint_entry):
     """
     return max(phys_footprint_entry['balance'], phys_footprint_entry.get('interval_max', 0))
 
-def IsProcFrozen(proc):
-    if not proc:
-        return 'N'
-    return 'Y' if proc.p_memstat_state & P_MEMSTAT_FROZEN else 'N'
-
-@header(f'{"effective": >12s} {"requested": >12s} {"assertion": >12s}'
-        f'{"state": >12s} {"dirty": >12s}'
-        f'{"frozen": >8s} {"relaunch": >10s} '
-        f'{"physical": >14s} {"iokit": >10s} {"footprint": >12s} '
-        f'{"recent_peak": >12s} {"lifemax": >10s} {"limit": >10s} '
-        f'{"pid": >8s} {"name": <32s}\n'
-        f'{"": >8s} {"priority": >12s} {"priority": >12s} '
-        f'{"priority": >12s} {"": >12s} '
-        f'{"": >8s} {"": >10s} '
-        f'{"(pages)": >14s} {"(pages)": >10s} {"(pages)": >12s} '
-        f'{"(pages)": >12s} {"(pages)": >10s} {"(pages)": >10s}  {"": <32s}')
-def GetMemoryStatusNode(proc_val):
+@header(f'{"cur_pri": <12s} '
+        f'{"name": <32s} '
+        f'{"pid": >8s} '
+        f'{"req_pri": >12s} '
+        f'{"ast_pri": >12s} '
+        f'{"state": >12s} '
+        f'{"dirty": >12s} '
+        f'{"relaunch": >10s} '
+        f'{"pcontrol": >10s} '
+        f'{"paction": >10s} '
+        f'{"footprint": >12s} '
+        f'{"max_footprint": >13s} '
+        f'{"limit": >12s}')
+def GetMemoryStatusNode(proc):
     """
     Internal function to get memorystatus information from the given proc
     params: proc - value representing struct proc *
     return: str - formatted output information for proc object
     """
-    out_str = ''
-    task_val = GetTaskFromProc(proc_val)
+
+    task_val = GetTaskFromProc(proc)
+    if task_val is None:
+        return ''
+
     task_ledgerp = task_val.ledger
     ledger_template = kern.globals.task_ledger_template
 
@@ -48,36 +63,42 @@ def GetMemoryStatusNode(proc_val):
     task_phys_footprint_ledger_entry = GetLedgerEntryWithName(ledger_template, task_ledgerp, 'phys_footprint')
     page_size = kern.globals.page_size
 
-    phys_mem_footprint = task_physmem_footprint_ledger_entry['balance'] // page_size
-    iokit_footprint = task_iokit_footprint_ledger_entry['balance'] // page_size
-    phys_footprint = task_phys_footprint_ledger_entry['balance'] // page_size
-    phys_footprint_limit = task_phys_footprint_ledger_entry['limit'] // page_size
-    ledger_peak = CalculateLedgerPeak(task_phys_footprint_ledger_entry)
-    phys_footprint_spike = ledger_peak // page_size
-    phys_footprint_lifetime_max = task_phys_footprint_ledger_entry['lifetime_max'] // page_size
-
-    format_string = '{:>12d} {:>12d} {:>12d} {:#012x} {:#012x} {:>8s} {:>10d} {:>14d} {:>10d} {:>12d}'
-    out_str += format_string.format(
-            proc_val.p_memstat_effectivepriority,
-            proc_val.p_memstat_requestedpriority,
-            proc_val.p_memstat_assertionpriority,
-            proc_val.p_memstat_state,
-            proc_val.p_memstat_dirty,
-            IsProcFrozen(proc_val),
-            proc_val.p_memstat_relaunch_flags,
-            phys_mem_footprint,
-            iokit_footprint,
-            phys_footprint)
-    if phys_footprint != phys_footprint_spike:
-        out_str += ' {: >12d}'.format(phys_footprint_spike)
+    phys_mem_footprint = task_physmem_footprint_ledger_entry['balance'] // 1024
+    iokit_footprint = task_iokit_footprint_ledger_entry['balance'] // 1024
+    phys_footprint = task_phys_footprint_ledger_entry['balance'] // 1024
+    if task_phys_footprint_ledger_entry['limit'] == ledger_limit_infinity:
+        phys_footprint_limit = '-'
     else:
-        out_str += ' {: >12s}'.format('-')
-    out_str += ' {: >10d} {: >10d} {:>8d} {: <32s}'.format(
-            phys_footprint_lifetime_max,
-            phys_footprint_limit,
-            GetProcPID(proc_val),
-            GetProcName(proc_val))
-    return out_str
+        phys_footprint_limit = str(task_phys_footprint_ledger_entry['limit'] // 1024)
+    ledger_peak = CalculateLedgerPeak(task_phys_footprint_ledger_entry) // 1024
+    phys_footprint_spike = ledger_peak // 1024
+    phys_footprint_lifetime_max = task_phys_footprint_ledger_entry['lifetime_max'] // 1024
+
+    if proc.p_memstat_relaunch_flags != 0:
+        relaunch_flags = RelaunchProbability(int(proc.p_memstat_relaunch_flags)).name
+    else:
+        relaunch_flags = '-'
+
+    if proc.p_pcaction != 0:
+        pc_control = PControlAction(proc.p_pcaction & 0xff).name
+        pc_action = PControlAction((proc.p_pcaction & 0xff00) >> 16).name
+    else:
+        pc_control = '-'
+        pc_action = '-'
+
+    return (f'{proc.p_memstat_effectivepriority:<12d} '
+            f'{GetProcName(proc):<32s} '
+            f'{GetProcPID(proc):>8d} '
+            f'{proc.p_memstat_requestedpriority:>12d} '
+            f'{proc.p_memstat_assertionpriority:>12d} '
+            f'{proc.p_memstat_state:#12x} '
+            f'{proc.p_memstat_dirty:#12x} '
+            f'{relaunch_flags:>10s} '
+            f'{pc_control:>10s} '
+            f'{pc_action:>10s} '
+            f'{phys_footprint:>12d} '
+            f'{phys_footprint_lifetime_max:>13d} '
+            f'{phys_footprint_limit:>12s}')
 
 @lldb_command('showmemorystatus')
 def ShowMemoryStatus(cmd_args=None):

@@ -148,6 +148,13 @@ int shared_region_persistence = 0;      /* no by default */
 /* delay in seconds before reclaiming an unused shared region */
 TUNABLE_WRITEABLE(int, shared_region_destroy_delay, "vm_shared_region_destroy_delay", 120);
 
+#if DEVELOPMENT || DEBUG
+#define PANIC_ON_DYLD_ISSUE_DEFAULT 0
+#else /* DEVELOPMENT || DEBUG */
+#define PANIC_ON_DYLD_ISSUE_DEFAULT 0
+#endif /* DEVELOPMENT || DEBUG */
+TUNABLE_WRITEABLE(int, panic_on_dyld_issue, "panic_on_dyld_issue", PANIC_ON_DYLD_ISSUE_DEFAULT);
+
 /*
  * Cached pointer to the most recently mapped shared region from PID 1, which should
  * be the most commonly mapped shared region in the system.  There are many processes
@@ -1120,8 +1127,7 @@ shared_region_tpro_protect(
 	vm_shared_region_t sr,
 	vm_prot_t max_prot __unused)
 {
-	if (sr->sr_cpu_type != CPU_TYPE_ARM64 ||
-	    (sr->sr_cpu_subtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) {
+	if (sr->sr_cpu_type != CPU_TYPE_ARM64) {
 		return false;
 	}
 
@@ -1768,7 +1774,14 @@ vm_shared_region_map_file_setup(
 			}
 
 			/* mapping's address is relative to the shared region base */
-			target_address = (vm_map_offset_t)(mappings[i].sms_address - sr_base_address);
+			if (__improbable(
+				    os_sub_overflow(
+					    mappings[i].sms_address,
+					    sr_base_address,
+					    &target_address))) {
+				kr = KERN_INVALID_ARGUMENT;
+				break;
+			}
 
 			vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 			vmk_flags.vmkf_already = TRUE;

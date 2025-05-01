@@ -245,8 +245,7 @@ def GetKperfStatus():
 
     lw_pet = kern.globals.kppet.g_lightweight
     if lw_pet != 0:
-        lw_pet_gen = kern.globals.kppet_gencount
-        out += 'lightweight PET is active (timer = {:<d}, generation count = {:<d})\n'.format(pet_timer_id, lw_pet_gen)
+        out += 'lightweight PET is active (timer = {:<d})\n'.format(pet_timer_id)
     else:
         out += 'lightweight PET is off\n'
 
@@ -917,5 +916,3 @@ def ShowKernelDebugBuffer(cmd_args=None):
 def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     """ REMOVED: Use savekdebugtrace instead. """
     raise NotImplementedError("Use savekdebugtrace instead")
-
-

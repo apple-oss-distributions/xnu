@@ -72,7 +72,14 @@ extern thread_t Shutdown_context(void (*doshutdown)(processor_t), processor_t  p
 extern void __dead2 Call_continuation(thread_continue_t, void *, wait_result_t, boolean_t enable_interrupts);
 
 
-extern unsigned int arm_sme_version(void) __pure2;
+typedef enum {
+	ARM_SME_UNSUPPORTED = 0,
+	ARM_FEAT_SME,
+	ARM_FEAT_SME2,
+	ARM_SME_VERSION_MAX,
+} arm_sme_version_t;
+
+extern arm_sme_version_t arm_sme_version(void) __pure2;
 #if HAS_ARM_FEAT_SME
 extern void arm_sme_init(bool is_boot_cpu);
 extern uint16_t arm_sme_svl_b(void);
@@ -88,24 +95,35 @@ extern void arm_save_sme_za_zt0(arm_sme_context_t *sme_ss, uint16_t svl_b);
 extern void arm_load_sme_za_zt0(const arm_sme_context_t *sme_ss, uint16_t svl_b);
 #endif /* HAS_ARM_FEAT_SME */
 
+struct arm_matrix_cpu_state {
+#if HAS_ARM_FEAT_SME
+	bool have_sme;
+	bool za_is_enabled;
+	bool sm_is_enabled;
+#endif
+};
+
+extern void arm_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state);
+
 /**
  * Indicate during a context-switch event that we have updated some CPU
  * state which requires a later context-sync event.
  *
- * On ARMv8.5 and later CPUs, this function sets a flag that will trigger an
- * explicit isb instruction sometime before the upcoming eret instruction.
+ * When the CPU is configured to speculate across eret, this function sets a
+ * flag that will trigger an explicit isb instruction sometime before the
+ * upcoming eret instruction.
  *
- * Prior to ARMv8.5, the eret instruction itself is always synchronizing, and
+ * Otherwise, the eret instruction itself is always synchronizing, and
  * this function is an empty stub which serves only as documentation.
  */
-#if __ARM_ARCH_8_5__
+#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 extern void arm_context_switch_requires_sync(void);
 #else
 static inline void
 arm_context_switch_requires_sync(void)
 {
 }
-#endif /* __ARM_ARCH_8_5__ */
+#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 
 #if __has_feature(ptrauth_calls)
 extern boolean_t arm_user_jop_disabled(void);
@@ -118,6 +136,7 @@ extern int copyout_kern(const char *kernel_addr, user_addr_t user_addr, vm_size_
 extern int copyin_kern(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes);
 
 extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t nbytes);
+extern void bcopy_phys_with_options(addr64_t from, addr64_t to, vm_size_t nbytes, int options);
 
 extern void dcache_incoherent_io_flush64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);
 extern void dcache_incoherent_io_store64(addr64_t pa, unsigned int count, unsigned int remaining, unsigned int *res);

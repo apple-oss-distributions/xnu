@@ -979,9 +979,8 @@ def Kasan(cmd_args=None, cmd_options=None, O=None):
         print("KASan not enabled in build")
         return
 
-    if not cmd_args:
-        print(Kasan.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     # Since the VM is not aware of the KASan shadow mapping, accesses to it will
     # fail. Setting kdp_read_io=1 avoids this check.

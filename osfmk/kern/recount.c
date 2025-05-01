@@ -1276,6 +1276,7 @@ recount_task_thread_perf_level_usage(struct task *task, uint64_t tid,
 		} else {
 			recount_thread_perf_level_usage(thread, usage_levels);
 		}
+		thread_deallocate(thread);
 	}
 	return thread != THREAD_NULL;
 }

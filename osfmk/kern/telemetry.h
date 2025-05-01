@@ -36,6 +36,9 @@
 
 __BEGIN_DECLS
 
+/*
+ * No longer supported.
+ */
 #define TELEMETRY_CMD_TIMER_EVENT 1
 #define TELEMETRY_CMD_VOUCHER_NAME 2
 #define TELEMETRY_CMD_VOUCHER_STAIN TELEMETRY_CMD_VOUCHER_NAME
@@ -48,104 +51,6 @@ enum telemetry_pmi {
 #define TELEMETRY_CMD_PMI_SETUP 3
 
 #if XNU_KERNEL_PRIVATE
-
-__options_decl(kernel_brk_options_t, uint32_t, {
-	/* Recoverability */
-	KERNEL_BRK_UNRECOVERABLE       = 0x00,
-	KERNEL_BRK_RECOVERABLE         = 0x01,
-
-	/* Telemetry collection mode */
-	KERNEL_BRK_CORE_ANALYTICS      = 0x10,
-	KERNEL_BRK_SIMULATED_PANIC     = 0x20, /* Future */
-});
-
-#define KERNEL_BRK_TELEMETRY_OPTIONS 0xf0
-
-/* these show up in telemetry, do not renumber */
-__enum_decl(kernel_brk_type_t, uint32_t, {
-	KERNEL_BRK_TYPE_KASAN          = 0,     /* <unrecoverable> KASan violation traps */
-	KERNEL_BRK_TYPE_PTRAUTH        = 1,     /* <unrecoverable> Pointer Auth failure traps */
-	KERNEL_BRK_TYPE_CLANG          = 2,     /* <unrecoverable> Clang sanitizer traps */
-	KERNEL_BRK_TYPE_LIBCXX         = 3,     /* <unrecoverable> Libc++ abort trap*/
-	KERNEL_BRK_TYPE_TELEMETRY      = 4,     /* <  recoverable> Soft telemetry collection traps */
-	KERNEL_BRK_TYPE_XNU            = 5,     /* <??recoverable> XNU defined traps */
-
-	KERNEL_BRK_TYPE_TEST           = ~0u,   /* Development only */
-});
-
-enum kernel_brk_trap_comment {
-	/* CLANG (reserved)       : [0x0000 ~ 0x00FF] <Intel only> */
-	CLANG_X86_TRAP_START           = 0x0000,
-	CLANG_X86_TRAP_BOUND_CHK       = 0x0019, /* bound check fatal trap */
-	CLANG_X86_TRAP_END             = 0x00FF,
-
-	/* LIBCXX                 : [0x0800 ~ 0x0800] */
-	LIBCXX_TRAP_START              = 0x0800,
-	LIBCXX_TRAP_ABORT              = 0x0800, /* libcxx abort() in libcxx_support/stdlib.h */
-	LIBCXX_TRAP_END                = 0x0800,
-
-	/* KASAN (kasan-tbi.h)    : [0x0900 ~ 0x093F] <ARM only> */
-
-	/* CLANG (reserved)       : [0x5500 ~ 0x55FF] <ARM only> */
-	CLANG_ARM_TRAP_START           = 0x5500,
-	CLANG_ARM_TRAP_BOUND_CHK       = 0x5519, /* bound check fatal trap */
-	CLANG_ARM_TRAP_END             = 0x55FF,
-
-	/* Software defined       : [0xB000 ~ 0xBFFF] */
-	XNU_HARD_TRAP_START            = 0xB000,
-	XNU_HARD_TRAP_SAFE_UNLINK      = 0xBFFD, /* queue safe unlinking traps */
-	XNU_HARD_TRAP_STRING_CHK       = 0xBFFE, /* read traps in string.h */
-	XNU_HARD_TRAP_END              = 0xBFFF,
-
-	/* PTRAUTH (sleh.c)       : [0xC470 ~ 0xC473] <ARM only> */
-
-	/* TELEMETRY              : [0xFF00 ~ 0xFFFE] */
-	XNU_SOFT_TRAP_START            = 0xFF00,
-	UBSAN_SOFT_TRAP_SIGNED_OF      = 0xFF00, /* ubsan minimal signed overflow*/
-	CLANG_SOFT_TRAP_BOUND_CHK      = 0xFF19, /* ml_bound_chk_soft_trap */
-	XNU_SOFT_TRAP_STRING_CHK       = 0xFFFE, /* read traps in string.h */
-	XNU_SOFT_TRAP_END              = 0xFFFE,
-
-	/* TEST */
-	TEST_RECOVERABLE_SOFT_TRAP     = 0xFFFF, /* development only */
-};
-
-typedef struct kernel_brk_descriptor {
-	kernel_brk_type_t     type;
-	uint16_t              base;
-	uint16_t              max;
-	kernel_brk_options_t  options;
-
-	void (*handle_breakpoint)(void *states, uint16_t comment);
-} *kernel_brk_descriptor_t;
-
-extern struct kernel_brk_descriptor brk_descriptors[]
-__SECTION_START_SYM("__DATA_CONST", "__brk_desc");
-
-extern struct kernel_brk_descriptor brk_descriptors_end[]
-__SECTION_END_SYM("__DATA_CONST", "__brk_desc");
-
-#define KERNEL_BRK_DESCRIPTOR_DEFINE(name, ...) \
-__PLACE_IN_SECTION("__DATA_CONST,__brk_desc") \
-static const struct kernel_brk_descriptor name = { __VA_ARGS__ };
-
-const static inline struct kernel_brk_descriptor *
-find_brk_descriptor_by_comment(uint16_t comment)
-{
-	for (kernel_brk_descriptor_t des = brk_descriptors; des < brk_descriptors_end; des++) {
-		if (comment >= des->base && comment <= des->max) {
-			return des;
-		}
-	}
-
-	return NULL;
-}
-
-extern void telemetry_kernel_brk(
-	kernel_brk_type_t     type,
-	kernel_brk_options_t  options,
-	void                  *state,
-	uint16_t              comment);
 
 /* implemented in OSKextLib.cpp */
 extern void telemetry_backtrace_add_kexts(
@@ -160,33 +65,21 @@ extern void telemetry_backtrace_to_string(
 	uint32_t              tot,
 	uintptr_t            *frames);
 
-/* boolean_t must be used since variable is loaded from assembly. */
-extern volatile boolean_t telemetry_needs_record;
-
 extern void telemetry_init(void);
 
 extern void compute_telemetry(void *);
 
 extern void telemetry_ast(thread_t thread, uint32_t reasons);
 
+extern int telemetry_kernel_gather(user_addr_t user_buffer, uint32_t *user_length);
 extern int telemetry_gather(user_addr_t buffer, uint32_t *length, bool mark);
 
-/* boolean_t must be used since this function is called from assembly. */
-extern void telemetry_mark_curthread(boolean_t interrupted_userspace,
-    boolean_t pmi);
-
-extern void telemetry_task_ctl(task_t task, uint32_t reason, int enable_disable);
-extern void telemetry_task_ctl_locked(task_t task, uint32_t reason, int enable_disable);
-extern void telemetry_global_ctl(int enable_disable);
-
-extern int telemetry_timer_event(uint64_t deadline, uint64_t interval, uint64_t leeway);
 extern int telemetry_pmi_setup(enum telemetry_pmi pmi_type, uint64_t interval);
 
 #if CONFIG_MACF
 extern int telemetry_macf_mark_curthread(void);
 #endif
 
-extern void bootprofile_init(void);
 extern void bootprofile_wake_from_sleep(void);
 extern void bootprofile_get(void **buffer, uint32_t *length);
 extern int bootprofile_gather(user_addr_t buffer, uint32_t *length);

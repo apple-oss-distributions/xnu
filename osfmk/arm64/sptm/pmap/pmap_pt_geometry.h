@@ -525,7 +525,71 @@ pte_index(const pt_attr_t * const pt_attr, vm_map_address_t addr)
 	return ttn_index(pt_attr, addr, PMAP_TT_L3_LEVEL);
 }
 
+/**
+ * Return true if a leaf-level PTE is valid.
+ *
+ * @note This will NOT work on non-leaf-level entries. Please use tte_is_valid()
+ *       instead.
+ */
+static inline bool
+pte_is_valid(pt_entry_t pte)
+{
+	return (pte & ARM_PTE_TYPE_MASK) == ARM_PTE_TYPE_VALID;
+}
 
+/**
+ * Return true if a non-leaf-level TTE is valid and typed as a table.
+ *
+ * @note This will NOT work on leaf-level entries. Please use pte_is_valid()
+ *       instead.
+ *
+ * @note This will return false if the TTE represents a non-leaf-level block
+ *       mapping (instead of a table mapping).
+ */
+static inline bool
+tte_is_valid_table(tt_entry_t tte)
+{
+	return (tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) == (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID);
+}
+
+/**
+ * Return true if a non-leaf-level TTE is valid and typed as a block mapping.
+ *
+ * @note This will NOT work on leaf-level entries. Please use pte_is_valid()
+ *       instead.
+ *
+ * @note This will return false if the TTE represents a non-leaf-level table
+ *       mapping (instead of a block mapping).
+ */
+static inline bool
+tte_is_valid_block(tt_entry_t tte)
+{
+	return (tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) == (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID);
+}
+
+/**
+ * Return true if a non-leaf-level TTE is typed as a table (regardless of
+ * validity).
+ *
+ * @note This will NOT work on leaf-level entries.
+ */
+static inline bool
+tte_is_table(tt_entry_t tte)
+{
+	return (tte & (ARM_TTE_TYPE_MASK)) == (ARM_TTE_TYPE_TABLE);
+}
+
+/**
+ * Return true if a non-leaf-level TTE is typed as a block mapping (regardless
+ * of validity).
+ *
+ * @note This will NOT work on leaf-level entries.
+ */
+static inline bool
+tte_is_block(tt_entry_t tte)
+{
+	return (tte & (ARM_TTE_TYPE_MASK)) == (ARM_TTE_TYPE_BLOCK);
+}
 
 /**
  * Given an address and a map, compute the address of the table entry at the
@@ -565,12 +629,12 @@ pmap_ttne(pmap_t pmap, unsigned int target_level, vm_map_address_t addr)
 		tte = *ttep;
 
 #if MACH_ASSERT
-		if ((tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) == (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID)) {
+		if (tte_is_valid_block(tte)) {
 			panic("%s: Attempt to demote L%u block, tte=0x%llx, pmap=%p, target_level=%u, addr=%p",
 			    __func__, cur_level, tte, pmap, target_level, (void*)addr);
 		}
 #endif
-		if ((tte & (ARM_TTE_TYPE_MASK | ARM_TTE_VALID)) != (ARM_TTE_TYPE_TABLE | ARM_TTE_VALID)) {
+		if (!tte_is_valid_table(tte)) {
 			return TT_ENTRY_NULL;
 		}
 

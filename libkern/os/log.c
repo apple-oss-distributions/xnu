@@ -1019,6 +1019,7 @@ log_stats_update_saved(firehose_stream_t stream)
 		break;
 	case firehose_stream_persist:
 	case firehose_stream_memory:
+	case firehose_stream_special:
 		counter_inc(&oslog_p_saved_msgcount);
 		break;
 	case firehose_stream_signpost:

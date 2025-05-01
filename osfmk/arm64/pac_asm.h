@@ -161,6 +161,48 @@
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
 
+/*
+ * For pacga diversification we always put the tag type in the
+ * lowest 4 bits of the first source to pacga.
+ *
+ * We diversify by use case, to prevent attackers from using
+ * pacga results from one usecase to attack another usecase.
+ *
+ * First pacga when using a context:
+ * pacga chain_reg, (context << 4) + PACGA_TAG_xxx, first_data
+ *
+ * First pacga without context:
+ * pacga chain_reg, PACGA_TAG_xxx, first_data
+ *
+ * Subsequent pacga's:
+ * pacga chain_reg, chain_reg + PACGA_TAG_xxx, next_data
+ *
+ * chain_reg layout
+ * 63 .. 32    || 31 .. 4                | 3 .. 0
+ * chain value || available per use case | TAG
+ */
+#define PACGA_TAG_0         0b0000
+#define PACGA_TAG_BLOB      0b0001
+#define PACGA_TAG_THREAD    0b0010
+#define PACGA_TAG_IRG       0b0011
+#define PACGA_TAG_HV        0b0100
+#define PACGA_TAG_5         0b0101
+#define PACGA_TAG_6         0b0110
+#define PACGA_TAG_7         0b0111
+#define PACGA_TAG_8         0b1000
+#define PACGA_TAG_9         0b1001
+/*
+ * This one is never actually used, it is here to effectively made the THREAD TAG
+ * 3 bits, so we can sign enough of PC there for the foreseeable future (up to 128M of kernel .text)
+ */
+#define PACGA_TAG_THREAD_2  0b1010
+#define PACGA_TAG_b         0b1011
+#define PACGA_TAG_c         0b1100
+#define PACGA_TAG_d         0b1101
+#define PACGA_TAG_e         0b1110
+#define PACGA_TAG_f         0b1111
+
+
 
 
 /* END IGNORE CODESTYLE */

@@ -88,6 +88,7 @@
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_right.h>
+#include <ipc/ipc_policy.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_space.h>
@@ -981,7 +982,6 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	thread_t                thread)
 {
 	mach_msg_option64_t     option64 = thread->ith_option;
-	ipc_object_t            object = io_from_waitq(waitq);
 	ipc_port_t              port = IP_NULL;
 	wait_result_t           wresult;
 	uint64_t                deadline;
@@ -990,7 +990,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	assert(thread == current_thread());
 
 	if (waitq_type(waitq) == WQT_PORT_SET) {
-		ipc_pset_t pset = ips_object_to_pset(object);
+		ipc_pset_t pset = ips_from_waitq(waitq);
 		wqs_prepost_flags_t wqs_flags = WQS_PREPOST_LOCK;
 		struct waitq *port_wq;
 
@@ -1019,7 +1019,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 			 * Continue on to handling the message with just
 			 * the port waitq locked.
 			 */
-			io_unlock(object);
+			waitq_unlock(waitq);
 			port = ip_from_waitq(port_wq);
 		}
 	} else if (waitq_type(waitq) == WQT_PORT) {
@@ -1048,7 +1048,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 
 	if (!waitq_is_valid(waitq)) {
 		/* someone raced us to destroy this mqueue/port! */
-		io_unlock(object);
+		waitq_unlock(waitq);
 		/*
 		 * ipc_mqueue_receive_results updates the thread's ith_state
 		 * TODO: differentiate between rights being moved and
@@ -1063,7 +1063,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	 * still locked.
 	 */
 	if ((option64 & MACH_RCV_TIMEOUT) && rcv_timeout == 0) {
-		io_unlock(object);
+		waitq_unlock(waitq);
 		thread->ith_state = MACH_RCV_TIMED_OUT;
 		return THREAD_NOT_WAITING;
 	}
@@ -1132,7 +1132,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 		panic("ipc_mqueue_receive_on_thread: sleep walking");
 	}
 
-	io_unlock(object);
+	waitq_unlock(waitq);
 
 	/*
 	 * After this point, a waiting thread could be found by the wakeup
@@ -1590,7 +1590,7 @@ ipc_mqueue_copyin(
 		io_unlock(object);
 		/* guard exception if we never held the receive right in this entry */
 		if ((bits & MACH_PORT_TYPE_EX_RECEIVE) == 0) {
-			mach_port_guard_exception(name, 0, 0, kGUARD_EXC_RCV_INVALID_NAME);
+			mach_port_guard_exception(name, 0, kGUARD_EXC_RCV_INVALID_NAME);
 		}
 		return MACH_RCV_INVALID_NAME;
 	}

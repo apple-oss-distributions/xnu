@@ -99,13 +99,13 @@ typedef struct diagWork {                       /* Diagnostic work area */
 extern diagWork dgWork;
 
 #define FIXED_PMC (1 << 30)
-#define FIXED_PMC0 (FIXED_PMC)
-#define FIXED_PMC1 (FIXED_PMC | 1)
-#define FIXED_PMC2 (FIXED_PMC | 2)
-#define GPMC0 (0)
-#define GPMC1 (1)
-#define GPMC2 (2)
-#define GPMC3 (3)
+#define FIXED_S3_2_C15_C0_0 (FIXED_PMC)
+#define FIXED_S3_2_C15_C1_0 (FIXED_PMC | 1)
+#define FIXED_S3_2_C15_C2_0 (FIXED_PMC | 2)
+#define GS3_2_C15_C0_0 (0)
+#define GS3_2_C15_C1_0 (1)
+#define GS3_2_C15_C2_0 (2)
+#define GS3_2_C15_C3_0 (3)
 
 static inline uint64_t
 read_pmc(uint32_t counter)

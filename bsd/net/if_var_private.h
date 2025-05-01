@@ -74,6 +74,7 @@
 #include <sys/ioccom.h>
 #ifdef KERNEL_PRIVATE
 #include <kern/locks.h>
+#include <net/kpi_interface.h>
 #endif /* KERNEL_PRIVATE */
 
 struct if_traffic_class {
@@ -134,6 +135,38 @@ struct if_packet_stats {
 	u_int64_t               ifi_udp_cleanup;
 	u_int64_t               ifi_udp_badipsec;
 	u_int64_t               _reserved[4];
+};
+
+/*
+ * Structure to report link heuristics
+ */
+#define HAS_IF_LINK_HEURISTICS_STATS 1
+struct if_linkheuristics {
+	u_int64_t       iflh_link_heuristics_cnt;  /* Count of congested link indications */
+	u_int64_t       iflh_link_heuristics_time; /* Duration of congested link indications (msec) */
+
+	u_int64_t       iflh_congested_link_cnt;  /* Count of congested link indications */
+	u_int64_t       iflh_congested_link_time; /* Duration of congested link indications (msec) */
+
+	u_int64_t       iflh_lqm_good_cnt;       /* Count of LQM good */
+	u_int64_t       iflh_lqm_good_time;      /* Duration of LQM good (msec) */
+
+	u_int64_t       iflh_lqm_poor_cnt;       /* Count of LQM poor */
+	u_int64_t       iflh_lqm_poor_time;      /* Duration of LQM poor (msec) */
+
+	u_int64_t       iflh_lqm_min_viable_cnt;  /* Count of LQM minimally viable */
+	u_int64_t       iflh_lqm_min_viable_time; /* Duration of LQM minimally viable (msec) */
+
+	u_int64_t       iflh_lqm_bad_cnt;         /* Count of LQM bad */
+	u_int64_t       iflh_lqm_bad_time;        /* Duration of LQM bad (msec) */
+
+	u_int64_t       iflh_tcp_linkheur_stealthdrop;
+	u_int64_t       iflh_tcp_linkheur_noackpri;
+	u_int64_t       iflh_tcp_linkheur_comprxmt;
+	u_int64_t       iflh_tcp_linkheur_synrxmt;
+	u_int64_t       iflh_tcp_linkheur_rxmtfloor;
+
+	u_int64_t       iflh_udp_linkheur_stealthdrop;
 };
 
 struct if_description {
@@ -312,6 +345,7 @@ struct if_lim_perf_stat {
 };
 
 #define IF_VAR_H_HAS_IFNET_STATS_PER_FLOW 1
+#define IF_VAR_H_HAS_IFNET_STATS_PER_FLOW_LINKHEUR 1
 struct ifnet_stats_per_flow {
 	u_int64_t bk_txpackets;
 	u_int64_t txpackets;
@@ -343,7 +377,14 @@ struct ifnet_stats_per_flow {
 	    ecn_fallback_droprst:1,
 	    ecn_fallback_droprxmt:1,
 	    ecn_fallback_ce:1,
-	    ecn_fallback_reorder:1;
+	    ecn_fallback_reorder:1,
+	    _reserved_6:6;
+	u_int16_t _reserved_16;
+	u_int32_t _reserved_32;
+	u_int64_t linkheur_noackpri;
+	u_int64_t linkheur_comprxmt;
+	u_int64_t linkheur_synrxmt;
+	u_int64_t linkheur_rxmtfloor;
 };
 
 struct if_interface_state {
@@ -433,12 +474,64 @@ struct if_data_internal {
 	u_int64_t       ifi_dt_bytes;   /* Data threshold counter */
 	u_int64_t       ifi_fpackets;   /* forwarded packets on interface */
 	u_int64_t       ifi_fbytes;     /* forwarded bytes on interface */
-	struct  timeval ifi_lastchange; /* time of last administrative change */
-	struct  timeval ifi_lastupdown; /* time of last up/down event */
+	u_int64_t       ifi_link_heuristics_cnt;  /* Count of link heuristics enabled */
+	u_int64_t       ifi_link_heuristics_time; /* Duration of link heuristics enabled (msec) */
+	u_int64_t       ifi_congested_link_cnt;  /* Count of congested link indications */
+	u_int64_t       ifi_congested_link_time; /* Duration of congested link indications (msec) */
+	u_int64_t       ifi_lqm_good_cnt;  /* Count of lqm good*/
+	u_int64_t       ifi_lqm_good_time; /* Duration of lqm good (msec) */
+	u_int64_t       ifi_lqm_poor_cnt;  /* Count of lqm poor */
+	u_int64_t       ifi_lqm_poor_time; /* Duration of lqm poor (msec) */
+	u_int64_t       ifi_lqm_min_viable_cnt;  /* Count of lqm minimally viable */
+	u_int64_t       ifi_lqm_min_viable_time; /* Duration of lqm minimally viable (msec) */
+	u_int64_t       ifi_lqm_bad_cnt;  /* Count of lqm bad */
+	u_int64_t       ifi_lqm_bad_time; /* Duration of lqm bad (msec) */
+	struct timeval  ifi_lastchange; /* time of last administrative change */
+	struct timeval  ifi_lastupdown; /* time of last up/down event */
 	u_int32_t       ifi_hwassist;   /* HW offload capabilities */
 	u_int32_t       ifi_tso_v4_mtu; /* TCP Segment Offload IPv4 maximum segment size */
 	u_int32_t       ifi_tso_v6_mtu; /* TCP Segment Offload IPv6 maximum segment size */
 };
+
+/*
+ * List of if_proto structures in if_proto_hash[] is protected by
+ * the ifnet lock.  The rest of the fields are initialized at protocol
+ * attach time and never change, thus no lock required as long as
+ * a reference to it is valid, via if_proto_ref().
+ */
+struct if_proto {
+	SLIST_ENTRY(if_proto)       next_hash;
+	u_int32_t                   refcount;
+	u_int32_t                   detached;
+	struct ifnet                *ifp;
+	protocol_family_t           protocol_family;
+	int                         proto_kpi;
+	union {
+		struct {
+			proto_media_input               input;
+			proto_media_preout              pre_output;
+			proto_media_event               event;
+			proto_media_ioctl               ioctl;
+			proto_media_detached            detached;
+			proto_media_resolve_multi       resolve_multi;
+			proto_media_send_arp            send_arp;
+		} v1;
+		struct {
+			proto_media_input_v2            input;
+			proto_media_preout              pre_output;
+			proto_media_event               event;
+			proto_media_ioctl               ioctl;
+			proto_media_detached            detached;
+			proto_media_resolve_multi       resolve_multi;
+			proto_media_send_arp            send_arp;
+		} v2;
+	} kpi;
+};
+
+SLIST_HEAD(proto_hash_entry, if_proto);
+
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct if_proto, if_proto);
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 #define if_mtu          if_data.ifi_mtu
@@ -472,6 +565,18 @@ struct if_data_internal {
 #define if_fpackets     if_data.ifi_fpackets
 #define if_fbytes       if_data.ifi_fbytes
 #define if_lastupdown   if_data.ifi_lastupdown
+#define if_link_heuristics_cnt    if_data.ifi_link_heuristics_cnt
+#define if_link_heuristics_time   if_data.ifi_link_heuristics_time
+#define if_congested_link_cnt    if_data.ifi_congested_link_cnt
+#define if_congested_link_time   if_data.ifi_congested_link_time
+#define if_lqm_good_cnt         if_data.ifi_lqm_good_cnt
+#define if_lqm_good_time        if_data.ifi_lqm_good_time
+#define if_lqm_poor_cnt         if_data.ifi_lqm_poor_cnt
+#define if_lqm_poor_time        if_data.ifi_lqm_poor_time
+#define if_lqm_min_viable_cnt   if_data.ifi_lqm_min_viable_cnt
+#define if_lqm_min_viable_time  if_data.ifi_lqm_min_viable_time
+#define if_lqm_bad_cnt          if_data.ifi_lqm_bad_cnt
+#define if_lqm_bad_time         if_data.ifi_lqm_bad_time
 
 /*
  * Forward structure declarations for function prototypes [sic].
@@ -483,7 +588,6 @@ struct ifnet_filter;
 struct mbuf;
 struct ifaddr;
 struct tqdummy;
-struct proto_hash_entry;
 struct dlil_threading_info;
 struct tcpstat_local;
 struct udpstat_local;
@@ -667,7 +771,8 @@ struct ifnet {
 	ifnet_add_proto_func    if_add_proto;
 	ifnet_del_proto_func    if_del_proto;
 	ifnet_check_multi       if_check_multi;
-	struct proto_hash_entry *if_proto_hash;
+	size_t                  if_proto_hash_count;
+	struct proto_hash_entry *__counted_by(if_proto_hash_count) if_proto_hash;
 	ifnet_detached_func     if_detach;
 
 	u_int32_t               if_flowhash;    /* interface flow control ID */
@@ -902,9 +1007,16 @@ struct ifnet {
 	struct in6_ifextra      *if_inet6data;
 	decl_lck_rw_data(, if_link_status_lock);
 	struct if_link_status   *if_link_status;
+
 	struct if_interface_state       if_interface_state;
+	uint64_t                        if_link_heuristics_start_time; /* milliseconds */
+	uint64_t                        if_congested_link_start_time; /* milliseconds */
+	uint64_t                        if_lqmstate_start_time;      /* milliseconds */
+	thread_call_t                   if_link_heuristics_tcall;
+
 	struct if_tcp_ecn_stat *if_ipv4_stat;
 	struct if_tcp_ecn_stat *if_ipv6_stat;
+
 
 #if SKYWALK
 	/* Keeps track of local ports bound to this interface
@@ -997,6 +1109,7 @@ EVENTHANDLER_DECLARE(ifnet_event, ifnet_event_fn);
 #define IFSF_TERMINATING         0x2     /* terminating */
 #define IFSF_NO_DELAY            0x4     /* no delay */
 #define IFSF_FLOW_RESUME_PENDING 0x8     /* ignore next flow control event */
+
 /*
  * Structure describing a `cloning' interface.
  */
@@ -1387,6 +1500,7 @@ struct ifmultiaddr {
     (_ifp)->if_family == IFNET_FAMILY_CELLULAR) &&    \
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_REDIRECT)
 
+
 extern int if_index;
 extern int if_indexcount;
 extern uint32_t ifindex2ifnetcount;
@@ -1575,13 +1689,16 @@ __private_extern__ void if_copy_rxpoll_stats(struct ifnet *ifp,
 __private_extern__ void if_copy_netif_stats(struct ifnet *ifp,
     struct if_netif_stats *if_ns);
 
+extern void if_copy_link_heuristics_stats(struct ifnet *ifp,
+    struct if_linkheuristics *if_lh);
+
 __private_extern__ struct rtentry *ifnet_cached_rtlookup_inet(struct ifnet *,
     struct in_addr);
 __private_extern__ struct rtentry *ifnet_cached_rtlookup_inet6(struct ifnet *,
     struct in6_addr *);
 
 __private_extern__ u_int32_t if_get_protolist(struct ifnet * ifp,
-    u_int32_t *protolist, u_int32_t count);
+    u_int32_t *__counted_by(count) protolist, u_int32_t count);
 __private_extern__ void if_free_protolist(u_int32_t *list);
 __private_extern__ errno_t if_state_update(struct ifnet *,
     struct if_interface_state *);
@@ -1610,15 +1727,9 @@ __private_extern__ errno_t ifnet_set_output_latencies(struct ifnet *,
 __private_extern__ void ifnet_clear_netagent(uuid_t);
 
 __private_extern__ int ifnet_set_netsignature(struct ifnet *, uint8_t,
-    uint8_t, uint16_t, uint8_t *);
+    uint8_t len, uint16_t, uint8_t *__sized_by(len));
 __private_extern__ int ifnet_get_netsignature(struct ifnet *, uint8_t,
-    uint8_t *, uint16_t *, uint8_t *);
-
-struct ipv6_prefix;
-__private_extern__ int ifnet_set_nat64prefix(struct ifnet *,
-    struct ipv6_prefix *);
-__private_extern__ int ifnet_get_nat64prefix(struct ifnet *,
-    struct ipv6_prefix *);
+    uint8_t *len, uint16_t *, uint8_t *__sized_by(*len));
 
 /* Required exclusive ifnet_head lock */
 __private_extern__ void ifnet_remove_from_ordered_list(struct ifnet *);
@@ -1662,7 +1773,10 @@ __private_extern__ void ifnet_update_stats_per_flow(struct ifnet_stats_per_flow 
 __private_extern__ int if_get_tcp_kao_max(struct ifnet *);
 #if XNU_TARGET_OS_OSX
 __private_extern__ errno_t ifnet_framer_stub(struct ifnet *, struct mbuf **,
-    const struct sockaddr *, const char *, const char *, u_int32_t *,
+    const struct sockaddr *,
+    IFNET_LLADDR_T dest_lladdr,
+    IFNET_FRAME_TYPE_T frame_type,
+    u_int32_t *,
     u_int32_t *);
 #endif /* XNU_TARGET_OS_OSX */
 __private_extern__ void ifnet_enqueue_multi_setup(struct ifnet *, uint16_t,
@@ -1671,8 +1785,8 @@ __private_extern__ errno_t ifnet_enqueue_mbuf(struct ifnet *, struct mbuf *,
     boolean_t, boolean_t *);
 __private_extern__ errno_t ifnet_enqueue_mbuf_chain(struct ifnet *,
     struct mbuf *, struct mbuf *, uint32_t, uint32_t, boolean_t, boolean_t *);
-__private_extern__ int ifnet_enqueue_netem(void *handle, pktsched_pkt_t *pkts,
-    uint32_t n_pkts);
+__private_extern__ int ifnet_enqueue_netem(void *handle,
+    pktsched_pkt_t *__sized_by(n_pkts) pkts, uint32_t n_pkts);
 #if SKYWALK
 struct __kern_packet;
 extern errno_t ifnet_enqueue_pkt(struct ifnet *,
@@ -1700,11 +1814,13 @@ extern int if_set_low_power(struct ifnet *, bool);
 extern u_int32_t if_set_eflags(ifnet_t, u_int32_t);
 extern void if_clear_eflags(ifnet_t, u_int32_t);
 extern u_int32_t if_set_xflags(ifnet_t, u_int32_t);
-extern void if_clear_xflags(ifnet_t, u_int32_t);
+extern u_int32_t if_clear_xflags(ifnet_t, u_int32_t);
 extern boolean_t sa_equal(const struct sockaddr *, const struct sockaddr *);
 extern void ifnet_update_traffic_rule_genid(struct ifnet *);
 extern boolean_t ifnet_sync_traffic_rule_genid(struct ifnet *, uint32_t *);
 extern void ifnet_update_traffic_rule_count(struct ifnet *, uint32_t);
+
+extern bool if_update_link_heuristic(struct ifnet *);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* DRIVERKIT */

@@ -97,7 +97,6 @@
 struct session;
 struct pgrp;
 struct proc;
-struct proc_ident;
 
 /* Exported fields for kern sysctls */
 struct extern_proc {
@@ -250,6 +249,23 @@ extern bool proc_is_third_party_debuggable_driver(proc_t p);
 
 #endif /* XNU_KERNEL_PRIVATE */
 
+#if KERNEL_PRIVATE
+/*
+ * Identify a process uniquely.
+ * proc_ident's fields match 1-1 with those in struct proc.
+ */
+struct proc_ident {
+	uint64_t        p_uniqueid;
+	pid_t           p_pid;
+	int             p_idversion;
+};
+
+/* obtain a proc_ident from a proc_ref */
+extern struct proc_ident proc_ident(proc_t p);
+#else
+struct proc_ident;
+#endif /* KERNEL_PRIVATE */
+
 /*
  * __unsafe_indexable is a workaround for
  * rdar://88409003 (PredefinedExpr trips C string detection)
@@ -292,6 +308,8 @@ void proc_selfname(char * buf, int size);
 extern proc_t proc_find(int pid);
 /* find a process with a given process identity */
 extern proc_t proc_find_ident(struct proc_ident const *i);
+/* find a process with a given audit token */
+extern proc_t proc_find_audit_token(const audit_token_t token);
 /* returns a handle to current process which is referenced. The reference needs to be dropped with proc_rele */
 extern proc_t proc_self(void);
 /* releases the held reference on the process */
@@ -302,6 +320,8 @@ extern int proc_pid(proc_t);
 extern int proc_ppid(proc_t);
 /* returns the original pid of the parent of a given process */
 extern int proc_original_ppid(proc_t);
+/* returns the pid version of the original parent of a given process */
+extern int proc_orig_ppidversion(proc_t);
 /* returns the start time of the given process */
 extern int proc_starttime(proc_t, struct timeval *);
 /* returns whether the given process is on simulated platform */
@@ -444,7 +464,6 @@ extern int proc_isabortedsignal(proc_t);
 /* return true if the process is translated, false for default */
 extern boolean_t proc_is_translated(proc_t);
 
-
 /* return true if this is an x86_64 process running under translation */
 extern bool proc_is_x86_64_compat(proc_t);
 
@@ -453,6 +472,9 @@ extern bool proc_ignores_content_protection(proc_t proc);
 
 /* true if the file system shouldn't update mtime for operations by the process */
 extern bool proc_skip_mtime_update(proc_t proc);
+
+/* true if syscalls support long paths */
+extern bool proc_support_long_paths(proc_t proc);
 
 /* return true if the process is flagged as allow-low-space */
 extern bool proc_allow_low_space_writes(proc_t p);

@@ -1,0 +1,39 @@
+/*
+ * @OSF_COPYRIGHT@
+ */
+/*
+ *	Error string definitions for the virtual memory kernel subsystem
+ */
+
+static const char * const err_codes_vm_kern[] = {
+	/* 0 */	"(vm/kernel) no error",
+	/* 1 */	"(vm/kernel) error return now",
+};
+
+static const char * const err_codes_vm_reclaim[] = {
+	/* 0 */	"(vm/reclaim) no error",
+	/* 1 */	"(vm/reclaim) invalid argument",
+	/* 2 */	"(vm/reclaim) operation not supported",
+	/* 3 */	"(vm/reclaim) invalid region size",
+	/* 4 */	"(vm/reclaim) invalid ring capacity",
+	/* 5 */	"(vm/reclaim) invalid reclaim ID",
+	/* 6 */	"(vm/reclaim) ring already instantiated",
+	/* 7 */	"(vm/reclaim) invalid ring",
+};
+
+/*	err_vm subsystems      	*/
+static const struct error_subsystem err_vm_sub[] = {
+	/* vm/0; */
+	{
+		"(vm/kernel)",
+		errlib_count(err_codes_vm_kern),
+		err_codes_mach_send,
+	},
+	/* vm/1; */
+	{
+		"(vm/reclaim)",
+		errlib_count(err_codes_vm_reclaim),
+		err_codes_vm_reclaim,
+
+	},
+};

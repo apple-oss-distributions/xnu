@@ -208,7 +208,8 @@ kern_open_file_for_direct_io(const char * name,
     uint32_t iflags,
     kern_get_file_extents_callback_t callback,
     void * callback_ref,
-    off_t set_file_size,
+    off_t set_file_size_min,
+    off_t set_file_size_max,
     off_t fs_free_size,
     off_t write_file_offset,
     void * write_file_addr,
@@ -302,7 +303,7 @@ kern_open_file_for_direct_io(const char * name,
 	wbctotal = 0;
 	mpFree = freespace_mb(ref->vp);
 	mpFree <<= 20;
-	kprintf("kern_direct_file(%s): vp size %qd, alloc %qd, mp free %qd, keep free %qd\n",
+	printf("kern_direct_file(%s): vp size %qd, alloc %qd, mp free %qd, keep free %qd\n",
 	    ref->name, va.va_data_size, va.va_data_alloc, mpFree, fs_free_size);
 
 	if (ref->vp->v_type == VREG) {
@@ -340,29 +341,43 @@ kern_open_file_for_direct_io(const char * name,
 			}
 		}
 
-		if (set_file_size) {
+		if (set_file_size_max) {
+			// set file size
 			if (wbctotal) {
-				if (wbctotal >= set_file_size) {
-					set_file_size = HIBERNATE_MIN_FILE_SIZE;
+				if (wbctotal >= set_file_size_min) {
+					set_file_size_min = HIBERNATE_MIN_FILE_SIZE;
 				} else {
-					set_file_size -= wbctotal;
-					if (set_file_size < HIBERNATE_MIN_FILE_SIZE) {
-						set_file_size = HIBERNATE_MIN_FILE_SIZE;
+					set_file_size_min -= wbctotal;
+					if (set_file_size_min < HIBERNATE_MIN_FILE_SIZE) {
+						set_file_size_min = HIBERNATE_MIN_FILE_SIZE;
 					}
 				}
+				set_file_size_max = set_file_size_min;
 			}
 			if (fs_free_size) {
 				mpFree += va.va_data_alloc;
-				if ((mpFree < set_file_size) || ((mpFree - set_file_size) < fs_free_size)) {
-					error = ENOSPC;
-					goto out;
+				if ((mpFree < set_file_size_max) || ((mpFree - set_file_size_max) < fs_free_size)) {
+					set_file_size_max = mpFree - fs_free_size;
+					if (0 == set_file_size_min) {
+						// passing zero for set_file_size_min (coredumps)
+						// means caller only accepts set_file_size_max
+						error = ENOSPC;
+						goto out;
+					}
+					if (set_file_size_max < set_file_size_min) {
+						set_file_size_max = set_file_size_min;
+					}
+					printf("kern_direct_file(%s): using reduced size %qd\n",
+					    ref->name, set_file_size_max);
+					// if set_file_size_min is passed (hibernation),
+					// it does not check free space on disk
 				}
 			}
-			error = vnode_setsize(ref->vp, set_file_size, IO_NOZEROFILL | IO_NOAUTH, ref->ctx);
+			error = vnode_setsize(ref->vp, set_file_size_max, IO_NOZEROFILL | IO_NOAUTH, ref->ctx);
 			if (error) {
 				goto out;
 			}
-			ref->filelength = set_file_size;
+			ref->filelength = set_file_size_max;
 		}
 	} else if ((ref->vp->v_type == VBLK) || (ref->vp->v_type == VCHR)) {
 		/* Partition. */

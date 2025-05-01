@@ -35,6 +35,7 @@
 #include <mach/task.h>
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_protos.h>
 #include <sys/errno.h>
 #include <sys/proc.h>
@@ -567,3 +568,4 @@ err_kalloc:
 	kfree_data(data.buf1, copyio_test_buf_size);
 	return ret;
 }
+

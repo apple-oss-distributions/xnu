@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -72,19 +72,17 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/time.h>
-#include <sys/queue.h>          /* get TAILQ macros */
-#ifdef BSD_KERN_PRIVATE
-#include <net/pktsched/pktsched.h>
-#include <sys/eventhandler.h>
+#ifdef XNU_KERNEL_PRIVATE
+#include <net/ethernet.h>
 #endif
-
-#if BSD_KERNEL_PRIVATE
+#ifdef BSD_KERNEL_PRIVATE
+#include <sys/eventhandler.h>
 #if DEVELOPMENT || DEBUG
 #define NET_KT_DEFAULT     KT_PRIV_ACCT
 #else
 #define NET_KT_DEFAULT     KT_DEFAULT
 #endif
-#endif /* BSD_KERN_PRIVATE */
+#endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef KERNEL
 #include <net/kpi_interface.h>
@@ -264,7 +262,7 @@ struct  ifqueue {
 
 #ifdef XNU_KERNEL_PRIVATE
 /* for uuid.c */
-__private_extern__ int uuid_get_ethernet(u_int8_t *);
+__private_extern__ int uuid_get_ethernet(u_int8_t * __counted_by(ETHER_ADDR_LEN));
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* DRIVERKIT */
 

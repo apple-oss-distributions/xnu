@@ -101,7 +101,7 @@ def ShowProcChannels(cmd_args=None):
         usage: showprocchannels <proc_t>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
@@ -117,7 +117,7 @@ def ShowChannelRings(cmd_args=None):
         usage: showchannelrings <struct kern_channel *>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('missing struct kern_channel * argument')
 
     kc = kern.GetValueFromAddress(cmd_args[0], 'kern_channel *')
@@ -446,7 +446,7 @@ def ShowAllNetNSTokens(cmd_args=None):
 
     tokenhead = kern.globals.netns_all_tokens
     print(GetNsTokenSummary.header)
-    for nt in IterateListEntry(tokenhead, 'nt_all_link', list_prefix='s'):
+    for nt in IterateListEntry(tokenhead, 'nt_all_link'):
         print(GetNsTokenSummary(nt))
 
 @lldb_command("shownetnstokens")
@@ -617,7 +617,7 @@ def ShowProcNECP(cmd_args=None):
         usage: showprocnecp <proc_t>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
@@ -771,7 +771,7 @@ def ShowCuckooHashtable(cmd_args=None):
 
         usage: showcuckoohashtable <struct cuckoo_hashtable *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError('missing struct cuckoo_hashtable * argument')
 
     cht = kern.GetValueFromAddress(cmd_args[0], 'struct cuckoo_hashtable *')

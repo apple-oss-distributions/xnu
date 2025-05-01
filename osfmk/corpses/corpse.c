@@ -39,13 +39,13 @@
  * Why do we need Corpses?
  * -----------------------
  * For crash inspection we need to inspect the state and data that is associated with process so that
- * crash reporting infrastructure can build backtraces, find leaks etc. For example a crash
+ * crash reporting infrastructure can build backtraces, find leaks etc.
  *
  * Corpses functionality in kernel
  * ===============================
  * The corpse functionality is an extension of existing exception reporting mechanisms we have. The
  * exception_triage calls will try to deliver the first round of exceptions allowing
- * task/debugger/ReportCrash/launchd level exception handlers to  respond to exception. If even after
+ * task/debugger/ReportCrash/launchd level exception handlers to respond to exception. If even after
  * notification the exception is not handled, then the process begins the death operations and during
  * proc_prepareexit, we decide to create a corpse for inspection. Following is a sample run through
  * of events and data shuffling that happens when corpses is enabled.
@@ -65,7 +65,7 @@
  *       prevents task_terminate from stripping important data from task.
  *     - It marks all the threads to terminate and return to AST for termination.
  *     - The allocation logic takes into account the rate limiting policy of allowing only
- *       TOTAL_CORPSES_ALLOWED in flight.
+ *       `total_corpses_allowed` in flight.
  *   * The proc exit threads continues and collects required information in the allocated vm region.
  *     Once complete it marks itself for termination.
  *   * In the thread_terminate_self(), the last thread to enter will do a call to proc_exit().
@@ -93,9 +93,9 @@
  * =================================
  *   boot-arg: -no_corpses disables the corpse generation. This can be added/removed without affecting
  *     any other subsystem.
- *   TOTAL_CORPSES_ALLOWED : (recompilation required) - Changing this number allows for controlling
- *     the number of corpse instances to be held for inspection before allowing memory to be reclaimed
- *     by system.
+ *   DEFAULT_TOTAL_CORPSES_ALLOWED: Controls the number of corpse instances to be held for
+ *         inspection before allowing memory to be reclaimed by the system.
+ *     On a live system, the maximum corpse count can be reconfigured via the `kern.total_corpses_allowed` sysctl.
  *   CORPSEINFO_ALLOCATION_SIZE: is the default size of vm allocation. If in future there is much more
  *     data to be put in, then please re-tune this parameter.
  *
@@ -111,10 +111,9 @@
  * ======================
  *   With holding off memory for inspection, it creates vm pressure which might not be desirable
  *   on low memory devices. There are limits to max corpses being inspected at a time which is
- *   marked by TOTAL_CORPSES_ALLOWED.
+ *   marked by `total_corpses_allowed`.
  *
  */
-
 
 #include <stdatomic.h>
 #include <kern/assert.h>
@@ -159,6 +158,8 @@ union corpse_creation_gate {
 
 static _Atomic uint32_t inflight_corpses;
 unsigned long  total_corpses_created = 0;
+
+uint32_t total_corpses_allowed = DEFAULT_TOTAL_CORPSES_ALLOWED;
 
 static TUNABLE(bool, corpses_disabled, "-no_corpses", false);
 
@@ -234,7 +235,7 @@ task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 				return KERN_RESOURCE_SHORTAGE;
 			}
 		}
-		if (newgate.corpses++ >= TOTAL_CORPSES_ALLOWED) {
+		if (newgate.corpses++ >= total_corpses_allowed) {
 			os_log(OS_LOG_DEFAULT, "%s[%d] Corpse failure, too many %d\n",
 			    proc_best_name(p), proc_pid(p), newgate.corpses);
 			return KERN_RESOURCE_SHORTAGE;
@@ -245,7 +246,7 @@ task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 		    &oldgate.value, newgate.value, memory_order_relaxed,
 		    memory_order_relaxed)) {
 			os_log(OS_LOG_DEFAULT, "%s[%d] Corpse allowed %d of %d\n",
-			    proc_best_name(p), proc_pid(p), newgate.corpses, TOTAL_CORPSES_ALLOWED);
+			    proc_best_name(p), proc_pid(p), newgate.corpses, total_corpses_allowed);
 			return KERN_SUCCESS;
 		}
 	}
@@ -745,6 +746,7 @@ task_generate_corpse_internal(
 	}
 
 	/* Enable IPC access to the corpse task */
+	vm_map_setup(get_task_map(new_task), new_task);
 	ipc_task_enable(new_task);
 
 	/* new task is now referenced, do not free the struct in error case */

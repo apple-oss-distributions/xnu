@@ -31,6 +31,7 @@
 
 #include <sys/_types.h>
 #include <sys/cdefs.h>
+#include <Availability.h>
 
 #ifndef KERNEL
 
@@ -44,7 +45,10 @@ typedef __darwin_mach_port_t fileport_t;
 #define FILEPORT_NULL   ((fileport_t)0)
 #endif /* _FILEPORT_T */
 
+__API_AVAILABLE(macos(10.7), ios(4.3))
 int     fileport_makeport(int, fileport_t *);
+
+__API_AVAILABLE(macos(10.7), ios(4.3))
 int     fileport_makefd(fileport_t);
 
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */

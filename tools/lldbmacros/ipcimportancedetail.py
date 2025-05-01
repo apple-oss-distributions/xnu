@@ -93,16 +93,18 @@ class IIINode(object):
             cur_elem = cur_elem.GetParentNode()
         return out_str
 
-def GetIIIListFromIIT(iit, rootnode):
+def GetIIIListFromIIT(iit, rootnode, seen=set()):
     """ walk the iii queue and find each III element in a list format
     """
     for iii in IterateQueue(iit.iit_inherits, 'struct ipc_importance_inherit *',  'iii_inheritance'):
         iiiNode = IIINode(iii, rootnode)
         if unsigned(iii.iii_elem.iie_bits) & xnudefines.IIE_TYPE_MASK:
             rootnode.addChildNode(iiiNode)
-            GetIIIListFromIIT(iii.iii_to_task, iiiNode)
+            if (iii_to_task_unsigned := unsigned(iii.iii_to_task)) not in seen:
+                seen.add(iii_to_task_unsigned)
+                GetIIIListFromIIT(iii.iii_to_task, iiiNode, seen)
             GetTaskNodeByKernelTaskObj(iiiNode.GetToTask()).AddImportanceNode(iiiNode)
-    return 
+    return
 
 AllTasksCollection = {}
 def GetTaskNodeByKernelTaskObj(task_kobj):

@@ -49,8 +49,6 @@ workload_config_cleanup(void)
 static void
 environment_init(void)
 {
-	wait_for_quiescence_default();
-
 	num_cores = (unsigned int) dt_ncpu();
 
 	if (platform_is_amp()) {
@@ -163,6 +161,7 @@ T_DECL(thread_group_fairness,
 {
 	T_SETUPBEGIN;
 
+	wait_for_quiescence_default(argc, argv);
 	environment_init();
 
 	/*

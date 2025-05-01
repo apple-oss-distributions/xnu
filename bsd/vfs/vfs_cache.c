@@ -770,7 +770,14 @@ again:
 				}
 				len = (unsigned int)strlen(str);
 
-				vnode_update_identity(vp, dvp, str, len, 0, VNODE_UPDATE_NAME | VNODE_UPDATE_PARENT);
+				/* Don't update parent for namedstream vnode. */
+				if (vp->v_flag & VISNAMEDSTREAM) {
+					vnode_update_identity(vp, NULL, str, len, 0,
+					    VNODE_UPDATE_NAME);
+				} else {
+					vnode_update_identity(vp, dvp, str, len, 0,
+					    VNODE_UPDATE_NAME | VNODE_UPDATE_PARENT);
+				}
 
 				/*
 				 * Check that there's enough space.
@@ -1126,7 +1133,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 	}
 
 	if (flags & VNODE_UPDATE_PARENT) {
-		if (dvp && vnode_ref(dvp) != 0) {
+		if (dvp && (vnode_ref_ext(dvp, 0, ((flags & VNODE_UPDATE_FORCE_PARENT_REF) ? VNODE_REF_FORCE : 0)) != 0)) {
 			dvp = NULLVP;
 		}
 		/* Don't count a stream's parent ref during unmounts */
@@ -1981,6 +1988,10 @@ skiprsrcfork:
 			vp = dp;
 			vvid = vid;
 		} else if ((cnp->cn_flags & ISDOTDOT)) {
+			/* if dp is the starting directory and RESOLVE_BENEATH, we should break */
+			if ((ndp->ni_flag & NAMEI_RESOLVE_BENEATH) && (dp == ndp->ni_usedvp)) {
+				break;
+			}
 			/*
 			 * If this is a chrooted process, we need to check if
 			 * the process is trying to break out of its chrooted

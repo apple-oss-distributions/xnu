@@ -150,7 +150,7 @@ iokit_lookup_object_in_space_with_port_name(mach_port_name_t name, ipc_kobject_t
 	io_object_t obj = NULL;
 	io_kobject_t kobj;
 
-	if (name && MACH_PORT_VALID(name)) {
+	if (MACH_PORT_VALID(name)) {
 		ipc_port_t port;
 		kern_return_t kr;
 
@@ -196,22 +196,41 @@ iokit_lookup_uext_ref_current_task(mach_port_name_t name)
  * This returns the port unlocked with a +1 send right.
  * Release with iokit_release_port_send()
  */
-EXTERN ipc_port_t
-iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t * type)
+EXTERN kern_return_t
+iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t type, ipc_port_t *portp)
 {
-	ipc_port_t port = NULL;
-	if (name && MACH_PORT_VALID(name)) {
-		kern_return_t kr = ipc_object_copyin(current_space(), name, MACH_MSG_TYPE_COPY_SEND, (ipc_object_t *)&port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_NONE);
-		if (kr == KERN_SUCCESS) {
-			assert(IP_VALID(port));
-			assert(ip_active(port));
-			if (type != NULL) {
-				*type = ip_kotype(port);
-			}
+	kern_return_t kr;
+	ipc_port_t port;
+
+	/*
+	 * Backward compatbility
+	 *
+	 * We can't use ipc_typed_port_copyin_send() builtin's capability to
+	 * check type here, because of legacy reasons.
+	 *
+	 * type mismatch used to be returned as kIOReturnBadArgument to callers,
+	 * but other cases of errors would yield kIOReturnNotFound.
+	 *
+	 * Do the dance by hand to respect this past.
+	 */
+	if (MACH_PORT_VALID(name)) {
+		kr = ipc_typed_port_copyin_send(current_space(), name,
+		    IKOT_UNKNOWN, &port);
+
+		if (kr != KERN_SUCCESS || !IP_VALID(port)) {
+			return kIOReturnNotFound;
 		}
+
+		if (type != IKOT_UNKNOWN && ip_kotype(port) != type) {
+			ipc_typed_port_release_send(port, IKOT_UNKNOWN);
+			return kIOReturnBadArgument;
+		}
+
+		*portp = port;
+		return kIOReturnSuccess;
 	}
 
-	return port;
+	return kIOReturnNotFound;
 }
 
 EXTERN void
@@ -343,8 +362,9 @@ iokit_make_send_right( task_t task, io_object_t obj, ipc_kobject_type_t type )
 		// We need to make ith_knote NULL as ipc_object_copyout() uses
 		// thread-argument-passing and its value should not be garbage
 		current_thread()->ith_knote = ITH_KNOTE_NULL;
-		kr = ipc_object_copyout( task->itk_space, ip_to_object(sendPort),
-		    MACH_MSG_TYPE_PORT_SEND, IPC_OBJECT_COPYOUT_FLAGS_NONE, NULL, NULL, &name);
+		kr = ipc_object_copyout( task->itk_space, sendPort,
+		    MACH_MSG_TYPE_PORT_SEND, IPC_OBJECT_COPYOUT_FLAGS_NONE,
+		    NULL, &name);
 		if (kr != KERN_SUCCESS) {
 			name = MACH_PORT_NULL;
 		}

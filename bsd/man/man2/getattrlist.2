@@ -16,7 +16,7 @@
 .\"
 .\"     @(#)getattrlist.2
 .
-.Dd March 28, 2024
+.Dd July 31, 2024
 .Dt GETATTRLIST 2
 .Os Darwin
 .Sh NAME
@@ -930,6 +930,17 @@ A
 containing the file system UUID.  Typically this will be a
 version 5 UUID.
 .
+.It ATTR_VOL_MOUNTEXTFLAGS
+A
+.Vt u_int32_t
+containing the volume extended mount flags.
+Equivalent to the
+.Fa f_flags_ext
+field of the
+.Vt statfs
+structure returned by
+.Xr statfs 2 .
+.
 .It ATTR_VOL_QUOTA_SIZE
 An
 .Vt off_t
@@ -960,6 +971,17 @@ A
 containing the file system sub-type.
 Equivalent to the
 .Fa f_fssubtype
+field of the
+.Vt statfs
+structure returned by
+.Xr statfs 2 .
+.
+.It ATTR_VOL_OWNER
+A
+.Vt uid_t
+containing the user that mounted the filesystem.
+Equivalent to the
+.Fa f_owner
 field of the
 .Vt statfs
 structure returned by

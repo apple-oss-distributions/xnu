@@ -35,7 +35,7 @@ static const struct timespec tptr[][2] = {
 T_DECL(utimensat, "Try various versions of utimensat")
 {
 	T_SETUPBEGIN;
-	T_ASSERT_POSIX_ZERO(chdir(dt_tmpdir()), NULL);
+	T_ASSERT_POSIX_SUCCESS(chdir(dt_tmpdir()), NULL);
 	// Skip the test if the current working directory is not on APFS.
 	struct statfs sfs = { 0 };
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(statfs(".", &sfs), NULL);
@@ -48,7 +48,7 @@ T_DECL(utimensat, "Try various versions of utimensat")
 	int fd;
 
 	T_ASSERT_POSIX_SUCCESS((fd = open(FILENAME, O_CREAT | O_RDWR, 0644)), NULL);
-	T_ASSERT_POSIX_ZERO(close(fd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(fd), NULL);
 
 	for (size_t i = 0; i < sizeof(tptr) / sizeof(tptr[0]); i++) {
 		T_LOG("=== {%ld, %ld} {%ld, %ld} ===",
@@ -58,9 +58,9 @@ T_DECL(utimensat, "Try various versions of utimensat")
 		struct timespec now;
 		clock_gettime(CLOCK_REALTIME, &now);
 
-		T_ASSERT_POSIX_ZERO(stat(FILENAME, &pre_st), NULL);
-		T_ASSERT_POSIX_ZERO(utimensat(AT_FDCWD, FILENAME, tptr[i], 0), NULL);
-		T_ASSERT_POSIX_ZERO(stat(FILENAME, &post_st), NULL);
+		T_ASSERT_POSIX_SUCCESS(stat(FILENAME, &pre_st), NULL);
+		T_ASSERT_POSIX_SUCCESS(utimensat(AT_FDCWD, FILENAME, tptr[i], 0), NULL);
+		T_ASSERT_POSIX_SUCCESS(stat(FILENAME, &post_st), NULL);
 
 		if (tptr[i][0].tv_nsec == UTIME_NOW) {
 			T_ASSERT_GE(post_st.st_atimespec.tv_sec, now.tv_sec, NULL);

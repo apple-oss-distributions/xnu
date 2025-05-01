@@ -86,12 +86,34 @@
 
 #define ARM_PAGEIN_STATE         27
 
+/* API */
+#define ARM_SME_STATE            28
+#define ARM_SVE_Z_STATE1         29
+#define ARM_SVE_Z_STATE2         30
+#define ARM_SVE_P_STATE          31
+#define ARM_SME_ZA_STATE1        32
+#define ARM_SME_ZA_STATE2        33
+#define ARM_SME_ZA_STATE3        34
+#define ARM_SME_ZA_STATE4        35
+#define ARM_SME_ZA_STATE5        36
+#define ARM_SME_ZA_STATE6        37
+#define ARM_SME_ZA_STATE7        38
+#define ARM_SME_ZA_STATE8        39
+#define ARM_SME_ZA_STATE9        40
+#define ARM_SME_ZA_STATE10       41
+#define ARM_SME_ZA_STATE11       42
+#define ARM_SME_ZA_STATE12       42
+#define ARM_SME_ZA_STATE13       44
+#define ARM_SME_ZA_STATE14       45
+#define ARM_SME_ZA_STATE15       46
+#define ARM_SME_ZA_STATE16       47
+#define ARM_SME2_STATE           48
 #if XNU_KERNEL_PRIVATE
 /* For kernel use */
-#define ARM_SME_SAVED_STATE      28
+#define ARM_SME_SAVED_STATE      49
 #endif /* XNU_KERNEL_PRIVATE */
 
-#define THREAD_STATE_FLAVORS     29     /* This must be updated to 1 more than the highest numerical state flavor */
+#define THREAD_STATE_FLAVORS     50     /* This must be updated to 1 more than the highest numerical state flavor */
 
 #ifndef ARM_STATE_FLAVOR_IS_OTHER_VALID
 #define ARM_STATE_FLAVOR_IS_OTHER_VALID(_flavor_) 0
@@ -118,6 +140,11 @@
 	 (x == ARM_DEBUG_STATE64) ||          \
 	 (x == ARM_PAGEIN_STATE) ||           \
 	 (ARM_STATE_FLAVOR_IS_OTHER_VALID(x)))
+/*
+ * VALID_THREAD_STATE_FLAVOR() intentionally excludes ARM_SME_STATE through
+ * ARM_SME2_STATE, since these are not currently supported inside Mach exception
+ * ports.
+ */
 
 struct arm_state_hdr {
 	uint32_t flavor;
@@ -218,6 +245,12 @@ typedef _STRUCT_ARM_DEBUG_STATE64     arm_debug_state64_t;
 
 typedef _STRUCT_ARM_PAGEIN_STATE      arm_pagein_state_t;
 
+typedef _STRUCT_ARM_SME_STATE         arm_sme_state_t;
+typedef _STRUCT_ARM_SVE_Z_STATE       arm_sve_z_state_t;
+typedef _STRUCT_ARM_SVE_P_STATE       arm_sve_p_state_t;
+typedef _STRUCT_ARM_SME_ZA_STATE      arm_sme_za_state_t;
+typedef _STRUCT_ARM_SME2_STATE        arm_sme2_state_t;
+
 #if defined(XNU_KERNEL_PRIVATE) && defined(__arm64__)
 /* See below for ARM64 kernel structure definition for arm_debug_state. */
 #else /* defined(XNU_KERNEL_PRIVATE) && defined(__arm64__) */
@@ -263,6 +296,21 @@ typedef _STRUCT_ARM_LEGACY_DEBUG_STATE arm_debug_state_t;
 
 #define ARM_NEON_STATE64_COUNT ((mach_msg_type_number_t) \
 	(sizeof (arm_neon_state64_t)/sizeof(uint32_t)))
+
+#define ARM_SME_STATE_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_sme_state_t)/sizeof(uint32_t)))
+
+#define ARM_SVE_Z_STATE_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_sve_z_state_t)/sizeof(uint32_t)))
+
+#define ARM_SVE_P_STATE_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_sve_p_state_t)/sizeof(uint32_t)))
+
+#define ARM_SME_ZA_STATE_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_sme_za_state_t)/sizeof(uint32_t)))
+
+#define ARM_SME2_STATE_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_sme2_state_t)/sizeof(uint32_t)))
 
 #define MACHINE_THREAD_STATE       ARM_THREAD_STATE
 #define MACHINE_THREAD_STATE_COUNT ARM_UNIFIED_THREAD_STATE_COUNT
@@ -465,6 +513,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
  * x5: authed _iss->ss_64.x17
  * x6: scratch register
  * x7: scratch register
+ * x8: scratch register
  *
  * If _instr makes no changes to the thread state, it may skip re-signing by
  * branching to label 0.
@@ -497,7 +546,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
 	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
 	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
 	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", \
-	                  "x9", "x16"                                           \
+	                  "x9", "x16", "x17"                                    \
 	        );                                                              \
 	        ml_pac_safe_interrupts_restore(_intr);                          \
 	} while (0)

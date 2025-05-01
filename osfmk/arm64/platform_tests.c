@@ -79,6 +79,7 @@
 #endif                          /* MACH_KDB */
 
 #include <san/kasan.h>
+#include <sys/errno.h>
 #include <sys/kdebug.h>
 #include <sys/munge.h>
 #include <machine/cpu_capabilities.h>
@@ -122,6 +123,9 @@ volatile char pan_fault_value = 0;
 #if CONFIG_SPTM
 kern_return_t arm64_panic_lockdown_test(void);
 #endif /* CONFIG_SPTM */
+
+#include <arm64/speculation.h>
+kern_return_t arm64_speculation_guard_test(void);
 
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
@@ -692,7 +696,7 @@ lt_e_thread(void *arg, wait_result_t wres __unused)
 
 	thread_t thread = current_thread();
 
-	thread_bind_cluster_type(thread, 'e', false);
+	thread_soft_bind_cluster_type(thread, 'e');
 
 	func();
 
@@ -706,7 +710,7 @@ lt_p_thread(void *arg, wait_result_t wres __unused)
 
 	thread_t thread = current_thread();
 
-	thread_bind_cluster_type(thread, 'p', false);
+	thread_soft_bind_cluster_type(thread, 'p');
 
 	func();
 
@@ -1057,7 +1061,8 @@ struct munger_test {
 	{MT_FUNC(munge_wl), 3, 2, {MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwl), 4, 3, {MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwlll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
-	{MT_FUNC(munge_wwlllll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
+	{MT_FUNC(munge_wwlllll), 12, 7, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
+	{MT_FUNC(munge_wwllllll), 14, 8, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlw), 4, 3, {MT_W_VAL, MT_L_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wlwwwll), 10, 7, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlwwwllw), 11, 8, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_W_VAL}},
@@ -1347,8 +1352,9 @@ arm64_pan_test()
 	mp_disable_preemption();
 
 	// Insert the user's pmap root table pointer in TTBR0
-	pmap_t old_pmap = vm_map_pmap(current_thread()->map);
-	pmap_switch(pmap);
+	thread_t thread = current_thread();
+	pmap_t old_pmap = vm_map_pmap(thread->map);
+	pmap_switch(pmap, thread);
 
 	// Below should trigger a PAN exception as pan_test_addr is accessible
 	// in user mode
@@ -1381,7 +1387,7 @@ arm64_pan_test()
 
 	T_ASSERT(pan_fault_value == *(char *)priv_addr, NULL);
 
-	pmap_switch(old_pmap);
+	pmap_switch(old_pmap, thread);
 
 	pan_ro_addr = 0;
 
@@ -1652,6 +1658,7 @@ extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_br_auth_fail;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_ldr_auth_fail;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_fpac;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_copyio;
+extern uint8_t arm64_panic_lockdown_test_copyio_fault_pc;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_bti_telemetry;
 
 extern int gARM_FEAT_FPACCOMBINE;
@@ -1663,11 +1670,17 @@ extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_sp1_exception_in_ve
 extern panic_lockdown_helper_fcn_t el1_sp1_synchronous_raise_exception_in_vector;
 extern bool arm64_panic_lockdown_test_sp1_exception_in_vector_handler(arm_saved_state_t *);
 
+#if DEVELOPMENT || DEBUG
+extern struct panic_lockdown_initiator_state debug_panic_lockdown_initiator_state;
+#endif /* DEVELOPMENT || DEBUG */
+
 typedef struct arm64_panic_lockdown_test_case {
-	const char *func_str;
+	const char *name;
 	panic_lockdown_helper_fcn_t *func;
 	uint64_t arg;
 	esr_exception_class_t expected_ec;
+	bool check_fs;
+	fault_status_t expected_fs;
 	bool expect_lockdown_exceptions_masked;
 	bool expect_lockdown_exceptions_unmasked;
 	bool override_expected_fault_pc_valid;
@@ -1682,11 +1695,15 @@ arm64_panic_lockdown_test_exception_handler(arm_saved_state_t * state)
 {
 	uint64_t esr = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
+	fault_status_t fs = ISS_DA_FSC(ESR_ISS(esr));
 
 	if (!arm64_panic_lockdown_active_test ||
-	    class != arm64_panic_lockdown_active_test->expected_ec) {
+	    class != arm64_panic_lockdown_active_test->expected_ec ||
+	    (arm64_panic_lockdown_active_test->check_fs &&
+	    fs != arm64_panic_lockdown_active_test->expected_fs)) {
 		return false;
 	}
+
 
 #if BTI_ENFORCED
 	/* Clear BTYPE to prevent taking another exception on ERET */
@@ -1744,14 +1761,28 @@ panic_lockdown_expect_test(const char *treatment,
 
 	if (expect_lockdown == xnu_post_panic_lockdown_did_fire &&
 	    arm64_panic_lockdown_caught_exception) {
-		T_PASS("%s + %s OK\n", test->func_str, treatment);
+		T_PASS("%s + %s OK\n", test->name, treatment);
 	} else {
 		T_FAIL(
 			"%s + %s FAIL (expected lockdown: %d, did lockdown: %d, caught exception: %d)\n",
-			test->func_str, treatment,
+			test->name, treatment,
 			expect_lockdown, xnu_post_panic_lockdown_did_fire,
 			arm64_panic_lockdown_caught_exception);
 	}
+
+#if DEVELOPMENT || DEBUG
+	/* Check that the debug info is minimally functional */
+	if (expect_lockdown) {
+		T_EXPECT_NE_ULLONG(debug_panic_lockdown_initiator_state.initiator_pc,
+		    0ULL, "Initiator PC set");
+	} else {
+		T_EXPECT_EQ_ULLONG(debug_panic_lockdown_initiator_state.initiator_pc,
+		    0ULL, "Initiator PC not set");
+	}
+
+	/* Reset the debug data so it can be filled later if needed */
+	debug_panic_lockdown_initiator_state.initiator_pc = 0;
+#endif /* DEVELOPMENT || DEBUG */
 }
 
 static void
@@ -1833,9 +1864,10 @@ arm64_panic_lockdown_test(void)
 #if __has_feature(ptrauth_calls)
 	uint64_t ia_invalid = panic_lockdown_pacia_get_invalid_ptr();
 #endif /* ptrauth_calls */
+
 	arm64_panic_lockdown_test_case_s tests[] = {
 		{
-			.func_str = "arm64_panic_lockdown_test_load",
+			.name = "arm64_panic_lockdown_test_load",
 			.func = &arm64_panic_lockdown_test_load,
 			/* Trigger a null deref */
 			.arg = (uint64_t)NULL,
@@ -1844,7 +1876,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = false,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_gdbtrap",
+			.name = "arm64_panic_lockdown_test_gdbtrap",
 			.func = &arm64_panic_lockdown_test_gdbtrap,
 			.arg = 0,
 			.expected_ec = ESR_EC_UNCATEGORIZED,
@@ -1854,7 +1886,7 @@ arm64_panic_lockdown_test(void)
 		},
 #if __has_feature(ptrauth_calls)
 		{
-			.func_str = "arm64_panic_lockdown_test_pac_brk_c470",
+			.name = "arm64_panic_lockdown_test_pac_brk_c470",
 			.func = &arm64_panic_lockdown_test_pac_brk_c470,
 			.arg = 0,
 			.expected_ec = ESR_EC_BRK_AARCH64,
@@ -1862,7 +1894,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = true,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_pac_brk_c471",
+			.name = "arm64_panic_lockdown_test_pac_brk_c471",
 			.func = &arm64_panic_lockdown_test_pac_brk_c471,
 			.arg = 0,
 			.expected_ec = ESR_EC_BRK_AARCH64,
@@ -1870,7 +1902,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = true,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_pac_brk_c472",
+			.name = "arm64_panic_lockdown_test_pac_brk_c472",
 			.func = &arm64_panic_lockdown_test_pac_brk_c472,
 			.arg = 0,
 			.expected_ec = ESR_EC_BRK_AARCH64,
@@ -1878,7 +1910,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = true,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_pac_brk_c473",
+			.name = "arm64_panic_lockdown_test_pac_brk_c473",
 			.func = &arm64_panic_lockdown_test_pac_brk_c473,
 			.arg = 0,
 			.expected_ec = ESR_EC_BRK_AARCH64,
@@ -1886,7 +1918,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = true,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_telemetry_brk_ff00",
+			.name = "arm64_panic_lockdown_test_telemetry_brk_ff00",
 			.func = &arm64_panic_lockdown_test_telemetry_brk_ff00,
 			.arg = 0,
 			.expected_ec = ESR_EC_BRK_AARCH64,
@@ -1900,7 +1932,7 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = false,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_br_auth_fail",
+			.name = "arm64_panic_lockdown_test_br_auth_fail",
 			.func = &arm64_panic_lockdown_test_br_auth_fail,
 			.arg = ia_invalid,
 			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_IABORT_EL1,
@@ -1918,7 +1950,7 @@ arm64_panic_lockdown_test(void)
 			.override_expected_fault_pc = ia_invalid
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_ldr_auth_fail",
+			.name = "arm64_panic_lockdown_test_ldr_auth_fail",
 			.func = &arm64_panic_lockdown_test_ldr_auth_fail,
 			.arg = panic_lockdown_pacda_get_invalid_ptr(),
 			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_DABORT_EL1,
@@ -1926,17 +1958,19 @@ arm64_panic_lockdown_test(void)
 			.expect_lockdown_exceptions_unmasked = true,
 		},
 		{
-			.func_str = "arm64_panic_lockdown_test_copyio_poison",
-			.func = arm64_panic_lockdown_test_copyio,
+			.name = "arm64_panic_lockdown_test_copyio_poison",
+			.func = &arm64_panic_lockdown_test_copyio,
 			/* fake a poisoned kernel pointer by flipping the bottom PAC bit */
 			.arg = ((uint64_t)-1) ^ (1LLU << (64 - T1SZ_BOOT)),
 			.expected_ec = ESR_EC_DABORT_EL1,
 			.expect_lockdown_exceptions_masked = false,
 			.expect_lockdown_exceptions_unmasked = false,
+			.override_expected_fault_pc_valid = true,
+			.override_expected_fault_pc = (uint64_t)&arm64_panic_lockdown_test_copyio_fault_pc,
 		},
 #if __ARM_ARCH_8_6__
 		{
-			.func_str = "arm64_panic_lockdown_test_fpac",
+			.name = "arm64_panic_lockdown_test_fpac",
 			.func = &arm64_panic_lockdown_test_fpac,
 			.arg = ia_invalid,
 			.expected_ec = ESR_EC_PAC_FAIL,
@@ -1946,12 +1980,14 @@ arm64_panic_lockdown_test(void)
 #endif /* __ARM_ARCH_8_6__ */
 #endif /* ptrauth_calls */
 		{
-			.func_str = "arm64_panic_lockdown_test_copyio",
-			.func = arm64_panic_lockdown_test_copyio,
+			.name = "arm64_panic_lockdown_test_copyio",
+			.func = &arm64_panic_lockdown_test_copyio,
 			.arg = 0x0 /* load from NULL */,
 			.expected_ec = ESR_EC_DABORT_EL1,
 			.expect_lockdown_exceptions_masked = false,
 			.expect_lockdown_exceptions_unmasked = false,
+			.override_expected_fault_pc_valid = true,
+			.override_expected_fault_pc = (uint64_t)&arm64_panic_lockdown_test_copyio_fault_pc,
 		},
 	};
 
@@ -1989,104 +2025,6 @@ arm64_panic_lockdown_test(void)
 
 /*** CPS RCTX ***/
 
-#if HAS_CPSRCTX
-
-static inline void
-_cpsrctx_exec(uint64_t ctx)
-{
-	asm volatile ( "ISB SY");
-	asm volatile ( "CPS RCTX, %0" :: "r"(ctx));
-	asm volatile ( "DSB SY");
-	asm volatile ( "ISB SY");
-}
-
-static void
-_cpsrctx_do_test(void)
-{
-	typedef struct {
-		union {
-			struct {
-				uint64_t ASID:16;
-				uint64_t GASID:1;
-				uint64_t :7;
-				uint64_t EL:2;
-				uint64_t NS:1;
-				uint64_t NSE:1;
-				uint64_t :4;
-				uint64_t VMID:16;
-				uint64_t GVMID:1;
-				uint64_t :7;
-				uint64_t GM:1;
-				uint64_t :3;
-				uint64_t IS:3;
-				uint64_t :1;
-			};
-			uint64_t raw;
-		};
-	} cpsrctx_ctx;
-
-	assert(sizeof(cpsrctx_ctx) == 8);
-
-	/*
-	 * Test various possible meaningful CPS_RCTX context ID.
-	 */
-
-	/* el : EL0 / EL1 / EL2. */
-	for (uint8_t el = 0; el < 3; el++) {
-		/* Always non-secure. */
-		const uint8_t ns = 1;
-		const uint8_t nse = 0;
-
-		/* Iterat eover some couples of ASIDs / VMIDs. */
-		for (uint16_t xxid = 0; xxid < 256; xxid++) {
-			const uint16_t asid = (uint16_t) (xxid << 4);
-			const uint16_t vmid = (uint16_t) (256 - (xxid << 4));
-
-			/* Test 4 G[AS|VM]ID combinations. */
-			for (uint8_t bid = 0; bid < 4; bid++) {
-				const uint8_t gasid = bid & 1;
-				const uint8_t gvmid = bid & 2;
-
-				/* Test all GM / IS combinations. */
-				for (uint8_t gid = 0; gid < 0x8; gid++) {
-					const uint8_t gm = gid & 1;
-					const uint8_t is = gid >> 1;
-
-					/* Generate the context descriptor. */
-					cpsrctx_ctx ctx = {0};
-					ctx.ASID = asid;
-					ctx.GASID = gasid;
-					ctx.EL = el;
-					ctx.NS = ns;
-					ctx.NSE = nse;
-					ctx.VMID = vmid;
-					ctx.GVMID = gvmid;
-					ctx.GM = gm;
-					ctx.IS = is;
-
-					/* Execute the CPS instruction. */
-					_cpsrctx_exec(ctx.raw);
-
-					/* Insert some operation. */
-					volatile uint8_t sum = 0;
-					for (volatile uint8_t i = 0; i < 64; i++) {
-						sum += i * sum + 3;
-					}
-				}
-
-				/* If el0 is not targetted, just need to do it once. */
-				if (el != 0) {
-					goto not_el0_skip;
-				}
-			}
-		}
-
-		/* El0 skip. */
-not_el0_skip:   ;
-	}
-}
-
-#endif /* HAS_CPSRCTX */
 
 /*** SPECRES ***/
 
@@ -2224,9 +2162,6 @@ _rctx_do_test(void)
 #if HAS_SPECRES2
 	_specres_do_test_std(&_cosprctx_exec);
 #endif
-#if HAS_CPSRCTX
-	_cpsrctx_do_test();
-#endif
 }
 
 kern_return_t
@@ -2238,9 +2173,6 @@ specres_test(void)
 	_dvprctx_exec(0);
 #if HAS_SPECRES2
 	_cosprctx_exec(0);
-#endif
-#if HAS_CPSRCTX
-	_cpsrctx_exec(0);
 #endif
 
 	/* More advanced instructions test. */
@@ -2413,3 +2345,106 @@ arm64_bti_test(void)
 }
 #endif /* BTI_ENFORCED */
 
+
+/**
+ * Test the speculation guards
+ * We can't easily ensure that the guards actually behave correctly under
+ * speculation, but we can at least ensure that the guards are non-speculatively
+ * correct.
+ */
+kern_return_t
+arm64_speculation_guard_test(void)
+{
+	uint64_t cookie1_64 = 0x5350454354524521ULL; /* SPECTRE! */
+	uint64_t cookie2_64 = 0x5941592043505553ULL; /* YAY CPUS */
+	uint32_t cookie1_32 = (uint32_t)cookie1_64;
+	uint32_t cookie2_32 = (uint32_t)cookie2_64;
+	uint64_t result64 = 0;
+	uint32_t result32 = 0;
+	bool result_valid;
+
+	/*
+	 * Test the zeroing guard
+	 * Since failing the guard triggers a panic, we don't actually test that
+	 * part as part of the automated tests.
+	 */
+
+	result64 = 0;
+	SPECULATION_GUARD_ZEROING_XXX(
+		/* out */ result64, /* out_valid */ result_valid,
+		/* value */ cookie1_64,
+		/* cmp_1 */ 0ULL, /* cmp_2 */ 1ULL, /* cc */ "NE");
+	T_EXPECT(result_valid, "result valid");
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 64 zeroing guard works");
+
+	result64 = 0;
+	SPECULATION_GUARD_ZEROING_XWW(
+		/* out */ result64, /* out_valid */ result_valid,
+		/* value */ cookie1_64,
+		/* cmp_1 */ 1U, /* cmp_2 */ 0U, /* cc */ "HI");
+	T_EXPECT(result_valid, "result valid");
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 32 zeroing guard works");
+
+	result32 = 0;
+	SPECULATION_GUARD_ZEROING_WXX(
+		/* out */ result32, /* out_valid */ result_valid,
+		/* value */ cookie1_32,
+		/* cmp_1 */ -1LL, /* cmp_2 */ 4LL, /* cc */ "LT");
+	T_EXPECT(result_valid, "result valid");
+	T_EXPECT_EQ_UINT(result32, cookie1_32, "32, 64 zeroing guard works");
+
+	result32 = 0;
+	SPECULATION_GUARD_ZEROING_WWW(
+		/* out */ result32, /* out_valid */ result_valid,
+		/* value */ cookie1_32,
+		/* cmp_1 */ 1, /* cmp_2 */ -4, /* cc */ "GT");
+	T_EXPECT(result_valid, "result valid");
+	T_EXPECT_EQ_UINT(result32, cookie1_32, "32, 32 zeroing guard works");
+
+	result32 = 0x41;
+	SPECULATION_GUARD_ZEROING_WWW(
+		/* out */ result32, /* out_valid */ result_valid,
+		/* value */ cookie1_32,
+		/* cmp_1 */ 1, /* cmp_2 */ -4, /* cc */ "LT");
+	T_EXPECT(!result_valid, "result invalid");
+	T_EXPECT_EQ_UINT(result32, 0, "zeroing guard works with failing condition");
+
+	/*
+	 * Test the selection guard
+	 */
+
+	result64 = 0;
+	SPECULATION_GUARD_SELECT_XXX(
+		/* out */ result64,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "EQ", /* sel_1 */ cookie1_64,
+		/* n_cc */ "NE", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result64, cookie2_64, "64, 64 select guard works (1)");
+
+	result64 = 0;
+	SPECULATION_GUARD_SELECT_XXX(
+		/* out */ result64,
+		/* cmp_1 */ 32ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "EQ", /* sel_1 */ cookie1_64,
+		/* n_cc */ "NE", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 64 select guard works (2)");
+
+
+	result32 = 0;
+	SPECULATION_GUARD_SELECT_WXX(
+		/* out */ result32,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "HI", /* sel_1 */ cookie1_64,
+		/* n_cc */ "LS", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result32, cookie2_32, "32, 64 select guard works (1)");
+
+	result32 = 0;
+	SPECULATION_GUARD_SELECT_WXX(
+		/* out */ result32,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 2ULL,
+		/* cc   */ "HI", /* sel_1 */ cookie1_64,
+		/* n_cc */ "LS", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result32, cookie1_32, "32, 64 select guard works (2)");
+
+	return KERN_SUCCESS;
+}

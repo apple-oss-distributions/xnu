@@ -32,6 +32,8 @@
 #include <IOKit/IOCommand.h>
 #include <IOKit/IOEventSource.h>
 
+#include <vm/vm_compressor_xnu.h>
+
 #define USE_SETTLE_TIMER    0
 
 //******************************************************************************
@@ -202,6 +204,7 @@ private:
 	OSArray *               BlockedArray;
 	uint64_t                PendingResponseDeadline;
 	uint64_t                WatchdogDeadline;
+	uint64_t                WatchdogStart;
 
 // Settle time after changing power state.
 #if USE_SETTLE_TIMER
@@ -383,6 +386,7 @@ private:
 #define fIdleTimer                  pwrMgt->IdleTimer
 #define fWatchdogTimer              pwrMgt->WatchdogTimer
 #define fWatchdogDeadline           pwrMgt->WatchdogDeadline
+#define fWatchdogStart              pwrMgt->WatchdogStart
 #define fWatchdogLock               pwrMgt->WatchdogLock
 #define fBlockedArray               pwrMgt->BlockedArray
 #define fPendingResponseDeadline    pwrMgt->PendingResponseDeadline
@@ -491,6 +495,7 @@ private:
 #define WATCHDOG_SLEEP_TIMEOUT      (35)   // 35 secs (kMaxTimeRequested + 5s)
 #define WATCHDOG_WAKE_TIMEOUT       (35)   // 35 secs (kMaxTimeRequested + 5s)
 #endif
+#define WATCHDOG_HIBERNATION_TIMEOUT (180)
 
 // Max wait time in microseconds for kernel priority and capability clients
 // with async message handlers to acknowledge.

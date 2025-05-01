@@ -965,76 +965,48 @@ kauth_copyinfilesec(user_addr_t xsecurity, kauth_filesec_t *xsecdestpp)
 {
 	int error;
 	kauth_filesec_t fsec;
+	struct kauth_filesec tmp;
 	size_t count;
 	size_t copysize;
 
-	error = 0;
-	fsec = NULL;
+	/* copy the minimum filesec header which must always be present */
+	if ((error = copyin(xsecurity, &tmp, KAUTH_FILESEC_SIZE(0))) != 0) {
+		return error;
+	}
 
-	/*
-	 * Make a guess at the size of the filesec.  We start with the base
-	 * pointer, and look at how much room is left on the page, clipped
-	 * to a sensible upper bound.  If it turns out this isn't enough,
-	 * we'll size based on the actual ACL contents and come back again.
-	 *
-	 * The upper bound must be less than KAUTH_ACL_MAX_ENTRIES.  The
-	 * value here is fairly arbitrary.  It's ok to have a zero count.
-	 *
-	 * Because we're just using these values to make a guess about the
-	 * number of entries, the actual address doesn't matter, only their
-	 * relative offsets into the page.  We take advantage of this to
-	 * avoid an overflow in the rounding step (this is a user-provided
-	 * parameter, so caution pays off).
-	 */
-	{
-		user_addr_t known_bound = (xsecurity & PAGE_MASK) + KAUTH_FILESEC_SIZE(0);
-		user_addr_t uaddr = (user_addr_t)mach_vm_round_page(known_bound);
-		count = (uaddr - known_bound) / sizeof(struct kauth_ace);
+	/* validate the filesec header and count */
+	if (tmp.fsec_magic != KAUTH_FILESEC_MAGIC) {
+		return EINVAL;
 	}
-	if (count > 32) {
-		count = 32;
+
+	count = tmp.fsec_entrycount;
+	if (count == KAUTH_FILESEC_NOACL) {
+		count = 0;
+	} else if (count > KAUTH_ACL_MAX_ENTRIES) {
+		/* XXX This should be E2BIG */
+		return EINVAL;
 	}
-restart:
+
 	if ((fsec = kauth_filesec_alloc((int)count)) == NULL) {
-		error = ENOMEM;
-		goto out;
-	}
-	copysize = KAUTH_FILESEC_SIZE(count);
-	if ((error = copyin(xsecurity, (caddr_t)fsec, copysize)) != 0) {
-		goto out;
-	}
-
-	/* validate the filesec header */
-	if (fsec->fsec_magic != KAUTH_FILESEC_MAGIC) {
-		error = EINVAL;
-		goto out;
+		return ENOMEM;
 	}
 
 	/*
-	 * Is there an ACL payload, and is it too big?
+	 * now copy the header we already have,
+	 * and the number of records we're missing
 	 */
-	if ((fsec->fsec_entrycount != KAUTH_FILESEC_NOACL) &&
-	    (fsec->fsec_entrycount > count)) {
-		if (fsec->fsec_entrycount > KAUTH_ACL_MAX_ENTRIES) {
-			/* XXX This should be E2BIG */
-			error = EINVAL;
-			goto out;
-		}
-		count = fsec->fsec_entrycount;
+	copysize = KAUTH_FILESEC_SIZE(count);
+	memcpy(fsec, &tmp, KAUTH_FILESEC_SIZE(0));
+
+	if (count > 0 && ((error = copyin(xsecurity + KAUTH_FILESEC_SIZE(0),
+	    fsec->fsec_acl.acl_ace, copysize - KAUTH_FILESEC_SIZE(0))) != 0)) {
 		kauth_filesec_free(fsec);
-		goto restart;
+		return error;
 	}
 
-out:
-	if (error) {
-		if (fsec) {
-			kauth_filesec_free(fsec);
-		}
-	} else {
-		*xsecdestpp = fsec;
-		AUDIT_ARG(opaque, fsec, copysize);
-	}
-	return error;
+	*xsecdestpp = fsec;
+	AUDIT_ARG(opaque, fsec, copysize);
+	return 0;
 }
 
 /*

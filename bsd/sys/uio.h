@@ -162,6 +162,11 @@ void uio_reset( uio_t a_uio,
  */
 uio_t uio_duplicate( uio_t a_uio );
 
+/*
+ * uio_restore - restore a uio to the state it was in the provided snapshot.
+ *      returns 0 if it was successful else non zero.
+ */
+int uio_restore(uio_t uio, uio_t snapshot_uio);
 
 /*
  * uio_free - free a uio_t allocated via uio_create.

@@ -50,6 +50,7 @@
 #endif /* HIBERNATION */
 /* ARM64_TODO unify boot.h */
 #if __arm64__
+#include <pexpert/arm64/apt_msg.h>
 #include <pexpert/arm64/boot.h>
 #include <arm64/amcc_rorgn.h>
 #else
@@ -118,10 +119,6 @@ extern void set_bp_ret(void);
 #endif
 
 #if SCHED_HYGIENE_DEBUG
-boolean_t sched_hygiene_debug_pmc = 1;
-#endif
-
-#if SCHED_HYGIENE_DEBUG
 
 #if XNU_PLATFORM_iPhoneOS
 #define DEFAULT_INTERRUPT_MASKED_TIMEOUT 12000   /* 500us */
@@ -177,6 +174,7 @@ SECURITY_READ_ONLY_LATE(boolean_t) diversify_user_jop = TRUE;
 
 SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
+SECURITY_READ_ONLY_LATE(ppnum_t)  pmap_first_pnum;
 
 SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
 
@@ -187,7 +185,6 @@ static SECURITY_READ_ONLY_LATE(bool) enable_sme = true;
 #if APPLEVIRTUALPLATFORM
 SECURITY_READ_ONLY_LATE(vm_offset_t) reset_vector_vaddr = 0;
 #endif /* APPLEVIRTUALPLATFORM */
-
 
 /*
  * Forward definition
@@ -509,16 +506,7 @@ arm_init(
 		/* Disable if WDT is disabled */
 		if (wdt_disabled || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
 			interrupt_masked_debug_mode = SCHED_HYGIENE_MODE_OFF;
-		} else if (kern_feature_override(KF_SCHED_HYGIENE_DEBUG_PMC_OVRD)) {
-			/*
-			 * The sched hygiene facility can, in adition to checking time, capture
-			 * metrics provided by the cycle and instruction counters available in some
-			 * systems. Check if we should enable this feature based on the validation
-			 * overrides.
-			 */
-			sched_hygiene_debug_pmc = 0;
 		}
-
 		if (wdt_disabled || kern_feature_override(KF_PREEMPTION_DISABLED_DEBUG_OVRD)) {
 			sched_preemption_disable_debug_mode = SCHED_HYGIENE_MODE_OFF;
 		}
@@ -561,7 +549,7 @@ arm_init(
 
 	gDramBase = *dram_base;
 	gDramSize = *dram_size;
-
+	pmap_first_pnum = (ppnum_t)atop(gDramBase);
 
 	arm_vm_init(xmaxmem, args);
 
@@ -633,6 +621,9 @@ arm_init(
 
 	PE_init_platform(TRUE, &BootCpuData);
 
+	/* Initialize the debug infrastructure system-wide and on the local core. */
+	pe_arm_debug_init_early(&BootCpuData);
+
 #if __arm64__
 	extern bool cpu_config_correct;
 	if (!cpu_config_correct) {
@@ -655,6 +646,10 @@ arm_init(
 #endif /* KPERF */
 
 	PE_init_cpu();
+#if __arm64__
+	apt_msg_init();
+	apt_msg_init_cpu();
+#endif
 	fiq_context_init(TRUE);
 
 
@@ -692,7 +687,6 @@ arm_init_cpu(
 	__builtin_arm_wsr("pan", 1);
 #endif
 
-
 #ifdef __arm64__
 	configure_timer_apple_regs();
 	configure_misc_apple_regs(false);
@@ -707,7 +701,6 @@ arm_init_cpu(
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
-
 
 #if APPLE_ARM64_ARCH_FAMILY
 	configure_late_apple_regs(false);
@@ -775,6 +768,9 @@ arm_init_cpu(
 		commpage_update_timebase();
 	}
 	PE_init_cpu();
+#if __arm64__
+	apt_msg_init_cpu();
+#endif
 
 	fiq_context_init(TRUE);
 	cpu_data_ptr->rtcPop = EndOfAllTime;
@@ -783,6 +779,7 @@ arm_init_cpu(
 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, cpu_data_ptr);
 	bool should_kprintf = processor_should_kprintf(processor, true);
 
+	/* Start tracing (secondary CPU). */
 #if DEVELOPMENT || DEBUG
 	PE_arm_debug_enable_trace(should_kprintf);
 #endif /* DEVELOPMENT || DEBUG */

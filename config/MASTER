@@ -643,7 +643,6 @@ options		DEVELOPMENT	# dev kernel	    	    # <development>
 
 # DEBUG kernel
 options		DEBUG		# general debugging code    # <debug>
-options		CONFIG_NONFATAL_ASSERTS	# non fatal asserts	# <softasserts>
 
 options		MACH_BSD	# BSD subsystem on top of Mach	# <mach_bsd>
 options         IOKIT		#				# <iokit>
@@ -683,6 +682,8 @@ options		CONFIG_SCHED_DEFERRED_AST	# <config_sched_deferred_ast>
 
 options		CONFIG_PREADOPT_TG			# <config_preadopt_tg>
 options		CONFIG_PREADOPT_TG_DEBUG	# <config_preadopt_tg_debug>
+
+options     CONFIG_SCHED_SMT            # <config_sched_smt>
 
 # This is overridden by the board configuration's HAS_FAST_CNTVCT.
 options	    CONFIG_SKIP_PRECISE_USER_KERNEL_TIME    # <config_skip_precise_user_kernel_time>

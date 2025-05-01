@@ -168,8 +168,8 @@ extern unsigned int     panic_is_inited;
 
 extern uint64_t roots_installed;
 
+#define MAX_PROCNAME_LEN 32
 /* #include <sys/proc.h> */
-#define MAXCOMLEN 16
 struct proc;
 extern int              proc_pid(struct proc *p);
 extern void             proc_name_kdp(struct proc *p, char * buf, int size);
@@ -1480,7 +1480,7 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		paniclog_append_noflush("Panicked task %p: %d threads: ",
 		    task, task->thread_count);
 		if (proc) {
-			char name[MAXCOMLEN + 1];
+			char name[MAX_PROCNAME_LEN + 1];
 			proc_name_kdp(proc, name, sizeof(name));
 			paniclog_append_noflush("pid %d: %s", proc_pid(proc), name);
 		} else {

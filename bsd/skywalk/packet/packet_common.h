@@ -488,18 +488,39 @@ __packet_opt_set_token(struct __packet_opt *po,
 	return 0;
 }
 
-#ifndef KERNEL
 __attribute__((always_inline))
 static inline void
 __packet_set_tx_timestamp(const uint64_t ph, const uint64_t ts)
 {
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+#ifdef KERNEL
+	struct __packet_opt *po = PKT_ADDR(ph)->pkt_com_opt;
+#else /* !KERNEL */
 	struct __packet_opt *po = &PKT_ADDR(ph)->pkt_com_opt;
-
-	po->__po_pkt_tx_time = ts;
-	PKT_ADDR(ph)->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
-}
 #endif /* !KERNEL */
+
+	if (po != NULL) {
+		po->__po_pkt_tx_time = ts;
+		PKT_ADDR(ph)->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+	}
+}
+
+__attribute__((always_inline))
+static inline uint64_t
+__packet_get_tx_timestamp(const uint64_t ph)
+{
+	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
+#ifdef KERNEL
+	struct __packet_opt *po = PKT_ADDR(ph)->pkt_com_opt;
+#else /* !KERNEL */
+	struct __packet_opt *po = &PKT_ADDR(ph)->pkt_com_opt;
+#endif /* !KERNEL */
+	if (po == NULL || (PKT_ADDR(ph)->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) == 0) {
+		return 0;
+	}
+
+	return po->__po_pkt_tx_time;
+}
 
 __attribute__((always_inline))
 static inline errno_t

@@ -429,10 +429,19 @@ class SBTarget(lldb.SBTarget, metaclass=LLDBWrapMetaclass):
         if strip := getattr(self, '_strip_ptr', None):
             return strip(sbvalue)
 
-        is_tagged = self.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+        is_tagged = False
+        # is_tagged = self.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
+
+        def stripPtr(sbvalue: lldb.SBValue):
+            if sbvalue.GetValueAsAddress() != sbvalue.GetValueAsUnsigned():
+                addr = sbvalue.GetValueAsAddress()
+                sbv_new = sbvalue.CreateValueFromExpression(None, '(void *)' + str(addr))
+                return sbv_new.Cast(sbvalue.GetType())
+
+            return sbvalue
 
         if is_tagged:
-            strip = lambda sbv: self.xCreateValueFromAddress(sbv.GetName(), sbv.GetValueAsAddress(), sbv.GetType())
+            strip = lambda sbv: stripPtr(sbv)
         else:
             strip = lambda sbv : sbv
 

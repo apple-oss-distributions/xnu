@@ -678,6 +678,7 @@ __private_extern__ errno_t kern_channel_slot_attach_packet_byidx(
 __private_extern__ errno_t kern_channel_slot_detach_packet_byidx(
 	const kern_channel_ring_t kring, const uint32_t sidx, kern_packet_t ph);
 __private_extern__ void kern_channel_flowadv_clear(struct flowadv_fcentry *);
+__private_extern__ void kern_channel_flowadv_set(struct flowadv_fcentry *);
 __private_extern__ void kern_channel_flowadv_report_ce_event(
 	struct flowadv_fcentry *, uint32_t, uint32_t);
 __private_extern__ void kern_channel_memstatus(struct proc *, uint32_t,

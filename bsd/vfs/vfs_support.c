@@ -904,3 +904,24 @@ err_blockmap(__unused struct vnop_blockmap_args *ap)
 {
 	return ENOTSUP;
 }
+
+struct vnop_monitor_args /* {
+                          *    struct vnodeop_desc *a_desc;
+                          *    vnode_t a_vp;
+                          *    uint32_t a_events;
+                          *    uint32_t a_flags;
+                          *    void *a_handle;
+                          *    vfs_context_t a_context;
+                          *} */;
+
+int
+nop_monitor(__unused struct vnop_monitor_args *ap)
+{
+	return 0;
+}
+
+int
+err_monitor(__unused struct vnop_monitor_args *ap)
+{
+	return ENOTSUP;
+}

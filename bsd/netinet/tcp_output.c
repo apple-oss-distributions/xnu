@@ -88,6 +88,7 @@
 #include <net/if.h>
 #include <net/if_types.h>
 #include <net/dlil.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -148,9 +149,23 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, accurate_ecn,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_acc_ecn, 0,
     "Accurate ECN mode (0: disable, 1: enable Accurate ECN feedback");
 
+int tcp_l4s_developer = 0;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, l4s_developer,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_l4s_developer, 0,
+    "Developer L4S mode (0: system, 1: force enable L4S, 2: force disable L4S");
+
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, l4s,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_l4s, 0,
-    "L4S mode (0: disable, 1: enable L4S");
+    "System L4S mode (0: disable, 1: enable L4S");
+
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, link_heuristics_flags,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_link_heuristics_flags, TCP_LINK_HEURISTICS_DEFAULT,
+    "TCP LQM heuristics flags (1:rxmtcomp 2:noackpro 4:synrxmt 8:stealth 0x10:rtomin 0x20:notlp)");
+
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, link_heuristics_rto_min,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_link_heuristics_rto_min, TCP_DEFAULT_LINK_HEUR_RTOMIN,
+    "");
+
 
 // TO BE REMOVED
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, do_ack_compression,
@@ -513,7 +528,7 @@ tcp_set_ecn(struct tcpcb *tp, struct ifnet *ifp)
 	return;
 
 check_heuristic:
-	if (TCP_ACC_ECN_ENABLED(tp)) {
+	if (TCP_L4S_ENABLED(tp)) {
 		/* Allow ECN when Accurate ECN is enabled until heuristics are fixed */
 		tp->ecn_flags |= TE_ENABLE_ECN;
 		/* Set the accurate ECN state */
@@ -524,7 +539,7 @@ check_heuristic:
 			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_feature_enabled;
 		}
 	}
-	if (!tcp_heuristic_do_ecn(tp) && !TCP_ACC_ECN_ENABLED(tp)) {
+	if (!tcp_heuristic_do_ecn(tp) && !TCP_L4S_ENABLED(tp)) {
 		/* Allow ECN when Accurate ECN is enabled until heuristics are fixed */
 		tp->ecn_flags &= ~TE_ENABLE_ECN;
 	}
@@ -539,7 +554,7 @@ check_heuristic:
 		 * Use the random value in iss for randomizing
 		 * this selection
 		 */
-		if ((tp->iss % 100) >= tcp_ecn_setup_percentage && !TCP_ACC_ECN_ENABLED(tp)) {
+		if ((tp->iss % 100) >= tcp_ecn_setup_percentage && !TCP_L4S_ENABLED(tp)) {
 			/* Don't disable Accurate ECN randomly */
 			tp->ecn_flags &= ~TE_ENABLE_ECN;
 		}
@@ -645,7 +660,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e0b & 0xff) << 24) | (TCPOPT_NOP << 16) | (TCPOPT_NOP << 8) | TCPOPT_NOP);
 		}
 		*optlen += len + 3; /* 3 NOPs */
-		TCP_LOG(tp, "add single counter for AccECN option, optlen=%u", *optlen);
 	} else if (max_len < (TCPOLEN_ACCECN_EMPTY + 3 * TCPOLEN_ACCECN_COUNTER)) {
 		/* Can carry two options */
 		len += 2 * TCPOLEN_ACCECN_COUNTER;
@@ -657,7 +671,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e0b & 0xff) << 24) | (ceb & 0xffffff));
 		}
 		*optlen += len; /* 0 NOPs */
-		TCP_LOG(tp, "add 2 counters for AccECN option, optlen=%u", *optlen);
 	} else {
 		/*
 		 * TCP option sufficient to hold full AccECN option
@@ -675,7 +688,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e1b & 0xffffff) << 8) | TCPOPT_NOP);
 		}
 		*optlen += len + 1; /* 1 NOP */
-		TCP_LOG(tp, "add all 3 counters for AccECN option, optlen=%u", *optlen);
 	}
 }
 
@@ -744,10 +756,11 @@ tcp_output(struct tcpcb *tp)
 	boolean_t mptcp_acknow;
 #endif /* MPTCP */
 	stats_functional_type ifnet_count_type = stats_functional_type_none;
-	boolean_t sack_rescue_rxt = FALSE;
 	int sotc = so->so_traffic_class;
 	boolean_t do_not_compress = FALSE;
-	boolean_t sack_rxmted = FALSE;
+	bool sack_rescue_rxt = false;
+	bool sack_rxmted = false;
+	bool link_heuristics_enabled = false;
 
 	/*
 	 * Determine length of data that should be transmitted,
@@ -800,6 +813,8 @@ tcp_output(struct tcpcb *tp)
 		return 0;
 	}
 #endif /* MPTCP */
+
+	link_heuristics_enabled = if_link_heuristics_enabled(tp->t_inpcb->inp_last_outifp);
 
 again:
 	tcp_now_local = os_access_once(tcp_now);
@@ -879,8 +894,8 @@ again:
 			 * advertised peer window may not be valid anymore
 			 */
 			if (tp->t_timer[TCPT_REXMT] == 0) {
-				tp->t_timer[TCPT_REXMT] =
-				    OFFSET_FROM_START(tp, tp->t_rxtcur);
+				tcp_set_link_heur_rtomin(tp, inp->inp_last_outifp);
+				tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 				if (tp->t_timer[TCPT_PERSIST] != 0) {
 					tp->t_timer[TCPT_PERSIST] = 0;
 					tp->t_persist_stop = 0;
@@ -889,7 +904,7 @@ again:
 			}
 
 			if (tp->t_pktlist_head != NULL) {
-				m_freem_list(tp->t_pktlist_head);
+				m_drop_list(tp->t_pktlist_head, NULL, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_TCP_SRC_ADDR_NOT_AVAIL, NULL, 0);
 			}
 			TCP_PKTLIST_CLEAR(tp);
 
@@ -921,6 +936,15 @@ again:
 			tcp_set_tso(tp, ifp);
 			soif2kcl(so, (ifp->if_eflags & IFEF_2KCL));
 			tcp_set_ecn(tp, ifp);
+
+			/*
+			 * If the route changes, we cannot use the link heuristics
+			 * based on the previous outgoing interface
+			 */
+			if (rt->rt_ifp != tp->t_inpcb->inp_last_outifp) {
+				link_heuristics_enabled = false;
+				tp->t_comp_rxmt_gencnt = 0;
+			}
 		}
 		if (rt->rt_flags & RTF_UP) {
 			RT_GENID_SYNC(rt);
@@ -997,12 +1021,12 @@ again:
 
 	if (SACK_ENABLED(tp) && IN_FASTRECOVERY(tp)) {
 		int32_t cwin = min(tp->snd_wnd, tp->snd_cwnd) - tcp_flight_size(tp);
-		if (cwin <= 0 && sack_rxmted == FALSE) {
+		if (cwin <= 0 && sack_rxmted == false) {
 			/* Allow to clock out at least on per period */
 			cwin = tp->t_maxseg;
 		}
 
-		sack_rxmted = TRUE;
+		sack_rxmted = true;
 		if (cwin < 0) {
 			cwin = 0;
 		}
@@ -1168,7 +1192,7 @@ after_sack_rexmit:
 				    tp->t_maxseg);
 				len = imin(len, cwin);
 				old_snd_nxt = tp->snd_nxt;
-				sack_rescue_rxt = TRUE;
+				sack_rescue_rxt = true;
 				tp->snd_nxt = tp->snd_recover - len;
 				/*
 				 * If FIN has been sent, snd_max
@@ -1263,6 +1287,13 @@ after_sack_rexmit:
 
 	if ((flags & TH_SYN) && tp->t_state <= TCPS_SYN_SENT && TFO_ENABLED(tp)) {
 		len = tcp_tfo_check(tp, len);
+	}
+
+	if (tp->tcp_cc_index == TCP_CC_ALGO_PRAGUE_INDEX &&
+	    tp->t_pacer.tso_burst_size != 0 && len > 0 &&
+	    (uint32_t)len > tp->t_pacer.tso_burst_size) {
+		len = tp->t_pacer.tso_burst_size;
+		sendalot = 1;
 	}
 
 	/*
@@ -1508,7 +1539,20 @@ after_sack_rexmit:
 		if (recwin < (int32_t)recwin_announced) {
 			recwin = (int32_t)recwin_announced;
 		}
+
+		if (mp_tp->mpt_flags & MPTCPF_FALLBACK_TO_TCP) {
+			if (recwin < (int32_t)(tp->rcv_adv - tp->rcv_nxt)) {
+				recwin = (int32_t)(tp->rcv_adv - tp->rcv_nxt);
+			}
+		}
 	}
+
+	/* One day we should have a single ROUNDUP macro across xnu... */
+#ifndef ROUNDUP
+#define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
+#endif
+	recwin = ROUNDUP(recwin, (1 << tp->rcv_scale));
+#undef ROUNDUP
 
 	/*
 	 * Sender silly window avoidance.   We transmit under the following
@@ -1720,6 +1764,7 @@ after_sack_rexmit:
 	    SEQ_GT(tp->snd_max, tp->snd_una) &&
 	    tp->t_timer[TCPT_REXMT] == 0 &&
 	    tp->t_timer[TCPT_PERSIST] == 0) {
+		tcp_set_link_heur_rtomin(tp, inp->inp_last_outifp);
 		tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp,
 		    tp->t_rxtcur);
 		goto just_return;
@@ -1843,7 +1888,7 @@ send:
 			}
 #if MPTCP
 			if (mptcp_enable && (so->so_flags & SOF_MP_SUBFLOW)) {
-				optlen = mptcp_setup_syn_opts(so, opt, optlen);
+				optlen = mptcp_setup_syn_opts(so, opt, opt + sizeof(opt), optlen);
 			}
 #endif /* MPTCP */
 		}
@@ -1906,7 +1951,7 @@ send:
 		} else {
 			tp->t_mpflags |= TMPF_MPTCP_ACKNOW;
 		}
-		optlen = mptcp_setup_opts(tp, off, &opt[0], optlen, flags,
+		optlen = mptcp_setup_opts(tp, off, opt, opt + TCP_MAXOLEN, optlen, flags,
 		    len, &mptcp_acknow, &do_not_compress);
 		tp->t_mpflags &= ~TMPF_SEND_DSN;
 	}
@@ -2008,13 +2053,15 @@ send:
 	/*
 	 * AccECN option - after SACK
 	 * Don't send on <SYN>,
-	 * send only on <SYN,ACK> before ACCECN is negotiated or
+	 * send only on <SYN,ACK> before ACCECN is negotiated when
+	 * the client requests it or
 	 * when doing an AccECN session. Don't send AccECN option
 	 * if retransmitting a SYN-ACK or a data segment
 	 */
 	if ((TCP_ACC_ECN_ON(tp) ||
-	    (TCP_ACC_ECN_ENABLED(tp) && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK)))
-	    && ((tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0)) {
+	    (TCP_L4S_ENABLED(tp) && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+	    (tp->ecn_flags & TE_ACE_SETUPRECEIVED))) &&
+	    (tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0) {
 		uint32_t *lp = (uint32_t *)(void *)(opt + optlen);
 		/* lp will become outdated after options are added */
 		tcp_add_accecn_option(tp, flags, lp, (uint8_t *)&optlen);
@@ -2085,7 +2132,7 @@ send:
 		/* Server received either legacy or Accurate ECN setup SYN */
 		if (tp->ecn_flags & (TE_SETUPRECEIVED | TE_ACE_SETUPRECEIVED)) {
 			if (tcp_send_ecn_flags_on_syn(tp)) {
-				if (TCP_ACC_ECN_ENABLED(tp) && (tp->ecn_flags & TE_ACE_SETUPRECEIVED)) {
+				if (TCP_L4S_ENABLED(tp) && (tp->ecn_flags & TE_ACE_SETUPRECEIVED)) {
 					/*
 					 * Accurate ECN mode is on. Initialize packet and byte counters
 					 * for the server sending SYN-ACK. Although s_cep will be initialized
@@ -2185,7 +2232,7 @@ send:
 					tcpstat.tcps_ecn_server_success--;
 					tp->ecn_flags |= TE_LOST_SYNACK;
 				}
-				if (!TCP_ACC_ECN_ENABLED(tp)) {
+				if (!TCP_L4S_ENABLED(tp)) {
 					/* Do this only for classic ECN. */
 					tp->ecn_flags &=
 					    ~(TE_SETUPRECEIVED | TE_SENDIPECT |
@@ -2196,7 +2243,7 @@ send:
 	} else if ((flags & (TH_SYN | TH_ACK)) == TH_SYN &&
 	    (tp->ecn_flags & TE_ENABLE_ECN)) {
 		if (tcp_send_ecn_flags_on_syn(tp)) {
-			if (TCP_ACC_ECN_ENABLED(tp)) {
+			if (TCP_L4S_ENABLED(tp)) {
 				/*
 				 * We are negotiating AccECN in SYN.
 				 * We only set TE_SENDIPECT after the handshake
@@ -2440,12 +2487,14 @@ send:
 			MGETHDR(m, M_DONTWAIT, MT_HEADER);
 			if (m == NULL) {
 				error = ENOBUFS;
+				TCP_LOG(tp, "MGETHDR error ENOBUFS");
 				goto out;
 			}
 			MCLGET(m, M_DONTWAIT);
 			if ((m->m_flags & M_EXT) == 0) {
 				m_freem(m);
 				error = ENOBUFS;
+				TCP_LOG(tp, "MCLGET error ENOBUFS");
 				goto out;
 			}
 			m->m_data += max_linkhdr;
@@ -2458,6 +2507,7 @@ send:
 				MGETHDR(m, M_DONTWAIT, MT_HEADER);
 				if (m == NULL) {
 					error = ENOBUFS;
+					TCP_LOG(tp, "MGETHDR error ENOBUFS");
 					goto out;
 				}
 				m->m_data += max_linkhdr;
@@ -2506,6 +2556,7 @@ send:
 				if (m->m_next == NULL) {
 					(void) m_free(m);
 					error = ENOBUFS;
+					TCP_LOG(tp, "m_copym_mode error ENOBUFS");
 					goto out;
 				}
 			} else {
@@ -2540,6 +2591,7 @@ send:
 				}
 				if (m == NULL) {
 					error = ENOBUFS;
+					TCP_LOG(tp, "m_copym_with_hdrs error ENOBUFS");
 					goto out;
 				}
 				m->m_data += max_linkhdr;
@@ -2571,6 +2623,7 @@ send:
 		MGETHDR(m, M_DONTWAIT, MT_HEADER);      /* MAC-OK */
 		if (m == NULL) {
 			error = ENOBUFS;
+			TCP_LOG(tp, "MGETHDR error ENOBUFS");
 			goto out;
 		}
 		if (MHLEN < (hdrlen + max_linkhdr)) {
@@ -2578,6 +2631,7 @@ send:
 			if ((m->m_flags & M_EXT) == 0) {
 				m_freem(m);
 				error = ENOBUFS;
+				TCP_LOG(tp, "MCLGET error ENOBUFS");
 				goto out;
 			}
 		}
@@ -2599,15 +2653,18 @@ send:
 	if (do_not_compress) {
 		m->m_pkthdr.comp_gencnt = 0;
 	} else {
-		if (TSTMP_LT(tp->t_comp_lastinc + tcp_ack_compression_rate, tcp_now_local)) {
-			tp->t_comp_gencnt++;
-			/* 0 means no compression, thus jump this */
-			if (tp->t_comp_gencnt <= TCP_ACK_COMPRESSION_DUMMY) {
-				tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
+		if (TSTMP_LT(tp->t_comp_ack_lastinc + tcp_ack_compression_rate, tcp_now_local)) {
+			tp->t_comp_ack_gencnt++;
+			/*
+			 * 0 means no compression, and ACK gencnt is encoded on 31 bits
+			 */
+			if (tp->t_comp_ack_gencnt <= TCP_ACK_COMPRESSION_DUMMY ||
+			    tp->t_comp_ack_gencnt > INT_MAX) {
+				tp->t_comp_ack_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
 			}
-			tp->t_comp_lastinc = tcp_now_local;
+			tp->t_comp_ack_lastinc = tcp_now_local;
 		}
-		m->m_pkthdr.comp_gencnt = tp->t_comp_gencnt;
+		m->m_pkthdr.comp_gencnt = tp->t_comp_ack_gencnt;
 	}
 
 	if (isipv6) {
@@ -2828,7 +2885,8 @@ send:
 			m->m_pkthdr.csum_flags |= CSUM_TSO_IPV4;
 		}
 
-		m->m_pkthdr.tso_segsz = tp->t_maxopd - optlen;
+		m->m_pkthdr.tso_segsz = (uint16_t)(tp->t_maxopd - optlen);
+		m->m_pkthdr.tx_hdr_len = (uint16_t)hdrlen;
 	} else {
 		m->m_pkthdr.tso_segsz = 0;
 	}
@@ -2857,9 +2915,9 @@ send:
 		if (rack_sack_rxmit) {
 			goto timer;
 		}
-		if (sack_rescue_rxt == TRUE) {
+		if (sack_rescue_rxt == true) {
 			tp->snd_nxt = old_snd_nxt;
-			sack_rescue_rxt = FALSE;
+			sack_rescue_rxt = false;
 			tcpstat.tcps_pto_in_recovery++;
 		} else {
 			tp->snd_nxt += len;
@@ -2894,8 +2952,8 @@ timer:
 				tp->t_persist_stop = 0;
 				TCP_RESET_REXMT_STATE(tp);
 			}
-			tp->t_timer[TCPT_REXMT] =
-			    OFFSET_FROM_START(tp, tp->t_rxtcur);
+			tcp_set_link_heur_rtomin(tp, inp->inp_last_outifp);
+			tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 		}
 
 		/*
@@ -2912,21 +2970,28 @@ timer:
 		    tp->t_rxtshift == 0 &&
 		    (tp->t_flagsext & (TF_SENT_TLPROBE | TF_PKTS_REORDERED)) == 0) {
 			uint32_t pto, srtt;
+			struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 
+			/*
+			 * Don't use TLP on congested link
+			 */
 			srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-			pto = 2 * srtt;
-			if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
-				pto += tcp_delack;
-			} else {
-				pto += 2;
-			}
+			if (((tcp_link_heuristics_flags & TCP_LINK_HEUR_NOTLP) != 0 &&
+			    if_link_heuristics_enabled(outifp)) == false) {
+				pto = 2 * srtt;
+				if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
+					pto += tcp_delack;
+				} else {
+					pto += 2;
+				}
 
-			/* if RTO is less than PTO, choose RTO instead */
-			if (tp->t_rxtcur < pto) {
-				pto = tp->t_rxtcur;
-			}
+				/* if RTO is less than PTO, choose RTO instead */
+				if (tp->t_rxtcur < pto) {
+					pto = tp->t_rxtcur;
+				}
 
-			tp->t_timer[TCPT_PTO] = OFFSET_FROM_START(tp, pto);
+				tp->t_timer[TCPT_PTO] = OFFSET_FROM_START(tp, pto);
+			}
 		}
 	} else {
 		/*
@@ -3026,7 +3091,7 @@ timer:
 		u_int32_t pass_flags;
 		if (!necp_socket_is_allowed_to_send_recv(inp, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			TCP_LOG_DROP_NECP(isipv6 ? (void *)ip6 : (void *)ip, th, tp, true);
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_TCP_NECP, NULL, 0);
 			error = EHOSTUNREACH;
 			goto out;
 		}
@@ -3074,15 +3139,20 @@ timer:
 		 *    not disable ACK prioritization.
 		 * 3. Only ACK flag is set.
 		 * 4. there is no outstanding data on this connection.
+		 * 5. Link heuristics are not enabled for the interface
 		 */
 		if (len == 0 && (inp->inp_last_outifp->if_eflags & (IFEF_TXSTART | IFEF_NOACKPRI)) == IFEF_TXSTART) {
-			if (th->th_flags == TH_ACK &&
-			    tp->snd_una == tp->snd_max &&
-			    tp->t_timer[TCPT_REXMT] == 0) {
-				svc_flags |= PKT_SCF_TCP_ACK;
-			}
-			if (th->th_flags & TH_SYN) {
-				svc_flags |= PKT_SCF_TCP_SYN;
+			if (link_heuristics_enabled && (tcp_link_heuristics_flags & TCP_LINK_HEUR_NOACKPRI) != 0) {
+				IF_TCP_STATINC(inp->inp_last_outifp, linkheur_noackpri);
+			} else {
+				if (th->th_flags == TH_ACK &&
+				    tp->snd_una == tp->snd_max &&
+				    tp->t_timer[TCPT_REXMT] == 0) {
+					svc_flags |= PKT_SCF_TCP_ACK;
+				}
+				if (th->th_flags & TH_SYN) {
+					svc_flags |= PKT_SCF_TCP_SYN;
+				}
 			}
 		}
 		set_packet_service_class(m, so, sotc, svc_flags);
@@ -3093,19 +3163,6 @@ timer:
 		 */
 		(void) m_set_service_class(m, so_tc2msc(sotc));
 	}
-
-	if ((th->th_flags & TH_SYN) && tp->t_syn_sent < UINT8_MAX) {
-		tp->t_syn_sent++;
-	}
-	if ((th->th_flags & TH_FIN) && tp->t_fin_sent < UINT8_MAX) {
-		tp->t_fin_sent++;
-	}
-	if ((th->th_flags & TH_RST) && tp->t_rst_sent < UINT8_MAX) {
-		tp->t_rst_sent++;
-	}
-	TCP_LOG_TH_FLAGS(isipv6 ? (void *)ip6 : (void *)ip, th, tp, true,
-	    inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
-	    inp->inp_boundifp);
 
 	tp->t_pktlist_sentlen += len;
 	tp->t_lastchain++;
@@ -3128,7 +3185,7 @@ timer:
 	}
 
 	/* Append segment to time-ordered list and RB tree used for RACK */
-	if (TCP_RACK_ENABLED(tp) && len) {
+	if (TCP_RACK_ENABLED(tp) && len != 0) {
 		uint8_t retransmit_flag = 0;
 		if (tp->t_flagsext & TF_SENT_TLPROBE) {
 			/* Only set the at least once retransmitted flag */
@@ -3138,6 +3195,44 @@ timer:
 			retransmit_flag = (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) ? TCP_SEGMENT_RETRANSMITTED : 0;
 		}
 		tcp_seg_sent_insert(tp, seg, ntohl(th->th_seq), ntohl(th->th_seq) + len, tcp_now_local, retransmit_flag);
+	}
+
+	if ((th->th_flags & TH_SYN) != 0) {
+		(void)os_add_overflow(tp->t_syn_sent, 1, &tp->t_syn_sent);
+		if (tp->t_rxtshift > 0) {
+			m->m_pkthdr.pkt_flags |= PKTF_TCP_REXMT;
+		}
+	}
+	if ((th->th_flags & TH_FIN) != 0) {
+		(void)os_add_overflow(tp->t_fin_sent, 1, &tp->t_fin_sent);
+		if (tp->t_rxtshift > 0) {
+			m->m_pkthdr.pkt_flags |= PKTF_TCP_REXMT;
+		}
+	}
+	if ((th->th_flags & TH_RST) != 0) {
+		(void)os_add_overflow(tp->t_rst_sent, 1, &tp->t_rst_sent);
+		if (tp->t_rxtshift > 0) {
+			m->m_pkthdr.pkt_flags |= PKTF_TCP_REXMT;
+		}
+	}
+	TCP_LOG_TH_FLAGS(isipv6 ? (void *)ip6 : (void *)ip, th, tp, true,
+	    inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
+	    inp->inp_boundifp);
+
+	if (link_heuristics_enabled && (tcp_link_heuristics_flags & TCP_LINK_HEUR_RXMT_COMP) != 0 &&
+	    (len != 0 || (th->th_flags & TH_FIN) != 0)) {
+		/*
+		 * Set compression flag if gencnt of segment is the same as the last sent segment
+		 * otherwise record the gencnt of the segment that we are sending
+		 */
+		uint32_t gencnt =  ntohl(th->th_seq) & TCP_COMP_RXMT_GENCNT_MASK;
+
+		if ((m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) != 0 && gencnt == tp->t_comp_rxmt_gencnt) {
+			IF_TCP_STATINC(inp->inp_last_outifp, linkheur_comprxmt);
+			m->m_pkthdr.comp_gencnt = gencnt;
+		} else {
+			tp->t_comp_rxmt_gencnt = gencnt;
+		}
 	}
 
 	if (sendalot == 0 || (tp->t_state != TCPS_ESTABLISHED) ||
@@ -3237,7 +3332,7 @@ timer:
 		}
 out:
 		if (tp->t_pktlist_head != NULL) {
-			m_freem_list(tp->t_pktlist_head);
+			m_drop_list(tp->t_pktlist_head, NULL, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_TCP_PKT_UNSENT, NULL, 0);
 		}
 		TCP_PKTLIST_CLEAR(tp);
 
@@ -3251,8 +3346,8 @@ out:
 			    tp->t_timer[TCPT_PERSIST] == 0 &&
 			    (len != 0 || (flags & (TH_SYN | TH_FIN)) != 0 ||
 			    so->so_snd.sb_cc > 0)) {
-				tp->t_timer[TCPT_REXMT] =
-				    OFFSET_FROM_START(tp, tp->t_rxtcur);
+				tcp_set_link_heur_rtomin(tp, inp->inp_last_outifp);
+				tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 			}
 			tp->snd_cwnd = tp->t_maxseg;
 			tp->t_bytes_acked = 0;
@@ -3412,6 +3507,13 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			ipoa.ipoa_flags |=  IPOAF_MANAGEMENT_ALLOWED;
 		}
 	}
+	if (INP_ULTRA_CONSTRAINED_ALLOWED(inp)) {
+		if (isipv6) {
+			ip6oa.ip6oa_flags |=  IP6OAF_ULTRA_CONSTRAINED_ALLOWED;
+		} else {
+			ipoa.ipoa_flags |=  IPOAF_ULTRA_CONSTRAINED_ALLOWED;
+		}
+	}
 	if (isipv6) {
 		ip6oa.ip6oa_sotc = so->so_traffic_class;
 		ip6oa.ip6oa_netsvctype = so->so_netsvctype;
@@ -3532,7 +3634,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			 * we need to free the rest of the chain ourselves.
 			 */
 			if (!chain) {
-				m_freem_list(npkt);
+				m_drop_list(npkt, NULL, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_TCP_PKT_UNSENT, NULL, 0);
 			}
 			break;
 		}
@@ -3656,6 +3758,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 		 * reset the retransmit timer
 		 */
 		tcp_getrt_rtt(tp, tp->t_inpcb->in6p_route.ro_rt);
+		tcp_set_link_heur_rtomin(tp, inp->inp_last_outifp);
 		tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 	}
 	return error;

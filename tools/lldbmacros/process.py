@@ -2,7 +2,7 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from typing import Union
+from typing import Union, Optional
 from xnu import *
 import sys, shlex
 from utils import *
@@ -17,7 +17,7 @@ from collections import defaultdict, namedtuple
 
 NO_PROC_NAME = "unknown"
 P_LHASTASK = 0x00000002
-TF_HAS_PROC = 0x00800000
+TF_HASPROC = 0x00800000
 
 THREAD_STATE_CHARS = {
     0x0: '',
@@ -40,7 +40,7 @@ def GetProcPID(proc):
         returns:
             int: the pid of the process.
     """
-    return unsigned(proc.p_pid) if proc else -1
+    return unsigned(proc.p_pid) if proc is not None else -1
 
 def GetProcPlatform(proc):
     """ returns the platform identifier of a process.
@@ -60,7 +60,7 @@ def GetProcName(proc):
         returns:
             str: a string name of the process linked to the task.
     """
-    if not proc:
+    if proc is None:
         return NO_PROC_NAME
     name = str(proc.p_name)
     return name if name != '' else str(proc.p_comm)
@@ -76,13 +76,13 @@ def GetProcNameForTask(task):
     """
     if task:
         p = GetProcFromTask(task)
-        if p:
+        if p is not None:
             return GetProcName(p)
 
-        if (hasattr(task, 'task_imp_base') and
-           hasattr(task.task_imp_base, 'iit_procname') and
-           unsigned(task.task_imp_base) != 0):
-            return str(task.task_imp_base.iit_procname)
+        if ((task_imp_base := get_field(task, 'task_imp_base')) is not None and
+           (iit_procname := get_field(task_imp_base, 'iit_procname')) is not None and
+           unsigned(task_imp_base) != 0):
+            return str(iit_procname)
 
     return NO_PROC_NAME
 
@@ -97,7 +97,7 @@ def GetProcPIDForTask(task):
         return -1
 
     p = GetProcFromTask(task)
-    if p:
+    if p is not None:
         return GetProcPID(p)
 
     proc_ro = Cast(task.bsd_info_ro, 'proc_ro *')
@@ -107,7 +107,7 @@ def GetProcPIDForTask(task):
 def GetProcStartAbsTimeForTask(task):
     if task:
         p = GetProcFromTask(task)
-        if unsigned(p):
+        if p is not None:
             return p.p_stats.ps_start
     return None
 
@@ -224,7 +224,8 @@ def ShowZombStacks(O=None, regex=None):
                 print("\nZombie Stacks:")
                 header_flag = 1
             t = GetTaskFromProc(proc)
-            ShowTaskStacks(t, O=O, regex=regex)
+            if t is not None:
+                ShowTaskStacks(t, O=O, regex=regex)
 
 @lldb_command('zombstacks', fancy=True)
 def ZombStacksCommand(cmd_args=None, cmd_options={}, O=None):
@@ -247,7 +248,7 @@ def ZombStacksCommand(cmd_args=None, cmd_options={}, O=None):
     M - AST_MACF
     r - AST_RESET_PCS
     a - AST_ARCADE
-    G - AST_GUARD
+    X - AST_MACH_EXCEPTION
     T - AST_TELEMETRY_USER
     T - AST_TELEMETRY_KERNEL
     T - AST_TELEMETRY_WINDOWED
@@ -263,7 +264,7 @@ def ZombStacksCommand(cmd_args=None, cmd_options={}, O=None):
 _AST_CHARS = {
     0x1: 'P', 0x2: 'Q', 0x4: 'U', 0x8: 'H', 0x10: 'Y', 0x20: 'A',
     0x40: 'L', 0x80: 'B', 0x100: 'K', 0x200: 'M', 0x400: 'r', 0x800: 'a',
-    0x1000: 'G', 0x2000: 'T', 0x4000: 'T', 0x8000: 'T', 0x10000: 'S',
+    0x1000: 'X', 0x2000: 'T', 0x4000: 'T', 0x8000: 'T', 0x10000: 'S',
     0x20000: 'D', 0x40000: 'I', 0x80000: 'E', 0x100000: 'R',
     0x400000: 'p', 0x800000: 'd', 0x1000000: 'T'
 }
@@ -291,14 +292,18 @@ def GetKCDataSummary(kcdata):
     format_string = "{0: <#020x} {1: <#020x} {2: <#020x} {3: <10d} {4: <#05x}"
     return format_string.format(kcdata, kcdata.kcd_addr_begin, kcdata.kcd_addr_end, kcdata.kcd_length, kcdata.kcd_flags)
 
+INVALID_TASK_SUMMARY = "Process is not valid."
 
 @lldb_type_summary(['task', 'task_t'])
 @header("{0: <20s} {1: <20s} {2: <20s} {3: >5s} {4: <5s}".format("task","vm_map", "ipc_space", "#acts", "flags"))
-def GetTaskSummary(task, showcorpse=False):
+def GetTaskSummary(task: Optional[value], showcorpse=False) -> str:
     """ Summarizes the important fields in task structure.
         params: task: value - value object representing a task in kernel
         returns: str - summary of the task
     """
+    if task is None:
+        return INVALID_TASK_SUMMARY
+
     out_string = ""
     format_string = '{0: <#020x} {1: <#020x} {2: <#020x} {3: >5d} {4: <5s}'
     thread_count = int(task.thread_count)
@@ -319,10 +324,11 @@ def GetTaskSummary(task, showcorpse=False):
             task_flags += 'B'
 
     proc_ro = Cast(task.bsd_info_ro, 'proc_ro *')
+    if unsigned(proc_ro) != 0:
+        # check if corpse flag is set
+        if unsigned(proc_ro.t_flags_ro) & 0x20:
+            task_flags += 'C'
 
-    # check if corpse flag is set
-    if unsigned(proc_ro.t_flags_ro) & 0x20:
-        task_flags += 'C'
     if unsigned(task.t_flags) & 0x40:
         task_flags += 'P'
 
@@ -354,25 +360,27 @@ def GetBSDThread(thread: Union[lldb.SBValue, value]) -> value:
     addr = unsigned(thread) + sizeof('struct thread')
     return kern.CreateValueFromAddress(addr, 'struct uthread')
 
-def GetProcFromTask(task):
+def GetProcFromTask(task) -> Optional[value]:
     """ Converts the passed in value interpreted as a task_t into a proc_t
     """
-    if unsigned(task) and unsigned(task.t_flags) & TF_HAS_PROC:
-        addr = unsigned(task) - kern.globals.proc_struct_size
+    task_addr = unsigned(task)
+    if task_addr and unsigned(task.t_flags) & TF_HASPROC:
+        addr = task_addr - kern.globals.proc_struct_size
         return value(task.GetSBValue().xCreateValueFromAddress(
             'proc', addr, gettype('struct proc')
         ).AddressOf())
-    return kern.GetValueFromAddress(0, 'proc *')
+    return None
 
-def GetTaskFromProc(proc):
+def GetTaskFromProc(proc) -> Optional[value]:
     """ Converts the passed in value interpreted as a proc_t into a task_t
     """
-    if unsigned(proc) and unsigned(proc.p_lflag) & P_LHASTASK:
-        addr = unsigned(proc) + kern.globals.proc_struct_size
+    proc_addr = unsigned(proc)
+    if proc_addr and unsigned(proc.p_lflag) & P_LHASTASK:
+        addr = proc_addr + kern.globals.proc_struct_size
         return value(proc.GetSBValue().xCreateValueFromAddress(
             'task', addr, gettype('struct task')
         ).AddressOf())
-    return kern.GetValueFromAddress(0, 'task *')
+    return None
 
 def GetThreadNameFromBSDThread(uthread):
     """ Get the name of a thread from a BSD thread, if possible.
@@ -681,7 +689,7 @@ def ShowCoalitionInfo(cmd_args=None, cmd_options={}):
     verbose = False
     if config['verbosity'] > vHUMAN:
         verbose = True
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     coal = kern.GetValueFromAddress(cmd_args[0], 'coalition *')
     if not coal:
@@ -776,17 +784,19 @@ def ShowTaskCoalitions(cmd_args=None, cmd_options={}):
 
 # EndMacro: showtaskcoalitions
 
+INVALID_PROC_SUMMARY = "Process is not valid."
+
 @lldb_type_summary(['proc', 'proc *'])
 @header("{0: >6s}   {1: <18s} {2: >11s} {3: ^10s} {4: <32s}".format("pid", "process", "io_policy", "wq_state", "command"))
-def GetProcSummary(proc):
+def GetProcSummary(proc: Optional[value]) -> str:
     """ Summarize the process data. 
         params:
           proc : value - value representaitng a proc * in kernel
         returns:
           str - string summary of the process.
     """
-    if not proc:
-        return "Process is not valid."
+    if proc is None:
+        return INVALID_PROC_SUMMARY
 
     out_string = ""
     format_string= "{0: >6d}   {1: <#018x} {2: >11s} {3: >2d} {4: >2d} {5: >2d}   {6: <32s}"
@@ -801,6 +811,8 @@ def GetProcSummary(proc):
         proc_rage_str = "RAGE"
     
     task = GetTaskFromProc(proc)
+    if task is None:
+        return "Process is not associated with a Task"
     
     io_policy_str = ""
     
@@ -877,12 +889,14 @@ def ShowTask(cmd_args=None, cmd_options={}):
     if "-F" in cmd_options:
         task_list = FindTasksByName(cmd_options['-F'])
     else:
-        if not cmd_args:
+        if cmd_args is None or len(cmd_args) == 0:
             raise ArgumentError("Invalid arguments passed.")
 
-        tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
+        task_address = ArgumentStringToInt(cmd_args[0])
+        tval = addressof(kern.CreateValueFromAddress(task_address, 'task'))
         if not tval:
             raise ArgumentError("Unknown arguments: {:s}".format(cmd_args[0]))
+
         task_list.append(tval)
     
     for tval in task_list:
@@ -899,12 +913,12 @@ def ShowPid(cmd_args=None):
     """  Routine to print a summary listing of task corresponding to given pid
          Usage: showpid <pid value>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     pidval = ArgumentStringToInt(cmd_args[0])
     for t in kern.tasks:
         pval = GetProcFromTask(t)
-        if pval and GetProcPID(pval) == pidval:
+        if pval is not None and GetProcPID(pval) == pidval:
             print(GetTaskSummary.header + " " + GetProcSummary.header)
             print(GetTaskSummary(t) + " " + GetProcSummary(pval))
             break
@@ -918,7 +932,7 @@ def ShowProc(cmd_args=None):
     """  Routine to print a summary listing of task corresponding to given proc
          Usage: showproc <address of proc>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     pval = kern.GetValueFromAddress(cmd_args[0], 'proc *')
     if not pval:
@@ -938,7 +952,7 @@ def ShowProcInfo(cmd_args=None):
          It also shows the Cred, Flags and state of the process
          Usage: showprocinfo <address of proc>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     pval = kern.GetValueFromAddress(cmd_args[0], 'proc *')
     if not pval:
@@ -955,9 +969,9 @@ def ShowProcFiles(cmd_args=None):
     """ Given a proc_t pointer, display the list of open file descriptors for the referenced process.
         Usage: showprocfiles <proc_t>
     """
-    if not cmd_args:
-        print(ShowProcFiles.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
     proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
@@ -997,9 +1011,9 @@ def ShowTTY(cmd_args=None):
     """ Display information about a struct tty
         Usage: showtty <tty struct>
     """
-    if not cmd_args:
-        print(ShowTTY.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     
     tty = kern.GetValueFromAddress(cmd_args[0], 'struct tty *')
     print("TTY structure at:              {0: <s}".format(cmd_args[0]))
@@ -1119,7 +1133,7 @@ def DumpCallQueue(cmd_args=None):
     """ Displays the contents of the specified call_entry queue.
         Usage: dumpcallqueue <queue_head_t *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid arguments")
 
     print("{0: <18s} {1: <18s} {2: <18s} {3: <64s} {4: <18s}".format('CALL_ENTRY', 'PARAM0', 'PARAM1', 'DEADLINE', 'FUNC'))
@@ -1185,7 +1199,7 @@ def ShowAllTasks(cmd_args=None, cmd_options={}, O=None):
 
     ZombTasks()
 
-def TaskForPmapHelper(pmap):
+def TaskForPmapHelper(pmap) -> Optional[value]:
     """ Given a pmap pointer, return the task pointer which contains that
         address space.
 
@@ -1204,7 +1218,7 @@ def TaskForPmap(cmd_args=None):
         Syntax: (lldb) taskforpmap <pmap>
             Multiple -v's can be specified for increased verbosity
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to taskforpmap.")
     pmap = kern.GetValueFromAddress(cmd_args[0], 'pmap_t')
     task = TaskForPmapHelper(pmap)
@@ -1236,7 +1250,7 @@ def ShowTerminatedTasks(cmd_args=None):
         # gone too. If there is no proc it may still be possible to find
         # the original proc name.
         pval = GetProcFromTask(t)
-        if pval:
+        if pval is not None:
             psummary = GetProcSummary(pval)
         else:
             name = GetProcNameForTask(t);
@@ -1315,7 +1329,7 @@ def ShowTaskStacksCmdHelper(cmd_args=None, cmd_options={}, O=None):
             ShowTaskStacks(tval, O=O)
         return
     
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
 
     tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
@@ -1356,7 +1370,7 @@ def ShowProcRefs(cmd_args=None, cmd_options={}, O=None):
               there's no way to pair references with drop-refs in the current infrastructure.
         Usage: showprocrefs <proc>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
          raise ArgumentError("No arguments passed")
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
@@ -1412,10 +1426,12 @@ def ShowTaskThreads(cmd_args = None, cmd_options={}, O=None):
            or: showtaskthreads -F <name>
     """
     task_list = []
+
     if "-F" in cmd_options:
         task_list = FindTasksByName(cmd_options["-F"])
     elif cmd_args:
-        t = kern.GetValueFromAddress(cmd_args[0], 'task *')
+        task_addr = ArgumentStringToInt(cmd_args[0])
+        t = addressof(kern.CreateValueFromAddress(task_addr, 'task'))
         task_list = [t]
     else:
         raise ArgumentError("No arguments passed")
@@ -1434,7 +1450,7 @@ def ShowAct(cmd_args=None, cmd_options={}, O=None):
     """ Routine to print out the state of a specific thread.
         usage: showact <activation> 
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     threadval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     with O.table(GetThreadSummary.header):
@@ -1445,7 +1461,7 @@ def ShowActStack(cmd_args=None, cmd_options={}, O=None):
     """ Routine to print out the stack of a specific thread.
         usage:  showactstack <activation> 
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     threadval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     with O.table(GetThreadSummary.header):
@@ -1462,7 +1478,7 @@ def SwitchToAct(cmd_args=None, cmd_options={}, O=None):
     Before resuming execution, issue a "resetctx" command, to
     return to the original execution context.
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
     thval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     lldbthread = GetLLDBThreadForKernelThread(thval)
@@ -1481,7 +1497,7 @@ def SwitchToRegs(cmd_args=None):
         Note: This command ONLY works for ARM based kernel setup.
     """
     
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
 
     lldb_process = LazyTarget.GetProcess()
@@ -1521,7 +1537,7 @@ def GetCallChains(filter_regex) -> dict[str, list[str]]:
     ## Filter threads and build call graph
     root = CallChainNode({"root": CallChainNode({}, [])}, [])
 
-    zomb_tasks = [GetTaskFromProc(proc) for proc in kern.zombprocs]
+    zomb_tasks = [t for proc in kern.zombprocs if (t := GetTaskFromProc(proc)) is not None]
     for t in kern.tasks + zomb_tasks:
         for th in IterateQueue(t.threads, 'thread *', 'task_threads'):
             thread_val = GetLLDBThreadForKernelThread(th)
@@ -1565,7 +1581,7 @@ def ShowCallChains(cmd_args=None, cmd_options={}, O=None):
         The regex filters function names. Function names that don't match the regex are ignored.
     """
     
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed.")
 
     show_call_chain(cmd_args[0],O)
@@ -1735,8 +1751,8 @@ def FullBackTrace(cmd_args=[]):
         Example: fullbt  `$rbp` 
     """
     if len(cmd_args) < 1:
-        print(FullBackTrace.__doc__)
-        return False
+        raise ArgumentError()
+
     print(GetFullBackTrace(ArgumentStringToInt(cmd_args[0]), prefix="\t"))
 
 @lldb_command('fullbtall', fancy=True)
@@ -1796,9 +1812,7 @@ def ShowProcTree(cmd_args=None):
         search_pid = ArgumentStringToInt(cmd_args[0])
     
     if search_pid < 0:
-        print("pid specified must be a positive number")
-        print(ShowProcTree.__doc__)
-        return
+        raise ArgumentError("pid specified must be a positive number")
     
     hdr_format = "{0: <6s} {1: <14s} {2: <9s}\n"
     out_string = hdr_format.format("PID", "PROCESS", "POINTER")
@@ -1832,10 +1846,9 @@ def ShowThreadForTid(cmd_args=None, O=None):
         This command is used to retrieve the address of the thread structure(thread_t)
         corresponding to a given thread_id.
     """
-    if not cmd_args:
-        print("Please provide thread_t whose tid you'd like to look up")
-        print(ShowThreadForTid.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("Please provide thread_t whose tid you'd like to look up")
+
     search_tid = ArgumentStringToInt(cmd_args[0])
     for taskp in kern.tasks:
         for actp in IterateQueue(taskp.threads, 'struct thread *', 'task_threads'):
@@ -1912,10 +1925,13 @@ ledger_limit_infinity = (uint64_t(0x1).value << 63) - 1
 
 def GetLedgerEntryIndex(template, name):
     i = 0
-    while i != template.lt_cnt:
-        if str(template.lt_entries[i].et_key) == name:
+    lt_count = template.lt_cnt
+    lt_entries = template.lt_entries
+
+    while i != lt_count:
+        if str(lt_entries[i].et_key) == name:
             return i
-        i = i + 1
+        i += 1
     return -1
 
 def GetLedgerEntryWithTemplate(ledger_template, ledgerp, i):
@@ -1928,36 +1944,35 @@ def GetLedgerEntryWithTemplate(ledger_template, ledgerp, i):
     lf_refill_scheduled = 0x0400
     lf_tracking_max = 0x4000
 
-    now = unsigned(kern.globals.sched_tick) // 20
-    lim_pct = 0
-
     entry = {}
 
     et = ledger_template.lt_entries[i]
     entry["key"] = str(et.et_key)
-    if et.et_size == sizeof("struct ledger_entry_small"):
+    et_size = et.et_size
+    if et_size == sizeof("struct ledger_entry_small"):
         les = ledgerp.l_entries[et.et_offset]
         entry["credit"] = unsigned(les.les_credit)
         entry["debit"] = 0
         entry["flags"] = int(les.les_flags)
         entry["limit"] = ledger_limit_infinity
-    elif et.et_size == sizeof("struct ledger_entry"):
-        le = Cast(addressof(ledgerp.l_entries[et.et_offset]), "struct ledger_entry *")
+    elif et_size == sizeof("struct ledger_entry"):
+        le = cast(addressof(ledgerp.l_entries[et.et_offset]), "struct ledger_entry *")
         entry["credit"] = unsigned(le.le_credit)
         entry["debit"] = unsigned(le.le_debit)
-        if (le.le_flags & lf_tracking_max):
+        le_flags = int(le.le_flags)
+        if (le_flags & lf_tracking_max):
             if hasattr(le._le._le_max, "le_interval_max"):
                 entry["interval_max"] = unsigned(le._le._le_max.le_interval_max)
             entry["lifetime_max"] = unsigned(le._le._le_max.le_lifetime_max)
 
         entry["limit"] = unsigned(le.le_limit)
 
-        if (le.le_flags & lf_refill_scheduled):
-            entry["refill_period"] = unsigned (le._le.le_refill.le_refill_period)
+        if (le_flags & lf_refill_scheduled):
+            entry["refill_period"] = unsigned(le._le.le_refill.le_refill_period)
 
         if (unsigned(le.le_warn_percent) < 65535):
             entry["warn_percent"] = unsigned (le.le_warn_percent * 100 / 65536)
-        entry["flags"] = int(le.le_flags)
+        entry["flags"] = le_flags
         entry["diag_threshold_scaled"] = int(le.le_diag_threshold_scaled)
     else:
         return None
@@ -2074,7 +2089,7 @@ def GetTaskLedgers(task_val):
     task["address"] = unsigned(task_val)
 
     pval = GetProcFromTask(task_val)
-    if pval:
+    if pval is not None:
         task["name"] = GetProcName(pval)
         task["pid"] = int(GetProcPID(pval))
 
@@ -2136,12 +2151,12 @@ def ShowTaskLedgers(cmd_args=None, cmd_options={}):
     if "-J" in cmd_options:
         print_json = True
     
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed.")
     show_footprint_interval_max = False
     if "-I" in cmd_options:
         show_footprint_interval_max = True
-    tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
+    tval = addressof(kern.CreateValueFromAddress(cmd_args[0], 'task'))
     if not tval:
         raise ArgumentError("unknown arguments: %r" %cmd_args)
     ledgers = GetTaskLedgers(tval)
@@ -2213,6 +2228,13 @@ def ShowProcUUIDPolicyTable(cmd_args=None):
 
 
 # EndMacro: showprocuuidpolicytable
+def build_fields_string(obj: value, fields: list[list[str]]) -> str:
+    result = ""
+    for field_name, human_name in fields:
+            if (trp_field_value := get_field(obj, field_name)) is not None:
+                result += f"{human_name}: {str(trp_field_value)} "
+    
+    return result
 
 @lldb_command('showalltaskpolicy') 
 def ShowAllTaskPolicy(cmd_args=None):
@@ -2230,79 +2252,64 @@ def ShowAllTaskPolicy(cmd_args=None):
     for t in kern.tasks:
         pval = GetProcFromTask(t)
         print(GetTaskSummary(t) +" "+ GetProcSummary(pval))
+
         requested_strings = [
-                ["int_darwinbg",        "DBG-int"],
-                ["ext_darwinbg",        "DBG-ext"],
-                ["int_iotier",          "iotier-int"],
-                ["ext_iotier",          "iotier-ext"],
-                ["int_iopassive",       "passive-int"],
-                ["ext_iopassive",       "passive-ext"],
-                ["bg_iotier",           "bg-iotier"],
-                ["terminated",          "terminated"],
-                ["th_pidbind_bg",       "bg-pidbind"],
-                ["t_apptype",           "apptype"],
-                ["t_boosted",           "boosted"],
-                ["t_role",              "role"],
-                ["t_tal_enabled",       "tal-enabled"],
-                ["t_base_latency_qos",  "latency-base"],
-                ["t_over_latency_qos",  "latency-override"],
-                ["t_base_through_qos",  "throughput-base"],
-                ["t_over_through_qos",  "throughput-override"]
+                ["trp_int_darwinbg",        "DBG-int"],
+                ["trp_ext_darwinbg",        "DBG-ext"],
+                ["trp_int_iotier",          "iotier-int"],
+                ["trp_ext_iotier",          "iotier-ext"],
+                ["trp_int_iopassive",       "passive-int"],
+                ["trp_ext_iopassive",       "passive-ext"],
+                ["trp_bg_iotier",           "bg-iotier"],
+                ["trp_terminated",          "terminated"],
+                # ["thrp_pidbind_bg",       "bg-pidbind"], # no longer part of task requested policy
+                ["trp_apptype",           "apptype"],
+                ["trp_boosted",           "boosted"],
+                ["trp_role",              "role"],
+                # ["trp_tal_enabled",       "tal-enabled"], # tal_enabled is unused/deprecated
+                ["trp_base_latency_qos",  "latency-base"],
+                ["trp_over_latency_qos",  "latency-override"],
+                ["trp_base_through_qos",  "throughput-base"],
+                ["trp_over_through_qos",  "throughput-override"]
                 ]
         
-        requested=""
-        for value in requested_strings:
-            if t.requested_policy.__getattr__(value[0]) :
-                requested+=value[1] + ": " + str(t.requested_policy.__getattr__(value[0])) + " "
-            else:
-                requested+=""
+        requested = build_fields_string(t.requested_policy, requested_strings)
         
         suppression_strings = [
-                ["t_sup_active",        "active"],
-                ["t_sup_lowpri_cpu",    "lowpri-cpu"],
-                ["t_sup_timer",         "timer-throttling"],
-                ["t_sup_disk",          "disk-throttling"],
-                ["t_sup_cpu_limit",     "cpu-limits"],
-                ["t_sup_suspend",       "suspend"],
-                ["t_sup_bg_sockets",    "bg-sockets"]
+                ["trp_sup_active",        "active"],
+                ["trp_sup_lowpri_cpu",    "lowpri-cpu"],
+                ["trp_sup_timer",         "timer-throttling"],
+                ["trp_sup_disk",          "disk-throttling"],
+                ["trp_sup_cpu_limit",     "cpu-limits"],
+                ["trp_sup_suspend",       "suspend"],
+                ["trp_sup_bg_sockets",    "bg-sockets"]
                 ]
-            
-        suppression=""
-        for value in suppression_strings:
-            if t.requested_policy.__getattr__(value[0]) :
-                suppression+=value[1] + ": " + str(t.requested_policy.__getattr__(value[0])) + " "
-            else:
-                suppression+=""
+        suppression = build_fields_string(t.requested_policy, suppression_strings)
 
         effective_strings = [
-                ["darwinbg",        "background"],
-                ["lowpri_cpu",      "lowpri-cpu"],
-                ["io_tier",         "iotier"],
-                ["io_passive",      "passive"],
-                ["all_sockets_bg",  "bg-allsockets"],
-                ["new_sockets_bg",  "bg-newsockets"],
-                ["bg_iotier",       "bg-iotier"],
-                ["terminated",      "terminated"],
-                ["t_gpu_deny",      "gpu-deny"],
-                ["t_tal_engaged",   "tal-engaged"],
-                ["t_suspended",     "suspended"],
-                ["t_watchers_bg",   "bg-watchers"],
-                ["t_latency_qos",   "latency-qos"],
-                ["t_through_qos",   "throughput-qos"],
-                ["t_sup_active",    "suppression-active"],
-                ["t_role",          "role"]
+                ["tep_darwinbg",        "background"],
+                ["tep_lowpri_cpu",      "lowpri-cpu"],
+                ["tep_io_tier",         "iotier"],
+                ["tep_io_passive",      "passive"],
+                ["tep_all_sockets_bg",  "bg-allsockets"],
+                ["tep_new_sockets_bg",  "bg-newsockets"],
+                ["tep_bg_iotier",       "bg-iotier"],
+                ["tep_terminated",      "terminated"],
+                # ["t_gpu_deny",      "gpu-deny"], # no longer exists
+                ["tep_tal_engaged",   "tal-engaged"],
+                # ["t_suspended",     "suspended"], # no longer exists
+                ["tep_watchers_bg",   "bg-watchers"],
+                ["tep_latency_qos",   "latency-qos"],
+                ["tep_through_qos",   "throughput-qos"],
+                ["tep_sup_active",    "suppression-active"],
+                ["tep_role",          "role"]
                 ]
-            
-        effective=""
-        for value in effective_strings:
-            if t.effective_policy.__getattr__(value[0]) :
-                effective+=value[1] + ": " + str(t.effective_policy.__getattr__(value[0])) + " "
-            else:
-                effective+=""
+        effective = build_fields_string(t.effective_policy, effective_strings)
                 
         print("requested: " + requested)
         print("suppression: " + suppression)
         print("effective: " + effective)
+        print("\n\n")
 
 
 @lldb_command('showallsuspendedtasks', '')
@@ -2323,9 +2330,9 @@ def ShowAllPte(cmd_args=None):
     head_taskp = addressof(kern.globals.tasks)
     taskp = Cast(head_taskp.next, 'task *')
     while taskp != head_taskp:
-        procp = GetProcFromTask(taskp)
         out_str = "task = {:#x} pte = {:#x}\t".format(taskp, taskp.map.pmap.ttep)
-        if procp != 0:
+        procp = GetProcFromTask(taskp)
+        if procp is not None:
             out_str += "{:s}\n".format(GetProcName(procp))
         else:
             out_str += "\n"
@@ -2372,7 +2379,7 @@ def ShowAllSchedUsage(cmd_args=None):
     """
     out_str = ''
     for taskp in kern.tasks:
-        ShowTask([unsigned(taskp)])
+        ShowTask([str(unsigned(taskp))])
         print(ShowAllSchedUsage.header)
         for actp in IterateQueue(taskp.threads, 'thread *', 'task_threads'):
             out_str = "{: <#20x}".format(actp)
@@ -2414,9 +2421,9 @@ def WorkingUserStacks(cmd_args=None):
     """ Print out the user stack for each thread in a task, followed by the user libraries.
         Syntax: (lldb) workinguserstacks <task_t>
     """
-    if not cmd_args:
-        print("Insufficient arguments" + ShowTaskUserStacks.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
     print(GetTaskSummary.header + " " + GetProcSummary.header)
     pval = GetProcFromTask(task)
@@ -2440,10 +2447,8 @@ def WorkingUserLibraries(cmd_args=None):
         For a given user task, inspect the dyld shared library state and print information about all Mach-O images.
         Syntax: (lldb)workinguserlibraries <task_t>
     """
-    if not cmd_args:
-        print("Insufficient arguments")
-        print(ShowTaskUserLibraries.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     print("{0: <18s} {1: <12s} {2: <36s} {3: <50s}".format('address','type','uuid','path'))
     out_format = "0x{0:0>16x} {1: <12s} {2: <36s} {3: <50s}"
@@ -2510,7 +2515,7 @@ def Showstackaftertask(cmd_args=None, cmd_options={}, O=None):
             ListTaskStacks(tval, O=O)
         return
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Insufficient arguments")
     tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
     if not tval:

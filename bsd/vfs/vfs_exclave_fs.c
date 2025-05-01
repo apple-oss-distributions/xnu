@@ -273,6 +273,12 @@ out:
 	return error;
 }
 
+static bool
+is_fs_writeable(uint32_t fs_tag)
+{
+	return (fs_tag == EFT_EXCLAVE) || (fs_tag == EFT_EXCLAVE_MAIN);
+}
+
 /*
  * Set a base directory for the given fs tag.
  */
@@ -307,27 +313,17 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info, bool i
 	}
 
 	/*
-	 * make sure that EFT_EXCLAVE does not share a dev_t with another fs,
-	 * since EFT_EXCLAVE vnodes are opened RW whereas other fs vnodes
+	 * make sure that a writable fs does not share a dev_t with another non writable fs (and vice versa)
+	 * since writable vnodes are opened RW whereas non writable fs vnodes
 	 * are opened RO
 	 */
-	if (fs_tag == EFT_EXCLAVE) {
-		int i;
-
-		for (i = 0; i <= rft_hashmask; i++) {
-			registered_tags_head_t *head = registered_tags_hash + i;
-			LIST_FOREACH(rft, head, link) {
-				if (rft->dev == dev) {
-					error = EBUSY;
-					goto out;
-				}
-			}
-		}
-	} else {
-		registered_tags_head_t *head = get_registered_tags_chain(EFT_EXCLAVE);
-
+	int i;
+	bool is_writable_fs_tag = is_fs_writeable(fs_tag);
+	for (i = 0; i <= rft_hashmask; i++) {
+		registered_tags_head_t *head = registered_tags_hash + i;
 		LIST_FOREACH(rft, head, link) {
-			if ((rft->fstag == EFT_EXCLAVE) && (rft->dev == dev)) {
+			if ((is_fs_writeable(rft->fstag) != is_writable_fs_tag) && rft->dev == dev) {
+				printf("tag %u has same device 0x%x as tag %u\n", fs_tag, rft->fstag, dev);
 				error = EBUSY;
 				goto out;
 			}
@@ -490,12 +486,6 @@ vfs_exclave_fs_stop(void)
 #if (DEVELOPMENT || DEBUG)
 	integrity_checks_disabled = false;
 #endif
-}
-
-static bool
-is_fs_writeable(uint32_t fs_tag)
-{
-	return fs_tag == EFT_EXCLAVE;
 }
 
 int
@@ -812,11 +802,22 @@ out:
 int
 vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
 {
+	return vfs_exclave_fs_root_ex(EFT_EXCLAVE, exclave_id, root_id);
+}
+
+int
+vfs_exclave_fs_root_ex(uint32_t fs_tag, const char *exclave_id, uint64_t *root_id)
+{
 	int error;
 	uint32_t ov_flags = 0;
 
 	if (!exclave_fs_started()) {
 		return ENXIO;
+	}
+
+	if (!is_fs_writeable(fs_tag)) {
+		/* root is valid only on RW tags */
+		return EINVAL;
 	}
 
 	if (strchr(exclave_id, '/') || !strcmp(exclave_id, ".") || !strcmp(exclave_id, "..")) {
@@ -830,20 +831,20 @@ vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
 	}
 #endif
 
-	error = exclave_fs_open_internal(EFT_EXCLAVE, EXCLAVE_FS_BASEDIR_ROOT_ID,
+	error = exclave_fs_open_internal(fs_tag, EXCLAVE_FS_BASEDIR_ROOT_ID,
 	    exclave_id, O_DIRECTORY, ov_flags, root_id);
 
 	if (error == ENOENT) {
 		vnode_t base_vp;
 
-		error = get_base_dir(EFT_EXCLAVE, NULL, &base_vp);
+		error = get_base_dir(fs_tag, NULL, &base_vp);
 		if (error) {
 			return error;
 		}
 
 		error = create_exclave_dir(base_vp, exclave_id);
 		if (!error) {
-			error = exclave_fs_open_internal(EFT_EXCLAVE, EXCLAVE_FS_BASEDIR_ROOT_ID,
+			error = exclave_fs_open_internal(fs_tag, EXCLAVE_FS_BASEDIR_ROOT_ID,
 			    exclave_id, O_DIRECTORY, ov_flags, root_id);
 		}
 
@@ -1046,6 +1047,21 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 		return error;
 	}
 
+	// if we need to create the file, then delete it first (so that we won't reuse the same inode number)
+	if ((flags & O_CREAT) && !(flags & O_DIRECTORY)) {
+		error = unlink1(vfs_context_kernel(), dvp, CAST_USER_ADDR_T(path), UIO_SYSSPACE, 0);
+		if (error) {
+			if (error == ENOENT) {
+				error = 0;
+			} else {
+				goto out;
+			}
+		}
+
+		// Add an O_EXCL flag so that create will fail if the file is already there after delete (a possible attack)
+		flags |= O_EXCL;
+	}
+
 	ndp = kalloc_type(struct nameidata, Z_WAITOK);
 	if (!ndp) {
 		error = ENOMEM;
@@ -1124,7 +1140,7 @@ vfs_exclave_fs_open(uint32_t fs_tag, uint64_t root_id, const char *name, uint64_
 		return ENXIO;
 	}
 
-	if ((fs_tag == EFT_EXCLAVE) && (root_id == EXCLAVE_FS_BASEDIR_ROOT_ID)) {
+	if (is_fs_writeable(fs_tag) && (root_id == EXCLAVE_FS_BASEDIR_ROOT_ID)) {
 		return EINVAL;
 	}
 
@@ -1138,7 +1154,7 @@ vfs_exclave_fs_create(uint32_t fs_tag, uint64_t root_id, const char *name, uint6
 		return ENXIO;
 	}
 
-	if ((fs_tag == EFT_EXCLAVE) && (root_id == EXCLAVE_FS_BASEDIR_ROOT_ID)) {
+	if (is_fs_writeable(fs_tag) && (root_id == EXCLAVE_FS_BASEDIR_ROOT_ID)) {
 		return EINVAL;
 	}
 
@@ -1314,7 +1330,7 @@ vfs_exclave_fs_sync(uint32_t fs_tag, uint64_t file_id, uint64_t sync_op)
 		command = F_BARRIERFSYNC;
 	} else if (sync_op == EXCLAVE_FS_SYNC_OP_FULL) {
 		command = F_FULLFSYNC;
-	} else {
+	} else if (sync_op != EXCLAVE_FS_SYNC_OP_UBC) {
 		return EINVAL;
 	}
 
@@ -1328,7 +1344,11 @@ vfs_exclave_fs_sync(uint32_t fs_tag, uint64_t file_id, uint64_t sync_op)
 		goto out;
 	}
 
-	error = VNOP_IOCTL(vp, command, (caddr_t)NULL, 0, vfs_context_kernel());
+	if (sync_op == EXCLAVE_FS_SYNC_OP_UBC) {
+		error = VNOP_FSYNC(vp, MNT_WAIT, vfs_context_kernel());
+	} else {
+		error = VNOP_IOCTL(vp, command, (caddr_t)NULL, 0, vfs_context_kernel());
+	}
 
 out:
 	if (vp) {

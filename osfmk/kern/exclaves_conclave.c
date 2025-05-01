@@ -153,12 +153,54 @@ exclaves_conclave_launcher_stop(const tb_client_connection_t connection,
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+exclaves_conclave_launcher_suspend(const tb_client_connection_t connection,
+    bool suspend)
+{
+	assert3p(connection, !=, NULL);
+
+	tb_error_t tb_result = TB_ERROR_SUCCESS;
+
+	const conclave_launcher_conclavecontrol_s control = {
+		.connection = connection,
+	};
+
+	__block bool success = false;
+
+	/* BEGIN IGNORE CODESTYLE */
+	tb_result = conclave_launcher_conclavecontrol_suspend(
+	    &control, suspend,
+	    ^(conclave_launcher_conclavecontrol_suspend__result_s result) {
+		conclave_launcher_conclavestatus_s *status = NULL;
+		status = conclave_launcher_conclavecontrol_suspend__result_get_success(&result);
+		if (status != NULL) {
+		        success = true;
+		        return;
+		}
+
+		conclave_launcher_conclavelauncherfailure_s *failure = NULL;
+		failure = conclave_launcher_conclavecontrol_suspend__result_get_failure(&result);
+		assert3p(failure, !=, NULL);
+
+		exclaves_debug_printf(show_errors,
+		    "conclave suspend failure: failure %u\n", *failure);
+	});
+	/* END IGNORE CODESTYLE */
+
+	if (tb_result != TB_ERROR_SUCCESS || !success) {
+		return KERN_FAILURE;
+	}
+
+	return KERN_SUCCESS;
+}
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Conclave Upcalls
 
+/* Legacy upcall handlers */
+
 tb_error_t
-exclaves_conclave_upcall_suspend(const uint32_t flags,
+exclaves_conclave_upcall_legacy_suspend(const uint32_t flags,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_suspend__result_s))
 {
 	xnuupcalls_conclavescidlist_s scid_list = {};
@@ -195,7 +237,7 @@ exclaves_conclave_upcall_suspend(const uint32_t flags,
 }
 
 tb_error_t
-exclaves_conclave_upcall_stop(const uint32_t flags,
+exclaves_conclave_upcall_legacy_stop(const uint32_t flags,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_stop__result_s))
 {
 	exclaves_debug_printf(show_lifecycle_upcalls,
@@ -229,7 +271,7 @@ exclaves_conclave_upcall_stop(const uint32_t flags,
 }
 
 tb_error_t
-exclaves_conclave_upcall_crash_info(const xnuupcalls_conclavesharedbuffer_s *shared_buf,
+exclaves_conclave_upcall_legacy_crash_info(const xnuupcalls_conclavesharedbuffer_s *shared_buf,
     const uint32_t length,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_crash_info__result_s ))
 {
@@ -244,7 +286,8 @@ exclaves_conclave_upcall_crash_info(const xnuupcalls_conclavesharedbuffer_s *sha
 	exclaves_debug_printf(show_lifecycle_upcalls,
 	    "[lifecycle_upcalls] conclave_crash_info\n");
 
-	kern_return_t kret = task_crash_info_conclave_upcall(task, shared_buf, length);
+	const conclave_sharedbuffer_t *buf = (const conclave_sharedbuffer_t *) shared_buf;
+	kern_return_t kret = task_crash_info_conclave_upcall(task, buf, length);
 
 	exclaves_debug_printf(show_lifecycle_upcalls,
 	    "[lifecycle_upcalls] task_crash_info_conclave_upcall returned 0x%x\n", kret);
@@ -271,220 +314,124 @@ exclaves_conclave_upcall_crash_info(const xnuupcalls_conclavesharedbuffer_s *sha
 	return completion(result);
 }
 
-#if DEVELOPMENT || DEBUG
+/* V2 upcall handlers */
 
-/* -------------------------------------------------------------------------- */
-#pragma mark Testing
-
-typedef struct conclave_test_context {
-	tb_endpoint_t conclave_control_endpoint;
-	conclave_launcher_conclavecontrol_s conclave_control;
-	tb_endpoint_t conclave_debug_endpoint;
-	conclave_launcher_conclavedebug_s conclave_debug;
-} conclave_test_context_t;
-
-LCK_MTX_DECLARE(exclaves_conclave_lock, &exclaves_lck_grp);
-
-static conclave_test_context_t *conclave_context = NULL;
-
-#define EXCLAVES_ID_CONCLAVECONTROL_EP               \
-    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
-    "com.apple.service.ConclaveLauncherControl"))
-
-#define EXCLAVES_ID_CONCLAVEDEBUG_EP \
-    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
-    "com.apple.service.ConclaveLauncherDebug"))
-
-static TUNABLE(bool, enable_hello_conclaves, "enable_hello_conclaves", false);
-
-static int
-exclaves_hello_conclaves_test(int64_t in, int64_t *out)
+tb_error_t
+exclaves_conclave_upcall_suspend(const uint32_t flags,
+    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_suspend__result_s))
 {
-	tb_error_t tb_result = TB_ERROR_SUCCESS;
-	if (!enable_hello_conclaves) {
-		exclaves_debug_printf(show_test_output,
-		    "%s: SKIPPED: enable_hello_conclaves not set\n", __func__);
-		*out = -1;
-		return 0;
-	}
+	xnuupcallsv2_conclavescidlist_s scid_list = {};
 
-	if (exclaves_get_status() != EXCLAVES_STATUS_AVAILABLE) {
-		exclaves_debug_printf(show_test_output,
-		    "%s: SKIPPED: Exclaves not available\n", __func__);
-		*out = -1;
-		return 0;
-	}
-	lck_mtx_lock(&exclaves_conclave_lock);
-	switch (in) {
-	case 0: {         /* init */
-		if (conclave_context != NULL) {
-			break;
-		}
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] conclave_suspend flags %x\n", flags);
 
-		conclave_context = kalloc_type(conclave_test_context_t, Z_WAITOK);
-		assert(conclave_context != NULL);
+	kern_return_t kret = task_suspend_conclave_upcall(scid_list.scid,
+	    ARRAY_COUNT(scid_list.scid));
 
-		/* BEGIN IGNORE CODESTYLE */
-		conclave_context->conclave_control_endpoint =
-		    tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
-		    EXCLAVES_ID_CONCLAVECONTROL_EP, TB_ENDPOINT_OPTIONS_NONE);
-		tb_result = conclave_launcher_conclavecontrol__init(
-		    &conclave_context->conclave_control,
-		    conclave_context->conclave_control_endpoint);
-		assert(tb_result == TB_ERROR_SUCCESS);
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] task_suspend_conclave_upcall returned %x\n", kret);
 
-		conclave_context->conclave_debug_endpoint =
-		    tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
-		    EXCLAVES_ID_CONCLAVEDEBUG_EP, TB_ENDPOINT_OPTIONS_NONE);
-		tb_result = conclave_launcher_conclavedebug__init(
-		    &conclave_context->conclave_debug,
-		    conclave_context->conclave_debug_endpoint);
-		assert(tb_result == TB_ERROR_SUCCESS);
-		/* END IGNORE CODESTYLE */
+	xnuupcallsv2_conclaveupcallsprivate_suspend__result_s result = {};
 
+	switch (kret) {
+	case KERN_SUCCESS:
+		xnuupcallsv2_conclaveupcallsprivate_suspend__result_init_success(
+			&result, scid_list);
+		break;
+
+	case KERN_INVALID_TASK:
+	case KERN_INVALID_ARGUMENT:
+		xnuupcallsv2_conclaveupcallsprivate_suspend__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_INVALIDTASK);
+		break;
+
+	default:
+		xnuupcallsv2_conclaveupcallsprivate_suspend__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_FAILURE);
 		break;
 	}
-	case 1: {         /* launch conclave */
-		assert(conclave_context != NULL);
 
-		/* BEGIN IGNORE CODESTYLE */
-		tb_result = conclave_launcher_conclavecontrol_launch(
-		    &conclave_context->conclave_control,
-		    ^(conclave_launcher_conclavecontrol_launch__result_s result) {
-			conclave_launcher_conclavestatus_s *status = NULL;
-			status = conclave_launcher_conclavecontrol_launch__result_get_success(&result);
-			if (status != NULL) {
-			        exclaves_debug_printf(show_test_output,
-			            "%s:%d conclave launch success: status %u\n",
-			            __func__, __LINE__, *status);
-			        return;
-			}
-
-			conclave_launcher_conclavelauncherfailure_s *failure = NULL;
-			failure = conclave_launcher_conclavecontrol_launch__result_get_failure(&result);
-			assert3p(failure, !=, NULL);
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave launch failure: failure %u\n",
-			    __func__, __LINE__, *failure);
-		});
-		/* END IGNORE CODESTYLE */
-
-		if (tb_result != TB_ERROR_SUCCESS) {
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave launch failure: tightbeam error %u\n",
-			    __func__, __LINE__, tb_result);
-		}
-		break;
-	}
-	case 2: {         /* status */
-		assert(conclave_context != NULL);
-
-		/* BEGIN IGNORE CODESTYLE */
-		tb_result = conclave_launcher_conclavecontrol_status(
-		    &conclave_context->conclave_control,
-		    ^(conclave_launcher_conclavecontrol_status__result_s result) {
-			conclave_launcher_conclavestatus_s *status = NULL;
-			status = conclave_launcher_conclavecontrol_status__result_get_success(&result);
-			if (status != NULL) {
-			        exclaves_debug_printf(show_test_output,
-			            "%s:%d conclave status success: status %u\n",
-			            __func__, __LINE__, *status);
-			        return;
-			}
-
-			conclave_launcher_conclavelauncherfailure_s *failure = NULL;
-			failure = conclave_launcher_conclavecontrol_status__result_get_failure(&result);
-			assert3p(failure, !=, NULL);
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave status failure: failure %u\n",
-			    __func__, __LINE__, *failure);
-		});
-		/* END IGNORE CODESTYLE */
-
-		if (tb_result != TB_ERROR_SUCCESS) {
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave status failure: tightbeam error %u\n",
-			    __func__, __LINE__, tb_result);
-		}
-		break;
-	}
-	case 3: {         /* stop conclave */
-		conclave_launcher_conclavestopreason_s stop_reason =
-		    CONCLAVE_LAUNCHER_CONCLAVESTOPREASON_EXIT;
-		assert(conclave_context != NULL);
-
-		/* BEGIN IGNORE CODESTYLE */
-		tb_result = conclave_launcher_conclavecontrol_stop(
-		    &conclave_context->conclave_control, stop_reason, true,
-		    ^(conclave_launcher_conclavecontrol_stop__result_s result) {
-			conclave_launcher_conclavestatus_s *status = NULL;
-			status = conclave_launcher_conclavecontrol_stop__result_get_success(&result);
-			if (status != NULL) {
-				exclaves_debug_printf(show_test_output,
-				    "%s:%d conclave stop success: status %u\n",
-				    __func__, __LINE__, *status);
-			        return;
-			}
-
-			conclave_launcher_conclavelauncherfailure_s *failure = NULL;
-			failure = conclave_launcher_conclavecontrol_stop__result_get_failure(&result);
-			assert3p(failure, !=, NULL);
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave stop failure: failure %u\n",
-			    __func__, __LINE__, *failure);
-		});
-		/* END IGNORE CODESTYLE */
-
-		if (tb_result != TB_ERROR_SUCCESS) {
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave stop failure: tightbeam error %u\n",
-			    __func__, __LINE__, tb_result);
-		}
-		break;
-	}
-	case 4: {         /* debug info */
-		assert(conclave_context != NULL);
-
-		/* BEGIN IGNORE CODESTYLE */
-		tb_result = conclave_launcher_conclavedebug_debuginfo(
-		    &conclave_context->conclave_debug,
-		    ^(conclave_launcher_conclavedebug_debuginfo__result_s result) {
-			conclave_launcher_conclavedebuginfo_s *debuginfo = NULL;
-			debuginfo = conclave_launcher_conclavedebug_debuginfo__result_get_success(&result);
-			if (debuginfo != NULL) {
-				uuid_string_t uuid_string;
-				uuid_unparse(debuginfo->conclaveuuid, uuid_string);
-				exclaves_debug_printf(show_test_output,
-				    "%s:%d conclave debuginfo success: result %s\n",
-				    __func__, __LINE__, uuid_string);
-			        return;
-			}
-
-			conclave_launcher_conclavelauncherfailure_s *failure = NULL;
-			failure = conclave_launcher_conclavedebug_debuginfo__result_get_failure(&result);
-			assert3p(failure, !=, NULL);
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave debuginfo failure: failure %u\n",
-			    __func__, __LINE__, *failure);
-		});
-		/* END IGNORE CODESTYLE */
-
-		if (tb_result != TB_ERROR_SUCCESS) {
-			exclaves_debug_printf(show_errors,
-			    "%s:%d conclave debug info failure: tightbeam error %u\n",
-			    __func__, __LINE__, tb_result);
-		}
-		break;
-	}
-	}
-	lck_mtx_unlock(&exclaves_conclave_lock);
-	*out = tb_result == TB_ERROR_SUCCESS ? 1 : 0;
-	return tb_result == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+	return completion(result);
 }
 
-SYSCTL_TEST_REGISTER(exclaves_hello_conclaves_test,
-    exclaves_hello_conclaves_test);
+tb_error_t
+exclaves_conclave_upcall_stop(const uint32_t flags,
+    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_stop__result_s))
+{
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] conclave_stop flags %x\n", flags);
 
-#endif /* DEVELOPMENT || DEBUG */
+	kern_return_t kret = task_stop_conclave_upcall();
+
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] task_stop_conclave_upcall returned %x\n", kret);
+
+	xnuupcallsv2_conclaveupcallsprivate_stop__result_s result = {};
+
+	switch (kret) {
+	case KERN_SUCCESS:
+		xnuupcallsv2_conclaveupcallsprivate_stop__result_init_success(
+			&result);
+		break;
+
+	case KERN_INVALID_TASK:
+	case KERN_INVALID_ARGUMENT:
+		xnuupcallsv2_conclaveupcallsprivate_stop__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_INVALIDTASK);
+		break;
+
+	default:
+		xnuupcallsv2_conclaveupcallsprivate_stop__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_FAILURE);
+		break;
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_conclave_upcall_crash_info(const xnuupcallsv2_conclavesharedbuffer_s *shared_buf,
+    const uint32_t length,
+    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_s ))
+{
+	task_t task;
+
+	/* Check if the thread was calling conclave stop on another task */
+	task = current_thread()->conclave_stop_task;
+	if (task == TASK_NULL) {
+		task = current_task();
+	}
+
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] conclave_crash_info\n");
+
+	const conclave_sharedbuffer_t *buf = (const conclave_sharedbuffer_t *) shared_buf;
+	kern_return_t kret = task_crash_info_conclave_upcall(task, buf, length);
+
+	exclaves_debug_printf(show_lifecycle_upcalls,
+	    "[lifecycle_upcalls] task_crash_info_conclave_upcall returned 0x%x\n", kret);
+
+	xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_s result = {};
+
+	switch (kret) {
+	case KERN_SUCCESS:
+		xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_init_success(
+			&result);
+		break;
+
+	case KERN_INVALID_TASK:
+	case KERN_INVALID_ARGUMENT:
+		xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_INVALIDTASK);
+		break;
+
+	default:
+		xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_init_failure(
+			&result, XNUUPCALLSV2_LIFECYCLEERROR_FAILURE);
+		break;
+	}
+
+	return completion(result);
+}
 
 #endif /* CONFIG_EXCLAVES */

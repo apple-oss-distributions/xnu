@@ -88,11 +88,12 @@ skt_fsw29301703_common(int nchannels)
 	    CHANNEL_DIR_TX_RX, CHANNEL_RING_ID_ANY, NULL,
 	    -1, -1, -1, -1, -1, -1, -1, 1, -1, -1) == NULL);
 
-	/* open many channels from userland to the flowswitch */
-	/* Start with channel 1 because presumably the feth0 has channel 0 */
-	/* XXX we should be able to use NEXUS_PORT_ANY here instead */
+	/*
+	 * Open many channels from userland to the flowswitch.
+	 * Start with channel 2 because port 0 and 1 are reserved to kernel.
+	 */
 	for (int i = 0; i < sizeof(channels) / sizeof(channels[0]); i++) {
-		channels[i] = sktu_channel_create_extended(fsw_instance, 2 + i,
+		channels[i] = sktu_channel_create_extended(fsw_instance, i + 2,
 		    CHANNEL_DIR_TX_RX, CHANNEL_RING_ID_ANY, NULL,
 		    -1, -1, -1, -1, -1, -1, 1, 1, -1, -1);
 		if (!channels[i]) {
@@ -120,9 +121,9 @@ skt_fsw29301703b_main(int argc, char *argv[])
 static int
 skt_fsw29301703c_main(int argc, char *argv[])
 {
-	/* Expect failure */
-	/* The 4100 here is because NX_FSW_VP_MAX is currently 4096 in nx_flowswitch.h
-	 * Howveer, we now hit <rdar://problem/34922770> opening too many channels to flowswitch panics in allocator
+	/*
+	 * Expect failure
+	 * The 4100 here is because NX_FSW_VP_MAX is currently 4096 in nx_flowswitch.h
 	 */
 	int error = skt_fsw29301703_common(4100);
 	assert(error);

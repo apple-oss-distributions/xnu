@@ -215,6 +215,10 @@ enum arm64_ldst_reg_extend_type {
 #define ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIA1716      0xc
 #define ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIB1716      0xe
 
+#define ARM64_INSTR_LDRAx_MASK          (0xff200400)
+#define ARM64_INSTR_LDRAx_BITS          (0xf8200400)
+#define ARM64_INSTR_IS_LDRAx(x)         (((x) & ARM64_INSTR_LDRAx_MASK) == ARM64_INSTR_LDRAx_BITS)
+
 #define ARM64_INSTR_BxRAx_MASK          (0xfedff800)
 #define ARM64_INSTR_BxRAx_BITS          (0xd61f0800)
 #define ARM64_INSTR_IS_BxRAx(x)         (((x) & ARM64_INSTR_BxRAx_MASK) == ARM64_INSTR_BxRAx_BITS)

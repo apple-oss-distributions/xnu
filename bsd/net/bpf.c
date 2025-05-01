@@ -4152,6 +4152,7 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 					ehp->bh_unsent_snd =
 					    m->m_pkthdr.bufstatus_sndbuf;
 				}
+				ehp->bh_comp_gencnt = m->m_pkthdr.comp_gencnt;
 			} else {
 				if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
 					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;
@@ -4174,6 +4175,7 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 				if (kern_packet_get_transport_last_packet(kern_pkt)) {
 					ehp->bh_pktflags |= BPF_PKTFLAGS_LAST_PKT;
 				}
+				kern_packet_get_compression_generation_count(kern_pkt, &ehp->bh_comp_gencnt);
 			} else {
 				if (kern_packet_get_wake_flag(kern_pkt)) {
 					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;

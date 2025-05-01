@@ -78,7 +78,17 @@
 
 extern int              thread_get_current_cpuid(void);
 
-#ifdef  MACH_KERNEL_PRIVATE
+#if XNU_KERNEL_PRIVATE
+
+/*
+ * The quantum length used for Fixed and RT sched modes. In general the quantum
+ * can vary - for example for background or QOS.
+ */
+uint64_t sched_get_quantum_us(void);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS
 
 #include <kern/sched_urgency.h>
 #include <kern/thread_group.h>
@@ -314,11 +324,18 @@ extern bool pset_type_is_recommended(
 extern pset_node_t sched_choose_node(
 	thread_t     thread);
 
+#if CONFIG_SCHED_SMT
+extern processor_t      choose_processor_smt(
+	processor_set_t                pset,
+	processor_t                    processor,
+	thread_t                       thread);
+#else /* CONFIG_SCHED_SMT */
 /* Choose the best processor to run a thread */
 extern processor_t      choose_processor(
 	processor_set_t                pset,
 	processor_t                    processor,
 	thread_t                       thread);
+#endif /* CONFIG_SCHED_SMT */
 
 extern bool sched_SMT_balance(
 	processor_t processor,
@@ -420,6 +437,8 @@ extern boolean_t        sched_clutch_timeshare_scan(queue_t thread_queue, uint16
 extern void sched_timeshare_init(void);
 extern void sched_timeshare_timebase_init(void);
 extern void sched_timeshare_maintenance_continue(void);
+
+
 
 extern boolean_t priority_is_urgent(int priority);
 extern uint32_t sched_timeshare_initial_quantum_size(thread_t thread);
@@ -556,30 +575,25 @@ extern uint32_t sched_qos_max_parallelism(int qos, uint64_t options);
 
 extern void check_monotonic_time(uint64_t ctime);
 
-#endif /* MACH_KERNEL_PRIVATE */
+#endif /* defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 __BEGIN_DECLS
 
 #ifdef  XNU_KERNEL_PRIVATE
 
-extern void thread_bind_cluster_type(thread_t, char cluster_type, bool soft_bind);
+extern void thread_soft_bind_cluster_type(thread_t, char cluster_type);
 
 __options_decl(thread_bind_option_t, uint64_t, {
 	/* Unbind a previously cluster bound thread */
 	THREAD_UNBIND                   = 0x1,
 	/*
-	 * Soft bind the thread to the cluster; soft binding means the thread will be
-	 * moved to an available cluster if the bound cluster is de-recommended/offline.
-	 */
-	THREAD_BIND_SOFT                = 0x2,
-	/*
 	 * Bind thread to the cluster only if it is eligible to run on that cluster. If
-	 * the thread is not eligible to run on the cluster, thread_bind_cluster_id()
+	 * the thread is not eligible to run on the cluster, thread_soft_bind_cluster_id()
 	 * returns KERN_INVALID_POLICY.
 	 */
-	THREAD_BIND_ELIGIBLE_ONLY       = 0x4,
+	THREAD_BIND_ELIGIBLE_ONLY       = 0x2,
 });
-extern kern_return_t thread_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
+extern kern_return_t thread_soft_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
 
 extern int sched_get_rt_n_backup_processors(void);
 extern void sched_set_rt_n_backup_processors(int n);
@@ -742,7 +756,7 @@ extern sched_cond_t sched_cond_ack(
 
 #endif  /* XNU_KERNEL_PRIVATE */
 
-#ifdef KERNEL_PRIVATE
+#if defined(KERNEL_PRIVATE) || SCHED_TEST_HARNESS
 /* Set pending block hint for a particular object before we go into a wait state */
 extern void             thread_set_pending_block_hint(
 	thread_t                        thread,
@@ -753,13 +767,13 @@ extern void             thread_set_pending_block_hint(
 #define QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE              0x4
 
 extern uint32_t qos_max_parallelism(int qos, uint64_t options);
-#endif /* KERNEL_PRIVATE */
+#endif /* defined(KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 #if XNU_KERNEL_PRIVATE
 extern void             thread_yield_with_continuation(
 	thread_continue_t       continuation,
 	void                            *parameter) __dead2;
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* Context switch */
 extern wait_result_t    thread_block(
@@ -810,6 +824,12 @@ extern kern_return_t    thread_wakeup_prim(
 	boolean_t                       one_thread,
 	wait_result_t                   result);
 
+/* Wake up up to given number of threads waiting on a particular event */
+extern kern_return_t    thread_wakeup_nthreads_prim(
+	event_t                         event,
+	uint32_t                        nthreads,
+	wait_result_t                   result);
+
 #define thread_wakeup(x)                                        \
 	                thread_wakeup_prim((x), FALSE, THREAD_AWAKENED)
 #define thread_wakeup_with_result(x, z)         \
@@ -817,12 +837,17 @@ extern kern_return_t    thread_wakeup_prim(
 #define thread_wakeup_one(x)                            \
 	                thread_wakeup_prim((x), TRUE, THREAD_AWAKENED)
 
+#define thread_wakeup_nthreads(x, nthreads) \
+	                thread_wakeup_nthreads_prim((x), (nthreads), THREAD_AWAKENED)
+#define thread_wakeup_nthreads_with_result(x, nthreads, z) \
+	                thread_wakeup_nthreads_prim((x), (nthreads), (z))
+
 /* Wakeup the specified thread if it is waiting on this event */
 extern kern_return_t thread_wakeup_thread(event_t event, thread_t thread);
 
 extern boolean_t preemption_enabled(void);
 
-#ifdef MACH_KERNEL_PRIVATE
+#if defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS
 
 
 #if   !CONFIG_SCHED_TIMESHARE_CORE && !CONFIG_SCHED_CLUTCH && !CONFIG_SCHED_EDGE
@@ -1051,7 +1076,7 @@ extern const struct sched_dispatch_table sched_edge_dispatch;
 extern void sched_set_max_unsafe_rt_quanta(int max);
 extern void sched_set_max_unsafe_fixed_quanta(int max);
 
-#endif  /* MACH_KERNEL_PRIVATE */
+#endif  /* defined(MACH_KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 __END_DECLS
 

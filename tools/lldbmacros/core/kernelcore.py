@@ -225,6 +225,7 @@ def IterateMPSCQueue(root, element_type, field_name):
         root.GetSBValue(), element_type, field_name
     ))
 
+function_counters = dict()
 
 class KernelTarget(object):
     """ A common kernel object that provides access to kernel objects and information.
@@ -241,7 +242,9 @@ class KernelTarget(object):
         class _GlobalVariableFind(object):
             def __init__(self, kern):
                 self._xnu_kernobj_12obscure12 = kern
-            def __getattr__(self, name):
+
+            @cache_statically
+            def __getattr__(self, name, target=None):
                 v = self._xnu_kernobj_12obscure12.GetGlobalVariable(name)
                 if not v.GetSBValue().IsValid():
                     # Python 2 swallows all exceptions in hasattr(). That makes it work
@@ -249,7 +252,14 @@ class KernelTarget(object):
                     # and we can raise only AttributeError here to keep original behavior.
                     raise AttributeError('No such global variable by name: %s '%str(name))
                 return v
+            def __contains__(self, name):
+                try:
+                    val = self.__getattr__(name)
+                    return True
+                except AttributeError:
+                    return False
         self.globals = _GlobalVariableFind(self)
+
 
     def _GetSymbolicator(self):
         """ Internal function: To initialize the symbolication from lldb.utils
@@ -327,7 +337,8 @@ class KernelTarget(object):
 
         return value(target.FindGlobalVariables(name, 1).GetValueAtIndex(0))
 
-    def PERCPU_BASE(self, cpu):
+    @cache_statically
+    def PERCPU_BASE(self, cpu, target=None):
         """ Get the PERCPU base for the given cpu number
             params:
               cpu  : int - the cpu# for this variable
@@ -349,10 +360,12 @@ class KernelTarget(object):
             raises : Exception in case the variable is not found.
         """
         var = addressof(self.GetGlobalVariable('percpu_slot_' + name))
+        var_type = var.GetSBValue().GetType().name
         addr = unsigned(var) + self.PERCPU_BASE(cpu)
-        return dereference(self.GetValueFromAddress(addr, var))
+        return dereference(self.GetValueFromAddress(addr, var_type))
 
-    def GetLoadAddressForSymbol(self, name):
+    @cache_statically
+    def GetLoadAddressForSymbol(self, name, target=None):
         """ Get the load address of a symbol in the kernel.
             params:
               name : str - name of the symbol to lookup
@@ -360,7 +373,6 @@ class KernelTarget(object):
             raises : LookupError - if the symbol is not found.
         """
         name = str(name)
-        target = LazyTarget.GetTarget()
         syms_arr = target.FindSymbols(name)
         if syms_arr.IsValid() and len(syms_arr) > 0:
             symbol = syms_arr[0].GetSymbol()

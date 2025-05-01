@@ -90,11 +90,10 @@
 #define CAP_BIT_FEAT_SME2           41
 #define CAP_BIT_FEAT_SME_F64F64     42
 #define CAP_BIT_FEAT_SME_I16I64     43
-/* 5  bits left after SME. */
 
 #define CAP_BIT_AdvSIMD             49
 #define CAP_BIT_AdvSIMD_HPFPCvt     50
-#define CAP_BIT_CRC32               51
+#define CAP_BIT_FEAT_CRC32          51
 
 #define CAP_BIT_SME_F32F32          52
 #define CAP_BIT_SME_BI32I32         53
@@ -103,9 +102,22 @@
 #define CAP_BIT_SME_I8I32           56
 #define CAP_BIT_SME_I16I32          57
 
+#define CAP_BIT_FEAT_PACIMP         58
 
+
+#define CAP_BIT_FEAT_HBC            64
+#define CAP_BIT_FEAT_EBF16          65
+#define CAP_BIT_FEAT_SPECRES2       66
+#define CAP_BIT_FEAT_CSSC           67
+#define CAP_BIT_FEAT_FPACCOMBINE    68
+
+
+#define CAP_BIT_FP_SyncExceptions   73
+
+/* Legacy definitions for backwards compatibility */
+#define CAP_BIT_CRC32               CAP_BIT_FEAT_CRC32
 
 /* Total number of FEAT bits. */
-#define CAP_BIT_NB 64
+#define CAP_BIT_NB 74
 
 #endif /* _ARM_CPU_CAPABILITIES_PUBLIC_H */

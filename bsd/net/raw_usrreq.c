@@ -305,7 +305,6 @@ raw_usend(struct socket *so, int flags, struct mbuf *m,
 	}
 
 	if (control != NULL) {
-		m_freem(control);
 		error = EOPNOTSUPP;
 		goto release;
 	}
@@ -326,6 +325,9 @@ raw_usend(struct socket *so, int flags, struct mbuf *m,
 		rp->rcb_faddr = NULL;
 	}
 release:
+	if (control != NULL) {
+		m_freem(control);
+	}
 	if (m != NULL) {
 		m_freem(m);
 	}

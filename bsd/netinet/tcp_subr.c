@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -123,6 +123,7 @@
 #include <netinet/tcp_log.h>
 
 #include <netinet6/ip6protosw.h>
+#include <netinet6/esp.h>
 
 #if IPSEC
 #include <netinet6/ipsec.h>
@@ -307,7 +308,7 @@ static void tcp_flow_ecn_perf_stats(struct ifnet_stats_per_flow *ifs,
 static aes_encrypt_ctx tfo_ctx; /* Crypto-context for TFO */
 
 void
-tcp_tfo_gen_cookie(struct inpcb *inp, u_char *out, size_t blk_size)
+tcp_tfo_gen_cookie(struct inpcb *inp, u_char *out __sized_by(blk_size), size_t blk_size)
 {
 	u_char in[CCAES_BLOCK_SIZE];
 	int isipv6 = inp->inp_vflag & INP_IPV6;
@@ -340,6 +341,7 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	char keystring[TCP_FASTOPEN_KEYLEN * 2 + 2];
 	u_int32_t key[TCP_FASTOPEN_KEYLEN / sizeof(u_int32_t)];
 	int i;
+	size_t ks_len;
 
 	/*
 	 * sysctl_io_string copies keystring into the oldptr of the sysctl_req.
@@ -359,10 +361,11 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		goto exit;
 	}
 
-	if (strlen(keystring) != TCP_FASTOPEN_KEYLEN * 2) {
+	ks_len = strbuflen(keystring, sizeof(keystring));
+	if (ks_len != TCP_FASTOPEN_KEYLEN * 2) {
 		os_log(OS_LOG_DEFAULT,
 		    "%s: strlen(keystring) %lu != TCP_FASTOPEN_KEYLEN * 2 %u, newlen %lu",
-		    __func__, strlen(keystring), TCP_FASTOPEN_KEYLEN * 2, req->newlen);
+		    __func__, ks_len, TCP_FASTOPEN_KEYLEN * 2, req->newlen);
 		error = EINVAL;
 		goto exit;
 	}
@@ -372,7 +375,7 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		 * We jump over the keystring in 8-character (4 byte in hex)
 		 * steps
 		 */
-		if (sscanf(&keystring[i * 8], "%8x", &key[i]) != 1) {
+		if (sscanf(__unsafe_null_terminated_from_indexable(&keystring[i * 8]), "%8x", &key[i]) != 1) {
 			error = EINVAL;
 			os_log(OS_LOG_DEFAULT,
 			    "%s: sscanf() != 1, error EINVAL", __func__);
@@ -475,7 +478,7 @@ tcp_round_up(uint32_t val, uint32_t base)
 }
 
 uint32_t
-ntoh24(u_char *p)
+ntoh24(u_char *p __sized_by(3))
 {
 	uint32_t v;
 
@@ -631,6 +634,10 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_log_enable_flags to 0x%x", tcp_log_enable_flags);
 	}
 
+	if (PE_parse_boot_argn("tcp_link_heuristics", &tcp_link_heuristics_flags, sizeof(tcp_link_heuristics_flags))) {
+		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_link_heuristics_flags to 0x%x", tcp_link_heuristics_flags);
+	}
+
 	/*
 	 * If more than 4GB of actual memory is available, increase the
 	 * maximum allowed receive and send socket buffer size.
@@ -752,7 +759,7 @@ tcp_maketemplate(struct tcpcb *tp, struct mbuf **mp)
  * NOTE: If m != NULL, then ti must point to *inside* the mbuf.
  */
 void
-tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
+tcp_respond(struct tcpcb *tp, void *ipgen __sized_by(ipgen_size), size_t ipgen_size __unused, struct tcphdr *th, struct mbuf *m,
     tcp_seq ack, tcp_seq seq, uint8_t flags, struct tcp_respond_args *tra)
 {
 	uint16_t tlen;
@@ -819,7 +826,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 			ip = mtod(m, struct ip *);
 			nth = (struct tcphdr *)(void *)(ip + 1);
 		}
-		bcopy((caddr_t)th, (caddr_t)nth, sizeof(struct tcphdr));
+		bcopy(th, nth, sizeof(struct tcphdr));
 #if MPTCP
 		if ((tp) && (tp->t_mpflags & TMPF_RESET)) {
 			flags = (TH_RST | TH_ACK);
@@ -938,7 +945,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		m->m_pkthdr.tx_tcp_e_pid = tp->t_inpcb->inp_socket->e_pid;
 
 		if (flags & TH_RST) {
-			m->m_pkthdr.comp_gencnt = tp->t_comp_gencnt;
+			m->m_pkthdr.comp_gencnt = tp->t_comp_ack_gencnt;
 		}
 	} else {
 		if (flags & TH_RST) {
@@ -975,6 +982,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		}
 		if (tra->management_allowed) {
 			ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+		}
+		if (tra->ultra_constrained_allowed) {
+			ip6oa.ip6oa_flags |= IP6OAF_ULTRA_CONSTRAINED_ALLOWED;
 		}
 		ip6oa.ip6oa_sotc = sotc;
 		if (tp != NULL) {
@@ -1201,11 +1211,12 @@ tcp_newtcpcb(struct inpcb *inp)
 	tp->t_twentry.tqe_prev = NULL;
 
 	read_frandom(&random_32, sizeof(random_32));
-	tp->t_comp_gencnt = random_32;
-	if (tp->t_comp_gencnt <= TCP_ACK_COMPRESSION_DUMMY) {
-		tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
+	tp->t_comp_ack_gencnt = random_32;
+	if (tp->t_comp_ack_gencnt <= TCP_ACK_COMPRESSION_DUMMY ||
+	    tp->t_comp_ack_gencnt > INT_MAX) {
+		tp->t_comp_ack_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
 	}
-	tp->t_comp_lastinc = tcp_now;
+	tp->t_comp_ack_lastinc = tcp_now;
 
 	/* Initialize Accurate ECN state */
 	tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_feature_disabled;
@@ -1257,8 +1268,7 @@ tcp_drop(struct tcpcb *tp, int errno)
 void
 tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 {
-	u_int32_t rtt = rt->rt_rmx.rmx_rtt;
-	int isnetlocal = (tp->t_flags & TF_LOCAL);
+	uint32_t rtt = rt->rt_rmx.rmx_rtt;
 
 	TCP_LOG_RTM_RTT(tp, rt);
 
@@ -1270,8 +1280,7 @@ tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 		if (rt->rt_rmx.rmx_locks & RTV_RTT) {
 			tp->t_rttmin = rtt / (RTM_RTTUNIT / TCP_RETRANSHZ);
 		} else {
-			tp->t_rttmin = isnetlocal ? tcp_TCPTV_MIN :
-			    TCPTV_REXMTMIN;
+			tp->t_rttmin = TCPTV_REXMTMIN;
 		}
 
 		tp->t_srtt =
@@ -2019,7 +2028,7 @@ tcp_pcblist SYSCTL_HANDLER_ARGS
 	error = 0;
 	for (i = 0; i < n; i++) {
 		struct xtcpcb xt;
-		caddr_t inp_ppcb;
+		caddr_t inp_ppcb __single;
 		struct inpcb *inp;
 
 		inp = inp_list[i];
@@ -2297,7 +2306,7 @@ SYSCTL_PROC(_net_inet_tcp, OID_AUTO, progress_enable,
 
 __private_extern__ void
 tcp_get_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
-    bitstr_t *bitfield)
+    bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)) bitfield)
 {
 	inpcb_get_ports_used(ifp, protocol, flags, bitfield,
 	    &tcbinfo);
@@ -2333,9 +2342,7 @@ tcp_handle_msgsize(struct ip *ip, struct inpcb *inp)
 	};
 	struct icmp *icp = NULL;
 
-	icp = (struct icmp *)(void *)
-	    ((caddr_t)ip - offsetof(struct icmp, icmp_ip));
-
+	icp = __container_of(ip, struct icmp, icmp_ip);
 	icmpsrc.sin_addr = icp->icmp_ip.ip_dst;
 
 	/*
@@ -2423,7 +2430,7 @@ void
 tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp)
 {
 	tcp_seq icmp_tcp_seq;
-	struct ipctlparam *ctl_param = vip;
+	struct ipctlparam *ctl_param __single = vip;
 	struct ip *ip = NULL;
 	struct mbuf *m = NULL;
 	struct in_addr faddr;
@@ -2819,6 +2826,57 @@ tcp_drop_syn_sent(struct inpcb *inp, int errno)
 }
 
 /*
+ * Get effective MTU for redirect virtual interface. Redirect
+ * virtual interface switches between multiple delegated interfaces.
+ * For cases, where redirect forwards packets to an ipsec interface,
+ * MTU should be adjusted to consider ESP encapsulation overhead.
+ */
+uint32_t
+tcp_get_effective_mtu(struct rtentry *rt, uint32_t current_mtu)
+{
+	ifnet_t ifp = NULL;
+	ifnet_t delegated_ifp = NULL;
+	ifnet_t outgoing_ifp = NULL;
+	uint32_t min_mtu = 0;
+	uint32_t outgoing_mtu = 0;
+	uint32_t tunnel_overhead = 0;
+
+	if (rt == NULL || rt->rt_ifp == NULL) {
+		return current_mtu;
+	}
+
+	ifp = rt->rt_ifp;
+	if (ifp->if_subfamily != IFNET_SUBFAMILY_REDIRECT) {
+		return current_mtu;
+	}
+
+	delegated_ifp = ifp->if_delegated.ifp;
+	if (delegated_ifp == NULL || delegated_ifp->if_family != IFNET_FAMILY_IPSEC) {
+		return current_mtu;
+	}
+
+	min_mtu = MIN(delegated_ifp->if_mtu, current_mtu);
+
+	outgoing_ifp = delegated_ifp->if_delegated.ifp;
+	if (outgoing_ifp == NULL) {
+		return min_mtu;
+	}
+
+	outgoing_mtu = outgoing_ifp->if_mtu;
+	if (outgoing_mtu > 0) {
+		tunnel_overhead = (u_int32_t)(esp_hdrsiz(NULL) + sizeof(struct ip6_hdr));
+		if (outgoing_mtu > tunnel_overhead) {
+			outgoing_mtu -= tunnel_overhead;
+		}
+		if (outgoing_mtu < min_mtu) {
+			return outgoing_mtu;
+		}
+	}
+
+	return min_mtu;
+}
+
+/*
  * When `need fragmentation' ICMP is received, update our idea of the MSS
  * based on the new value in the route.  Also nudge TCP to send something,
  * since we know the packet we just sent was dropped.
@@ -2865,6 +2923,8 @@ tcp_mtudisc(struct inpcb *inp, __unused int errno)
 			return;
 		}
 		mtu = rt->rt_rmx.rmx_mtu;
+
+		mtu = tcp_get_effective_mtu(rt, mtu);
 
 		/* Route locked during lookup above */
 		RT_UNLOCK(rt);
@@ -3190,13 +3250,7 @@ ipsec_hdrsiz_tcp(struct tcpcb *tp)
 int
 tcp_lock(struct socket *so, int refcount, void *lr)
 {
-	void *lr_saved;
-
-	if (lr == NULL) {
-		lr_saved = __builtin_return_address(0);
-	} else {
-		lr_saved = lr;
-	}
+	lr_ref_t lr_saved = TCP_INIT_LR_SAVED(lr);
 
 retry:
 	if (so->so_pcb != NULL) {
@@ -3249,13 +3303,8 @@ retry:
 int
 tcp_unlock(struct socket *so, int refcount, void *lr)
 {
-	void *lr_saved;
+	lr_ref_t lr_saved = TCP_INIT_LR_SAVED(lr);
 
-	if (lr == NULL) {
-		lr_saved = __builtin_return_address(0);
-	} else {
-		lr_saved = lr;
-	}
 
 #ifdef MORE_TCPLOCK_DEBUG
 	printf("tcp_unlock: so=0x%llx sopcb=0x%llx lock=0x%llx ref=%x "
@@ -3601,7 +3650,7 @@ microuptime_ns(void)
 #define MAX_BURST_INTERVAL_KERNEL_PACING_NSEC                                  \
 	(10 * NSEC_PER_MSEC) // Don't delay more than 10ms between two bursts
 static uint64_t
-tcp_pacer_get_packet_interval(struct tcpcb *tp, uint16_t pkt_len)
+tcp_pacer_get_packet_interval(struct tcpcb *tp, uint32_t size)
 {
 	if (tp->t_pacer.rate == 0) {
 		os_log_error(OS_LOG_DEFAULT,
@@ -3611,7 +3660,7 @@ tcp_pacer_get_packet_interval(struct tcpcb *tp, uint16_t pkt_len)
 		return MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
 	}
 
-	uint64_t interval = (uint64_t)pkt_len * NSEC_PER_SEC / tp->t_pacer.rate;
+	uint64_t interval = (uint64_t)size * NSEC_PER_SEC / tp->t_pacer.rate;
 	if (interval > MAX_BURST_INTERVAL_KERNEL_PACING_NSEC) {
 		interval = MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
 	}
@@ -3624,12 +3673,10 @@ uint64_t
 tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
 {
 	/*
-	 * size is a static variable as this function is called
-	 * multiple times for mss-sized packets and for high-speeds,
-	 * we'd want to send multiple packets that add up to burst_size
-	 * at the same time.
+	 * This function is called multiple times for mss-sized packets
+	 * and for high-speeds, we'd want to send multiple packets
+	 * that add up to burst_size at the same time.
 	 */
-	static uint32_t size = 0;
 	uint64_t now = microuptime_ns();
 
 	if (pkt_len == 0 || now == 0) {
@@ -3638,17 +3685,17 @@ tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
 
 	if (tp->t_pacer.packet_tx_time == 0) {
 		tp->t_pacer.packet_tx_time = now;
-		size = pkt_len;
+		tp->t_pacer.current_size = pkt_len;
 	} else {
-		size += pkt_len;
-		if (size > tp->t_pacer.tso_burst_size) {
+		tp->t_pacer.current_size += pkt_len;
+		if (tp->t_pacer.current_size > tp->t_pacer.tso_burst_size) {
 			/*
 			 * Increment tx_time by packet_interval and
 			 * reset size to this packet's len
 			 */
 			tp->t_pacer.packet_tx_time +=
-			    tcp_pacer_get_packet_interval(tp, pkt_len);
-			size = pkt_len;
+			    tcp_pacer_get_packet_interval(tp, tp->t_pacer.current_size);
+			tp->t_pacer.current_size = 0;
 			if (now > tp->t_pacer.packet_tx_time) {
 				/*
 				 * If current time is bigger, then application
@@ -3811,8 +3858,6 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 
 		tcp_rxt_seg_drop++;
 		tp->t_rxt_seg_drop++;
-		TCP_LOG(tp, "removed rxseg list overflow %u:%u ",
-		    rxseg->rx_start, rxseg->rx_end);
 		zfree(tcp_rxt_seg_zone, rxseg);
 
 		tp->t_rxt_seg_count -= 1;
@@ -4641,7 +4686,7 @@ tcp_make_keepalive_frame(struct tcpcb *tp, struct ifnet *ifp,
 {
 	struct inpcb *inp = tp->t_inpcb;
 	struct tcphdr *th;
-	u_int8_t *data;
+	caddr_t data;
 	int win = 0;
 	struct mbuf *m;
 
@@ -4657,7 +4702,7 @@ tcp_make_keepalive_frame(struct tcpcb *tp, struct ifnet *ifp,
 	}
 	m->m_pkthdr.pkt_proto = IPPROTO_TCP;
 
-	data = mbuf_datastart(m);
+	data = m_mtod_lower_bound(m);
 
 	if (inp->inp_vflag & INP_IPV4) {
 		bzero(data, sizeof(struct ip) + sizeof(struct tcphdr));
@@ -4734,7 +4779,7 @@ tcp_make_keepalive_frame(struct tcpcb *tp, struct ifnet *ifp,
 
 void
 tcp_fill_keepalive_offload_frames(ifnet_t ifp,
-    struct ifnet_keepalive_offload_frame *frames_array,
+    struct ifnet_keepalive_offload_frame *frames_array __counted_by(frames_array_count),
     u_int32_t frames_array_count, size_t frame_data_offset,
     u_int32_t *used_frames_count)
 {
@@ -5015,7 +5060,7 @@ tcp_notify_kao_timeout(ifnet_t ifp,
 		/*
 		 * Drop the TCP connection like tcptimers() does
 		 */
-		struct tcpcb *tp = inp->inp_ppcb;
+		tcpcb_ref_t tp = inp->inp_ppcb;
 
 		tcpstat.tcps_keepdrops++;
 		soevent(so,
@@ -5336,7 +5381,54 @@ tcp_update_stats_per_flow(struct ifnet_stats_per_flow *ifs,
 	}
 
 	tcp_flow_lim_stats(ifs, &ifp->if_lim_stat);
+
+	/*
+	 * Link heuristics are updated here only for NECP client flow when they close
+	 * Socket flows are updated live
+	 */
+	os_atomic_add(&ifp->if_tcp_stat->linkheur_noackpri, ifs->linkheur_noackpri, relaxed);
+	os_atomic_add(&ifp->if_tcp_stat->linkheur_comprxmt, ifs->linkheur_comprxmt, relaxed);
+	os_atomic_add(&ifp->if_tcp_stat->linkheur_synrxmt, ifs->linkheur_synrxmt, relaxed);
+	os_atomic_add(&ifp->if_tcp_stat->linkheur_rxmtfloor, ifs->linkheur_rxmtfloor, relaxed);
+
 	ifnet_lock_done(ifp);
+}
+
+struct tseg_qent *
+tcp_reass_qent_alloc(void)
+{
+	return zalloc_flags(tcp_reass_zone, Z_WAITOK | Z_NOFAIL);
+}
+
+void
+tcp_reass_qent_free(struct tseg_qent *te)
+{
+	zfree(tcp_reass_zone, te);
+}
+
+struct tcp_rxt_seg *
+tcp_rxt_seg_qent_alloc(void)
+{
+	return zalloc_flags(tcp_rxt_seg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+}
+
+void
+tcp_rxt_seg_qent_free(struct tcp_rxt_seg *te)
+{
+	zfree(tcp_rxt_seg_zone, te);
+}
+
+
+struct tcp_seg_sent *
+tcp_seg_sent_qent_alloc(void)
+{
+	return zalloc_flags(tcp_seg_sent_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+}
+
+void
+tcp_seg_sent_qent_free(struct tcp_seg_sent *te)
+{
+	zfree(tcp_seg_sent_zone, te);
 }
 
 #if SKYWALK

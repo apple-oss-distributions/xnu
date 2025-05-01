@@ -226,5 +226,13 @@ inline int ETIME = 101;
 #pragma D binding "1.0" ETIME
 inline int EOPNOTSUPP = 102;
 #pragma D binding "1.0" EOPNOTSUPP
-inline int ELAST = 102;
+inline int ENOPOLICY = 103;
+#pragma D binding "1.0" ENOPOLICY
+inline int ENOTRECOVERABLE = 104;
+#pragma D binding "1.0" ENOTRECOVERABLE
+inline int EOWNERDEAD = 105;
+#pragma D binding "1.0" EOWNERDEAD
+inline int EQFULL = 106;
+#pragma D binding "1.0" EQFULL
+inline int ELAST = 106;
 #pragma D binding "1.0" ELAST

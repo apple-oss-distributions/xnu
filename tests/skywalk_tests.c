@@ -79,7 +79,6 @@ T_GLOBAL_META(
 	X(writecfd, "test writing to channel fd") \
 	X(readcfd, "test reading from channel fd") \
 	X(closenfd, "test closing guarded nexus fd") \
-	X(writenfd, "test writing to a guarded nexus fd") \
 	X(readnfd, "test reading from a guarded nexus fd") \
 	X(writeif, "test writes to the read only channel if") \
 	X(writering, "test writes to the writeable ring") \
@@ -126,6 +125,7 @@ T_GLOBAL_META(
 	X(teardownb, "Test setup complicated topology tear it down backwards") \
 	X(fsw29301703a, "Test open 63 channels to a flowswitch") \
 	X(fsw29301703b, "Test open 200 channels to a flowswitch") \
+	X(fsw29301703c, "Open too many channels to a flowswitch") \
 	X(fswbindany, "Test attempts to bind to port -1 of flowswitch") \
 	X(fswbind0, "Test attempts to bind to port 0 of flowswitch") \
 	X(fswbind1, "Test attempts to bind to port 1 of flowswitch") \
@@ -154,6 +154,11 @@ T_GLOBAL_META(
 	X(steering, "Test steering rules") \
 	X(listen_stress, "Test stress posix socket listen") \
 	X(pllutxk, "Test send 10000000 slots to upipe sink using kqueue")
+
+/*
+ *  The following tetsts are disabled:
+ *       X(writenfd, "test writing to a guarded nexus fd") due to rdar://133461652
+ */
 
 #define BATSPLL_TESTS \
 	X(noop, "test just returns true") \
@@ -269,6 +274,7 @@ T_GLOBAL_META(
 	X(teardownz, "setup complicated topology tear it down with each stage in an out of order position") \
 	X(fsw29301703a, "Test open 63 channels to a flowswitch") \
 	X(fsw29301703b, "Test open 200 channels to a flowswitch") \
+	X(fsw29301703c, "Open too many channels to a flowswitch") \
 	X(mf10x10, "test binds 10 ports with 10 flows per port") \
 	X(mf10x100, "test binds 10 ports with 100 flows per port") \
 	X(mf100x10, "test binds 100 ports with 10 flows per port") \
@@ -281,6 +287,19 @@ T_GLOBAL_META(
 	X(pllurxk, "receive 10000000 slots from upipe source using kqueue") \
 	X(pllurxs, "receive 10000000 slots from upipe source using select") \
 	X(pllurxp, "receive 10000000 slots to upipe source using poll")
+
+/*
+ * These tests have failure rate > 2%, so we turn on extra logging.
+ */
+#define BATS_FAILING_TESTS \
+	X(utunloopn4u1, "open 2 utuns without netif and floods ipv4 udp packets in one direction") \
+	X(utunloopn4u2, "open 2 utuns without netif and floods ipv4 udp packets in two directions") \
+	X(utunloopn4t1, "open 2 utuns without netif and floods ipv4 tcp packets in one direction") \
+	X(utunloopn4t2, "open 2 utuns without netif and floods ipv4 tcp packets in two directions") \
+	X(utunloopy4u1, "open 2 utuns with netif and floods ipv4 udp packets in one direction") \
+	X(utunloopy4u2, "open 2 utuns with netif and floods ipv4 udp packets in two directions") \
+	X(utunloopy4t1, "open 2 utuns with netif and floods ipv4 tcp packets in one direction") \
+	X(utunloopy4t2, "open 2 utuns with netif and floods ipv4 tcp packets in two directions")
 
 #define EXPAND_TO_T_DECL_COMMON(test, desc)                                    \
 	{                                                                      \
@@ -403,3 +422,17 @@ T_DECL_REF(noop_memcleanup, noop, "run noop test to cleanup memory failure sysct
 	EXPAND_TO_T_DECL_COMMON(test, desc)
 SHUTDOWN_TESTS;
 #undef X
+
+/*
+ * These tests are known to have failure rate > 2% so we turn on extra logging.
+ * Uncrustify does not handle T_META_MAYFAIL being used in X macros properly.
+ */
+/* BEGIN IGNORE CODESTYLE */
+#define X(test, desc, ...)                                                \
+	T_DECL(failing_##test, desc,                                      \
+	        T_META_SYSCTL_INT("kern.skywalk.verbose=16492674416640"), \
+	        T_META_MAYFAIL("rdar://126364642, bind call fails with EADDRNOTAVAIL")) \
+        EXPAND_TO_T_DECL_COMMON(test, desc)
+BATS_FAILING_TESTS;
+#undef X
+/* END IGNORE CODESTYLE */

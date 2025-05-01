@@ -121,6 +121,14 @@
 
 
 
+#if defined(APPLEH16)
+/*
+ * EACC/PACC cpmX_IMPL register offset
+ */
+#define LLC_ERR_INF_OFFSET (0x18ULL)
+#define LLC_ERR_INF_NREC   (1ULL << 36)
+#endif /* defined(APPLEH16) */
+
 #ifdef ASSEMBLER
 
 /*

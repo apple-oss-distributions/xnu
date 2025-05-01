@@ -562,9 +562,6 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 	uint32_t instr = tp->ftt_instr;
 	user_addr_t new_pc = 0;
 
-	/* Neon state should be threaded throw, but hack it until we have better arm/arm64 integration */
-	arm_neon_saved_state64_t *ns64 = &(get_user_neon_regs(th)->ns_64);
-
 	/* is-enabled probe: set x0 to 1 and step forwards */
 	if (is_enabled) {
 		regs64->x[0] = 1;
@@ -683,13 +680,13 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 			set_saved_state_regno(state, regno, 1, value.val64);
 			break;
 		case FASTTRAP_T_ARM64_LDR_S_PC_REL:
-			ns64->v.s[regno][0] = value.val32;
+			set_user_neon_reg(th, regno, (uint128_t)value.val32);
 			break;
 		case FASTTRAP_T_ARM64_LDR_D_PC_REL:
-			ns64->v.d[regno][0] = value.val64;
+			set_user_neon_reg(th, regno, (uint128_t)value.val64);
 			break;
 		case FASTTRAP_T_ARM64_LDR_Q_PC_REL:
-			ns64->v.q[regno] = value.val128;
+			set_user_neon_reg(th, regno, value.val128);
 			break;
 		default:
 			panic("Should never get here!");

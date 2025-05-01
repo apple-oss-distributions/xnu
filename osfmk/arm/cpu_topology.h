@@ -36,6 +36,7 @@
 #ifndef _ARM_CPU_TOPOLOGY_H_
 #define _ARM_CPU_TOPOLOGY_H_
 
+#include <stdint.h>
 __BEGIN_DECLS
 
 /*!
@@ -50,8 +51,6 @@ __BEGIN_DECLS
  *                          Dynamically assigned by XNU so it might not match EDT.  No holes.
  * @field die_id            Die ID (EDT: die-id)
  * @field cluster_type      The type of CPUs found in this cluster.
- * @field l2_access_penalty Indicates that the scheduler should try to de-prioritize a core because
- *                          L2 accesses are slower than on the boot processor.
  * @field l2_cache_size     Size of the L2 cache, in bytes.  0 if unknown or not present.
  * @field l2_cache_id       l2-cache-id property read from EDT.
  * @field l3_cache_size     Size of the L3 cache, in bytes.  0 if unknown or not present.
@@ -74,7 +73,7 @@ typedef struct ml_topology_cpu {
 	unsigned int                    cluster_id;
 	unsigned int                    die_id;
 	cluster_type_t                  cluster_type;
-	uint32_t                        l2_access_penalty;
+	uint32_t                        l2_access_penalty; /* unused */
 	uint32_t                        l2_cache_size;
 	uint32_t                        l2_cache_id;
 	uint32_t                        l3_cache_size;

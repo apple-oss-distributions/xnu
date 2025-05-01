@@ -100,6 +100,7 @@ kern_mman.o_CFLAGS_ADD += -DVM_UNSAFE_TYPES
 ah_core.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 ah_input.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 dlil.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
+dlil_subr.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 esp_input.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 esp_output.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 frag6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
@@ -145,6 +146,7 @@ fbt_arm.o_CWARNFLAGS_ADD += -Wno-cast-align
 fbt_x86.o_CWARNFLAGS_ADD += -Wno-cast-align
 if_bridge.o_CWARNFLAGS_ADD += -Wno-cast-align
 if_bond.o_CWARNFLAGS_ADD += -Wno-cast-align
+ip_dummynet.o_CWARNFLAGS_ADD += -Wno-cast-align
 kern_credential.o_CWARNFLAGS_ADD += -Wno-cast-align
 kern_descrip.o_CWARNFLAGS_ADD += -Wno-cast-align
 kern_event.o_CWARNFLAGS_ADD += -Wno-cast-align
@@ -553,6 +555,14 @@ monotonic.o_CWARNFLAGS_ADD += -Wno-vla
 necp.o_CWARNFLAGS_ADD += -Wno-vla
 ntstat.o_CWARNFLAGS_ADD += -Wno-vla
 sysv_sem.o_CWARNFLAGS_ADD += -Wno-vla
+# -Wno-enum-compare
+dlil_input.o_CWARNFLAGS_ADD += -Wno-enum-compare
+pktsched_netem.o_CWARNFLAGS_ADD += -Wno-enum-compare
+skmem_arena.o_CWARNFLAGS_ADD += -Wno-enum-compare
+skmem_region.o_CWARNFLAGS_ADD += -Wno-enum-compare
+flow_entry.o_CWARNFLAGS_ADD += -Wno-enum-compare
+flow_track.o_CWARNFLAGS_ADD += -Wno-enum-compare
+pbufpool.o_CWARNFLAGS_ADD += -Wno-enum-compare
 
 # In the case of PGO/coverage build, disable LTO for profile_runtime_data.
 # This is to prevent a global compiler_rt variable from being optimized out.

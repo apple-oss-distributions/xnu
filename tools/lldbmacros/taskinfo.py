@@ -1,7 +1,6 @@
 from core.cvalue import sizeof, value
-from process import GetTaskSummary
 from scheduler import GetRecentTimestamp
-from xnu import lldb_command, kern
+from xnu import ArgumentError, lldb_command, kern
 
 # Macro: showtasksuspendstats
 
@@ -31,7 +30,7 @@ def ShowTaskSuspendStatsMacro(cmd_args=None, cmd_options={}):
     Display suspension statistics for a given task
         Usage: showtasksuspendstats <task addr>  (ex. showtasksuspendstats 0x00ataskptr00 )
     """
-    if not cmd_args or len(cmd_args) != 1:
+    if cmd_args is None or len(cmd_args) != 1:
         raise ArgumentError("Invalid argument")
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
     ShowTaskSuspendStats(task)
@@ -64,7 +63,7 @@ def ShowTaskSuspendSourcesMacro(cmd_args=None, cmd_options={}):
     Show info on the most recent suspenders for a given task
         Usage showtasksuspenders <task addr> (ex. showtasksuspenders 0x00ataskptr00 )
     '''
-    if not cmd_args or len(cmd_args) != 1:
+    if cmd_args is None or len(cmd_args) != 1:
         raise ArgumentError("Invalid argument")
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
     ShowTaskSuspendSources(task)

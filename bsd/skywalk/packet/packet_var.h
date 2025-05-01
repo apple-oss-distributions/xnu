@@ -341,7 +341,7 @@ struct __packet_compl {
 		} compl_data;
 	};
 	/* bitmap indicating the requested packet completion callbacks */
-	uint32_t        compl_callbacks;
+	uint8_t        compl_callbacks;
 	/* Context identifier for a given packet completion */
 	uint32_t        compl_context;
 };

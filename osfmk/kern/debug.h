@@ -39,8 +39,11 @@
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
 #include <mach/vm_types.h>
+#include <kern/panic_call.h>
 
-#ifndef XNU_KERNEL_PRIVATE
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/percpu.h>
+#else
 #include <TargetConditionals.h>
 #endif
 
@@ -223,12 +226,19 @@ struct _dyld_cache_image_text_info {
 
 
 enum micro_snapshot_flags {
-	kInterruptRecord        = 0x1,
-	kTimerArmingRecord      = 0x2,
-	kUserMode               = 0x4, /* interrupted usermode, or armed by usermode */
-	kIORecord               = 0x8,
+	/*
+	 * (Timer) interrupt records are no longer supported.
+	 */
+	kInterruptRecord        = 0x01,
+	/*
+	 * Timer arming records are no longer supported.
+	 */
+	kTimerArmingRecord      = 0x02,
+	kUserMode               = 0x04, /* interrupted usermode, or armed by usermode */
+	kIORecord               = 0x08,
 	kPMIRecord              = 0x10,
 	kMACFRecord             = 0x20, /* armed by MACF policy */
+	kKernelThread           = 0x40, /* sampled a kernel thread */
 };
 
 /*
@@ -288,10 +298,34 @@ __options_decl(stackshot_flags_t, uint64_t, {
 }); // Note: Add any new flags to kcdata.py (stackshot_in_flags)
 
 __options_decl(microstackshot_flags_t, uint32_t, {
-	STACKSHOT_GET_MICROSTACKSHOT               = 0x10,
-	STACKSHOT_GLOBAL_MICROSTACKSHOT_ENABLE     = 0x20,
-	STACKSHOT_GLOBAL_MICROSTACKSHOT_DISABLE    = 0x40,
-	STACKSHOT_SET_MICROSTACKSHOT_MARK          = 0x80,
+	/*
+	 * Collect and consume kernel thread microstackshots.
+	 */
+	STACKSHOT_GET_KERNEL_MICROSTACKSHOT        = 0x0008,
+	/*
+	 * Collect user thread microstackshots.
+	 */
+	STACKSHOT_GET_MICROSTACKSHOT               = 0x0010,
+	/*
+	 * Enable and disable are longer supported; use telemetry(2) instead.
+	 */
+	STACKSHOT_GLOBAL_MICROSTACKSHOT_ENABLE     = 0x0020,
+	STACKSHOT_GLOBAL_MICROSTACKSHOT_DISABLE    = 0x0040,
+	/*
+	 * For user thread microstackshots, set a mark to consume the entries.
+	 */
+	STACKSHOT_SET_MICROSTACKSHOT_MARK          = 0x0080,
+});
+
+__options_decl(telemetry_notice_t, uint32_t, {
+	/*
+	 * User space microstackshots should be read.
+	 */
+	TELEMETRY_NOTICE_BASE                 = 0x00,
+	/*
+	 * Kernel microstackshots should be read.
+	 */
+	TELEMETRY_NOTICE_KERNEL_MICROSTACKSHOT = 0x01,
 });
 
 #define STACKSHOT_THREAD_SNAPSHOT_MAGIC     0xfeedface
@@ -312,7 +346,7 @@ __options_closed_decl(kf_override_flag_t, uint32_t, {
 	KF_IOTRACE_OVRD                           = 0x100,
 	KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD  = 0x200,
 	KF_SCHED_HYGIENE_DEBUG_PMC_OVRD           = 0x400,
-	KF_RW_LOCK_DEBUG_OVRD                     = 0x800,
+	KF_MACH_ASSERT_OVRD                       = 0x800,
 	KF_MADVISE_FREE_DEBUG_OVRD                = 0x1000,
 	KF_DISABLE_FP_POPC_ON_PGFLT               = 0x2000,
 	KF_DISABLE_PROD_TRC_VALIDATION            = 0x4000,
@@ -323,6 +357,20 @@ __options_closed_decl(kf_override_flag_t, uint32_t, {
 	 */
 	KF_DISABLE_PROCREF_TRACKING_OVRD          = 0x20000,
 });
+
+#define KF_SERVER_PERF_MODE_OVRD ( \
+	KF_SERIAL_OVRD | \
+	KF_PMAPV_OVRD | \
+	KF_MATV_OVRD | \
+	KF_COMPRSV_OVRD | \
+	KF_INTERRUPT_MASKED_DEBUG_OVRD | \
+	KF_TRAPTRACE_OVRD | \
+	KF_IOTRACE_OVRD  | \
+	KF_SCHED_HYGIENE_DEBUG_PMC_OVRD | \
+	KF_MACH_ASSERT_OVRD | \
+	KF_MADVISE_FREE_DEBUG_OVRD | \
+	KF_DISABLE_PROD_TRC_VALIDATION | \
+	0)
 
 boolean_t kern_feature_override(kf_override_flag_t fmask);
 
@@ -470,13 +518,6 @@ struct efi_aurr_extended_panic_log {
  */
 extern uint64_t ecc_panic_physical_address;
 
-#ifdef KERNEL
-
-__abortlike __printflike(1, 2)
-extern void panic(const char *string, ...);
-
-#endif /* KERNEL */
-
 #ifdef KERNEL_PRIVATE
 #if DEBUG
 #ifndef DKPR
@@ -531,7 +572,7 @@ enum {
 
 /* Debug boot-args */
 #define DB_HALT         0x1
-//#define DB_PRT          0x2 -- obsolete
+#define DB_PRT          0x2 // enable always-on panic print to serial
 #define DB_NMI          0x4
 #define DB_KPRT         0x8
 #define DB_KDB          0x10
@@ -577,6 +618,7 @@ enum {
 #define DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE              0x1000ULL /* sync() early in Panic - Can add unbounded delay, may be unsafe for some panic scenarios. Intended for userspace, watchdogs and RTBuddy panics */
 #define DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC         0x2000ULL /* panic initiated by userspace */
 #define DEBUGGER_OPTION_INTEGRATED_COPROC_INITIATED_PANIC 0x4000ULL /* panic initiated by an SOC-integrated coprocessor */
+#define DEBUGGER_OPTION_USER_WATCHDOG                     0x8000ULL /* A watchdog panic caused by an unresponsive user daemon */
 
 #define DEBUGGER_INTERNAL_OPTIONS_MASK              (DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE)
 
@@ -606,29 +648,10 @@ void platform_stall_panic_or_spin(uint32_t req);
 
 #endif
 
-#if XNU_KERNEL_PRIVATE
-#define panic(ex, ...)  ({ \
-	__asm__("" ::: "memory"); \
-	(panic)(ex " @%s:%d", ## __VA_ARGS__, __FILE_NAME__, __LINE__); \
-})
-#else
-#define panic(ex, ...)  ({ \
-	__asm__("" ::: "memory"); \
-	(panic)(#ex " @%s:%d", ## __VA_ARGS__, __FILE_NAME__, __LINE__); \
-})
-#endif
-#define panic_plain(ex, ...)  (panic)(ex, ## __VA_ARGS__)
-
 struct task;
 struct thread;
 struct proc;
 
-__abortlike __printflike(4, 5)
-void panic_with_options(unsigned int reason, void *ctx,
-    uint64_t debugger_options_mask, const char *str, ...);
-__abortlike __printflike(5, 6)
-void panic_with_options_and_initiator(const char* initiator, unsigned int reason, void *ctx,
-    uint64_t debugger_options_mask, const char *str, ...);
 void Debugger(const char * message);
 void populate_model_name(char *);
 
@@ -651,14 +674,6 @@ unsigned panic_active(void);
 
 #if XNU_KERNEL_PRIVATE
 
-#if defined (__x86_64__)
-struct thread;
-
-__abortlike __printflike(5, 6)
-void panic_with_thread_context(unsigned int reason, void *ctx,
-    uint64_t debugger_options_mask, struct thread* th, const char *str, ...);
-#endif
-
 /* limit the max size to a reasonable length */
 #define ADDITIONAL_PANIC_DATA_BUFFER_MAX_LEN 64
 
@@ -667,6 +682,11 @@ struct additional_panic_data_buffer {
 	void *buf;
 	int len;
 };
+
+typedef struct kernel_panic_reason {
+	char            buf[1024];
+} *kernel_panic_reason_t;
+PERCPU_DECL(struct kernel_panic_reason, panic_reason);
 
 extern struct additional_panic_data_buffer *panic_data_buffers;
 
@@ -724,7 +744,7 @@ extern size_t   panic_disk_error_description_size;
 
 extern unsigned char    *__counted_by(sizeof(uuid_t)) kernel_uuid;
 extern unsigned int     debug_boot_arg;
-extern int     verbose_panic_flow_logging;
+extern unsigned int     verbose_panic_flow_logging;
 
 extern boolean_t kernelcache_uuid_valid;
 extern uuid_t kernelcache_uuid;
@@ -808,7 +828,10 @@ void    panic_print_symbol_name(vm_address_t search);
 #if CONFIG_ECC_LOGGING
 void    panic_display_ecc_errors(void);
 #endif /* CONFIG_ECC_LOGGING */
-void panic_display_compressor_stats(void);
+void    panic_display_compressor_stats(void);
+
+struct mach_assert_hdr;
+void    panic_assert_format(char *buf, size_t len, struct mach_assert_hdr *hdr, long a, long b);
 
 /*
  * @var not_in_kdp
@@ -867,6 +890,7 @@ zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32
 #define PANIC_TEST_CASE_RECURPANIC_POSTLOG          0x8    // recursive panic after paniclog has been written
 #define PANIC_TEST_CASE_RECURPANIC_POSTCORE         0x10   // recursive panic after corefile has been written
 #define PANIC_TEST_CASE_COREFILE_IO_ERR             0x20   // single IO error in the corefile write path
+#define PANIC_TEST_CASE_HIBERNATION_ENTRY           0x40   // panic on hibernation entry
 extern unsigned int    panic_test_case;
 
 #define PANIC_TEST_FAILURE_MODE_BADPTR 0x1                 // dereference a bad pointer
@@ -939,6 +963,32 @@ extern lbr_modes_t last_branch_enabled_modes;
 
 /* Exclaves stackshot tests support */
 #define STACKSHOT_EXCLAVES_TESTING ((DEVELOPMENT || DEBUG) && CONFIG_EXCLAVES)
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+struct panic_lockdown_initiator_state {
+	/** The PC from which panic lockdown was initiated. */
+	uint64_t initiator_pc;
+	/** The SP from which panic lockdown was initiated. */
+	uint64_t initiator_sp;
+	/** The TPIDR of the initiating CPU. */
+	uint64_t initiator_tpidr;
+	/** The MPIDR of the initating CPU. */
+	uint64_t initiator_mpidr;
+
+	/** The timestamp (from CNTVCT_EL0) at which panic lockdown was initiated. */
+	uint64_t timestamp;
+
+	/*
+	 * Misc. exception information.
+	 */
+	uint64_t esr;
+	uint64_t elr;
+	uint64_t far;
+};
+
+/** Attempt to record debug state for a panic lockdown event */
+extern void panic_lockdown_record_debug_data(void);
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 #endif  /* XNU_KERNEL_PRIVATE */
 

@@ -405,6 +405,9 @@ typedef struct uthread * uthread_t;
 #define UT_LP64         0x00010000      /* denormalized P_LP64 bit from proc */
 #define UT_FS_BLKSIZE_NOCACHE_WRITES  0x00020000 /* thread wants sub pagesize directIO writes */
 #define UT_SKIP_MTIME_UPDATE  0x00040000 /* don't update mtime for files modified by this thread */
+#define UT_SKIP_MTIME_UPDATE_IGNORE  0x00080000 /* ignore the process's mtime update policy when the policy is not enabled for this thread */
+
+#define UT_SUPPORT_LONG_PATHS  0x00100000 /* support long paths in syscalls used by this thread */
 
 #endif /* BSD_KERNEL_PRIVATE */
 

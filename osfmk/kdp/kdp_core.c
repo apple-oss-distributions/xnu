@@ -374,6 +374,7 @@ kernel_vaddr_in_coredump_stages(uint64_t vaddr, uint64_t *vincr)
 	return false;
 }
 
+
 ppnum_t
 kernel_pmap_present_mapping(uint64_t vaddr, uint64_t * pvincr, uintptr_t * pvphysaddr)
 {
@@ -448,7 +449,6 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 #endif
 
 	/* Assumes pmap is locked, or being called from the kernel debugger */
-
 	if (start > end) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -504,11 +504,14 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 		}
 		if (ppn != 0) {
 			if (((vcur < debug_start) || (vcur >= debug_end))
-			    && !(pmap_valid_page(ppn) || bootloader_valid_page(ppn))
+			    && !(
+				    pmap_valid_page(ppn)
+				    || bootloader_valid_page(ppn)
+				    )
 #if defined(XNU_TARGET_OS_BRIDGE)
 			    // include the macOS panic region if it's mapped
 			    && ((vcur < macos_panic_start) || (vcur >= macos_panic_end))
-#endif
+#endif /* defined(XNU_TARGET_OS_BRIDGE) */
 			    ) {
 				/* not something we want */
 				ppn = 0;
@@ -560,6 +563,7 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 		ret = kasan_traverse_mappings(callback, context);
 	}
 #endif
+
 
 	return ret;
 }

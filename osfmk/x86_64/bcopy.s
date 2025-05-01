@@ -97,6 +97,7 @@ ENTRY(memmove)
 	movq	%rdi,%rax
 	subq	%rsi,%rax
 	cmpq	%rcx,%rax			/* overlapping && src < dst? */
+	movq    %rdi,%rax      		/* restore the return value */
 	jb	1f
 
 	cld					/* nope, copy forwards */

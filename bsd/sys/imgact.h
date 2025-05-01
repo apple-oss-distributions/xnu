@@ -153,9 +153,11 @@ struct image_params {
 #define IMGPF_HIGH_BITS_ASLR    0x00000200      /* randomize high bits of ASLR slide */
 #define IMGPF_IS_64BIT_DATA     0x00000400      /* exec to a 64Bit register state */
 #define IMGPF_DRIVER            0x00000800      /* exec of a driver binary (no LC_MAIN) */
-#define IMGPF_RESLIDE           0x00001000     /* reslide the shared cache */
+#define IMGPF_RESLIDE           0x00001000      /* reslide the shared cache */
 #define IMGPF_PLUGIN_HOST_DISABLE_A_KEYS  0x00002000     /* process hosts plugins, disable ptr auth A keys */
 #define IMGPF_HW_TPRO           0x00004000      /* HW support for read-only/read-write trusted paths  */
+#define IMGPF_HARDENED_HEAP     0x00008000      /* enable hardened-heap for the process */
+#define IMGPF_RESERVED_3        0x01000000
 #define IMGPF_ROSETTA           0x10000000      /* load rosetta runtime */
 #define IMGPF_ALT_ROSETTA       0x20000000      /* load alternative rosetta runtime */
 #define IMGPF_RESERVED_2        0x40000000

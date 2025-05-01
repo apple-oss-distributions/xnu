@@ -43,7 +43,9 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"));
 
-T_DECL(vm_tainted_executable, "Test that a tainted executable gets killed", T_META_TAG_VM_PREFERRED)
+T_DECL(vm_tainted_executable, "Test that a tainted executable gets killed",
+    T_META_TAG_VM_PREFERRED,
+    T_META_IGNORECRASHES(".*hell0.*"))
 {
 	char tmp_path[] = "/tmp/hell0-XXXXXX";
 	int fd1, fd2;

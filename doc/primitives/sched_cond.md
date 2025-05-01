@@ -57,7 +57,7 @@ Using these enhancements, the previous example can be revised to:
 ```c
 while(1) {
 	...
-	sched_cond_signal(&my_cond, ..., consumer_thread); // (E)
+	sched_cond_signal(&my_cond, ...); // (E)
 }
 ```
 ### Consumer Thread

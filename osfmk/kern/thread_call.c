@@ -54,7 +54,7 @@
 #include <machine/machine_routines.h>
 
 static KALLOC_TYPE_DEFINE(thread_call_zone, thread_call_data_t,
-    KT_PRIV_ACCT | KT_NOSHARED);
+    KT_PRIV_ACCT | KT_NOEARLY);
 
 typedef enum {
 	TCF_ABSOLUTE    = 0,

@@ -36,6 +36,7 @@
 //for write protection
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_map_xnu.h>
+#include <mach/mach_vm.h>
 
 #define PTR_ADD(type, base, offset)             (type)((uintptr_t)(base) + (offset))
 
@@ -181,9 +182,8 @@ cpx_writeprotect(cpx_t cpx)
 {
 #if CONFIG_KEYPAGE_WP
 	void *cpxstart = (void*)cpx;
-	void *cpxend = (void*)((uint8_t*)cpx + PAGE_SIZE);
 	if (cpx->cpx_flags & CPX_WRITE_PROTECTABLE) {
-		vm_map_protect(kernel_map, (vm_map_offset_t)cpxstart, (vm_map_offset_t)cpxend, (VM_PROT_READ), FALSE);
+		mach_vm_protect(kernel_map, (vm_map_offset_t)cpxstart, PAGE_SIZE, false, (VM_PROT_READ));
 	}
 #else
 	(void) cpx;
@@ -207,9 +207,8 @@ cpx_free(cpx_t cpx)
 #if CONFIG_KEYPAGE_WP
 	/* unprotect the page before bzeroing */
 	void *cpxstart = (void*)cpx;
-	void *cpxend = (void*)((uint8_t*)cpx + PAGE_SIZE);
 	if (cpx->cpx_flags & CPX_WRITE_PROTECTABLE) {
-		vm_map_protect(kernel_map, (vm_map_offset_t)cpxstart, (vm_map_offset_t)cpxend, (VM_PROT_DEFAULT), FALSE);
+		mach_vm_protect(kernel_map, (vm_map_offset_t)cpxstart, PAGE_SIZE, false, (VM_PROT_DEFAULT));
 
 		//now zero the memory after un-protecting it
 		bzero(cpx->cpx_cached_key, cpx->cpx_max_key_len);

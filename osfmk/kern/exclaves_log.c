@@ -72,18 +72,6 @@ SCALABLE_COUNTER_DEFINE(oslog_e_query_error_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_trace_mode_set_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_trace_mode_error_count);
 
-/*
- * Interpose kernel UUID until Exclaves cstring harvesting is in place. This
- * workaround allows to send out proper logs and signposts instead of plain
- * strings. As a result, logs and signposts will be attributed to the kernel.
- */
-static inline void
-interpose_kernel_uuid(uint8_t *ld_data, __assert_only size_t ld_data_size)
-{
-	assert3u(sizeof(uint32_t) + sizeof(uuid_t), <, ld_data_size);
-	memcpy(&ld_data[sizeof(uint32_t)], kernel_uuid, sizeof(uuid_t));
-}
-
 static size_t
 oslogdarwin_logdata_data(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size_t ld_data_size)
 {
@@ -125,14 +113,12 @@ os_log_replay_log(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size_t ld_d
 		break;
 	case firehose_tracepoint_namespace_log:
 		counter_inc(&oslog_e_log_count);
-		interpose_kernel_uuid(ld_data, ld_size);
 		if (!os_log_encoded_log(stream, ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
 			counter_inc(&oslog_e_log_dropped_count);
 		}
 		break;
 	case firehose_tracepoint_namespace_signpost:
 		counter_inc(&oslog_e_signpost_count);
-		interpose_kernel_uuid(ld_data, ld_size);
 		if (!os_log_encoded_signpost(stream, ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
 			counter_inc(&oslog_e_signpost_dropped_count);
 		}
@@ -235,6 +221,9 @@ os_log_replay_redacted_log(const oslogdarwin_redactedlogdata_s *ld)
 		break;
 	case OSLOGDARWIN_REDACTEDLOGDATA__SUBSYSTEM:
 		// Subsystem registration not supported for now.
+		break;
+	case OSLOGDARWIN_REDACTEDLOGDATA__IMAGELOAD:
+		// Image registration not supported for now.
 		break;
 	default:
 		panic("Unsupported redacted Exclaves log type %llu", ld->tag);

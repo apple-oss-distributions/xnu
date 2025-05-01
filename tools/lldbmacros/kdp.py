@@ -80,9 +80,9 @@ def KDPSendCore(cmd_args=None):
     optionally specify the filename to be used for the generated core file.
 
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(KDPSendCore.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     ip_address = cmd_args[0]
     filename=""
     if len(cmd_args) >=2:
@@ -106,9 +106,9 @@ def KDPSendSyslog(cmd_args=None):
         will resume waiting in the debugger after completion. You can optionally
         specify the name to be used for the generated system log.
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(KDPSendSyslog.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     ip_address = cmd_args[0]
     filename =""
     if len(cmd_args) >=2:
@@ -131,9 +131,9 @@ def KDPSendPaniclog(cmd_args=None):
         will resume waiting in the debugger after completion. You can optionally
         specify the name to be used for the generated panic log.
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(KDPSendPaniclog.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     ip_address = cmd_args[0]
     filename =""
     if len(cmd_args) >=2:
@@ -233,9 +233,7 @@ def KDPReenter(cmd_args=None):
         usage: kdp-reenter <seconds>
     """
     if len(cmd_args) < 1:
-        print("Please provide valid time in seconds")
-        print(KDPReenter.__doc__)
-        return False
+        raise ArgumentError("Please provide valid time in seconds")
 
     if "kdp" != GetConnectionProtocol():
         print("Target is not connected over kdp. Nothing to do here.")
@@ -270,13 +268,12 @@ def KDPSetDumpInfo(cmd_args=None):
         use the previously configured/default setting for that.
         Syntax: setdumpinfo <filename> <ip> <router> <port>
     """
-    if not cmd_args:
-        print(KDPSetDumpInfo.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     if len(cmd_args) < 4:
-        print("Not enough arguments.")
-        print(KDPSetDumpInfo.__doc__)
-        return False
+        raise ArgumentError("Not enough arguments.")
+
     portnum = ArgumentStringToInt(cmd_args[3])
     retval = KDPDumpInfo(GetEnumValue('kdp_dumpinfo_t::KDP_DUMPINFO_SETINFO'), cmd_args[0], cmd_args[1], cmd_args[2], portnum)
     if retval:
@@ -303,7 +300,7 @@ def KDPMode(cmd_args=None):
     if cmd_args is None or len(cmd_args) == 0:
         return current_KDP_mode
     if len(cmd_args) > 1 or cmd_args[0] not in {'swhosted', 'hwprobe'}:
-        print("Invalid Arguments", KDPMode.__doc__)
+        raise ArgumentError()
     else:
         current_KDP_mode = cmd_args[0]
     return

@@ -884,6 +884,7 @@ struct nfsclntstats {
 		uint64_t    nlm_unlock;
 	} nlmcnt; // NFSv3 only
 	uint64_t        opcntv4[NFS_OP_COUNT];
+	uint64_t        cbopcntv4[NFS_OP_CB_COUNT];
 	uint64_t        rpcretries;
 	uint64_t        rpcrequests;
 	uint64_t        rpctimeouts;

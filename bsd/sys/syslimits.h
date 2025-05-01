@@ -132,6 +132,11 @@
                                         /* range: -20 - 20 */
                                         /* (PRIO_MIN - PRIO_MAX) */
 #endif /* __DARWIN_UNIX03 */
+
+#ifdef XNU_KERNEL_PRIVATE
+#define MAXLONGPATHLEN           8192   /* max length of a long path */
+#endif /* XNU_KERNEL_PRIVATE */
+
 #endif /* !_ANSI_SOURCE */
 
 #endif /* !_SYS_SYSLIMITS_H_ */

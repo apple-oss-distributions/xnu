@@ -71,8 +71,6 @@
 
 #ifdef  KERNEL
 
-#include <vm/vm_memtag.h>
-
 #ifndef ASSEMBLER
 #include <mach/vm_types.h>
 #endif  /* ASSEMBLER */
@@ -262,6 +260,14 @@ extern uint64_t         max_mem;                /* 64-bit size of memory - limit
  * core machines with workloads involving video and graphics processing.
  */
 #define MALLOC_MEDIUM_CHUNK_SIZE (8ULL * 1024 * 1024) /* 8 MB */
+
+/**
+ * The size of the largest allocation which can be used in the kernel without
+ * special accessors/attributes. When using accessors/attributes, this limit can
+ * be overridden when making allocations/mappings through various APIs by
+ * setting the "no soft limit" option.
+ */
+#define VM_KERNEL_SIMPLE_MAX_SIZE (1ULL << 30) /* 1GB */
 
 #ifdef KERNEL_PRIVATE
 extern uint64_t         sane_size;              /* Memory size to use for defaults calculations */
@@ -569,7 +575,7 @@ static inline vm_offset_t
 vm_pack_pointer(vm_offset_t ptr, vm_packing_params_t params)
 {
 	if (ptr != 0) {
-		ptr = vm_memtag_canonicalize_address(ptr);
+		ptr = vm_memtag_canonicalize_kernel(ptr);
 	}
 
 	if (!params.vmpp_base_relative) {
@@ -604,10 +610,10 @@ vm_unpack_pointer(vm_offset_t packed, vm_packing_params_t params)
 		intptr_t addr = (intptr_t)packed;
 		addr <<= __WORDSIZE - params.vmpp_bits;
 		addr >>= __WORDSIZE - params.vmpp_bits - params.vmpp_shift;
-		return vm_memtag_fixup_ptr((vm_offset_t)addr);
+		return vm_memtag_load_tag((vm_offset_t)addr);
 	}
 	if (packed) {
-		return vm_memtag_fixup_ptr((packed << params.vmpp_shift) + params.vmpp_base);
+		return vm_memtag_load_tag((packed << params.vmpp_shift) + params.vmpp_base);
 	}
 	return (vm_offset_t)0;
 }
@@ -668,7 +674,7 @@ static inline void
 vm_verify_pointer_packable(vm_offset_t ptr, vm_packing_params_t params)
 {
 	if (ptr != 0) {
-		ptr = vm_memtag_canonicalize_address(ptr);
+		ptr = vm_memtag_canonicalize_kernel(ptr);
 	}
 
 	if (ptr & ((1ul << params.vmpp_shift) - 1)) {

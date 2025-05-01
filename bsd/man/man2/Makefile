@@ -57,6 +57,8 @@ DATAFILES = \
 	fsetattrlist.2		\
 	fgetxattr.2		\
 	fhopen.2		\
+	fileport_makefd.2	\
+	fileport_makeport.2	\
 	flistxattr.2		\
 	flock.2			\
 	fork.2			\

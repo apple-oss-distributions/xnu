@@ -133,7 +133,7 @@ typedef uint64_t                vm_map_size_t;
 
 typedef mach_vm_address_t       mach_port_context_t;
 
-#ifdef  MACH_KERNEL_PRIVATE
+#if defined(MACH_KERNEL_PRIVATE) || KERNEL_VM_TEST
 
 /*
  * These are types used internal to Mach to implement the

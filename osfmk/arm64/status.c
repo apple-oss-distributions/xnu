@@ -80,6 +80,12 @@ unsigned int _MachineStateCount[THREAD_STATE_FLAVORS] = {
 	[ARM_NEON_STATE] = ARM_NEON_STATE_COUNT,
 	[ARM_NEON_STATE64] = ARM_NEON_STATE64_COUNT,
 	[ARM_PAGEIN_STATE] = ARM_PAGEIN_STATE_COUNT,
+	/*
+	 * Mach exception ports don't currently support SME state flavors.
+	 * In case exception_deliver tries to access them anyway, give
+	 * them bogus sizes that will ensure the access fails.
+	 */
+	[ARM_SME_STATE ... ARM_SME2_STATE] = 0,
 };
 
 extern zone_t ads_zone;
@@ -299,6 +305,327 @@ handle_set_arm_thread_state(const thread_state_t   tstate,
 	return KERN_SUCCESS;
 }
 
+
+#if HAS_ARM_FEAT_SME
+static kern_return_t
+handle_get_arm_sme_state(thread_state_t tstate, mach_msg_type_number_t *count, thread_t thread)
+{
+	if (!arm_sme_version()) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (*count < ARM_SME_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_state_t *state_out = (arm_sme_state_t *)tstate;
+	state_out->svl_b = arm_sme_svl_b();
+
+	/*
+	 * Saved-state TPIDR2_EL0, ZA, and ZT0 are only updated on context-switch.  If
+	 * the thread is currently active on this CPU, those saved-state values may be
+	 * stale and must be resynchronized with the live CPU state.
+	 *
+	 * We don't need to do this for threads active on other CPUs, since thread_get_state()
+	 * forcibly preempts them before calling machine_thread_get_state().
+	 */
+	if (thread == current_thread()) {
+		thread->machine.tpidr2_el0 = __builtin_arm_rsr64("TPIDR2_EL0");
+	}
+	state_out->tpidr2_el0 = thread->machine.tpidr2_el0;
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		/* This thread has never used SME before, so all SME state is invalid */
+		state_out->svcr = 0;
+	} else {
+		state_out->svcr = saved_state->svcr;
+	}
+
+	*count = ARM_SME_STATE_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_get_arm_sve_z_state(thread_state_t tstate, mach_msg_type_number_t *count, thread_t thread, size_t z_offset)
+{
+	if (*count < ARM_SVE_Z_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_SM)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sve_z_state_t *state_out = (arm_sve_z_state_t *)tstate;
+	const size_t elem_size = saved_state->svl_b;
+	const uint8_t *saved_state_z = const_arm_sme_z(&saved_state->context) + z_offset * elem_size;
+
+	const size_t padding_size = sizeof(state_out->z[0]) - elem_size;
+	for (int i = 0; i < ARRAY_COUNT(state_out->z); i++) {
+		bcopy(saved_state_z, state_out->z[i], elem_size);
+		if (padding_size) {
+			bzero(state_out->z[i] + elem_size, padding_size);
+		}
+		saved_state_z += elem_size;
+	}
+
+	*count = ARM_SVE_Z_STATE_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_get_arm_sve_p_state(thread_state_t tstate, mach_msg_type_number_t *count, thread_t thread)
+{
+	if (*count < ARM_SVE_P_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_SM)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sve_p_state_t *state_out = (arm_sve_p_state_t *)tstate;
+	const uint8_t *saved_state_p = const_arm_sme_p(&saved_state->context, saved_state->svl_b);
+
+	const size_t elem_size = saved_state->svl_b / 8;
+	const size_t padding_size = sizeof(state_out->p[0]) - elem_size;
+	for (int i = 0; i < ARRAY_COUNT(state_out->p); i++) {
+		bcopy(saved_state_p, state_out->p[i], elem_size);
+		if (padding_size) {
+			bzero(state_out->p[i] + elem_size, padding_size);
+		}
+		saved_state_p += elem_size;
+	}
+
+	*count = ARM_SVE_P_STATE_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_get_arm_za_state(thread_state_t tstate, mach_msg_type_number_t *count, thread_t thread)
+{
+	if (*count < ARM_SME_ZA_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_ZA)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (thread == current_thread()) {
+		arm_save_sme_za(&saved_state->context, saved_state->svl_b);
+	}
+
+	const uint8_t *saved_state_za = const_arm_sme_za(&saved_state->context, saved_state->svl_b);
+	size_t za_size = saved_state->svl_b * saved_state->svl_b;
+	arm_sme_za_state_t *state_out = (arm_sme_za_state_t *)tstate;
+	assert(za_size <= sizeof(state_out->za));
+
+	bcopy(saved_state_za, state_out->za, za_size);
+	if (za_size < sizeof(state_out->za)) {
+		bzero(state_out->za + za_size, sizeof(state_out->za) - za_size);
+	}
+
+	*count = ARM_SME_ZA_STATE_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_set_arm_sme_state(const thread_state_t tstate, mach_msg_type_number_t count, thread_t thread)
+{
+	if (!arm_sme_version()) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (count < ARM_SME_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	const arm_sme_state_t *state_in = (const arm_sme_state_t *)tstate;
+	uint16_t svl_b = arm_sme_svl_b();
+	if (state_in->svl_b != svl_b) {
+		/* arm_sme_state_t::svl_b is currently read-only */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		kern_return_t err = machine_thread_sme_state_alloc(thread);
+		if (err) {
+			return err;
+		}
+		saved_state = machine_thread_get_sme_state(thread);
+		assert(saved_state);
+	}
+
+	saved_state->svcr = state_in->svcr & (SVCR_SM | SVCR_ZA);
+	thread->machine.tpidr2_el0 = state_in->tpidr2_el0;
+	/*
+	 * Like in handle_get_arm_sme_state(), if we're accessing live TPIDR2_EL0, ZA,
+	 * or ZT0 state then we need to explicitly synchronize the saved-state with
+	 * hardware.
+	 */
+	if (thread == current_thread()) {
+		__builtin_arm_wsr64("TPIDR2_EL0", state_in->tpidr2_el0);
+	}
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_set_arm_sve_z_state(const thread_state_t tstate, mach_msg_type_number_t count, thread_t thread, size_t z_offset)
+{
+	if (count < ARM_SVE_Z_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_SM)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	const arm_sve_z_state_t *state_in = (const arm_sve_z_state_t *)tstate;
+	const size_t elem_size = saved_state->svl_b;
+	uint8_t *saved_state_z = arm_sme_z(&saved_state->context) + z_offset * elem_size;
+
+	for (int i = 0; i < ARRAY_COUNT(state_in->z); i++) {
+		bcopy(state_in->z[i], saved_state_z, elem_size);
+		saved_state_z += elem_size;
+	}
+
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_set_arm_sve_p_state(const thread_state_t tstate, mach_msg_type_number_t count, thread_t thread)
+{
+	if (count < ARM_SVE_P_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_SM)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	const arm_sve_p_state_t *state_in = (const arm_sve_p_state_t *)tstate;
+	uint8_t *saved_state_p = arm_sme_p(&saved_state->context, saved_state->svl_b);
+
+	const size_t elem_size = saved_state->svl_b / 8;
+	for (int i = 0; i < ARRAY_COUNT(state_in->p); i++) {
+		bcopy(state_in->p[i], saved_state_p, elem_size);
+		saved_state_p += elem_size;
+	}
+
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_set_arm_za_state(const thread_state_t tstate, mach_msg_type_number_t count, thread_t thread)
+{
+	if (count < ARM_SME_ZA_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!(saved_state->svcr & SVCR_ZA)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	uint8_t *saved_state_za = arm_sme_za(&saved_state->context, saved_state->svl_b);
+	size_t za_size = saved_state->svl_b * saved_state->svl_b;
+	const arm_sme_za_state_t *state_in = (const arm_sme_za_state_t *)tstate;
+	assert(za_size <= sizeof(state_in->za));
+
+	bcopy(state_in->za, saved_state_za, za_size);
+	if (thread == current_thread()) {
+		arm_load_sme_za(&saved_state->context, saved_state->svl_b);
+	}
+
+	return KERN_SUCCESS;
+}
+
+#if HAS_ARM_FEAT_SME2
+static kern_return_t
+handle_get_arm_sme2_state(thread_state_t tstate, mach_msg_type_number_t *count, thread_t thread)
+{
+	if (arm_sme_version() < ARM_FEAT_SME2) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (*count < ARM_SME2_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if ((saved_state->svcr & SVCR_ZA) == 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme2_state_t *sme2_tstate = (arm_sme2_state_t *)tstate;
+	if (thread == current_thread()) {
+		arm_save_sme_zt0(&saved_state->context);
+	}
+	memcpy(sme2_tstate->zt0, saved_state->context.zt0, sizeof(saved_state->context.zt0));
+
+	*count = ARM_SME2_STATE_COUNT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+handle_set_arm_sme2_state(const thread_state_t tstate, mach_msg_type_number_t count, thread_t thread)
+{
+	if (arm_sme_version() < ARM_FEAT_SME2) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	arm_sme_saved_state_t *saved_state = machine_thread_get_sme_state(thread);
+	if (!saved_state) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (count < ARM_SME2_STATE_COUNT) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if ((saved_state->svcr & SVCR_ZA) == 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	const arm_sme2_state_t *sme2_tstate = (const arm_sme2_state_t *)tstate;
+	memcpy(saved_state->context.zt0, sme2_tstate->zt0, sizeof(saved_state->context.zt0));
+	if (thread == current_thread()) {
+		arm_load_sme_zt0(&saved_state->context);
+	}
+	return KERN_SUCCESS;
+}
+#endif /* HAS_ARM_FEAT_SME2 */
+#endif /* HAS_ARM_FEAT_SME */
 
 #if __has_feature(ptrauth_calls)
 
@@ -1125,7 +1452,7 @@ machine_thread_get_state(thread_t                 thread,
 
 	case ARM_NEON_STATE64:{
 		arm_neon_state64_t *state;
-		arm_neon_saved_state64_t *thread_state;
+		const arm_neon_saved_state64_t *thread_state;
 
 		if (*count < ARM_NEON_STATE64_COUNT) {
 			return KERN_INVALID_ARGUMENT;
@@ -1138,9 +1465,26 @@ machine_thread_get_state(thread_t                 thread,
 		state = (arm_neon_state64_t *)tstate;
 		thread_state = neon_state64(thread->machine.uNeon);
 
-		/* For now, these are identical */
-		assert(sizeof(*state) == sizeof(*thread_state));
-		bcopy(thread_state, state, sizeof(arm_neon_state64_t));
+#if HAS_ARM_FEAT_SME
+		const arm_sme_saved_state_t *sme_ss = machine_thread_get_sme_state(thread);
+		/* Inside streaming SVE mode, reads from Q[i] access the lower 128 bits of Z[i] */
+		if (sme_ss && (sme_ss->svcr & SVCR_SM)) {
+			const uint8_t *z = const_arm_sme_z(&sme_ss->context);
+
+			for (int i = 0; i < ARRAY_COUNT(state->q); i++) {
+				bcopy(z, &state->q[i], sizeof(state->q[i]));
+				z += sme_ss->svl_b;
+			}
+			state->fpcr = thread_state->fpcr;
+			state->fpsr = thread_state->fpsr;
+#else
+		if (0) {
+#endif
+		} else {
+			/* For now, these are identical */
+			assert(sizeof(*state) == sizeof(*thread_state));
+			bcopy(thread_state, state, sizeof(arm_neon_state64_t));
+		}
 
 
 		*count = ARM_NEON_STATE64_COUNT;
@@ -1162,6 +1506,31 @@ machine_thread_get_state(thread_t                 thread,
 		break;
 	}
 
+#if HAS_ARM_FEAT_SME
+	case ARM_SME_STATE:
+		return handle_get_arm_sme_state(tstate, count, thread);
+
+	case ARM_SVE_Z_STATE1:
+		return handle_get_arm_sve_z_state(tstate, count, thread, 0);
+
+	case ARM_SVE_Z_STATE2:
+		return handle_get_arm_sve_z_state(tstate, count, thread, 16);
+
+	case ARM_SVE_P_STATE:
+		return handle_get_arm_sve_p_state(tstate, count, thread);
+
+	case ARM_SME_ZA_STATE1:
+		return handle_get_arm_za_state(tstate, count, thread);
+
+	case ARM_SME_ZA_STATE2 ... ARM_SME_ZA_STATE16:
+		/* Reserved for future use */
+		return KERN_INVALID_ARGUMENT;
+
+#if HAS_ARM_FEAT_SME2
+	case ARM_SME2_STATE:
+		return handle_get_arm_sme2_state(tstate, count, thread);
+#endif
+#endif
 
 	default:
 		return KERN_INVALID_ARGUMENT;
@@ -1610,8 +1979,32 @@ machine_thread_set_state(thread_t               thread,
 		state = (arm_neon_state64_t *)tstate;
 		thread_state = neon_state64(thread->machine.uNeon);
 
-		assert(sizeof(*state) == sizeof(*thread_state));
-		bcopy(state, thread_state, sizeof(arm_neon_state64_t));
+#if HAS_ARM_FEAT_SME
+		arm_sme_saved_state_t *sme_ss = machine_thread_get_sme_state(thread);
+		/*
+		 * Inside streaming SVE mode, writes to Q[i] modify the lower 128 bits
+		 * of Z[i], and zero out all bits > 128.
+		 */
+		if (sme_ss && (sme_ss->svcr & SVCR_SM)) {
+			uint8_t *z = arm_sme_z(&sme_ss->context);
+			const size_t elem_size = sizeof(state->q[0]);
+			const size_t padding_size = sme_ss->svl_b - elem_size;
+
+			for (int i = 0; i < ARRAY_COUNT(state->q); i++) {
+				bcopy(&state->q[i], z, elem_size);
+				z += elem_size;
+				bzero(z, padding_size);
+				z += padding_size;
+			}
+			thread_state->fpcr = state->fpcr;
+			thread_state->fpsr = state->fpsr;
+#else
+		if (0) {
+#endif
+		} else {
+			assert(sizeof(*state) == sizeof(*thread_state));
+			bcopy(state, thread_state, sizeof(arm_neon_state64_t));
+		}
 
 
 		thread->machine.uNeon->nsh.flavor = ARM_NEON_SAVED_STATE64;
@@ -1619,6 +2012,32 @@ machine_thread_set_state(thread_t               thread,
 		break;
 	}
 
+
+#if HAS_ARM_FEAT_SME
+	case ARM_SME_STATE:
+		return handle_set_arm_sme_state(tstate, count, thread);
+
+	case ARM_SVE_Z_STATE1:
+		return handle_set_arm_sve_z_state(tstate, count, thread, 0);
+
+	case ARM_SVE_Z_STATE2:
+		return handle_set_arm_sve_z_state(tstate, count, thread, 16);
+
+	case ARM_SVE_P_STATE:
+		return handle_set_arm_sve_p_state(tstate, count, thread);
+
+	case ARM_SME_ZA_STATE1:
+		return handle_set_arm_za_state(tstate, count, thread);
+
+	case ARM_SME_ZA_STATE2 ... ARM_SME_ZA_STATE16:
+		/* Reserved for future use */
+		return KERN_INVALID_ARGUMENT;
+
+#if HAS_ARM_FEAT_SME2
+	case ARM_SME2_STATE:
+		return handle_set_arm_sme2_state(tstate, count, thread);
+#endif
+#endif
 
 	default:
 		return KERN_INVALID_ARGUMENT;
@@ -1688,7 +2107,7 @@ machine_thread_state_initialize(thread_t thread)
                         :
                         : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
                           VERIFY_USER_THREAD_STATE_INPUTS
-                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6"
+                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x17"
                 );
 		ml_pac_safe_interrupts_restore(intr);
 	}
@@ -1741,10 +2160,34 @@ get_user_regs(thread_t thread)
 	return thread->machine.upcb;
 }
 
-arm_neon_saved_state_t *
-get_user_neon_regs(thread_t thread)
+/**
+ * Sets the value of NEON register Q[regno] inside the provided thread's
+ * saved-state.
+ *
+ * On SME-capable CPUs, this accessor follows the same aliasing rules as
+ * hardware.  If the thread is inside streaming SVE mode (SVCR.SM == 1), then
+ * writes to Q[regno] actually update Z[regno][127:0] and zero out
+ * Z[regno][SVL-1:128].
+ *
+ * @param thread thread
+ * @param regno which Q register to modify
+ * @param val the new value to store in Q[regno]
+ */
+void
+set_user_neon_reg(thread_t thread, unsigned int regno, uint128_t val)
 {
-	return thread->machine.uNeon;
+#if HAS_ARM_FEAT_SME
+	arm_sme_saved_state_t *sme_ss = machine_thread_get_sme_state(thread);
+	if (sme_ss && (sme_ss->svcr & SVCR_SM)) {
+		uint8_t *z_0 = arm_sme_z(&sme_ss->context);
+		uint8_t *z_dst = z_0 + (regno * sme_ss->svl_b);
+		bcopy(&val, z_dst, sizeof(val));
+		bzero(z_dst + sizeof(val), sme_ss->svl_b - sizeof(val));
+		return;
+	}
+#endif
+	void *q_dst = &thread->machine.uNeon->ns_64.v.q[regno];
+	bcopy(&val, q_dst, sizeof(val));
 }
 
 /*

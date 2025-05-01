@@ -97,6 +97,14 @@ pmap_zero_page(
 	bzero_phys((addr64_t)i386_ptob(pn), PAGE_SIZE);
 }
 
+void
+pmap_zero_page_with_options(
+	ppnum_t pn,
+	__unused int options)
+{
+	pmap_zero_page(pn);
+}
+
 /*
  *	pmap_zero_part_page
  *	zeros the specified (machine independent) part of a page.

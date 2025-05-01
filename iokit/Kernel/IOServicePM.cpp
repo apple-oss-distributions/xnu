@@ -1588,6 +1588,7 @@ IOService::handleAcknowledgePowerChange( IOPMRequest * request )
 			// make sure we're expecting this ack
 			if (informee->timer != 0) {
 				SOCD_TRACE_XNU(PM_INFORM_POWER_CHANGE_ACK,
+				    SOCD_TRACE_MODE_NONE,
 				    ADDR(informee->whatObject->getMetaClass()),
 				    ADDR(this->getMetaClass()),
 				    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(informee->whatObject->getRegistryEntryID())),
@@ -1726,6 +1727,7 @@ IOService::handleAcknowledgeSetPowerState( IOPMRequest * request __unused)
 		}
 
 		SOCD_TRACE_XNU(PM_SET_POWER_STATE_ACK,
+		    SOCD_TRACE_MODE_NONE,
 		    ADDR(controllingDriverMetaClass),
 		    ADDR(this->getMetaClass()),
 		    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(controllingDriverRegistryEntryID)),
@@ -3925,6 +3927,11 @@ IOService::notifyRootDomainDone( void )
 	assert( fDriverCallBusy == false );
 	assert( fMachineState == kIOPM_DriverThreadCallDone );
 
+	if (IS_ROOT_DOMAIN) {
+		// Reset in case watchdog was adjusted for hibernation
+		reset_watchdog_timer();
+	}
+
 	MS_POP(); // pop notifyAll() machine state
 	notifyChildren();
 }
@@ -5696,6 +5703,7 @@ IOService::start_watchdog_timer( void )
 	IOLockLock(fWatchdogLock);
 
 	timeout = getPMRootDomain()->getWatchdogTimeout();
+
 	clock_interval_to_deadline(timeout, kSecondScale, &deadline);
 	start_watchdog_timer(deadline);
 	IOLockUnlock(fWatchdogLock);
@@ -5705,6 +5713,8 @@ void
 IOService::start_watchdog_timer(uint64_t deadline)
 {
 	IOLockAssert(fWatchdogLock, kIOLockAssertOwned);
+
+	fWatchdogStart = mach_absolute_time();
 	fWatchdogDeadline = deadline;
 
 	if (!thread_call_isactive(fWatchdogTimer)) {
@@ -5805,6 +5815,43 @@ IOService::reset_watchdog_timer(IOService *blockedObject, int pendingResponseTim
 
 exit:
 	IOLockUnlock(fWatchdogLock);
+}
+
+void
+IOService::reset_watchdog_timer(int timeout)
+{
+	uint64_t deadline;
+
+	if (!fWatchdogTimer || (kIOSleepWakeWdogOff & gIOKitDebug)) {
+		return;
+	}
+
+	IOLockLock(fWatchdogLock);
+	if (!fWatchdogDeadline) {
+		goto exit;
+	}
+
+	if (timeout == 0) {
+		int defaultTimeout = getPMRootDomain()->getWatchdogTimeout();
+		clock_interval_to_deadline(defaultTimeout, kSecondScale, &deadline);
+	} else {
+		clock_interval_to_deadline(timeout, kSecondScale, &deadline);
+	}
+
+	thread_call_cancel(fWatchdogTimer);
+	start_watchdog_timer(deadline);
+
+exit:
+	IOLockUnlock(fWatchdogLock);
+}
+
+uint64_t
+IOService::get_watchdog_elapsed_time(void)
+{
+	uint64_t delta;
+	absolutetime_to_nanoseconds(mach_absolute_time() - fWatchdogStart, &delta);
+	delta /= kSecondScale;
+	return delta;
 }
 
 
@@ -6066,41 +6113,88 @@ logAppTimeouts( OSObject * object, void * arg )
 	}
 }
 
+static void
+logClientTimeouts( OSObject * object, void * arg )
+{
+	IOPMInterestContext * context = (IOPMInterestContext *) arg;
+	unsigned int          clientIndex, startIndex = 0;
+	OSObject *            flag;
+	bool                  isPriorityClient;
+
+	isPriorityClient = (context->notifyType == kNotifyPriority) || (context->notifyType == kNotifyCapabilityChangePriority);
+
+	// notifyClients can contain multiple instances of a client if we have notified
+	// them multiple times in one tellClientsWithResponse cycle.
+	while ((clientIndex = context->notifyClients->getNextIndexOfObject(object, startIndex)) != (unsigned int) -1) {
+		// Check for client timeouts
+		bool timeout = (flag = context->responseArray->getObject(clientIndex)) && (flag != kOSBooleanTrue);
+		if (timeout) {
+			if (context->us == IOService::getPMRootDomain()) {
+				// Root domain clients
+				PM_ERROR("PM %snotification timeout (%s)\n",
+				    isPriorityClient ? "priority " : "",
+				    IOService::getPMRootDomain()->getNotificationClientName(object));
+			} else {
+				// Non root domain clients
+				char id[30];
+				IOService * clientService;
+				_IOServiceInterestNotifier * notifier;
+
+				if ((notifier = OSDynamicCast(_IOServiceInterestNotifier, object))) {
+					// _IOServiceInterestNotifier clients
+					snprintf(id, sizeof(id), "%p", OBFUSCATE(notifier->handler));
+				} else if ((clientService = OSDynamicCast(IOService, object))) {
+					// IOService clients (e.g. power plane children)
+					snprintf(id, sizeof(id), "%s", clientService->getName());
+				} else {
+					snprintf(id, sizeof(id), "%p", OBFUSCATE(object));
+				}
+
+				PM_ERROR("PM %snotification timeout (service: %s, client: %s)\n",
+				    isPriorityClient ? "priority " : "", context->us->getName(), id);
+			}
+		}
+
+		startIndex = clientIndex + 1;
+	}
+}
+
 void
 IOService::cleanClientResponses( bool logErrors )
 {
 	if (logErrors && fResponseArray) {
-		switch (fOutOfBandParameter) {
-		case kNotifyApps:
-		case kNotifyCapabilityChangeApps:
-			if (fNotifyClientArray) {
-				IOPMInterestContext context;
+		if (fNotifyClientArray) {
+			IOPMInterestContext context;
 
-				context.responseArray    = fResponseArray;
-				context.notifyClients    = fNotifyClientArray;
-				context.serialNumber     = fSerialNumber;
-				context.messageType      = kIOMessageCopyClientID;
-				context.notifyType       = kNotifyApps;
-				context.isPreChange      = fIsPreChange;
-				context.enableTracing    = false;
-				context.us               = this;
-				context.maxTimeRequested = 0;
-				context.stateNumber      = fHeadNotePowerState;
-				context.stateFlags       = fHeadNotePowerArrayEntry->capabilityFlags;
-				context.changeFlags      = fHeadNoteChangeFlags;
+			context.responseArray    = fResponseArray;
+			context.notifyClients    = fNotifyClientArray;
+			context.serialNumber     = fSerialNumber;
+			context.messageType      = kIOMessageCopyClientID;
+			context.notifyType       = fOutOfBandParameter;
+			context.isPreChange      = fIsPreChange;
+			context.enableTracing    = false;
+			context.us               = this;
+			context.maxTimeRequested = 0;
+			context.stateNumber      = fHeadNotePowerState;
+			context.stateFlags       = fHeadNotePowerArrayEntry->capabilityFlags;
+			context.changeFlags      = fHeadNoteChangeFlags;
 
+			switch (fOutOfBandParameter) {
+			case kNotifyApps:
+				// kNotifyApps informs in-kernel clients as well
+				applyToInterested(gIOGeneralInterest, logClientTimeouts, (void *) &context);
+				OS_FALLTHROUGH;
+			case kNotifyCapabilityChangeApps:
 				applyToInterested(gIOAppPowerStateInterest, logAppTimeouts, (void *) &context);
+				break;
+			case kNotifyPriority:
+				OS_FALLTHROUGH;
+			case kNotifyCapabilityChangePriority:
+				applyToInterested(gIOPriorityPowerStateInterest, logClientTimeouts, (void *) &context);
+				break;
+			default:
+				break;
 			}
-			break;
-
-		default:
-			// kNotifyPriority, kNotifyCapabilityChangePriority
-			// TODO: identify the priority client that has not acked
-			PM_ERROR("PM priority notification timeout\n");
-			if (gIOKitDebug & kIOLogDebugPower) {
-				panic("PM priority notification timeout");
-			}
-			break;
 		}
 	}
 
@@ -8033,6 +8127,15 @@ IOService::actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue
 		case kIOPM_OurChangeTellPriorityClientsPowerDown:
 			// PMRD:     LastCallBeforeSleep notify done
 			// Non-PMRD: tellChangeDown/kNotifyApps done
+
+			// Root domain might self cancel due to assertions.
+			if (IS_ROOT_DOMAIN) {
+				bool cancel = (bool) fDoNotPowerDown;
+				getPMRootDomain()->askChangeDownDone(
+					&fHeadNoteChangeFlags, &cancel);
+				fDoNotPowerDown = cancel;
+			}
+
 			if (fDoNotPowerDown) {
 				OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
 				PM_ERROR("%s: idle revert, state %u\n", fName, fMachineState);

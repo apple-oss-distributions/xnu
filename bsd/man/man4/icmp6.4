@@ -120,7 +120,7 @@ The following codes are defined:
 .It 0 Ta noroute-unr Ta unreach Ta "No route to destination"
 .It 1 Ta admin-unr Ta unreach Ta "Administratively prohibited"
 .It 2 Ta beyond-unr Ta unreach Ta "Beyond scope of source address"
-.It 2 Ta notnbr-unr Ta unreach Ta "Not a neighbor (obselete)"
+.It 2 Ta notnbr-unr Ta unreach Ta "Not a neighbor (obsolete)"
 .It 3 Ta addr-unr Ta unreach Ta "Address unreachable"
 .It 4 Ta port-unr Ta unreach Ta "Port unreachable"
 .It 0 Ta transit Ta timex Ta "Time exceeded in transit"
@@ -231,21 +231,21 @@ structure as the option value.
 .Ss "Non-privileged ICMPv6"
 .Pp
 .Tn ICMPv6
-sockets can be opened with the 
+sockets can be opened with the
 .Dv SOCK_DGRAM
 socket type without requiring root privileges. The synopsis is the following:
 .Pp
 .Fn socket AF_INET6 SOCK_DGRAM IPPROTO_ICMPV6
 .Pp
-This can only be used to send 
+This can only be used to send
 .Tn ICMPv6
-echo requests to gauge the quality of the connectivity to a host, to receive 
-destination unreachable message for path MTU discovery, or to receveive 
-time exceeded message for traceroute. 
+echo requests to gauge the quality of the connectivity to a host, to receive
+destination unreachable message for path MTU discovery, or to receive
+time exceeded message for traceroute.
 .Pp
-A socket opened with superuser privileges can send any kind of 
-.Tn ICMPv6 
-message and can also use the 
+A socket opened with superuser privileges can send any kind of
+.Tn ICMPv6
+message and can also use the
 .Xr ip6 4
 options that require superuser privileges.
 .Sh SEE ALSO

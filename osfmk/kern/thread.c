@@ -130,6 +130,7 @@
 
 #include <corpses/task_corpse.h>
 #include <kern/kpc.h>
+#include <vm/vm_map_xnu.h>
 
 #if CONFIG_PERVASIVE_CPI
 #include <kern/monotonic.h>
@@ -145,6 +146,7 @@
 
 #include <sys/kdebug.h>
 #include <sys/bsdtask_info.h>
+#include <sys/reason.h>
 #include <mach/sdt.h>
 #include <san/kasan.h>
 #include <san/kcov_stksz.h>
@@ -727,13 +729,15 @@ thread_terminate_self(void)
 	assert(thread->handoff_thread == THREAD_NULL);
 	assert(thread->th_work_interval == NULL);
 	assert(thread->t_rr_state.trr_value == 0);
+#if DEBUG || DEVELOPMENT
+	assert(thread->th_test_ctx == NULL);
+#endif
 
 	assert3u(0, ==, thread->sched_flags &
 	    (TH_SFLAG_WAITQ_PROMOTED |
 	    TH_SFLAG_RW_PROMOTED |
 	    TH_SFLAG_EXEC_PROMOTED |
 	    TH_SFLAG_FLOOR_PROMOTED |
-	    TH_SFLAG_PROMOTED |
 	    TH_SFLAG_DEPRESS));
 
 	thread_unlock(thread);
@@ -2435,12 +2439,19 @@ thread_priority_floor_end(thread_pri_floor_t *token)
  * XXX assuming current thread only, for now...
  */
 void
-thread_guard_violation(thread_t thread,
-    mach_exception_data_type_t code, mach_exception_data_type_t subcode, boolean_t fatal)
+thread_ast_mach_exception(
+	thread_t thread,
+	int os_reason,
+	exception_type_t exception_type,
+	mach_exception_data_type_t code,
+	mach_exception_data_type_t subcode,
+	bool fatal,
+	bool ktriage)
 {
 	assert(thread == current_thread());
 
-	/* Don't set up the AST for kernel threads; this check is needed to ensure
+	/*
+	 * Don't set up the AST for kernel threads; this check is needed to ensure
 	 * that the guard_exc_* fields in the thread structure are set only by the
 	 * current thread and therefore, don't require a lock.
 	 */
@@ -2448,27 +2459,41 @@ thread_guard_violation(thread_t thread,
 		return;
 	}
 
-	assert(EXC_GUARD_DECODE_GUARD_TYPE(code));
-
 	/*
 	 * Use the saved state area of the thread structure
 	 * to store all info required to handle the AST when
 	 * returning to userspace. It's possible that there is
-	 * already a pending guard exception. If it's non-fatal,
-	 * it can only be over-written by a fatal exception code.
+	 * already a pending guard exception.
+	 *
+	 * Fatal guard exceptions cannot be overwritten; non-fatal
+	 * guards can be overwritten by fatal guards.
 	 */
-	if (thread->guard_exc_info.code && (thread->guard_exc_fatal || !fatal)) {
+	if (thread->mach_exc_info.code && (thread->mach_exc_fatal || !fatal)) {
 		return;
 	}
 
-	thread->guard_exc_info.code = code;
-	thread->guard_exc_info.subcode = subcode;
-	thread->guard_exc_fatal = fatal ? 1 : 0;
+	thread->mach_exc_info.os_reason = os_reason;
+	thread->mach_exc_info.exception_type = exception_type;
+	thread->mach_exc_info.code = code;
+	thread->mach_exc_info.subcode = subcode;
+	thread->mach_exc_fatal = fatal;
+	thread->mach_exc_ktriage = ktriage;
 
 	spl_t s = splsched();
-	thread_ast_set(thread, AST_GUARD);
+	thread_ast_set(thread, AST_MACH_EXCEPTION);
 	ast_propagate(thread);
 	splx(s);
+}
+
+void
+thread_guard_violation(
+	thread_t                thread,
+	mach_exception_data_type_t code,
+	mach_exception_data_type_t subcode,
+	bool                    fatal)
+{
+	assert(EXC_GUARD_DECODE_GUARD_TYPE(code));
+	thread_ast_mach_exception(thread, OS_REASON_GUARD, EXC_GUARD, code, subcode, fatal, false);
 }
 
 #if CONFIG_DEBUG_SYSCALL_REJECTION
@@ -2478,27 +2503,18 @@ extern void rejected_syscall_guard_ast(thread_t __unused t, mach_exception_data_
 /*
  *	guard_ast:
  *
- *	Handle AST_GUARD for a thread. This routine looks at the
- *	state saved in the thread structure to determine the cause
- *	of this exception. Based on this value, it invokes the
- *	appropriate routine which determines other exception related
- *	info and raises the exception.
+ *	Handle AST_MACH_EXCEPTION with reason OS_REASON_GUARD for a thread. This
+ *	routine looks at the state saved in the thread structure to determine
+ *	the cause of this exception. Based on this value, it invokes the
+ *	appropriate routine which determines other exception related info and
+ *	raises the exception.
  */
-void
-guard_ast(thread_t t)
+static void
+guard_ast(thread_t t,
+    mach_exception_data_type_t code,
+    mach_exception_data_type_t subcode)
 {
-	const mach_exception_data_type_t
-	    code = t->guard_exc_info.code,
-	    subcode = t->guard_exc_info.subcode;
-
-	t->guard_exc_info.code = 0;
-	t->guard_exc_info.subcode = 0;
-	t->guard_exc_fatal = 0;
-
 	switch (EXC_GUARD_DECODE_GUARD_TYPE(code)) {
-	case GUARD_TYPE_NONE:
-		/* lingering AST_GUARD on the processor? */
-		break;
 	case GUARD_TYPE_MACH_PORT:
 		mach_port_guard_ast(t, code, subcode);
 		break;
@@ -2521,31 +2537,47 @@ guard_ast(thread_t t)
 	}
 }
 
+void
+mach_exception_ast(thread_t t)
+{
+	const int os_reason = t->mach_exc_info.os_reason;
+	const exception_type_t exception_type = t->mach_exc_info.exception_type;
+	const mach_exception_data_type_t
+	    code = t->mach_exc_info.code,
+	    subcode = t->mach_exc_info.subcode;
+	const bool
+	    ktriage = t->mach_exc_ktriage;
+
+	bzero(&t->mach_exc_info, sizeof(t->mach_exc_info));
+	t->mach_exc_fatal = 0;
+	t->mach_exc_ktriage = 0;
+
+	if (os_reason == OS_REASON_INVALID) {
+		/* lingering AST_MACH_EXCEPTION on the processor? */
+	} else if (os_reason == OS_REASON_GUARD) {
+		guard_ast(t, code, subcode);
+	} else {
+		task_t task = get_threadtask(t);
+		void *bsd_info = get_bsdtask_info(task);
+		uint32_t flags = PX_FLAGS_NONE;
+		if (ktriage) {
+			flags |= PX_KTRIAGE;
+		}
+
+		exception_info_t info = {
+			.os_reason = os_reason,
+			.exception_type = exception_type,
+			.mx_code = code,
+			.mx_subcode = subcode,
+		};
+		exit_with_mach_exception(bsd_info, info, flags);
+	}
+
+}
+
 static void
 thread_cputime_callback(int warning, __unused const void *arg0, __unused const void *arg1)
 {
-	if (warning == LEDGER_WARNING_ROSE_ABOVE) {
-#if CONFIG_TELEMETRY
-		/*
-		 * This thread is in danger of violating the CPU usage monitor. Enable telemetry
-		 * on the entire task so there are micro-stackshots available if and when
-		 * EXC_RESOURCE is triggered. We could have chosen to enable micro-stackshots
-		 * for this thread only; but now that this task is suspect, knowing what all of
-		 * its threads are up to will be useful.
-		 */
-		telemetry_task_ctl(current_task(), TF_CPUMON_WARNING, 1);
-#endif
-		return;
-	}
-
-#if CONFIG_TELEMETRY
-	/*
-	 * If the balance has dipped below the warning level (LEDGER_WARNING_DIPPED_BELOW) or
-	 * exceeded the limit, turn telemetry off for the task.
-	 */
-	telemetry_task_ctl(current_task(), TF_CPUMON_WARNING, 0);
-#endif
-
 	if (warning == 0) {
 		SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU();
 	}
@@ -3048,6 +3080,7 @@ thread_sched_call(
 	thread->sched_call = call;
 }
 
+
 uint64_t
 thread_tid(
 	thread_t        thread)
@@ -3198,13 +3231,13 @@ thread_shared_rsrc_policy_get(__unused thread_t thread, __unused cluster_shared_
 kern_return_t
 thread_shared_rsrc_policy_set(thread_t thread, uint32_t index, __unused cluster_shared_rsrc_type_t type, __unused shared_rsrc_policy_agent_t agent)
 {
-	return thread_bind_cluster_id(thread, index, THREAD_BIND_SOFT | THREAD_BIND_ELIGIBLE_ONLY);
+	return thread_soft_bind_cluster_id(thread, index, THREAD_BIND_ELIGIBLE_ONLY);
 }
 
 kern_return_t
 thread_shared_rsrc_policy_clear(thread_t thread, __unused cluster_shared_rsrc_type_t type, __unused shared_rsrc_policy_agent_t agent)
 {
-	return thread_bind_cluster_id(thread, 0, THREAD_UNBIND);
+	return thread_soft_bind_cluster_id(thread, 0, THREAD_UNBIND);
 }
 
 #endif /* CONFIG_SCHED_EDGE */
@@ -4119,7 +4152,7 @@ ctid_table_remove(thread_t thread)
 thread_t
 ctid_get_thread_unsafe(ctid_t ctid)
 {
-	if (ctid) {
+	if (ctid && compact_id_slab_valid(&ctid_table, ctid_unmangle(ctid))) {
 		return *compact_id_resolve(&ctid_table, ctid_unmangle(ctid));
 	}
 	return THREAD_NULL;

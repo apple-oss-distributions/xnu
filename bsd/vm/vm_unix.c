@@ -285,6 +285,9 @@ extern int vm_log_xnu_user_debug;
 SYSCTL_INT(_vm, OID_AUTO, log_xnu_user_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_log_xnu_user_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
+extern int vm_log_map_delete_permanent_prot_none;
+SYSCTL_INT(_vm, OID_AUTO, log_map_delete_permanent_prot_none, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_log_map_delete_permanent_prot_none, 0, "");
+
 extern int cs_executable_create_upl;
 extern int cs_executable_wire;
 SYSCTL_INT(_vm, OID_AUTO, cs_executable_create_upl, CTLFLAG_RD | CTLFLAG_LOCKED, &cs_executable_create_upl, 0, "");
@@ -306,6 +309,9 @@ SYSCTL_INT(_vm, OID_AUTO, macho_printf, CTLFLAG_RW | CTLFLAG_LOCKED, &macho_prin
 
 extern int apple_protect_pager_data_request_debug;
 SYSCTL_INT(_vm, OID_AUTO, apple_protect_pager_data_request_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &apple_protect_pager_data_request_debug, 0, "");
+
+extern unsigned int vm_object_copy_delayed_paging_wait_disable;
+EXPERIMENT_FACTOR_UINT(_vm, vm_object_copy_delayed_paging_wait_disable, &vm_object_copy_delayed_paging_wait_disable, FALSE, TRUE, "");
 
 #if __arm64__
 /* These are meant to support the page table accounting unit test. */
@@ -378,6 +384,17 @@ SYSCTL_INT(_vm, OID_AUTO, vm_shadow_max_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &v
 #endif /* VM_SCAN_FOR_SHADOW_CHAIN */
 
 SYSCTL_INT(_vm, OID_AUTO, vm_debug_events, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_debug_events, 0, "");
+
+#if PAGE_SLEEP_WITH_INHERITOR
+#if DEVELOPMENT || DEBUG
+extern uint32_t page_worker_table_size;
+SYSCTL_INT(_vm, OID_AUTO, page_worker_table_size, CTLFLAG_RD | CTLFLAG_LOCKED, &page_worker_table_size, 0, "");
+SCALABLE_COUNTER_DECLARE(page_worker_hash_collisions);
+SYSCTL_SCALABLE_COUNTER(_vm, page_worker_hash_collisions, page_worker_hash_collisions, "");
+SCALABLE_COUNTER_DECLARE(page_worker_inheritor_sleeps);
+SYSCTL_SCALABLE_COUNTER(_vm, page_worker_inheritor_sleeps, page_worker_inheritor_sleeps, "");
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* PAGE_SLEEP_WITH_INHERITOR */
 
 /*
  * Sysctl's related to data/stack execution.  See osfmk/vm/vm_map.c
@@ -546,24 +563,27 @@ vm_purge_filebacked_pagers(void)
 
 int
 useracc(
-	user_addr_t     addr,
-	user_size_t     len,
-	int     prot)
+	user_addr_ut    addr_u,
+	user_size_ut    len_u,
+	int             prot)
 {
 	vm_map_t        map;
+	vm_prot_t       vm_prot = VM_PROT_WRITE;
 
 	map = current_map();
-	return vm_map_check_protection(
-		map,
-		vm_map_trunc_page(addr,
-		vm_map_page_mask(map)),
-		vm_map_round_page(addr + len,
-		vm_map_page_mask(map)),
-		prot == B_READ ? VM_PROT_READ : VM_PROT_WRITE);
+
+	if (prot == B_READ) {
+		vm_prot = VM_PROT_READ;
+	}
+
+	return vm_map_check_protection(map, addr_u,
+	           vm_sanitize_compute_ut_end(addr_u, len_u), vm_prot,
+	           VM_SANITIZE_CALLER_USERACC);
 }
 
 #if XNU_PLATFORM_MacOSX
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 vslock_sanitize(
 	vm_map_t                map,
 	user_addr_ut            addr_u,
@@ -619,7 +639,7 @@ vslock(user_addr_ut addr, user_size_ut len)
 #endif /* XNU_PLATFORM_MacOSX */
 
 	kret = vm_map_wire_kernel(current_map(), addr,
-	    vm_sanitize_compute_unsafe_end(addr, len),
+	    vm_sanitize_compute_ut_end(addr, len),
 	    vm_sanitize_wrap_prot(VM_PROT_READ | VM_PROT_WRITE),
 	    VM_KERN_MEMORY_BSD,
 	    FALSE);
@@ -701,7 +721,7 @@ vsunlock(user_addr_ut addr, user_size_ut len, __unused int dirtied)
 #endif /* XNU_PLATFORM_MacOSX */
 
 	kret = vm_map_unwire(map, addr,
-	    vm_sanitize_compute_unsafe_end(addr, len), false);
+	    vm_sanitize_compute_ut_end(addr, len), false);
 	switch (kret) {
 	case KERN_SUCCESS:
 		return 0;
@@ -1697,6 +1717,133 @@ shared_region_map_and_slide_cleanup(
 #define SLIDE_AMOUNT_MASK ~SIXTEENK_PAGE_MASK
 #endif
 
+static inline __result_use_check kern_return_t
+shared_region_map_and_slide_2_np_sanitize(
+	struct proc                         *p,
+	user_addr_t                         mappings_userspace_addr,
+	unsigned int                        count,
+	shared_file_mapping_slide_np_t      *mappings)
+{
+	kern_return_t kr;
+	vm_map_t map = current_map();
+	mach_vm_address_t addr, end;
+	mach_vm_offset_t offset, offset_end;
+	mach_vm_size_t size, offset_size;
+	user_addr_t slide_start, slide_end, slide_size;
+	vm_prot_t cur;
+	vm_prot_t max;
+
+	user_addr_t user_addr = mappings_userspace_addr;
+
+	for (size_t i = 0; i < count; i++) {
+		shared_file_mapping_slide_np_ut mapping_u;
+		/*
+		 * First we bring each mapping struct into our kernel stack to
+		 * avoid TOCTOU.
+		 */
+		kr = shared_region_copyin(
+			p,
+			user_addr,
+			1, // copy 1 element at a time
+			sizeof(shared_file_mapping_slide_np_ut),
+			&mapping_u);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		/*
+		 * Then, we sanitize the data on the kernel stack.
+		 */
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_address_u,
+			mapping_u.sms_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_START
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE),
+			&addr,
+			&end,
+			&size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_file_offset_u,
+			mapping_u.sms_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			PAGE_MASK,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES),
+			&offset,
+			&offset_end,
+			&offset_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+		if (__improbable(0 != (offset & vm_map_page_mask(map)))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		/*
+		 * Unsafe access is immediately followed by wrap to
+		 * convert from addr to size.
+		 */
+		mach_vm_size_ut sms_slide_size_u =
+		    vm_sanitize_wrap_size(
+			VM_SANITIZE_UNSAFE_UNWRAP(
+				mapping_u.sms_slide_size_u));
+
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_slide_start_u,
+			sms_slide_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES),
+			&slide_start,
+			&slide_end,
+			&slide_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		kr = vm_sanitize_cur_and_max_prots(
+			mapping_u.sms_init_prot_u,
+			mapping_u.sms_max_prot_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			VM_PROT_SFM_EXTENSIONS_MASK | VM_PROT_TPRO,
+			&cur,
+			&max);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		/*
+		 * Finally, we move the data from the kernel stack to our
+		 * caller-allocated kernel heap buffer.
+		 */
+		mappings[i].sms_address = addr;
+		mappings[i].sms_size = size;
+		mappings[i].sms_file_offset = offset;
+		mappings[i].sms_slide_size = slide_size;
+		mappings[i].sms_slide_start = slide_start;
+		mappings[i].sms_max_prot = max;
+		mappings[i].sms_init_prot = cur;
+
+		if (__improbable(os_add_overflow(
+			    user_addr,
+			    sizeof(shared_file_mapping_slide_np_ut),
+			    &user_addr))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 int
 shared_region_map_and_slide_2_np(
 	struct proc                                  *p,
@@ -1762,13 +1909,22 @@ shared_region_map_and_slide_2_np(
 		goto done;
 	}
 
+	/*
+	 * struct shared_file_np does not have fields that are subject to
+	 * sanitization, it is thus copied from userspace as is.
+	 */
 	kr = shared_region_copyin(p, uap->files, files_count, sizeof(shared_files[0]), shared_files);
 	if (kr != KERN_SUCCESS) {
 		goto done;
 	}
 
-	kr = shared_region_copyin(p, uap->mappings, mappings_count, sizeof(mappings[0]), mappings);
-	if (kr != KERN_SUCCESS) {
+	kr = shared_region_map_and_slide_2_np_sanitize(
+		p,
+		uap->mappings_u,
+		mappings_count,
+		mappings);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		kr = vm_sanitize_get_kr(kr);
 		goto done;
 	}
 
@@ -1807,9 +1963,29 @@ shared_region_map_and_slide_2_np(
 				kr = KERN_FAILURE;
 				goto done;
 			}
-			mappings[m].sms_address += slide_amount;
+			if (__improbable(
+				    os_add_overflow(
+					    mappings[m].sms_address,
+					    slide_amount,
+					    &mappings[m].sms_address))) {
+				kr = KERN_INVALID_ARGUMENT;
+				goto done;
+			}
 			if (mappings[m].sms_slide_size != 0) {
-				mappings[m].sms_slide_start += slide_amount;
+				mach_vm_address_t discard;
+				/* Slide and check that new start/size pairs do not overflow. */
+				if (__improbable(
+					    os_add_overflow(
+						    mappings[m].sms_slide_start,
+						    slide_amount,
+						    &mappings[m].sms_slide_start) ||
+					    os_add_overflow(
+						    mappings[m].sms_slide_start,
+						    mappings[m].sms_slide_size,
+						    &discard))) {
+					kr = KERN_INVALID_ARGUMENT;
+					goto done;
+				}
 			}
 		}
 	}
@@ -2187,6 +2363,9 @@ extern unsigned int vm_page_kern_lpage_count;
 SYSCTL_INT(_vm, OID_AUTO, kern_lpage_count, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_page_kern_lpage_count, 0, "kernel used large pages");
 
+SCALABLE_COUNTER_DECLARE(vm_page_grab_count);
+SYSCTL_SCALABLE_COUNTER(_vm, pages_grabbed, vm_page_grab_count, "Total pages grabbed");
+
 #if DEVELOPMENT || DEBUG
 #if __ARM_MIXED_PAGE_SIZE__
 static int vm_mixed_pagesize_supported = 1;
@@ -2196,8 +2375,6 @@ static int vm_mixed_pagesize_supported = 0;
 SYSCTL_INT(_debug, OID_AUTO, vm_mixed_pagesize_supported, CTLFLAG_ANYBODY | CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_mixed_pagesize_supported, 0, "kernel support for mixed pagesize");
 
-SCALABLE_COUNTER_DECLARE(vm_page_grab_count);
-SYSCTL_SCALABLE_COUNTER(_vm, pages_grabbed, vm_page_grab_count, "Total pages grabbed");
 SYSCTL_ULONG(_vm, OID_AUTO, pages_freed, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_pageout_vminfo.vm_page_pages_freed, "Total pages freed");
 
@@ -2355,20 +2532,18 @@ SYSCTL_UINT(_vm, OID_AUTO, page_secluded_grab_for_iokit_success, CTLFLAG_RD | CT
 
 #endif /* CONFIG_SECLUDED_MEMORY */
 
-#pragma mark Deferred Reclaim
-
 #if CONFIG_DEFERRED_RECLAIM
-
+#pragma mark Deferred Reclaim
+SYSCTL_NODE(_vm, OID_AUTO, reclaim, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Deferred Memory Reclamation");
 #if DEVELOPMENT || DEBUG
 /*
  * VM reclaim testing
  */
-extern bool vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid_t pid);
+extern bool vm_deferred_reclamation_block_until_task_has_been_reclaimed(task_t task);
 
 static int
-sysctl_vm_reclaim_drain_async_queue SYSCTL_HANDLER_ARGS
+sysctl_vm_reclaim_wait_for_pid SYSCTL_HANDLER_ARGS
 {
-#pragma unused(arg1, arg2)
 	int error = EINVAL, pid = 0;
 	/*
 	 * Only send on write
@@ -2377,23 +2552,40 @@ sysctl_vm_reclaim_drain_async_queue SYSCTL_HANDLER_ARGS
 	if (error || !req->newptr) {
 		return error;
 	}
+	if (pid <= 0) {
+		return EINVAL;
+	}
+	proc_t p = proc_find(pid);
+	if (p == PROC_NULL) {
+		return ESRCH;
+	}
+	task_t t = proc_task(p);
+	if (t == TASK_NULL) {
+		proc_rele(p);
+		return ESRCH;
+	}
+	task_reference(t);
+	proc_rele(p);
 
-	bool success = vm_deferred_reclamation_block_until_pid_has_been_reclaimed(pid);
+	bool success = vm_deferred_reclamation_block_until_task_has_been_reclaimed(t);
 	if (success) {
 		error = 0;
 	}
+	task_deallocate(t);
 
 	return error;
 }
 
-SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_async_queue,
+SYSCTL_PROC(_vm_reclaim, OID_AUTO, wait_for_pid,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
-    &sysctl_vm_reclaim_drain_async_queue, "I", "");
+    &sysctl_vm_reclaim_wait_for_pid, "I",
+    "Block until the given pid has been drained by kernel GC");
 
 static int
-sysctl_vm_reclaim_from_pid SYSCTL_HANDLER_ARGS
+sysctl_vm_reclaim_drain_pid SYSCTL_HANDLER_ARGS
 {
 	int error = EINVAL;
+	kern_return_t kr;
 	pid_t pid;
 	error = sysctl_handle_int(oidp, &pid, 0, req);
 	/* Only reclaim on write */
@@ -2414,40 +2606,143 @@ sysctl_vm_reclaim_from_pid SYSCTL_HANDLER_ARGS
 	}
 	task_reference(t);
 	proc_rele(p);
-	vm_deferred_reclamation_reclaim_from_task_sync(t, UINT64_MAX);
+	kr = vm_deferred_reclamation_task_drain(t, RECLAIM_OPTIONS_NONE);
 	task_deallocate(t);
-	return 0;
+	return mach_to_bsd_errno(kr);
 }
 
-SYSCTL_PROC(_vm, OID_AUTO, reclaim_from_pid,
+SYSCTL_PROC(_vm_reclaim, OID_AUTO, drain_pid,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
-    &sysctl_vm_reclaim_from_pid, "I",
+    &sysctl_vm_reclaim_drain_pid, "I",
     "Drain the deferred reclamation buffer for a pid");
 
 static int
-sysctl_vm_reclaim_drain_all_buffers SYSCTL_HANDLER_ARGS
+proc_filter_reclaimable(proc_t p, __unused void *arg)
 {
-	/* Only reclaim on write */
+	task_t task = proc_task(p);
+	return vm_deferred_reclamation_task_has_ring(task);
+}
+
+static int
+proc_reclaim_drain(proc_t p, __unused void *arg)
+{
+	kern_return_t kr;
+	task_t task = proc_task(p);
+	kr = vm_deferred_reclamation_task_drain(task, RECLAIM_OPTIONS_NONE);
+	return mach_to_bsd_errno(kr);
+}
+
+static int
+sysctl_vm_reclaim_drain_all SYSCTL_HANDLER_ARGS
+{
+	int error;
+	int val;
 	if (!req->newptr) {
 		return EINVAL;
 	}
-	vm_deferred_reclamation_reclaim_all_memory(RECLAIM_OPTIONS_NONE);
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == FALSE) {
+		return error;
+	}
+	proc_iterate(PROC_ALLPROCLIST, proc_reclaim_drain, NULL,
+	    proc_filter_reclaimable, NULL);
 	return 0;
 }
 
-SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_all_buffers,
+SYSCTL_PROC(_vm_reclaim, OID_AUTO, drain_all,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
-    &sysctl_vm_reclaim_drain_all_buffers, "I",
-    "Drain all system-wide deferred reclamation buffers");
+    &sysctl_vm_reclaim_drain_all, "I",
+    "Fully reclaim from every deferred reclamation buffer on the system");
 
-
+extern uint32_t vm_reclaim_buffer_count;
+extern uint64_t vm_reclaim_gc_epoch;
+extern uint64_t vm_reclaim_gc_reclaim_count;
+#if XNU_TARGET_OS_IOS
 extern uint64_t vm_reclaim_max_threshold;
-extern uint64_t vm_reclaim_trim_divisor;
+#else /* !XNU_TARGET_OS_IOS */
+extern bool vm_reclaim_debug;
+extern bool vm_reclaim_enabled;
+extern uint64_t vm_reclaim_sampling_period_ns;
+extern uint64_t vm_reclaim_sampling_period_abs;
+extern uint32_t vm_reclaim_autotrim_pct_normal;
+extern uint32_t vm_reclaim_autotrim_pct_pressure;
+extern uint32_t vm_reclaim_autotrim_pct_critical;
+extern uint32_t vm_reclaim_wma_weight_base;
+extern uint32_t vm_reclaim_wma_weight_cur;
+extern uint32_t vm_reclaim_wma_denom;
+extern uint64_t vm_reclaim_abandonment_threshold;
+#endif /* XNU_TARGET_OS_IOS */
 
-SYSCTL_ULONG(_vm, OID_AUTO, reclaim_max_threshold, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_max_threshold, "");
-SYSCTL_ULONG(_vm, OID_AUTO, reclaim_trim_divisor, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_trim_divisor, "");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, reclaim_buffer_count,
+    CTLFLAG_RD | CTLFLAG_LOCKED, (uint32_t *)&vm_reclaim_buffer_count, 0,
+    "The number of deferred memory buffers currently alive");
+SYSCTL_QUAD(_vm_reclaim, OID_AUTO, reclaim_gc_epoch,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_gc_epoch,
+    "Number of times the global GC thread has run");
+SYSCTL_QUAD(_vm_reclaim, OID_AUTO, reclaim_gc_reclaim_count,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_gc_reclaim_count,
+    "Number of times the global GC thread has reclaimed from a buffer");
+#if XNU_TARGET_OS_IOS
+SYSCTL_QUAD(_vm_reclaim, OID_AUTO, max_threshold,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_max_threshold,
+    "Maximum amount of virtual memory (in B) that may be deferred without "
+    "synchronous reclamation");
+#else /* !XNU_TARGET_OS_IOS */
+SYSCTL_COMPAT_UINT(_vm_reclaim, OID_AUTO, enabled,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_enabled, 0,
+    "Whether deferred memory reclamation is enabled on this system");
+SYSCTL_COMPAT_UINT(_vm_reclaim, OID_AUTO, debug,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_debug, 0,
+    "Whether vm.reclaim debug logs are enabled");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, autotrim_pct_normal,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_autotrim_pct_normal, 0,
+    "Percentage of a task's lifetime max phys_footprint that must be reclaimable "
+    "to engage auto-trim when the system is operating normally");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, autotrim_pct_pressure,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_autotrim_pct_pressure, 0,
+    "Percentage of a task's lifetime max phys_footprint that must be reclaimable "
+    "to engage auto-trim when the system is under memory pressure");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, autotrim_pct_critical,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_autotrim_pct_critical, 0,
+    "Percentage of a task's lifetime max phys_footprint that must be reclaimable "
+    "to engage auto-trim when the system is under critical memory pressure");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, wma_weight_base,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_wma_weight_base, 0,
+    "Weight applied to historical minimum buffer size samples");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, wma_weight_cur,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_wma_weight_cur, 0,
+    "Weight applied to current sampled minimum buffer size");
+SYSCTL_UINT(_vm_reclaim, OID_AUTO, wma_denom,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_wma_denom, 0,
+    "Denominator for weighted moving average calculation");
+SYSCTL_QUAD(_vm_reclaim, OID_AUTO, abandonment_threshold,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &vm_reclaim_abandonment_threshold,
+    "The number of sampling periods between accounting updates that may elapse "
+    "before the buffer is considered \"abandoned\"");
+
+static int
+sysctl_vm_reclaim_sampling_period SYSCTL_HANDLER_ARGS
+{
+	uint64_t new_val_ns;
+	uint64_t old_val_ns = vm_reclaim_sampling_period_ns;
+	int err = sysctl_io_number(req, vm_reclaim_sampling_period_ns,
+	    sizeof(vm_reclaim_sampling_period_ns), &new_val_ns, NULL);
+	if (err || !req->newptr) {
+		return err;
+	}
+	if (new_val_ns != old_val_ns) {
+		vm_reclaim_sampling_period_ns = new_val_ns;
+		nanoseconds_to_absolutetime(vm_reclaim_sampling_period_ns, &vm_reclaim_sampling_period_abs);
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_vm_reclaim, OID_AUTO, sampling_period_ns,
+    CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, sysctl_vm_reclaim_sampling_period, "I",
+    "Interval (nanoseconds) at which to sample the minimum buffer size and "
+    "consider trimming excess");
+#endif /* XNU_TARGET_OS_IOS */
 #endif /* DEVELOPMENT || DEBUG */
-
 #endif /* CONFIG_DEFERRED_RECLAIM */
 
 #include <kern/thread.h>
@@ -2913,6 +3208,8 @@ SYSCTL_QUAD(_vm, OID_AUTO, object_shadow_forced, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_QUAD(_vm, OID_AUTO, object_shadow_skipped, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_object_shadow_skipped, "");
 
+
+
 SYSCTL_INT(_vm, OID_AUTO, vmtc_total, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vmtc_total, 0, "total text page corruptions detected");
 
@@ -3081,12 +3378,22 @@ extern int fbdp_no_panic;
 SYSCTL_INT(_vm, OID_AUTO, fbdp_no_panic, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, &fbdp_no_panic, 0, "");
 #endif /* MACH_ASSERT */
 
+extern uint64_t cluster_direct_write_wired;
+SYSCTL_QUAD(_vm, OID_AUTO, cluster_direct_write_wired, CTLFLAG_RD | CTLFLAG_LOCKED, &cluster_direct_write_wired, "");
+
 
 #if DEVELOPMENT || DEBUG
 
+static uint32_t
+sysctl_compressor_seg_magic(vm_c_serialize_add_data_t with_data)
+{
+#pragma unused(with_data)
+	return VM_C_SEGMENT_INFO_MAGIC;
+}
 
-/* The largest possible single segment + its slots is (sizeof(c_segment_info) + C_SLOT_MAX_INDEX * sizeof(c_slot_info)), so this should be enough  */
-#define SYSCTL_SEG_BUF_SIZE (8 * 1024)
+/* The largest possible single segment + its slots is
+ * (sizeof(c_segment_info) + C_SLOT_MAX_INDEX * sizeof(c_slot_info)) + (data of a single segment) */
+#define SYSCTL_SEG_BUF_SIZE (8 * 1024 + 64 * 1024)
 
 extern uint32_t c_segments_available;
 
@@ -3097,7 +3404,7 @@ struct sysctl_buf_header {
 /* This sysctl iterates over the populated c_segments and writes some info about each one and its slots.
  * instead of doing everything here, the function calls a function vm_compressor.c. */
 static int
-sysctl_compressor_segments(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+sysctl_compressor_segments_stream(struct sysctl_req *req, vm_c_serialize_add_data_t with_data)
 {
 	char* buf = kalloc_data(SYSCTL_SEG_BUF_SIZE, Z_WAITOK | Z_ZERO);
 	if (!buf) {
@@ -3108,12 +3415,12 @@ sysctl_compressor_segments(__unused struct sysctl_oid *oidp, __unused void *arg1
 	int segno = 0;
 	/* 4 byte header to identify the version of the formatting of the data.
 	 * This should be incremented if c_segment_info or c_slot_info are changed */
-	((struct sysctl_buf_header*)buf)->magic = VM_C_SEGMENT_INFO_MAGIC;
+	((struct sysctl_buf_header*)buf)->magic = sysctl_compressor_seg_magic(with_data);
 	offset += sizeof(uint32_t);
 
 	while (segno < c_segments_available) {
 		size_t left_sz = SYSCTL_SEG_BUF_SIZE - offset;
-		kern_return_t kr = vm_compressor_serialize_segment_debug_info(segno, buf + offset, &left_sz);
+		kern_return_t kr = vm_compressor_serialize_segment_debug_info(segno, buf + offset, &left_sz, with_data);
 		if (kr == KERN_NO_SPACE) {
 			/* failed to add another segment, push the current buffer out and try again */
 			if (offset == 0) {
@@ -3134,6 +3441,7 @@ sysctl_compressor_segments(__unused struct sysctl_oid *oidp, __unused void *arg1
 		} else {
 			offset += left_sz;
 			++segno;
+			assert(offset <= SYSCTL_SEG_BUF_SIZE);
 		}
 	}
 
@@ -3146,6 +3454,11 @@ out:
 	return error;
 }
 
+static int
+sysctl_compressor_segments(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	return sysctl_compressor_segments_stream(req, VM_C_SERIALIZE_DATA_NONE);
+}
 SYSCTL_PROC(_vm, OID_AUTO, compressor_segments, CTLTYPE_STRUCT | CTLFLAG_LOCKED | CTLFLAG_RD, 0, 0, sysctl_compressor_segments, "S", "");
 
 
@@ -3159,6 +3472,18 @@ sysctl_compressor_fragmentation_level(__unused struct sysctl_oid *oidp, __unused
 }
 
 SYSCTL_PROC(_vm, OID_AUTO, compressor_fragmentation_level, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_compressor_fragmentation_level, "IU", "");
+
+extern uint32_t vm_compressor_incore_fragmentation_wasted_pages(void);
+
+static int
+sysctl_compressor_incore_fragmentation_wasted_pages(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	uint32_t value = vm_compressor_incore_fragmentation_wasted_pages();
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, compressor_incore_fragmentation_wasted_pages, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_compressor_incore_fragmentation_wasted_pages, "IU", "");
+
 
 
 #define SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE (8 * 1024)

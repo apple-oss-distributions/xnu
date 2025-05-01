@@ -187,6 +187,7 @@ struct proc;
 struct proc_ro;
 #endif
 
+
 struct task {
 	/* Synchronization/destruction information */
 	decl_lck_mtx_data(, lock);      /* Task's lock */
@@ -292,6 +293,10 @@ struct task {
 	counter_t cow_faults;         /* copy on write fault counter */
 	counter_t messages_sent;      /* messages sent counter */
 	counter_t messages_received;  /* messages received counter */
+	counter_t pages_grabbed;      /* pages grabbed */
+	counter_t pages_grabbed_kern; /* pages grabbed (kernel) */
+	counter_t pages_grabbed_iopl; /* pages grabbed (iopl) */
+	counter_t pages_grabbed_upl;  /* pages grabbed (upl) */
 	uint32_t decompressions;      /* decompression counter (from threads that already terminated) */
 	uint32_t syscalls_mach;       /* mach system call counter */
 	uint32_t syscalls_unix;       /* unix system call counter */
@@ -332,6 +337,7 @@ struct task {
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
 #define TF_HAS_REPLY_PORT_TELEMETRY 0x10000000                          /* Rate limit telemetry for reply port security semantics violations rdar://100244531 */
+#define TF_HAS_PROVISIONAL_REPLY_PORT_TELEMETRY 0x20000000              /* Rate limit telemetry for creating provisional reply port rdar://136996362 */
 #define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
 #define TF_CARPLAY_MODE         0x80000000                              /* Set the carplay mode bit for CLPC */
 
@@ -413,6 +419,12 @@ struct task {
 
 #define task_set_reply_port_telemetry(task) \
 	((task)->t_flags |= TF_HAS_REPLY_PORT_TELEMETRY)
+
+#define task_has_provisional_reply_port_telemetry(task) \
+	(((task)->t_flags & TF_HAS_PROVISIONAL_REPLY_PORT_TELEMETRY) != 0)
+
+#define task_set_provisional_reply_port_telemetry(task) \
+	((task)->t_flags |= TF_HAS_PROVISIONAL_REPLY_PORT_TELEMETRY)
 
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0
@@ -600,6 +612,10 @@ struct task {
 	void * XNU_PTRAUTH_SIGNED_PTR("task.exclave_crash_info") exclave_crash_info;
 	uint32_t exclave_crash_info_length;
 #endif /* CONFIG_EXCLAVES */
+
+	/* Auxiliary code-signing information */
+	uint64_t task_cs_auxiliary_info;
+
 };
 
 ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, void *);
@@ -776,13 +792,15 @@ __BEGIN_DECLS
 extern boolean_t                task_is_app_suspended(task_t task);
 extern bool task_is_exotic(task_t task);
 extern bool task_is_alien(task_t task);
+extern boolean_t task_get_platform_binary(task_t task);
 #endif /* KERNEL_PRIVATE */
 
 #ifdef  XNU_KERNEL_PRIVATE
 
 /* Hold all threads in a task, Wait for task to stop running, just to get off CPU */
 extern kern_return_t task_hold_and_wait(
-	task_t          task);
+	task_t          task,
+	bool            suspend_conclave);
 
 /* Release hold on all threads in a task */
 extern kern_return_t    task_release(
@@ -975,9 +993,6 @@ extern void             task_disable_mach_hardening(
 extern bool     task_opted_out_mach_hardening(
 	task_t task);
 #endif /* XNU_TARGET_OS_OSX */
-
-extern boolean_t task_get_platform_binary(
-	task_t task);
 
 extern void
 task_set_hardened_runtime(
@@ -1216,12 +1231,10 @@ struct _task_ledger_indices {
 #if CONFIG_MEMORYSTATUS
 	int memorystatus_dirty_time;
 #endif /* CONFIG_MEMORYSTATUS */
-#if DEBUG || DEVELOPMENT
 	int pages_grabbed;
 	int pages_grabbed_kern;
 	int pages_grabbed_iopl;
 	int pages_grabbed_upl;
-#endif
 #if CONFIG_FREEZE
 	int frozen_to_swap;
 #endif /* CONFIG_FREEZE */
@@ -1246,11 +1259,7 @@ struct _task_ledger_indices {
  * flags, you need to increment this count.
  * Otherwise, PPL systems will panic at boot.
  */
-#if DEVELOPMENT || DEBUG
 #define TASK_LEDGER_NUM_SMALL_INDICES 33
-#else
-#define TASK_LEDGER_NUM_SMALL_INDICES 29
-#endif /* DEVELOPMENT || DEBUG */
 extern struct _task_ledger_indices task_ledgers;
 
 /* requires task to be unlocked, returns a referenced thread */
@@ -1277,7 +1286,9 @@ extern void task_bank_init(task_t task);
 
 #if CONFIG_MEMORYSTATUS
 extern void task_ledger_settle_dirty_time(task_t t);
+extern void task_ledger_settle_dirty_time_locked(task_t t);
 #endif /* CONFIG_MEMORYSTATUS */
+extern void task_ledger_settle(task_t t);
 
 #if CONFIG_ARCADE
 extern void task_prep_arcade(task_t task, thread_t thread);
@@ -1313,7 +1324,6 @@ extern void task_copy_fields_for_exec(task_t dst_task, task_t src_task);
 
 extern void task_copy_vmobjects(task_t task, vm_object_query_t query, size_t len, size_t *num);
 extern void task_get_owned_vmobjects(task_t task, size_t buffer_size, vmobject_list_output_t buffer, size_t* output_size, size_t* entries);
-extern void task_store_owned_vmobject_info(task_t to_task, task_t from_task);
 
 extern void task_set_filter_msg_flag(task_t task, boolean_t flag);
 extern boolean_t task_get_filter_msg_flag(task_t task);
@@ -1324,7 +1334,7 @@ extern void task_set_pac_exception_fatal_flag(task_t task);
 #endif /*__has_feature(ptrauth_calls)*/
 
 extern bool task_is_jit_exception_fatal(task_t task);
-extern void task_set_jit_exception_fatal_flag(task_t task);
+extern void task_set_jit_flags(task_t task);
 
 extern bool task_needs_user_signed_thread_state(task_t task);
 extern void task_set_tecs(task_t task);
@@ -1362,12 +1372,14 @@ kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnod
 kern_return_t task_launch_conclave(mach_port_name_t port);
 void task_clear_conclave(task_t task);
 void task_stop_conclave(task_t task, bool gather_crash_bt);
+void task_suspend_conclave(task_t task);
+void task_resume_conclave(task_t task);
 kern_return_t task_stop_conclave_upcall(void);
 kern_return_t task_stop_conclave_upcall_complete(void);
 kern_return_t task_suspend_conclave_upcall(uint64_t *, size_t);
-struct xnuupcalls_conclavesharedbuffer_s;
+struct conclave_sharedbuffer_t;
 kern_return_t task_crash_info_conclave_upcall(task_t task,
-    const struct xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
+    const struct conclave_sharedbuffer_t *shared_buf, uint32_t length);
 typedef struct exclaves_resource exclaves_resource_t;
 exclaves_resource_t *task_get_conclave(task_t task);
 void task_set_conclave_untaintable(task_t task);
@@ -1549,8 +1561,16 @@ extern bool task_is_translated(task_t task);
 void task_procname(task_t task, char *buf, int size);
 const char *task_best_name(task_t task);
 
+void task_set_ast_mach_exception(task_t task);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
+
+
+#ifdef KERNEL_PRIVATE
+kern_return_t task_set_cs_auxiliary_info(task_t task, uint64_t info);
+uint64_t      task_get_cs_auxiliary_info_kdp(task_t task);
+#endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 

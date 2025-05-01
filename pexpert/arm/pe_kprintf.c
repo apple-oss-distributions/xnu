@@ -38,7 +38,7 @@ PE_init_kprintf_config(void)
 		panic("Platform Expert not initialized");
 	}
 
-	if (debug_boot_arg & DB_KPRT) {
+	if (debug_boot_arg & (DB_KPRT | DB_PRT)) {
 		disable_serial_output = false;
 	}
 

@@ -147,7 +147,8 @@ static errno_t lo_demux(struct ifnet *, struct mbuf *, char *,
     protocol_family_t *);
 static errno_t
 lo_framer(struct ifnet *, struct mbuf **, const struct sockaddr *,
-    const char *, const char *, u_int32_t *, u_int32_t *);
+    IFNET_LLADDR_T, IFNET_FRAME_TYPE_T,
+    u_int32_t *, u_int32_t *);
 static errno_t lo_add_proto(struct ifnet *, protocol_family_t,
     const struct ifnet_demux_desc *, u_int32_t);
 static errno_t lo_del_proto(struct ifnet *, protocol_family_t);
@@ -155,7 +156,7 @@ static int lo_output(struct ifnet *, struct mbuf *);
 static errno_t lo_pre_enqueue(struct ifnet *, struct mbuf *);
 static void lo_start(struct ifnet *);
 static errno_t lo_pre_output(struct ifnet *, protocol_family_t, struct mbuf **,
-    const struct sockaddr *, void *, char *, char *);
+    const struct sockaddr *, void *, IFNET_FRAME_TYPE_RW_T, IFNET_LLADDR_RW_T);
 static errno_t lo_input(struct ifnet *, protocol_family_t, struct mbuf *);
 static void lo_rtrequest(int, struct rtentry *, struct sockaddr *);
 static errno_t lo_ioctl(struct ifnet *, u_long, void *);
@@ -202,7 +203,8 @@ lo_demux(struct ifnet *ifp, struct mbuf *m, char *frame_header,
 
 static errno_t
 lo_framer(struct ifnet *ifp, struct mbuf **m, const struct sockaddr *dest,
-    const char *dest_linkaddr, const char *frame_type,
+    IFNET_LLADDR_T dest_linkaddr,
+    IFNET_FRAME_TYPE_T frame_type,
     u_int32_t *prepend_len, u_int32_t *postpend_len)
 {
 #pragma unused(ifp, dest, dest_linkaddr)
@@ -222,7 +224,7 @@ lo_framer(struct ifnet *ifp, struct mbuf **m, const struct sockaddr *dest,
 	}
 
 	header = mtod(*m, struct loopback_header *);
-	bcopy(dlil_frame_type(frame_type), &header->protocol, sizeof(u_int32_t));
+	bcopy(frame_type, &header->protocol, sizeof(u_int32_t));
 	return 0;
 }
 
@@ -429,8 +431,8 @@ lo_start(struct ifnet *ifp)
  */
 static errno_t
 lo_pre_output(struct ifnet *ifp, protocol_family_t protocol_family,
-    struct mbuf **m, const struct sockaddr *dst, void *route, char *frame_type,
-    char *dst_addr)
+    struct mbuf **m, const struct sockaddr *dst, void *route,
+    IFNET_FRAME_TYPE_RW_T frame_type, IFNET_LLADDR_RW_T dst_addr)
 {
 #pragma unused(ifp, dst, dst_addr)
 	rtentry_ref_t rt = route;
@@ -452,7 +454,7 @@ lo_pre_output(struct ifnet *ifp, protocol_family_t protocol_family,
 		}
 	}
 
-	bcopy(&protocol_family, dlil_frame_type(frame_type), sizeof(protocol_family));
+	bcopy(&protocol_family, frame_type, sizeof(protocol_family));
 
 	return 0;
 }

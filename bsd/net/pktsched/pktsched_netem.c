@@ -1158,6 +1158,22 @@ done_no_output:
 int
 netem_enqueue(struct netem *ne, classq_pkt_t *p, bool *pdrop)
 {
+	switch (p->cp_ptype) {
+	case QP_MBUF: {
+		struct pkthdr *pkth = &(p->cp_mbuf->m_pkthdr);
+		pkth->pkt_flags &= ~PKTF_FLOW_ADV;
+		break;
+	}
+	case QP_PACKET: {
+		struct __kern_packet *kp = p->cp_kpkt;
+		kp->pkt_pflags32 &= ~PKT_F_FLOW_ADV;
+		break;
+	}
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
 	return ne->netem_enqueue(ne, p, pdrop);
 }
 

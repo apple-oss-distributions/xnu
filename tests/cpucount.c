@@ -260,7 +260,13 @@ T_DECL(count_cpus,
 
 T_DECL(count_clusters,
     "Tests we can schedule bound threads on all cpu clusters and that _os_cpu_cluster_number matches",
-    XNU_T_META_SOC_SPECIFIC)
+    XNU_T_META_SOC_SPECIFIC,
+#if __x86_64__
+    T_META_ENABLED(false /* rdar://133956403 */)
+#else
+    T_META_ENABLED(true)
+#endif
+    )
 {
 	int rv;
 

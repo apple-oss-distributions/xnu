@@ -36,8 +36,8 @@
 #include <vm/vm_map_internal.h>
 
 #include <IOKit/IOHibernatePrivate.h>
-
 #include <kern/policy_internal.h>
+#include <sys/kern_memorystatus_xnu.h>
 
 LCK_GRP_DECLARE(vm_swap_data_lock_grp, "vm_swap_data");
 LCK_MTX_DECLARE(vm_swap_data_lock, &vm_swap_data_lock_grp);
@@ -650,8 +650,6 @@ extern int32_t c_segment_pages_compressed_incore_late_swapout;
 extern uint32_t c_segment_pages_compressed_nearing_limit;
 extern uint32_t c_segment_count;
 extern uint32_t c_segments_nearing_limit;
-
-boolean_t       memorystatus_kill_on_VM_compressor_space_shortage(boolean_t);
 
 extern bool freezer_incore_cseg_acct;
 #endif /* CONFIG_FREEZE */
@@ -2425,7 +2423,7 @@ vm_swap_low_on_space(void)
 	return false;
 }
 
-int
+bool
 vm_swap_out_of_space(void)
 {
 	if ((vm_num_swap_files == vm_num_swap_files_config) &&
@@ -2434,10 +2432,10 @@ vm_swap_out_of_space(void)
 		 * Last swapfile and we have only space for the
 		 * last few swapouts.
 		 */
-		return 1;
+		return true;
 	}
 
-	return 0;
+	return false;
 }
 
 boolean_t

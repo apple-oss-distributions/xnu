@@ -80,16 +80,8 @@ static SECURITY_READ_ONLY_LATE(uint16_t) sme_svl_b;
 static SECURITY_READ_ONLY_LATE(zone_t) sme_ss_zone;
 #endif
 
-#if HAVE_MACHINE_THREAD_MATRIX_STATE
-struct arm_matrix_cpu_state {
-#if HAS_ARM_FEAT_SME
-	bool have_sme;
-	bool za_is_enabled;
-#endif
-};
-
-static void
-machine_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state)
+void
+arm_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state)
 {
 #if HAS_ARM_FEAT_SME
 	cpu_state->have_sme = arm_sme_version() > 0;
@@ -99,8 +91,11 @@ machine_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state)
 		cpu_state->za_is_enabled = false;
 	}
 #endif /* HAS_ARM_FEAT_SME */
+
+#if !HAS_ARM_FEAT_SME
+#pragma unused(cpu_state)
+#endif
 }
-#endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
 /*
  * Routine: consider_machine_collect
@@ -196,7 +191,7 @@ static void
 machine_switch_matrix_context(thread_t old, thread_t new)
 {
 	struct arm_matrix_cpu_state cpu_state;
-	machine_get_matrix_cpu_state(&cpu_state);
+	arm_get_matrix_cpu_state(&cpu_state);
 
 
 #if HAS_ARM_FEAT_SME
@@ -275,8 +270,12 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 
 
 	new_pmap = new->map->pmap;
-	if (old->map->pmap != new_pmap) {
-		pmap_switch(new_pmap);
+	bool pmap_changed = old->map->pmap != new_pmap;
+	bool sec_override_changed =
+	    false;
+
+	if (pmap_changed || sec_override_changed) {
+		pmap_switch(new_pmap, new);
 	} else {
 		/*
 		 * If the thread is preempted while performing cache or TLB maintenance,
@@ -344,7 +343,9 @@ machine_thread_on_core(thread_t thread)
 boolean_t
 machine_thread_on_core_allow_invalid(thread_t thread)
 {
-	extern int _copyin_atomic64(const char *src, uint64_t *dst);
+	#define _copyin_fn      _copyin_atomic64
+
+	extern int _copyin_fn(const char *src, uint64_t *dst);
 	uint64_t addr;
 
 	/*
@@ -358,10 +359,12 @@ machine_thread_on_core_allow_invalid(thread_t thread)
 		return false;
 	}
 	thread_require(thread);
-	if (_copyin_atomic64((void *)&thread->machine.CpuDatap, &addr) == 0) {
+	if (_copyin_fn((void *)&thread->machine.CpuDatap, &addr) == 0) {
 		return addr != 0;
 	}
 	return false;
+
+#undef _copyin_fn
 }
 
 
@@ -657,7 +660,6 @@ machine_thread_matrix_state_dup(thread_t target)
 void
 machine_thread_init(void)
 {
-
 #if HAS_ARM_FEAT_SME
 	if (arm_sme_version()) {
 		sme_svl_b = arm_sme_svl_b();
@@ -858,6 +860,13 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 	arm_debug_state_t  off_state;
 	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
+
+	// Non-developers should never need to have hardware break/watchpoints
+	// set on their phones.
+	extern bool developer_mode_state(void);
+	if (!developer_mode_state()) {
+		return;
+	}
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
@@ -1060,6 +1069,13 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 	arm_debug_state_t  off_state;
 	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
+
+	// Non-developers should never need to have hardware break/watchpoints
+	// set on their phones.
+	extern bool developer_mode_state(void);
+	if (!developer_mode_state()) {
+		return;
+	}
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
@@ -1405,7 +1421,7 @@ machine_csv(__unused cpuvn_e cve)
 	return 0;
 }
 
-#if __ARM_ARCH_8_5__
+#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 void
 arm_context_switch_requires_sync()
 {

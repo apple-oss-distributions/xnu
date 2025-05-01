@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Apple Inc.  All rights reserved.
+// Copyright (c) 2024 Apple Inc.  All rights reserved.
 
 #include <mach/mach_time.h>
 
@@ -16,10 +16,21 @@
 #define kfree_type(x, y, z) free(z)
 #define PE_parse_boot_argn(x, y, z) FALSE
 
+/* Mock locks */
+typedef void *lck_ticket_t;
+#define decl_lck_mtx_data(class, name)     class int name
+#define decl_simple_lock_data(class, name) class int name
 #define pset_lock(x) (void)x
 #define pset_unlock(x) (void)x
+#define pset_assert_locked(x) (void)x
 #define thread_lock(x) (void)x
 #define thread_unlock(x) (void)x
+
+/* Processor-related */
+#define PERCPU_DECL(type_t, name) type_t name
+#include <kern/processor.h>
+processor_t processor_array[MAX_SCHED_CPUS];
+processor_set_t pset_array[MAX_PSETS];
 
 /* Expected global(s) */
 static task_t kernel_task = NULL;
@@ -50,10 +61,16 @@ struct thread {
 	struct { processor_t    runq; } __runq; /* internally managed run queue assignment, see above comment */
 	sched_bucket_t          th_sched_bucket;
 	processor_t             bound_processor;        /* bound to a processor? */
+	processor_t             last_processor;         /* processor last dispatched on */
+	ast_t                   reason;         /* why we blocked */
 	int                     state;
 #define TH_WAIT                 0x01            /* queued for waiting */
 #define TH_RUN                  0x04            /* running or on runq */
 #define TH_IDLE                 0x80            /* idling processor */
+#define TH_SFLAG_DEPRESS                0x0040          /* normal depress yield */
+#define TH_SFLAG_POLLDEPRESS            0x0080          /* polled depress yield */
+#define TH_SFLAG_DEPRESSED_MASK         (TH_SFLAG_DEPRESS | TH_SFLAG_POLLDEPRESS)
+#define TH_SFLAG_BOUND_SOFT             0x20000         /* thread is soft bound to a cluster; can run anywhere if bound cluster unavailable */
 	uint64_t                thread_id;             /* system wide unique thread-id */
 	struct {
 		uint64_t user_time;
@@ -69,6 +86,14 @@ struct thread {
 	struct priority_queue_entry_sched       th_clutch_pri_link;
 	queue_chain_t                           th_clutch_timeshare_link;
 	uint32_t                sched_flags;            /* current flag bits */
+#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
+	uint32_t                 th_bound_cluster_id;
+#if CONFIG_SCHED_EDGE
+	bool            th_bound_cluster_enqueued;
+	bool            th_shared_rsrc_enqueued[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+	bool            th_shared_rsrc_heavy_user[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+	bool            th_shared_rsrc_heavy_perf_control[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+#endif /* CONFIG_SCHED_EDGE */
 };
 
 void
@@ -136,28 +161,18 @@ sched_clutch_for_thread_group(struct thread_group *thread_group)
 	return &(thread_group->tg_sched_clutch);
 }
 
-inline uint64_t
+uint64_t
 thread_group_get_id(struct thread_group *tg)
 {
 	return tg->tg_id;
 }
 
-/*
- * processor and processor_set structs from osfmk/kern/processor.h containing
- * only fields needed by the Clutch runqueue logic
- */
-struct processor_set {
-	uint32_t pset_cluster_id;
-	struct sched_clutch_root pset_clutch_root; /* clutch hierarchy root */
-};
-struct processor {
-	processor_set_t         processor_set;  /* assigned set */
-	struct run_queue        runq;                   /* runq for this processor */
-	struct thread          *active_thread;          /* thread running on processor */
-	bool                    first_timeslice;        /* has the quantum expired since context switch */
-	int                     current_pri;            /* priority of current thread */
-	int                     cpu_id;                 /* platform numeric id */
-	processor_t             processor_primary;
-	bool                    current_is_bound;       /* current thread is bound to this processor */
-	struct thread_group    *current_thread_group;   /* thread_group of current thread */
-};
+#if CONFIG_SCHED_EDGE
+
+bool
+thread_shared_rsrc_policy_get(thread_t thread, cluster_shared_rsrc_type_t type)
+{
+	return thread->th_shared_rsrc_heavy_user[type] || thread->th_shared_rsrc_heavy_perf_control[type];
+}
+
+#endif /* CONFIG_SCHED_EDGE */

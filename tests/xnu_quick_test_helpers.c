@@ -54,7 +54,7 @@ create_target_directory( const char * the_targetp )
 
 /*
  * create_random_name - creates a file with a random / unique name in the given directory.
- * when do_open is true we create a file else we generaate a name that does not exist in the
+ * when do_open is true we create a file else we generate a name that does not exist in the
  * given directory (we do not create anything when do_open is 0).
  * WARNING - caller provides enough space in path buffer for longest possible name.
  * WARNING - assumes caller has appended a trailing '/' on the path passed to us.

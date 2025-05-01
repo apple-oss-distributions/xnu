@@ -41,6 +41,15 @@
 #include <vm/vm_protos.h>
 
 
+#if defined(APPLEAVALANCHE) && defined(ARM64_BOARD_CONFIG_T6020)
+#define CHECK_RDAR_145882231 1
+#endif
+
+#if defined(CHECK_RDAR_145882231)
+SECURITY_READ_ONLY_LATE(bool) needs_rdar_145882231 = FALSE;
+extern char gTargetTypeBuffer[16];
+#endif /* CHECK_RDAR_145882231 */
+
 #if __arm64__
 
 void configure_misc_apple_boot_args(void);
@@ -111,6 +120,27 @@ cpu_needs_throttle_tunable(uint32_t midr_pnum)
 void
 configure_late_apple_regs(bool cold_boot)
 {
+#if defined(CHECK_RDAR_145882231)
+	if (cold_boot) {
+		/* We only want the rdar://145882231 tunable to apply to J236c */
+		if (0 == strncmp(gTargetTypeBuffer, "J236c", sizeof(gTargetTypeBuffer))) {
+			needs_rdar_145882231 = true;
+		}
+	}
+
+	/* rdar://145882231 */
+	if (needs_rdar_145882231 && arm64_is_p_core()) {
+		uint64_t hid16  = __builtin_arm_rsr64("HID16");
+		hid16 |= ARM64_REG_HID16_leqThrottleAggr;
+		__builtin_arm_wsr64("HID16", hid16);
+		hid16 = __builtin_arm_rsr64("HID16");
+		const uint64_t expect = hid16 | ARM64_REG_HID16_leqThrottleAggr;
+		if (expect != hid16) {
+			panic("HID16 not as expected, Got: 0x%llx, Expected: 0x%llx", hid16, expect);
+		}
+	}
+#endif /* CHECK_RDAR_145882231 */
+
 	const ml_topology_info_t *tinfo = ml_get_topology_info();
 	uint32_t midr_pnum = machine_read_midr() & MIDR_EL1_PNUM_MASK;
 	uint64_t reg_val;
@@ -146,6 +176,8 @@ configure_late_apple_regs(bool cold_boot)
 	}
 #endif /* APPLEAVALANCHE */
 
+#if defined(APPLEEVEREST)
+#endif /* APPLEEVEREST */
 }
 #endif /* APPLE_ARM64_ARCH_FAMILY */
 
@@ -228,3 +260,4 @@ ml_non_arm64e_user_jop_pid(void)
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 }
 #endif /* HAS_APPLE_PAC */
+

@@ -3032,7 +3032,7 @@ skt_aqstatpr(const char *interface)
 	scheduler = ifcqs->ifqs_scheduler;
 
 	os_log(OS_LOG_DEFAULT, "%s:"
-	    "     [ sched: %18s  qlength:  %3d/%3d ]\n",
+	    "     [ sched: %18s  qlength:  %3u/%3u ]\n",
 	    interface, sched2str(ifcqs->ifqs_scheduler),
 	    ifcqs->ifqs_len, ifcqs->ifqs_maxlen);
 	os_log(OS_LOG_DEFAULT, "     [ dequeued pkts: %10llu  bytes: %10llu "
@@ -3076,7 +3076,7 @@ print_fq_codel_stats(int pri, struct fq_codel_classstats *fqst,
 		return;
 	}
 	os_log(OS_LOG_DEFAULT, "=====================================================\n");
-	os_log(OS_LOG_DEFAULT, "     [ pri: %s (%d)\tsrv_cl: 0x%x\tquantum: %d\tdrr_max: %d ]\n",
+	os_log(OS_LOG_DEFAULT, "     [ pri: %s (%u)\tsrv_cl: 0x%x\tquantum: %u\tdrr_max: %u ]\n",
 	    pri2str(fqst->fcls_pri), fqst->fcls_pri,
 	    fqst->fcls_service_class, fqst->fcls_quantum,
 	    fqst->fcls_drr_max);

@@ -154,9 +154,13 @@ struct cs_blob {
 	/* Validation category used for TLE */
 	unsigned int    csb_validation_category;
 
+	/* Auxiliary bit-map for code-signing information */
+	uint64_t    csb_auxiliary_info;
+
 #if CODE_SIGNING_MONITOR
 	void *XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_csm_obj") csb_csm_obj;
 	bool csb_csm_managed;
+	uint32_t csb_csm_trust_level;
 #endif
 };
 

@@ -39,6 +39,7 @@
 #include <arm64/instructions.h>
 
 #include <kern/debug.h>
+#include <kern/exc_guard.h>
 #include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/task.h>
@@ -72,6 +73,7 @@
 #include <kern/policy_internal.h>
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
 #endif
 
 #include <prng/entropy.h>
@@ -88,6 +90,7 @@
 #if CONFIG_UBSAN_MINIMAL
 #include <san/ubsan_minimal.h>
 #endif
+
 
 
 #ifdef CONFIG_BTI_TELEMETRY
@@ -211,6 +214,10 @@ unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * p
 extern void
 mach_syscall(struct arm_saved_state*);
 
+#if CONFIG_SPTM
+bool sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr);
+#endif /* CONFIG_SPTM */
+
 #if CONFIG_DTRACE
 extern kern_return_t dtrace_user_probe(arm_saved_state_t* regs);
 extern boolean_t dtrace_tally_fault(user_addr_t);
@@ -277,6 +284,8 @@ static arm_saved_state64_t *original_faulting_state = NULL;
 
 TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
 
+extern const vm_map_address_t physmap_base;
+extern const vm_map_address_t physmap_end;
 extern vm_offset_t static_memory_end;
 
 /*
@@ -308,9 +317,9 @@ copyio_recovery_addr(ptrdiff_t offset)
 #endif
 
 static inline struct copyio_recovery_entry *
-find_copyio_recovery_entry(arm_saved_state_t *state)
+find_copyio_recovery_entry(uint64_t pc)
 {
-	ptrdiff_t offset = copyio_recovery_offset(get_saved_state_pc(state));
+	ptrdiff_t offset = copyio_recovery_offset(pc);
 	struct copyio_recovery_entry *e;
 
 	for (e = copyio_recover_table; e < copyio_recover_table_end; e++) {
@@ -539,7 +548,9 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 	static int twice = 2;
 	if (twice > 0) {
 		twice--;
-		SOCD_TRACE_XNU(KERNEL_STATE_PANIC, ADDR(state->pc),
+		SOCD_TRACE_XNU(KERNEL_STATE_PANIC,
+		    SOCD_TRACE_MODE_STICKY_TRACEPOINT,
+		    ADDR(state->pc),
 		    PACK_LSB(VALUE(state->lr), VALUE(ss_valid)),
 		    PACK_2X32(VALUE(state->esr), VALUE(state->cpsr)),
 		    VALUE(state->far));
@@ -816,6 +827,18 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		thread_reset_pcs_will_fault(thread);
 	}
 
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown && current_thread() != NULL)) {
+		/*
+		 * If we initiated panic lockdown, we must disable preemption before
+		 * enabling interrupts. While unlikely, preempting the panicked thread
+		 * after lockdown has occurred may hang the system if all cores end up
+		 * blocked while attempting to return to user space.
+		 */
+		disable_preemption();
+	}
+#endif /* CONFIG_SPTM */
+
 	/* Inherit the interrupt masks from previous context */
 	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
 		ml_set_interrupts_enabled(TRUE);
@@ -1027,28 +1050,41 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, ARM64_KDBG_CODE_KERNEL | class) | DBG_FUNC_END,
 		    esr, VM_KERNEL_ADDRHIDE(far), VM_KERNEL_UNSLIDE(get_saved_state_pc(state)), 0, 0);
 	}
+
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown)) {
+#if CONFIG_XNUPOST
+		bool can_recover = !!(expected_fault_handler);
+#else
+		bool can_recover = false;
+#endif /* CONFIG_XNU_POST */
+
+		if (can_recover) {
+			/*
+			 * If we matched an exception handler, this was a simulated lockdown
+			 * and so we can recover. Re-enable preemption if we disabled it.
+			 */
+			if (current_thread() != NULL) {
+				enable_preemption();
+			}
+		} else {
+			/*
+			 * fleh already triggered a lockdown but we, for whatever reason,
+			 * didn't end up finding a reason to panic. Catch all panic in this
+			 * case.
+			 * Note that the panic here has no security benefit as the system is
+			 * already hosed, this is merely for telemetry.
+			 */
+			panic_with_thread_kernel_state("Panic lockdown initiated", state);
+		}
+	}
+#endif /* CONFIG_SPTM */
+
 #if MACH_ASSERT
 	if (preemption_level != sleh_get_preemption_level()) {
 		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
 	}
 #endif
-
-#if CONFIG_SPTM
-	if (did_initiate_panic_lockdown
-#if CONFIG_XNUPOST
-	    /* Do not engage the panic interlock if we matched a fault handler */
-	    && !expected_fault_handler
-#endif /* CONFIG_XNUPOST */
-	    ) {
-		/*
-		 *  fleh already triggered a lockdown but we, for whatever reason, didn't
-		 *  end up finding a reason to panic. Catch all panic in this case.
-		 *  Note that the panic here has no security benefit as the system is already
-		 *  hosed, this is merely for telemetry.
-		 */
-		panic_with_thread_kernel_state("Panic lockdown initiated", state);
-	}
-#endif /* CONFIG_SPTM */
 }
 
 /*
@@ -1169,30 +1205,28 @@ ptrauth_key_to_string(ptrauth_key key)
 	}
 }
 
-static void __attribute__((noreturn))
+static const char *
 ptrauth_handle_brk_trap(void *tstate, uint16_t comment)
 {
+	kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
 	arm_saved_state_t *state = (arm_saved_state_t *)tstate;
-#define MSG_FMT "Break 0x%04X instruction exception from kernel. Ptrauth failure with %s key resulted in 0x%016llx"
-	char msg[strlen(MSG_FMT)
-	- strlen("0x%04X") + strlen("0xFFFF")
-	- strlen("%s") + strlen("IA")
-	- strlen("0x%016llx") + strlen("0xFFFFFFFFFFFFFFFF")
-	+ 1];
+
 	ptrauth_key key = (ptrauth_key)(comment - PTRAUTH_TRAP_START);
 	const char *key_str = ptrauth_key_to_string(key);
-	snprintf(msg, sizeof(msg), MSG_FMT, comment, key_str, saved_state64(state)->x[16]);
-#undef MSG_FMT
 
-	panic_with_thread_kernel_state(msg, state);
-	__builtin_unreachable();
+	snprintf(pr->buf, sizeof(pr->buf),
+	    "Break 0x%04X instruction exception from kernel. "
+	    "Ptrauth failure with %s key resulted in 0x%016llx",
+	    comment, key_str, saved_state64(state)->x[16]);
+
+	return pr->buf;
 }
 #endif /* __has_feature(ptrauth_calls) */
 
 #if HAS_TELEMETRY_KERNEL_BRK
 static uint32_t bound_chk_violations_event;
 
-static void
+static const char *
 xnu_soft_trap_handle_breakpoint(
 	void              *tstate,
 	uint16_t          comment)
@@ -1208,66 +1242,81 @@ xnu_soft_trap_handle_breakpoint(
 	if (comment == CLANG_SOFT_TRAP_BOUND_CHK) {
 		os_atomic_inc(&bound_chk_violations_event, relaxed);
 	}
+	return NULL;
 }
 #endif /* HAS_TELEMETRY_KERNEL_BRK */
 
-static void
+static const char *
 xnu_hard_trap_handle_breakpoint(void *tstate, uint16_t comment)
 {
-	switch (comment) {
-	case XNU_HARD_TRAP_SAFE_UNLINK: {
-#define MSG_FMT "panic: corrupt list around element %p"
-		char msg[strlen(MSG_FMT) - strlen("%p") + 18 + 1];
-		arm_saved_state64_t *state = saved_state64(tstate);
+	kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+	arm_saved_state64_t *state = saved_state64(tstate);
 
-		snprintf(msg, sizeof(msg), MSG_FMT, (void *)state->x[8]);
-		panic_with_thread_kernel_state(msg, tstate);
-#undef MSG_FMT
-	}
+	switch (comment) {
+	case XNU_HARD_TRAP_SAFE_UNLINK:
+		snprintf(pr->buf, sizeof(pr->buf),
+		    "panic: corrupt list around element %p",
+		    (void *)state->x[8]);
+		return pr->buf;
+
 	case XNU_HARD_TRAP_STRING_CHK:
-		panic_with_thread_kernel_state("panic: string operation caused an overflow", tstate);
+		return "panic: string operation caused an overflow";
+
+	case XNU_HARD_TRAP_ASSERT_FAILURE:
+		/*
+		 * Read the implicit assert arguments, see:
+		 * ML_TRAP_REGISTER_1: x8
+		 * ML_TRAP_REGISTER_2: x16
+		 * ML_TRAP_REGISTER_3: x17
+		 */
+		panic_assert_format(pr->buf, sizeof(pr->buf),
+		    (struct mach_assert_hdr *)state->x[8],
+		    state->x[16], state->x[17]);
+		return pr->buf;
+
 	default:
-		break;
+		return NULL;
 	}
 }
 
 #if __has_feature(ptrauth_calls)
 KERNEL_BRK_DESCRIPTOR_DEFINE(ptrauth_desc,
-    .type                = KERNEL_BRK_TYPE_PTRAUTH,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_PTRAUTH,
     .base                = PTRAUTH_TRAP_START,
     .max                 = PTRAUTH_TRAP_START + ptrauth_key_asdb,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = ptrauth_handle_brk_trap);
 #endif
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
-    .type                = KERNEL_BRK_TYPE_CLANG,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_CLANG,
     .base                = CLANG_ARM_TRAP_START,
     .max                 = CLANG_ARM_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = NULL);
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
-    .type                = KERNEL_BRK_TYPE_LIBCXX,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_LIBCXX,
     .base                = LIBCXX_TRAP_START,
     .max                 = LIBCXX_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = NULL);
 
 #if HAS_TELEMETRY_KERNEL_BRK
 KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_soft_traps_desc,
-    .type                = KERNEL_BRK_TYPE_TELEMETRY,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TELEMETRY,
     .base                = XNU_SOFT_TRAP_START,
     .max                 = XNU_SOFT_TRAP_END,
-    .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ true),
     .handle_breakpoint   = xnu_soft_trap_handle_breakpoint);
 #endif /* HAS_TELEMETRY_KERNEL_BRK */
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_hard_traps_desc,
-    .type                = KERNEL_BRK_TYPE_XNU,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_XNU,
     .base                = XNU_HARD_TRAP_START,
     .max                 = XNU_HARD_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = xnu_hard_trap_handle_breakpoint);
 
 static void
@@ -1278,9 +1327,7 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint64_t esr)
 {
 	uint16_t comment = ISS_BRK_COMMENT(esr);
 	const struct kernel_brk_descriptor *desc;
-
-#define MSG_FMT "Break 0x%04X instruction exception from kernel. Panic (by design)"
-	char msg[strlen(MSG_FMT) - strlen("0x%04X") + strlen("0xFFFF") + 1];
+	const char *msg = NULL;
 
 	desc = find_brk_descriptor_by_comment(comment);
 
@@ -1289,25 +1336,36 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint64_t esr)
 	}
 
 #if HAS_TELEMETRY_KERNEL_BRK
-	if (desc->options & KERNEL_BRK_TELEMETRY_OPTIONS) {
-		telemetry_kernel_brk(desc->type, desc->options, (void *)state, comment);
+	if (desc->options.enable_trap_telemetry) {
+		trap_telemetry_report_exception(
+			/* trap_type   */ desc->type,
+			/* trap_code   */ comment,
+			/* options     */ desc->options.telemetry_options,
+			/* saved_state */ (void *)state);
 	}
 #endif
 
 	if (desc->handle_breakpoint) {
-		desc->handle_breakpoint(state, comment); /* May trigger panic */
+		msg = desc->handle_breakpoint(state, comment);
 	}
 
 #if HAS_TELEMETRY_KERNEL_BRK
 	/* Still alive? Check if we should recover. */
-	if (desc->options & KERNEL_BRK_RECOVERABLE) {
+	if (desc->options.recoverable) {
 		add_saved_state_pc(state, 4);
 		return;
 	}
 #endif
 
 brk_out:
-	snprintf(msg, sizeof(msg), MSG_FMT, comment);
+	if (msg == NULL) {
+		kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+
+		msg = tsnprintf(pr->buf, sizeof(pr->buf),
+		    "Break 0x%04X instruction exception from kernel. "
+		    "Panic (by design)",
+		    comment);
+	}
 
 	panic_with_thread_kernel_state(msg, state);
 	__builtin_unreachable();
@@ -1398,6 +1456,8 @@ fault_addr_bit(vm_offset_t fault_addr, unsigned int bit)
 	return (bool)((fault_addr >> bit) & 1);
 }
 
+extern int gARM_FEAT_FPAC;
+extern int gARM_FEAT_FPACCOMBINE;
 extern int gARM_FEAT_PAuth2;
 
 /**
@@ -1405,8 +1465,38 @@ extern int gARM_FEAT_PAuth2;
  * corresponding to the specified kind of ptrauth key.
  */
 static bool
-user_fault_addr_matches_pac_error_code(vm_offset_t fault_addr, bool data_key)
+user_fault_matches_pac_error_code(vm_offset_t fault_addr, uint64_t pc, bool data_key)
 {
+	if (gARM_FEAT_FPACCOMBINE) {
+		/*
+		 * CPUs with FPACCOMBINE always raise PAC Fail exceptions during
+		 * PAC failure.  If the CPU took any other kind of exception, we
+		 * can rule out PAC as the root cause.
+		 */
+		return false;
+	}
+
+	if (data_key && gARM_FEAT_FPAC) {
+		uint32_t instr;
+		int err = copyin(pc, (char *)&instr, sizeof(instr));
+		if (!err && !ARM64_INSTR_IS_LDRAx(instr)) {
+			/*
+			 * On FPAC-enabled devices, PAC failure can only cause
+			 * data aborts during "combined" LDRAx instructions.  If
+			 * PAC fails during a discrete AUTxx + LDR/STR
+			 * instruction sequence, then the AUTxx instruction
+			 * raises a PAC Fail exception rather than poisoning its
+			 * output address.
+			 *
+			 * In principle the same logic applies to instruction
+			 * aborts.  But we have no way to identify the exact
+			 * instruction that caused the abort, so we can't tell
+			 * if it was a combined branch + auth instruction.
+			 */
+			return false;
+		}
+	}
+
 	bool instruction_tbi = !(get_tcr() & TCR_TBID0_TBI_DATA_ONLY);
 	bool tbi = data_key || __improbable(instruction_tbi);
 
@@ -1463,7 +1553,8 @@ handle_pc_align(arm_saved_state_t *ss)
 
 	exc = EXC_BAD_ACCESS;
 #if __has_feature(ptrauth_calls)
-	if (user_fault_addr_matches_pac_error_code(get_saved_state_pc(ss), false)) {
+	uint64_t pc = get_saved_state_pc(ss);
+	if (user_fault_matches_pac_error_code(pc, pc, false)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
 #endif /* __has_feature(ptrauth_calls) */
@@ -1488,7 +1579,7 @@ handle_sp_align(arm_saved_state_t *ss)
 
 	exc = EXC_BAD_ACCESS;
 #if __has_feature(ptrauth_calls)
-	if (user_fault_addr_matches_pac_error_code(get_saved_state_sp(ss), true)) {
+	if (user_fault_matches_pac_error_code(get_saved_state_sp(ss), get_saved_state_pc(ss), true)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
 #endif /* __has_feature(ptrauth_calls) */
@@ -1664,6 +1755,10 @@ handle_sw_step_debug(arm_saved_state_t *state)
 	__builtin_unreachable();
 }
 
+#if MACH_ASSERT
+TUNABLE_WRITEABLE(int, panic_on_jit_guard, "panic_on_jit_guard", 0);
+#endif /* MACH_ASSERT */
+
 static void
 handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
@@ -1800,23 +1895,38 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	codes[1] = fault_addr;
 #if __has_feature(ptrauth_calls)
 	bool is_data_abort = (ESR_EC(esr) == ESR_EC_DABORT_EL0);
-	if (user_fault_addr_matches_pac_error_code(fault_addr, is_data_abort)) {
+	if (user_fault_matches_pac_error_code(fault_addr, get_saved_state_pc(state), is_data_abort)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
 	if (user_fault_in_self_restrict_mode(thread) &&
 	    task_is_jit_exception_fatal(get_threadtask(thread))) {
-		int flags = PX_KTRIAGE | PX_NO_EXCEPTION_UTHREAD;
+		int flags = PX_KTRIAGE;
 		exception_info_t info = {
-			.os_reason = OS_REASON_GUARD,
-			.exception_type = EXC_GUARD,
-			.mx_code = GUARD_REASON_JIT,
-			.mx_subcode = fault_addr,
+			.os_reason = OS_REASON_SELF_RESTRICT,
+			.exception_type = exc,
+			.mx_code = codes[0],
+			.mx_subcode = codes[1]
 		};
+
+#if MACH_ASSERT
+		printf("\nGUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx\n",
+		    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr);
+		if (panic_on_jit_guard &&
+		    current_task()->thread_count == 1 &&
+		    thread->syscalls_unix < 24) {
+			panic("GUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx state %p j %d t %d s user 0x%llx (0x%llx) jb 0x%llx (0x%llx)",
+			    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr, state,
+			    0, 0, 0ull, 0ull,
+			    0ull, 0ull
+			    );
+		}
+#endif /* MACH_ASSERT */
 
 		exit_with_mach_exception(current_proc(), info, flags);
 	}
+
 
 	exception_triage(exc, codes, numcodes);
 	__builtin_unreachable();
@@ -1836,16 +1946,29 @@ panic_on_invalid_recovery_handler(arm_saved_state_t *state, struct copyio_recove
 	panic("attempt to set invalid recovery handler %p on kernel saved-state %p", recover, state);
 }
 
+/**
+ * Update a thread saved-state to store an error code in x0 and branch to a
+ * copyio recovery handler.
+ *
+ * @param state original saved-state
+ * @param esr ESR_ELx value for the fault taken
+ * @param fault_addr FAR_ELx value for the fault taken
+ * @param thread target thread
+ * @param recover destination copyio recovery handler
+ * @param x0 error code to populate into x0
+ */
 static void
-handle_kernel_abort_recover(
+handle_kernel_abort_recover_with_error_code(
 	arm_saved_state_t              *state,
 	uint64_t                        esr,
 	vm_offset_t                     fault_addr,
 	thread_t                        thread,
-	struct copyio_recovery_entry   *_Nonnull recover)
+	struct copyio_recovery_entry   *_Nonnull recover,
+	uint64_t                       x0)
 {
 	thread->machine.recover_esr = esr;
 	thread->machine.recover_far = fault_addr;
+	saved_state64(state)->x[0] = x0;
 #if defined(HAS_APPLE_PAC)
 	MANIPULATE_SIGNED_THREAD_STATE(state,
 	    "adrp	x6, _copyio_recover_table_end@page		\n"
@@ -1857,8 +1980,15 @@ handle_kernel_abort_recover(
 	    "1:								\n"
 	    "adrp	x6, _copyio_recover_table@page			\n"
 	    "add	x6, x6, _copyio_recover_table@pageoff		\n"
-	    "cmp	%[recover], x6					\n"
-	    "b.ge	1f						\n"
+	    "subs	x7, %[recover], x6				\n"
+	    "b.pl	1f						\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
+	    "1:								\n"
+	    "udiv	x8, x7, %[SIZEOF_RECOVER]			\n"
+	    "mul	x8, x8, %[SIZEOF_RECOVER]			\n"
+	    "cmp	x7, x8						\n"
+	    "b.eq	1f						\n"
 	    "bl		_panic_on_invalid_recovery_handler		\n"
 	    "brk	#0						\n"
 	    "1:								\n"
@@ -1866,23 +1996,39 @@ handle_kernel_abort_recover(
 	    "add	x1, x1, x6					\n"
 	    "str	x1, [x0, %[SS64_PC]]				\n",
 	    [recover] "r"(recover),
+	    [SIZEOF_RECOVER] "r"((sizeof(*recover))),
 	    [CRE_RECOVERY] "i"(offsetof(struct copyio_recovery_entry, cre_recovery))
 	    );
 #else
+	ptrdiff_t recover_offset = (uintptr_t)recover - (uintptr_t)copyio_recover_table;
 	if ((uintptr_t)recover < (uintptr_t)copyio_recover_table ||
-	    (uintptr_t)recover >= (uintptr_t)copyio_recover_table_end) {
+	    (uintptr_t)recover >= (uintptr_t)copyio_recover_table_end ||
+	    (recover_offset % sizeof(*recover)) != 0) {
 		panic_on_invalid_recovery_handler(state, recover);
 	}
 	saved_state64(state)->pc = copyio_recovery_addr(recover->cre_recovery);
 #endif
 }
 
+static inline void
+handle_kernel_abort_recover(
+	arm_saved_state_t              *state,
+	uint64_t                        esr,
+	vm_offset_t                     fault_addr,
+	thread_t                        thread,
+	struct copyio_recovery_entry   *_Nonnull recover)
+{
+	handle_kernel_abort_recover_with_error_code(state, esr, fault_addr, thread, recover, EFAULT);
+}
+
+
 static void
 handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
 {
 	thread_t thread = current_thread();
-	struct copyio_recovery_entry *recover = find_copyio_recovery_entry(state);
+	struct copyio_recovery_entry *recover = find_copyio_recovery_entry(
+		get_saved_state_pc(state));
 
 #ifndef CONFIG_XNUPOST
 	(void)expected_fault_handler;
@@ -1911,21 +2057,11 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 		vm_map_t      map;
 		int           interruptible;
 
-		/*
-		 * Ensure no faults in the physical aperture. This could happen if
-		 * a page table is incorrectly allocated from the read only region
-		 * when running with KTRR.
-		 */
-
 #ifdef CONFIG_XNUPOST
 		if (expected_fault_handler && expected_fault_handler(state)) {
 			return;
 		}
 #endif /* CONFIG_XNUPOST */
-
-		if (fault_addr >= gVirtBase && fault_addr < static_memory_end) {
-			panic_with_thread_kernel_state("Unexpected fault in kernel static region\n", state);
-		}
 
 		if (VM_KERNEL_ADDRESS(fault_addr) || thread == THREAD_NULL || recover == 0) {
 			/*
@@ -1943,7 +2079,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 			 * chance to find it in the VM ranges. Do not mess with exec fault cases.
 			 */
 			if (!((fault_type) & VM_PROT_EXECUTE)) {
-				fault_addr = vm_memtag_canonicalize_address(fault_addr);
+				fault_addr = vm_memtag_canonicalize(map, fault_addr);
 			}
 #endif /* CONFIG_KERNEL_TAGGING */
 		} else {
@@ -1960,8 +2096,16 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 
 		}
 
-		if (fault_addr >= gVirtBase && fault_addr < static_memory_end) {
-			panic_with_thread_kernel_state("Unexpected fault in kernel static region\n", state);
+		/*
+		 * Ensure no faults in the physical aperture. This could happen if
+		 * a page table is incorrectly allocated from the read only region
+		 * when running with KTRR.
+		 */
+		if (__improbable(fault_addr >= physmap_base) && (fault_addr < physmap_end)) {
+			panic_with_thread_kernel_state("Unexpected fault in kernel physical aperture", state);
+		}
+		if (__improbable(fault_addr >= gVirtBase && fault_addr < static_memory_end)) {
+			panic_with_thread_kernel_state("Unexpected fault in kernel static region", state);
 		}
 
 		/* check to see if it is just a pmap ref/modify fault */
@@ -1987,12 +2131,20 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 		    startup_phase < STARTUP_SUB_EARLY_BOOT ||
 		    current_cpu_datap()->cpu_hibernate)) {
 			if (result != KERN_PROTECTION_FAILURE) {
+				// VM will query this property when deciding to throttle this fault, we don't want to
+				// throttle kernel faults for copyio faults. The presence of a recovery entry is used as a
+				// proxy for being in copyio code.
+				bool const was_recover = thread->recover;
+				thread->recover = was_recover || recover;
+
 				/*
 				 *  We have to "fault" the page in.
 				 */
 				result = vm_fault(map, fault_addr, fault_type,
 				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, interruptible,
 				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+
+				thread->recover = was_recover;
 			}
 
 			if (result == KERN_SUCCESS) {
@@ -2517,12 +2669,6 @@ sleh_interrupt_handler_prologue(arm_saved_state_t *state, unsigned int type)
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_INTR, 0) | DBG_FUNC_START,
 	    0, pc, is_user, type);
-
-#if CONFIG_TELEMETRY
-	if (telemetry_needs_record) {
-		telemetry_mark_curthread(is_user, FALSE);
-	}
-#endif /* CONFIG_TELEMETRY */
 }
 
 static void
@@ -2555,7 +2701,7 @@ sleh_invalid_stack(arm_context_t *context, uint64_t esr __unused, vm_offset_t fa
 
 #if MACH_ASSERT
 static int trap_handled;
-static void
+static const char *
 handle_recoverable_kernel_trap(
 	__unused void     *tstate,
 	uint16_t          comment)
@@ -2564,13 +2710,16 @@ handle_recoverable_kernel_trap(
 
 	printf("Recoverable trap handled.\n");
 	trap_handled = 1;
+
+	return NULL;
 }
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(test_desc,
-    .type                = KERNEL_BRK_TYPE_TEST,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TEST,
     .base                = TEST_RECOVERABLE_SOFT_TRAP,
     .max                 = TEST_RECOVERABLE_SOFT_TRAP,
-    .options             = KERNEL_BRK_RECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ false),
     .handle_breakpoint   = handle_recoverable_kernel_trap);
 
 static int
@@ -2585,3 +2734,120 @@ recoverable_kernel_trap_test(__unused int64_t in, int64_t *out)
 SYSCTL_TEST_REGISTER(recoverable_kernel_trap, recoverable_kernel_trap_test);
 
 #endif
+
+#if CONFIG_SPTM
+/**
+ * Evaluate the panic lockdown policy for a synchronous EL1 SP0 exception
+ *
+ * Returns true if panic lockdown should be initiated (but does not itself do
+ * so)
+ */
+__SECURITY_STACK_DISALLOWED_PUSH
+bool
+sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+    uint64_t far, uint64_t spsr)
+{
+	const esr_exception_class_t class = ESR_EC(esr);
+	const bool any_exceptions_masked = spsr & DAIF_STANDARD_DISABLE;
+
+	switch (class) {
+	case ESR_EC_PC_ALIGN:   /* PC misaligned (should never happen) */
+	case ESR_EC_IABORT_EL1: /* Potential iPAC failure (poisoned PC) */
+	case ESR_EC_PAC_FAIL: { /* FPAC fail */
+		return true;
+	}
+
+	case ESR_EC_BRK_AARCH64: {
+		/*
+		 * Breakpoints are used on non-FPAC systems to signal some PAC failures
+		 */
+#if HAS_TELEMETRY_KERNEL_BRK
+		const struct kernel_brk_descriptor *desc;
+		desc = find_brk_descriptor_by_comment(ISS_BRK_COMMENT(esr));
+		if (desc && desc->options.recoverable) {
+			/*
+			 * We matched a breakpoint and it's recoverable, skip lockdown.
+			 */
+			return false;
+		}
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
+
+		/*
+		 * If we don't support telemetry breakpoints and/or didn't match a
+		 * recoverable breakpoint, the exception is fatal.
+		 */
+		return true;
+	}
+
+	case ESR_EC_DABORT_EL1: {
+		const struct copyio_recovery_entry *cre =
+		    find_copyio_recovery_entry(elr);
+		if (cre) {
+
+			/*
+			 * copyio faults are recoverable regardless of whether or not
+			 * exceptions are masked.
+			 */
+			return false;
+		}
+
+
+		/*
+		 * Heuristic: if FAR != XPAC(FAR), the pointer was likely corrupted
+		 * due to PAC.
+		 */
+		const uint64_t far_stripped =
+		    (uint64_t)ptrauth_strip((void *)far, ptrauth_key_asda);
+
+		if (far != far_stripped) {
+			/* potential dPAC failure (poisoined address) */
+			return true;
+		}
+
+		if (any_exceptions_masked && startup_phase >= STARTUP_SUB_LOCKDOWN) {
+			/*
+			 * Any data abort taken with exceptions masked is fatal if we're
+			 * past early boot.
+			 */
+			return true;
+		}
+
+		return false;
+	}
+
+	case ESR_EC_UNCATEGORIZED: {
+		/* Undefined instruction (GDBTRAP for stackshots, etc.) */
+		return false;
+	}
+
+	case ESR_EC_BTI_FAIL: {
+		/* Kernel BTI exceptions are recoverable only in telemetry mode */
+#ifdef CONFIG_BTI_TELEMETRY
+		return false;
+#else
+		return true;
+#endif /* CONFIG_BTI_TELEMETRY */
+	}
+
+	default: {
+		if (!any_exceptions_masked) {
+			/*
+			 * When exceptions are not masked, we default-allow exceptions.
+			 */
+			return false;
+		}
+
+		if (startup_phase < STARTUP_SUB_LOCKDOWN) {
+			/*
+			 * Ignore early boot exceptions even if exceptions are masked.
+			 */
+			return false;
+		}
+
+		/* Default-deny all others when exceptions are masked */
+		return true;
+	}
+	}
+}
+__SECURITY_STACK_DISALLOWED_POP
+#endif /* CONFIG_SPTM */

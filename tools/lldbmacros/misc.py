@@ -6,6 +6,7 @@ from xnu import *
 import xnudefines
 
 from scheduler import *
+from xnu import GetTaskTerminatedUserSysTime
 
 @lldb_command('showmcastate')
 def showMCAstate(cmd_args=None):
@@ -89,7 +90,6 @@ def dumpTimerList(mpqueue, processor=None):
 
                     # There's got to be a better way to stringify the enum
                     flavorname = str(flavor).partition(" = ")[2]
-
                     extra_string += "{:s} {:s}".format(group.tcg_name, flavorname)
 
                 if "thread_timer_expire" in func_name :
@@ -485,9 +485,9 @@ def ReadMsr64(cmd_args=None):
     """ Read the specified MSR. The CPU can be optionally specified
         Syntax: readmsr64 <msr> [lcpu]
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(ReadMsr64.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     
     msr_address = ArgumentStringToInt(cmd_args[0])
     if len(cmd_args) > 1:
@@ -504,8 +504,8 @@ def WriteMsr64(cmd_args=None):
         Syntax: writemsr64 <msr> <value> [lcpu]
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print(WriteMsr64.__doc__)
-        return
+        raise ArgumentError()
+
     msr_address = ArgumentStringToInt(cmd_args[0])
     write_val = ArgumentStringToInt(cmd_args[1])
     if len(cmd_args) > 2:
@@ -563,7 +563,7 @@ def QIterate(cmd_args=None, cmd_options={}):
         e.g.
             iterate_linkage `&coalitions_q` 'coalition *' coalitions
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("usage: iterate_linkage {queue_head_ptr} {element_type} {field_name}")
 
     qhead = kern.GetValueFromAddress(cmd_args[0], 'struct queue_entry *')
@@ -621,6 +621,10 @@ def LBRBacktrace(cmd_args=None):
         options:
             None
     """
+    if IsDebuggingCore() or kern.arch.startswith('arm'):
+        print("Command is only supported on live Intel systems")
+        return
+
     DecoratedLBRStack = SymbolicateLBR()
     if (DecoratedLBRStack):
         print(DecoratedLBRStack)

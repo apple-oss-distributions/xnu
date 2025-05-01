@@ -128,10 +128,10 @@ extern void             lck_mtx_assert(
 	unsigned                int    type);
 
 #if MACH_ASSERT
-#define LCK_MTX_ASSERT(lck, type) lck_mtx_assert((lck),(type))
-#else /* MACH_ASSERT */
+#define LCK_MTX_ASSERT(lck, type)  MACH_ASSERT_DO(lck_mtx_assert(lck, type))
+#else /* !MACH_ASSERT */
 #define LCK_MTX_ASSERT(lck, type)
-#endif /* MACH_ASSERT */
+#endif /* !MACH_ASSERT */
 
 #if DEBUG
 #define LCK_MTX_ASSERT_DEBUG(lck, type) lck_mtx_assert((lck),(type))

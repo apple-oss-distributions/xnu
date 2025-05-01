@@ -252,7 +252,10 @@ struct IOMDDMAMapArgs {
 
 struct IOMDDMAWalkSegmentArgs {
 	UInt64 fOffset;                 // Input/Output offset
-	UInt64 fIOVMAddr, fLength;      // Output variables
+	/* Output variables.
+	 * Note to reader: fIOVMAddr is (sometimes?) a DART-mapped device address.
+	 */
+	UInt64 fIOVMAddr, fLength;
 	UInt8 fMapped;                  // Input Variable, Require mapped IOVMA
 	UInt64 fMappedBase;             // Input base of mapping
 };
@@ -1157,6 +1160,11 @@ public:
 	static uint64_t memoryReferenceGetDMAMapLength(
 		IOMemoryReference * ref,
 		uint64_t * offset);
+
+	IOByteCount readBytes(IOByteCount offset,
+	    void * bytes, IOByteCount withLength) override;
+	IOByteCount writeBytes(IOByteCount offset,
+	    const void * bytes, IOByteCount withLength) override;
 
 #endif
 

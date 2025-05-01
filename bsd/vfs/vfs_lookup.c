@@ -127,6 +127,10 @@ static int              lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *nd
 
 extern lck_rw_t rootvnode_rw_lock;
 
+#define RESOLVE_NOFOLLOW_ANY  0x00000001
+#define RESOLVE_CHECKED       0x80000000
+static int              lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len);
+
 /*
  * Convert a pathname into a pointer to a locked inode.
  *
@@ -182,11 +186,15 @@ namei(struct nameidata *ndp)
 	int volfs_restarts = 0;
 #endif
 	size_t bytes_copied = 0;
+	size_t resolve_prefix_len = 0;
 	vnode_t rootdir_with_usecount = NULLVP;
 	vnode_t startdir_with_usecount = NULLVP;
 	vnode_t usedvp_dp = NULLVP;
 	int32_t old_count = 0;
+	uint32_t resolve_flags = 0;
+	int resolve_error = 0;
 	bool dp_has_iocount = false;
+	bool clear_usedvp = false;
 
 #if DIAGNOSTIC
 	if (!vfs_context_ucred(ctx) || !p) {
@@ -249,19 +257,71 @@ retry_copy:
 		    cnp->cn_pnlen, &bytes_copied);
 	}
 	if (error == ENAMETOOLONG && !(cnp->cn_flags & HASBUF)) {
+		if (bytes_copied == PATHBUFLEN) {
+			resolve_error = lookup_check_for_resolve_prefix(cnp->cn_pnbuf, PATHBUFLEN,
+			    PATHBUFLEN, &resolve_flags, &resolve_prefix_len);
+			/* errors from copyinstr take precedence over resolve_error */
+			if (!resolve_error && resolve_prefix_len) {
+				ndp->ni_dirp += resolve_prefix_len;
+				resolve_prefix_len = 0;
+			}
+		}
+
 		cnp->cn_pnbuf = zalloc(ZV_NAMEI);
 		cnp->cn_flags |= HASBUF;
 		cnp->cn_pnlen = MAXPATHLEN;
 		bytes_copied = 0;
 
 		goto retry_copy;
+	} else if (error == ENAMETOOLONG && (cnp->cn_flags & HASBUF) &&
+	    (cnp->cn_pnlen * 2) <= MAXLONGPATHLEN && proc_support_long_paths(p)) {
+		if (cnp->cn_pnlen == MAXPATHLEN) {
+			/* First time we arrive here, the buffer came from ZV_NAMEI */
+			zfree(ZV_NAMEI, cnp->cn_pnbuf);
+		} else {
+			kfree_data(cnp->cn_pnbuf, cnp->cn_pnlen);
+		}
+
+		resolve_error = 0;
+
+		cnp->cn_pnlen *= 2;
+		cnp->cn_pnbuf = kalloc_data(cnp->cn_pnlen, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		bytes_copied = 0;
+
+		goto retry_copy;
 	}
 	if (error) {
 		goto error_out;
+	} else if (resolve_error) {
+		error = resolve_error;
+		goto error_out;
 	}
-	assert(bytes_copied <= MAXPATHLEN);
+	assert(bytes_copied <= cnp->cn_pnlen);
 	ndp->ni_pathlen = (u_int)bytes_copied;
 	bytes_copied = 0;
+
+	if (!(resolve_flags & RESOLVE_CHECKED)) {
+		assert(!(cnp->cn_flags & HASBUF) && (cnp->cn_pnlen == PATHBUFLEN));
+		error = lookup_check_for_resolve_prefix(cnp->cn_pnbuf, cnp->cn_pnlen, ndp->ni_pathlen,
+		    &resolve_flags, &resolve_prefix_len);
+		if (error) {
+			goto error_out;
+		}
+		if (resolve_prefix_len) {
+			/*
+			 * Since this is pointing to the static path buffer instead of a zalloc'ed memorry,
+			 * we're not going to attempt to free this, so it is perfectly fine to change the
+			 * value of cnp->cn_pnbuf.
+			 */
+			cnp->cn_pnbuf += resolve_prefix_len;
+			cnp->cn_pnlen -= resolve_prefix_len;
+			ndp->ni_pathlen -= resolve_prefix_len;
+			resolve_prefix_len = 0;
+		}
+	}
+
+	/* At this point we should have stripped off the prefix from the path that has to be looked up */
+	assert((resolve_flags & RESOLVE_CHECKED) && (resolve_prefix_len == 0));
 
 	/*
 	 * Since the name cache may contain positive entries of
@@ -289,32 +349,57 @@ retry_copy:
 	    cnp->cn_pnbuf[4] == 'l' &&
 	    cnp->cn_pnbuf[5] == '/') {
 		char * realpath;
+		size_t realpathlen;
 		int realpath_err;
 		/* Attempt to resolve a legacy volfs style pathname. */
-		realpath = zalloc(ZV_NAMEI);
-		/*
-		 * We only error out on the ENAMETOOLONG cases where we know that
-		 * vfs_getrealpath translation succeeded but the path could not fit into
-		 * MAXPATHLEN characters.  In other failure cases, we may be dealing with a path
-		 * that legitimately looks like /.vol/1234/567 and is not meant to be translated
-		 */
-		if ((realpath_err = vfs_getrealpath(&cnp->cn_pnbuf[6], realpath, MAXPATHLEN, ctx))) {
-			zfree(ZV_NAMEI, realpath);
-			if (realpath_err == ENOSPC || realpath_err == ENAMETOOLONG) {
-				error = ENAMETOOLONG;
-				goto error_out;
+
+		realpathlen = MAXPATHLEN;
+		do {
+			if (realpathlen == MAXPATHLEN) {
+				realpath = zalloc(ZV_NAMEI);
+			} else {
+				/*
+				 * To be consistent with the behavior of openbyid_np, which always supports
+				 * long paths, do not gate our support on proc_support_long_paths either.
+				 */
+				realpath = kalloc_data(realpathlen, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 			}
-		} else {
-			size_t tmp_len;
-			if (cnp->cn_flags & HASBUF) {
-				zfree(ZV_NAMEI, cnp->cn_pnbuf);
+			/*
+			 * We only error out on the ENAMETOOLONG cases where we know that
+			 * vfs_getrealpath translation succeeded but the path could not fit into
+			 * realpathlen characters.  In other failure cases, we may be dealing with a path
+			 * that legitimately looks like /.vol/1234/567 and is not meant to be translated
+			 */
+			if ((realpath_err = vfs_getrealpath(&cnp->cn_pnbuf[6], realpath, realpathlen, ctx))) {
+				if (realpathlen == MAXPATHLEN) {
+					zfree(ZV_NAMEI, realpath);
+				} else {
+					kfree_data(realpath, realpathlen);
+				}
+				if (realpath_err == ENOSPC || realpath_err == ENAMETOOLONG) {
+					error = ENAMETOOLONG;
+				}
+			} else {
+				size_t tmp_len;
+				if (cnp->cn_flags & HASBUF) {
+					if (cnp->cn_pnlen == MAXPATHLEN) {
+						zfree(ZV_NAMEI, cnp->cn_pnbuf);
+					} else {
+						kfree_data(cnp->cn_pnbuf, cnp->cn_pnlen);
+					}
+				}
+				cnp->cn_pnbuf = realpath;
+				cnp->cn_pnlen = (int)realpathlen;
+				tmp_len = strlen(realpath) + 1;
+				assert(tmp_len <= UINT_MAX);
+				ndp->ni_pathlen = (u_int)tmp_len;
+				cnp->cn_flags |= HASBUF | CN_VOLFSPATH;
+				error = 0;
 			}
-			cnp->cn_pnbuf = realpath;
-			cnp->cn_pnlen = MAXPATHLEN;
-			tmp_len = strlen(realpath) + 1;
-			assert(tmp_len <= UINT_MAX);
-			ndp->ni_pathlen = (u_int)tmp_len;
-			cnp->cn_flags |= HASBUF | CN_VOLFSPATH;
+		} while (error == ENAMETOOLONG && (realpathlen *= 2) && realpathlen <= MAXLONGPATHLEN);
+
+		if (error) {
+			goto error_out;
 		}
 	}
 #endif /* CONFIG_VOLFS */
@@ -336,7 +421,7 @@ retry_copy:
 		error = ENOENT;
 		goto error_out;
 	}
-	if (ndp->ni_flag & NAMEI_NOFOLLOW_ANY) {
+	if (ndp->ni_flag & NAMEI_NOFOLLOW_ANY || (resolve_flags & RESOLVE_NOFOLLOW_ANY)) {
 		ndp->ni_loopcnt = MAXSYMLINKS;
 	} else {
 		ndp->ni_loopcnt = 0;
@@ -380,6 +465,13 @@ retry_copy:
 			cnp->cn_nameptr++;
 			ndp->ni_pathlen--;
 		}
+		if (ndp->ni_flag & NAMEI_RESOLVE_BENEATH) {
+			/* Absolute paths are never allowed in NAMEI_RESOLVE_BENEATH */
+			lck_rw_unlock_shared(&rootvnode_rw_lock);
+			proc_dirs_unlock_shared(p);
+			error = EACCES;
+			goto error_out;
+		}
 		dp = ndp->ni_rootdir;
 	} else if (cnp->cn_flags & USEDVP) {
 		dp = ndp->ni_dvp;
@@ -387,6 +479,11 @@ retry_copy:
 		usedvp_dp = dp;
 	} else {
 		dp = vfs_context_cwd(ctx);
+		if (ndp->ni_flag & NAMEI_RESOLVE_BENEATH) {
+			/* Store the starting directory because it can change after a symlink traversal */
+			ndp->ni_usedvp = dp;
+			clear_usedvp = true;
+		}
 	}
 
 	if (dp == NULLVP || (dp->v_lflag & VL_DEAD)) {
@@ -526,6 +623,9 @@ out_drop:
 		vnode_put(ndp->ni_vp);
 	}
 error_out:
+	if (clear_usedvp) {
+		ndp->ni_usedvp = NULLVP;
+	}
 	if (startdir_with_usecount) {
 		vnode_rele(startdir_with_usecount);
 		startdir_with_usecount = NULLVP;
@@ -551,7 +651,11 @@ error_out:
 
 	if ((cnp->cn_flags & HASBUF)) {
 		cnp->cn_flags &= ~HASBUF;
-		zfree(ZV_NAMEI, cnp->cn_pnbuf);
+		if (cnp->cn_pnlen == MAXPATHLEN) {
+			zfree(ZV_NAMEI, cnp->cn_pnbuf);
+		} else {
+			kfree_data(cnp->cn_pnbuf, cnp->cn_pnlen);
+		}
 	}
 	cnp->cn_pnbuf = NULL;
 	ndp->ni_vp = NULLVP;
@@ -608,6 +712,49 @@ namei_compound_available(vnode_t dp, struct nameidata *ndp)
 	}
 
 	return 0;
+}
+
+static int
+lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len)
+{
+	int error = 0;
+	*resolve_flags = (uint32_t)RESOLVE_CHECKED;
+	*prefix_len = 0;
+
+	if (len < (sizeof("/.nofollow/") - 1) || path[0] != '/' || path[1] != '.') {
+		return 0;
+	}
+
+	if ((strncmp(&path[2], "nofollow/", (sizeof("nofollow/") - 1)) == 0)) {
+		*resolve_flags |= RESOLVE_NOFOLLOW_ANY;
+		*prefix_len = sizeof("/.nofollow") - 1;
+	} else if ((len >= sizeof("/.resolve/1/") - 1) &&
+	    strncmp(&path[2], "resolve/", (sizeof("resolve/") - 1)) == 0) {
+		char * flag = path + (sizeof("/.resolve/") - 1);
+		char *next = flag;
+		char last_char = path[pathbuflen - 1];
+
+		/* no leading zeroes or non digits */
+		if ((flag[0] == '0' && flag[1] != '/') ||
+		    flag[0] < '0' || flag[0] > '9') {
+			error = EINVAL;
+			goto out;
+		}
+
+		path[pathbuflen - 1] = '\0';
+		unsigned long flag_val = strtoul(flag, &next, 10);
+		path[pathbuflen - 1] = last_char;
+		if (next[0] != '/' || (flag_val & ~(RESOLVE_NOFOLLOW_ANY))) {
+			error = EINVAL;
+			goto out;
+		}
+		assert(next >= flag);
+		*resolve_flags |= (uint32_t)flag_val;
+		*prefix_len = (size_t)(next - path);
+	}
+out:
+	assert(*prefix_len <= sizeof("/.resolve/2147483647"));
+	return error;
 }
 
 static int
@@ -1172,16 +1319,23 @@ dirloop:
 	}
 
 	/*
-	 * Handle "..": two special cases.
-	 * 1. If at root directory (e.g. after chroot)
+	 * Handle "..": three special cases.
+	 * 1. if at starting directory (e.g. the cwd/usedvp)
+	 *    and RESOLVE_BENEATH, then return EACCES.
+	 * 2. If at root directory (e.g. after chroot)
 	 *    or at absolute root directory
 	 *    then ignore it so can't get out.
-	 * 2. If this vnode is the root of a mounted
+	 * 3. If this vnode is the root of a mounted
 	 *    filesystem, then replace it with the
 	 *    vnode which was mounted on so we take the
 	 *    .. in the other file system.
 	 */
 	if ((cnp->cn_flags & ISDOTDOT)) {
+		/* if dp is the starting directory and RESOLVE_BENEATH, we should return EACCES */
+		if ((ndp->ni_flag & NAMEI_RESOLVE_BENEATH) && (dp == ndp->ni_usedvp)) {
+			error = EACCES;
+			goto bad;
+		}
 		/*
 		 * if this is a chroot'ed process, check if the current
 		 * directory is still a subdirectory of the process's
@@ -1210,6 +1364,7 @@ dirloop:
 				 * released by another thread.
 				 */
 				if (vnode_get(dp)) {
+					dp = NULLVP;
 					error = ENOENT;
 					goto bad;
 				}
@@ -1228,7 +1383,7 @@ dirloop:
 				 * if we fail to get the new reference, we'll
 				 * drop our original down in 'bad'
 				 */
-				if ((vnode_get(dp))) {
+				if (vnode_get(dp)) {
 					error = ENOENT;
 					goto bad;
 				}
@@ -1665,7 +1820,8 @@ static int
 lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_iocount, vfs_context_t ctx)
 {
 	int error;
-	char *cp;               /* pointer into pathname argument */
+	char *cp = NULL;               /* pointer into pathname argument */
+	u_int cplen = 0;
 	uio_t auio;
 	UIO_STACKBUF(uio_buf, 1);
 	int need_newpathbuf;
@@ -1691,7 +1847,14 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	}
 
 	if (need_newpathbuf) {
-		cp = zalloc(ZV_NAMEI);
+		if (!(cnp->cn_flags & HASBUF) || cnp->cn_pnlen == MAXPATHLEN) {
+			cp = zalloc(ZV_NAMEI);
+			cplen = MAXPATHLEN;
+		} else {
+			assert(proc_support_long_paths(vfs_context_proc(ctx)));
+			cp = kalloc_data(cnp->cn_pnlen, Z_WAITOK | Z_ZERO);
+			cplen = cnp->cn_pnlen;
+		}
 	} else {
 		cp = cnp->cn_pnbuf;
 	}
@@ -1717,28 +1880,39 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 			linklen = (u_int)strnlen(cp, MAXPATHLEN - (u_int)resid);
 		}
 
+		size_t maxlen = proc_support_long_paths(vfs_context_proc(ctx)) ? MAXLONGPATHLEN : MAXPATHLEN;
+
 		if (linklen == 0) {
 			error = ENOENT;
-		} else if (linklen + ndp->ni_pathlen + rsrclen > MAXPATHLEN) {
+		} else if (linklen + ndp->ni_pathlen + rsrclen > maxlen) {
 			error = ENAMETOOLONG;
 		}
 	}
 
 	if (error) {
 		if (need_newpathbuf) {
-			zfree(ZV_NAMEI, cp);
+			if (cplen == MAXPATHLEN) {
+				zfree(ZV_NAMEI, cp);
+			} else {
+				kfree_data(cp, cplen);
+			}
 		}
 		return error;
 	}
 
 	if (need_newpathbuf) {
 		tmppn = cnp->cn_pnbuf;
+		u_int tmplen = cnp->cn_pnlen;
 		bcopy(ndp->ni_next, cp + linklen, ndp->ni_pathlen);
 		cnp->cn_pnbuf = cp;
-		cnp->cn_pnlen = MAXPATHLEN;
+		cnp->cn_pnlen = cplen;
 
 		if ((cnp->cn_flags & HASBUF)) {
-			zfree(ZV_NAMEI, tmppn);
+			if (tmplen == MAXPATHLEN) {
+				zfree(ZV_NAMEI, tmppn);
+			} else {
+				kfree_data(tmppn, tmplen);
+			}
 		} else {
 			cnp->cn_flags |= HASBUF;
 		}
@@ -1769,6 +1943,11 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	 * Check if symbolic link restarts us at the root
 	 */
 	if (*(cnp->cn_nameptr) == '/') {
+		/* return EACCES if resolve beneath and the symlink restarts at root */
+		if (ndp->ni_flag & NAMEI_RESOLVE_BENEATH) {
+			vnode_put(dp); /* ALWAYS have a dvp for a symlink */
+			return EACCES;
+		}
 		while (*(cnp->cn_nameptr) == '/') {
 			cnp->cn_nameptr++;
 			ndp->ni_pathlen--;
@@ -1914,7 +2093,11 @@ nameidone(struct nameidata *ndp)
 
 		ndp->ni_cnd.cn_pnbuf = NULL;
 		ndp->ni_cnd.cn_flags &= ~HASBUF;
-		zfree(ZV_NAMEI, tmp);
+		if (ndp->ni_cnd.cn_pnlen == MAXPATHLEN) {
+			zfree(ZV_NAMEI, tmp);
+		} else {
+			kfree_data(tmp, ndp->ni_cnd.cn_pnlen);
+		}
 	}
 }
 
@@ -1945,9 +2128,12 @@ nameidone(struct nameidata *ndp)
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_IST)
 
 void
-kdebug_vfs_lookup(unsigned long *path_words, int path_len, void *vnp,
+kdebug_vfs_lookup(const char *path, size_t path_len, void *vnp,
     uint32_t flags)
 {
+	unsigned long path_words[4] = {};
+	size_t trace_len = MIN(sizeof(path_words) - sizeof(path_words[0]), path_len);
+	size_t path_next = 0;
 	bool noprocfilt = flags & KDBG_VFS_LOOKUP_FLAG_NOPROCFILT;
 
 	assert(path_len >= 0);
@@ -1958,6 +2144,8 @@ kdebug_vfs_lookup(unsigned long *path_words, int path_len, void *vnp,
 	if (path_len <= (3 * (int)sizeof(long))) {
 		code |= DBG_FUNC_END;
 	}
+	memcpy(path_words, path, trace_len);
+	path_next += trace_len;
 
 	if (noprocfilt) {
 		KDBG_RELEASE_NOPROCFILT(code, kdebug_vnode(vnp), path_words[0],
@@ -1970,16 +2158,21 @@ kdebug_vfs_lookup(unsigned long *path_words, int path_len, void *vnp,
 	code &= ~DBG_FUNC_START;
 
 	for (int i = 3; i * (int)sizeof(long) < path_len; i += 4) {
+		trace_len = sizeof(path_words);
 		if ((i + 4) * (int)sizeof(long) >= path_len) {
 			code |= DBG_FUNC_END;
+			trace_len = path_len - path_next;
+			memset(path_words, 0, sizeof(path_words));
 		}
+		memcpy(path_words, &path[path_next], trace_len);
+		path_next += trace_len;
 
 		if (noprocfilt) {
-			KDBG_RELEASE_NOPROCFILT(code, path_words[i], path_words[i + 1],
-			    path_words[i + 2], path_words[i + 3]);
+			KDBG_RELEASE_NOPROCFILT(code, path_words[0], path_words[1],
+			    path_words[2], path_words[3]);
 		} else {
-			KDBG_RELEASE(code, path_words[i], path_words[i + 1],
-			    path_words[i + 2], path_words[i + 3]);
+			KDBG_RELEASE(code, path_words[0], path_words[1],
+			    path_words[2], path_words[3]);
 		}
 	}
 }
@@ -1988,42 +2181,21 @@ void
 kdebug_lookup_gen_events(long *path_words, int path_len, void *vnp, bool lookup)
 {
 	assert(path_len >= 0);
-	kdebug_vfs_lookup((unsigned long *)path_words, path_len, vnp,
+	kdebug_vfs_lookup((const char *)path_words, path_len, vnp,
 	    lookup ? KDBG_VFS_LOOKUP_FLAG_LOOKUP : 0);
 }
 
 void
 kdebug_lookup(vnode_t vnp, struct componentname *cnp)
 {
-	unsigned long path_words[NUMPARMS];
-
-	/*
-	 * Truncate the leading portion of the path to fit in path_words.
-	 */
-	char *path_end = cnp->cn_nameptr + cnp->cn_namelen;
-	size_t path_len = MIN(path_end - cnp->cn_pnbuf,
-	    (ssize_t)sizeof(path_words));
-	assert(path_len >= 0);
-	char *path_trunc = path_end - path_len;
-
-	memcpy(path_words, path_trunc, path_len);
-
-	/*
-	 * Pad with '\0' or '>'.
-	 */
-	if (path_len < (ssize_t)sizeof(path_words)) {
-		bool complete_str = *(cnp->cn_nameptr + cnp->cn_namelen) == '\0';
-		memset((char *)path_words + path_len, complete_str ? '\0' : '>',
-		    sizeof(path_words) - path_len);
-	}
-	kdebug_vfs_lookup(path_words, (int)path_len, vnp, KDBG_VFS_LOOKUP_FLAG_LOOKUP);
+	kdebug_vfs_lookup(cnp->cn_pnbuf, strnlen(cnp->cn_pnbuf, cnp->cn_pnlen), vnp, KDBG_VFS_LOOKUP_FLAG_LOOKUP);
 }
 
 #else /* (KDEBUG_LEVEL >= KDEBUG_LEVEL_IST) */
 
 void
-kdebug_vfs_lookup(long *dbg_parms __unused, int dbg_namelen __unused,
-    void *dp __unused, __unused uint32_t flags)
+kdebug_vfs_lookup(const char *dbg_parms __unused, size_t dbg_namelen __unused,
+    void *dp __unused, __unused kdebug_vfs_lookup_flags_t flags)
 {
 }
 

@@ -496,7 +496,8 @@ pmap_page_alloc(pmap_paddr_t *ppa, unsigned options)
 	 * If we're only allocating a single page, just grab one off the VM's
 	 * global page free list.
 	 */
-	while ((mem = vm_page_grab()) == VM_PAGE_NULL) {
+	int grab_options = VM_PAGE_GRAB_OPTIONS_NONE;
+	while ((mem = vm_page_grab_options(grab_options)) == VM_PAGE_NULL) {
 		if (options & PMAP_PAGE_ALLOCATE_NOWAIT) {
 			break;
 		}
@@ -2086,6 +2087,7 @@ pmap_cpu_data_init_internal(unsigned int cpu_number)
 	assert(((uintptr_t)sptm_pcpu & (PMAP_SPTM_PCPU_ALIGN - 1)) == 0);
 	sptm_pcpu->sptm_ops_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_ops);
 	sptm_pcpu->sptm_templates_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_templates);
+	sptm_pcpu->sptm_paddrs_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_paddrs);
 	sptm_pcpu->sptm_guest_dispatch_paddr = kvtophys_nofail((vm_offset_t)&sptm_pcpu->sptm_guest_dispatch);
 
 	const uint16_t sptm_cpu_number = sptm_cpu_id(ml_get_topology_info()->cpus[cpu_number].phys_id);

@@ -71,13 +71,17 @@
  *
  * code:
  * +-----------------------------+----------------+-----------------+
- * |[63:61] GUARD_TYPE_MACH_PORT | [60:32] flavor | [31:0] port name|
+ * |[63:61] GUARD_TYPE_MACH_PORT | [60:32] flavor | [31:0] target   |
  * +-----------------------------+----------------+-----------------+
  *
  * subcode:
  * +----------------------------------------------------------------+
- * |[63:0] guard identifier                                         |
+ * |[63:0] payload                                                  |
  * +----------------------------------------------------------------+
+ *
+ * - flavors are defined in <mach/port.h>
+ * - meaning of target and payload is described
+ *   in doc/mach_ipc/guard_exceptions.md
  */
 
 #define GUARD_TYPE_MACH_PORT    0x1      /* guarded mach port */

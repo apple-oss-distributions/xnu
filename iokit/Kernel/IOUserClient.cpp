@@ -734,6 +734,7 @@ iokit_client_died( io_object_t obj, ipc_port_t /* port */,
 	IOMemoryMap *       map;
 	IOUserNotification * notify;
 	IOUserServerCheckInToken * token;
+	IOUserUserClient * uc;
 
 	if (!IOMachPort::noMoreSendersForObject( obj, type, mscount )) {
 		return kIOReturnNotReady;
@@ -758,6 +759,19 @@ iokit_client_died( io_object_t obj, ipc_port_t /* port */,
 	case IKOT_IOKIT_IDENT:
 		if ((token = OSDynamicCast( IOUserServerCheckInToken, obj ))) {
 			token->cancel();
+		}
+		break;
+	case IKOT_UEXT_OBJECT:
+		if ((uc = OSDynamicCast(IOUserUserClient, obj))) {
+			IOService *provider = NULL;
+			uc->lockForArbitration();
+			provider = uc->getProvider();
+			if (provider) {
+				provider->retain();
+			}
+			uc->unlockForArbitration();
+			uc->setTerminateDefer(provider, false);
+			OSSafeReleaseNULL(provider);
 		}
 		break;
 	}

@@ -69,6 +69,7 @@
 	.align 14
 	.globl EXT(_start)
 LEXT(_start)
+	ARM64_PROLOG
 	/**
 	 * When SPTM/TXM/cL4 panics, it jumps to the XNU entry point with a special
 	 * sentinel value placed into x0. Let's check for that and jump to the
@@ -119,12 +120,6 @@ start_boot_path:
  * Cold boot path.
  */
 start_cold:
-	/* Install the exception vector */
-	adrp	x9, EXT(ExceptionVectorsBase)@page
-	add		x9, x9, EXT(ExceptionVectorsBase)@pageoff
-	msr		VBAR_EL1, x9
-	isb
-
 	/* Set up exception stack */
 	msr		SPSel, #1
 	adrp	x10, EXT(excepstack_top)@page
@@ -144,6 +139,19 @@ start_cold:
 	/* Rebase and sign absolute addresses */
 	bl EXT(arm_slide_rebase_and_sign_image)
 
+	mov		x0, x26
+	bl EXT(arm_static_if_init)
+
+	/**
+	 * Now setup final XNU exception vectors. This is the closest we can do this
+	 * in XNU because after sending SPTM SPTM_FUNCTIONID_FIXUPS_COMPLETE, VBAR
+	 * will be validated and locked.
+	 */
+	adrp	x9, EXT(ExceptionVectorsBase)@page
+	add		x9, x9, EXT(ExceptionVectorsBase)@pageoff
+	msr		VBAR_EL1, x9
+	isb
+
 	/**
 	 * Call into the SPTM for the first time. This function traps to GL2 to
 	 * signal the SPTM that the fixups phase has been completed.
@@ -158,7 +166,11 @@ start_cold:
 	/* Jump to handler */
 	mov		x0, x26
 	mov		x1, x27
+#if KASAN
+	b		EXT(arm_init_kasan)
+#else
 	b		EXT(arm_init)
+#endif /* KASAN */
 
 /**
  * Secondary CPU boot path.
@@ -291,6 +303,7 @@ cpu_data_entry_not_found:
 LEXT(panic_from_sptm)
 TRAP_UNWIND_PROLOGUE
 SPTM_UNWIND_DIRECTIVES
+	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	bl 		EXT(panic)
 	b .

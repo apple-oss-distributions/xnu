@@ -116,10 +116,14 @@
 	mov		x16, #0
 	mov		x17, #0
 	mov		x18, #0
+
+	/* Attempt to record the debug trace */
+	bl		EXT(panic_lockdown_record_debug_data)
+
 #endif /* DEVELOPMENT || DEBUG */
 #if CONFIG_XNUPOST
 	mrs		x0, TPIDR_EL1
-	/* 
+	/*
 	 * If hitting this with a null TPIDR, it's likely that this was an unexpected
 	 * exception in early boot rather than an expected one as a part of a test.
 	 * Trigger lockdown.
@@ -152,14 +156,14 @@ Lbegin_panic_lockdown_real_\@:
 #endif /* CONFIG_XNUPOST */
 	/*
 	 * The sptm_xnu_panic_begin routine is guaranteed to unavoidably lead to
-	 * the panic bit being set. 
+	 * the panic bit being set.
 	 */
 	bl EXT(sptm_xnu_panic_begin)
 #if CONFIG_XNUPOST
 	mov		x0, #0 // not a simulated lockdown
 	b		Lbegin_panic_lockdown_continue_\@
 Lbegin_panic_lockdown_simulated_\@:
-	/* 
+	/*
 	 * We hit lockdown with a matching exception handler installed.
 	 * Since this is an expected test exception, skip setting the panic bit
 	 * (since this will kill the system) and instead set a bit in the test
@@ -217,6 +221,7 @@ Lbegin_panic_lockdown_continue_\@:
  * This may mutate x18.
  */
 .macro BRANCH_TO_KVA_VECTOR
+
 #if __ARM_KERNEL_PROTECT__
 	/*
 	 * Find the kernelcache table for the exception vectors by accessing
@@ -262,6 +267,10 @@ Lbegin_panic_lockdown_continue_\@:
 	b.ne	Lvalid_stack_\@						// ...validate the stack pointer
 	mrs		x0, SP_EL0					// Get SP_EL0
 	mrs		x1, TPIDR_EL1						// Get thread pointer
+	cbnz	x1, Ltest_kstack_\@					// Can only continue if TPIDR_EL1 is set
+0:
+	wfe
+	b		0b									// Can't do much else but wait here for debugger.
 Ltest_kstack_\@:
 	LOAD_KERN_STACK_TOP	dst=x2, src=x1, tmp=x3	// Get top of kernel stack
 	sub		x3, x2, KERNEL_STACK_SIZE			// Find bottom of kernel stack
@@ -943,6 +952,7 @@ TRAP_UNWIND_DIRECTIVES
 	cmp		w6, w4
 	b.eq	Lfleh_sync_load_lr
 Lvalid_link_register:
+	PUSH_FRAME
 
 #if CONFIG_SPTM
 	mrs		x25, ELR_EL1
@@ -969,7 +979,6 @@ Lfleh_synchronous_continue:
 	str		x2,  [x0, SS64_FAR]
 #endif /* CONFIG_SPTM */
 
-	PUSH_FRAME
 	bl		EXT(sleh_synchronous)
 	POP_FRAME_WITHOUT_LR
 
@@ -986,209 +995,32 @@ Lfleh_sync_load_lr:
 
 #if CONFIG_SPTM
 Lfleh_synchronous_ool_check_exception_el1:
-	/* 
-	 * We're in the kernel!
-	 * 
-	 * An SP0 sync exception is forced to be fatal if:
-	 * (AND
-	 * 	(SPSR.M[3:2] > 0) // Originates from kernel
-	 * 	(OR
-	 * 		(ESR.EC == ESR_EC_PAC_FAIL)    // FPAC failure
-	 * 		(AND  // PAC BRK instruction (compiler generated traps)
-	 * 			ESR.EC == ESR_EC_BRK_AARCH64
-	 * 			ESR.ISS is in PTRAUTH_TRAPS
-	 * 		)
-	 *		(AND // Potential dPAC failure (poisoned VA)
-	 *			(ESR.EC == ESR_EC_DABORT_EL1)
-	 *			(XPACD(FAR) != FAR)
-	 *			(NAND //outside copyio region
-	 *				ELR >= copyio_fault_region_begin
-	 *				ELR < copyio_fault_region_end
-	 * 			)
-	 *		)
-	 *		(ESR.EC == ESR_EC_IABORT_EL1)  // Potential iPAC failure (poisoned PC)
-	 * 		(AND 
-	 * 			(AND SPSR.A SPSR.I SPSR.F) // Async exceptions were masked 
-	 * 			(ESR.EC != ESR_EC_UNCATEGORIZED) // Not an undefined instruction (GDBTRAP for stackshots, etc.)
-	 *			(NAND // brks other than PAC traps are permitted for non-fatal telemetry
-	 *				(ESR.EC == ESR_EC_BRK_AARCH64)
-	 *				(ESR.ISS is in PTRAUTH_TRAPS)
-	 *			)
-	 *			(CONFIG_BTI_TELEMETRY && ESR.EC != ESR_EC_BTI_FAIL) // Do not make BTI telemetry exceptions fatal
-	 * 			(startup_phase < STARTUP_SUB_LOCKDOWN) // Not in early-boot
-	 * 			(OR !CONFIG_XNUPOST (saved_expected_fault_handler == NULL)) // Not an expected, test exception
-	 *			(NAND // copyio data aborts are permitted while exceptions are masked
-	 *				ESR.EC == ESR_EC_DABORT_EL1
-	 *				ELR >= copyio_fault_region_begin
-	 *				ELR < copyio_fault_region_end
-	 *			)
-	 * 		)     
-	 * 	)
-	 * ) 
-	 */
-
-	/*
-	 * Pre-compute some sub-expressions which will be used later
-	 */
-	mrs		x10, ELR_EL1
-	adrp	x11, EXT(copyio_fault_region_begin)@page
-	add		x11, x11, EXT(copyio_fault_region_begin)@pageoff
-	adrp	x12, EXT(copyio_fault_region_end)@page
-	add		x12, x12, EXT(copyio_fault_region_end)@pageoff
-
-	/* in-copyio-region sub-expression */
-	/* Are we after the start of the copyio region? */
-	cmp		x10, x11
-	/*
-	 * If after the start (HS), test upper bounds.
-	 * Otherwise (LO), fail forward (HS)
-	 */
-	ccmp	x10, x12, #0b0010 /* C/HS */, HS
-	/*
-	 * Spill "in-copyio-region" flag for later reuse
-	 * x10=1 if ELR was in copyio region, 0 otherwise
-	 */
-	cset	x10, LO
-
-#if __has_feature(ptrauth_calls)
-	/* is-dPAC-poisoned-DABORT sub-expression */
-	mrs		x5, FAR_EL1
-	/*
-	 * Is XPACD(FAR) == FAR?
-	 * XPAC converts an arbitrary pointer like value into the canonical form
-	 * that would be produced if the pointer were to successfully pass AUTx.
-	 * If the pointer is canonical, this has no effect.
-	 * If the pointer is non-canonical (such as due to PAC poisoning), the value
-	 * will not match FAR.
-	 */
-	mov		x11, x5
-	xpacd	x11
-	/*
-	 * If we're outside the copyio region (HS), set flags for whether FAR is
-	 * clean (EQ) or has PAC poisoning (NE).
-	 * Otherwise (LO), set EQ
-	 */
-	ccmp    x5, x11, #0b0100 /* Z/EQ */, HS
-	/*
-	 * If we were poisoned (NE), was this a data abort?
-	 * Otherwise (EQ), pass NE
-	 */
-	mov		w5, #(ESR_EC_DABORT_EL1)
-	ccmp	w6, w5, #0b0000 /* !Z/NE */, NE
-	/* x11=1 when we had a DABORT with a poisoned VA outside the copyio region */
-	cset	x11, EQ
-#endif /* ptrauth_calls */
-
-	/*
-	 * Now let's check the rare but fast conditions that apply only to kernel
-	 * sync exceptions.
-	 */
-
-	/*
-	 * if ((ESR.EC == ESR_EC_BRK_AARCH64 && IS_PTRAUTH(ESR.ISS)) ||
-	 * 		ESR.EC == ESR_EC_PAC_FAIL ||
-	 *		ESR.EC == ESR_IABORT_EL1 ||
-	 *		poisoned_dabort)
-	 * 	goto Lfleh_synchronous_panic_lockdown
-	 */
-	cmp		w6, #(ESR_EC_BRK_AARCH64) // eq if this is a BRK instruction
-	/* 
-	 * Is this a PAC breakpoint? ESR.ISS in [0xC470, 0xC473], which is true when
-	 * {ESR.ISS[24:2], 2'b00} == 0xC470
-	 */
-	mov		w5, #(0xC470)
-	and		w7, w1, #0xfffc
-	/*
-	 * If we're not BRK, NE
-	 * If we're BRK, set flags for ISS=PAC breakpoint
-	 */
-	ccmp	w7, w5, #0, EQ
-
-	/* 
-	 * If we aren't a PAC BRK (NE), set flags for ESR.EC==PAC_FAIL
-	 * If we are a PAC BRK (EQ), pass EQ through.
-	*/
-	ccmp	w6, #(ESR_EC_PAC_FAIL), #0b0100 /* Z */, NE
-
-	/*
-	 * If !(PAC BRK || EC == PAC_FAIL) (NE), set flags for ESR.EC==IABORT
-	 * If (PAC BRK || EC == PAC_FAIL) (EQ), pass lockdown request (EQ)
-	 */
-	mov		w5, #(ESR_EC_IABORT_EL1)
-	ccmp	w6, w5, #0b0100 /* Z/EQ */, NE
-
-#if __has_feature(ptrauth_calls)
-	/*
-	 * If !(PAC BRK || EC == PAC_FAIL || EC == IABORT) (NE), set flags for
-	 * whether this was a posioned DABORT (previously computed in x11).
-	 * If (PAC BRK || EC == PAC_FAIL || EC == IABORT) (EQ), pass lockdown
-	 * request (EQ)
-	 */
-	ccmp	x11, #1, #0b0100 /* Z/EQ */, NE
-#endif /* ptrauth_calls */
-
-	b.eq	Lfleh_synchronous_panic_lockdown
-	
-	/*
-	 * Most kernel exceptions won't be taken with exceptions masked but if they
-	 * are they'll be stackshot traps or telemetry breakpoints. Check these
-	 * first since they're cheap.
-	 *
-	 * if (!((PSTATE & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE
-	 * 		&& ESR.EC != ESR_EC_UNCATEGORIZED
-	 * 		&& ESR.EC != ESR_EC_BRK_AARCH64))
-	 * 		goto Lfleh_synchronous_continue
-	 */
-	mov		w5, #(DAIF_STANDARD_DISABLE)
-	bics	wzr, w5, w4 // (DAIF_STANDARD_DISABLE & (~PSTATE)). If !Z/NE, AIF wasn't (fully) masked.
-	/*
-	 * If AIF was masked (EQ), test EC =? fasttrap
-	 * If AIF wasn't masked (NE), pass lockdown skip (EQ)
-	 */
-	ccmp	w6, #(ESR_EC_UNCATEGORIZED), #0b0100 /* Z/EQ */, EQ
-	/*
-	 * If AIF was masked AND EC != fasttrap (NE), test EC =? BRK
-	 * If AIF wasn't masked OR EC == fasttrap (EQ), pass lockdown skip (EQ)
-	 */
-	mov		w5, #(ESR_EC_BRK_AARCH64)
-	ccmp	w6, w5, #0b0100 /* Z/EQ */, NE
-	/*
-	 * AIF was masked AND EC != fasttrap AND EC != BRK (NE)
-	 * AIF wasn't masked OR EC == fasttrap OR EC == BRK (EQ) -> skip lockdown!
-	 */
-	b.eq	Lfleh_synchronous_continue
-	
-	/* 
-	 * Non-PAC/BRK/fasttrap exception taken with exceptions disabled.
-	 * We're going down if the system IS NOT:
-	 * 1) in early boot OR
-	 * 2) handling an expected XNUPOST exception (handled in lockdown macro)
-	 * 3) taking a copyio data abort
-	 */
-	adrp	x7, EXT(startup_phase)@page
-	add		x7, x7, EXT(startup_phase)@pageoff
-	ldr		w7, [x7]
-	cmp		w7, #-1 // STARTUP_SUB_LOCKDOWN
-	b.lo	Lfleh_synchronous_continue
-
-	/* Was this a copyio data abort taken while exceptions were masked? */
-	cmp		w6, #ESR_EC_DABORT_EL1
-	/* x10=1 when ELR was in copyio range */
-	ccmp	x10, #1, #0b0000 /* !Z/NE */, EQ
-	b.eq	Lfleh_synchronous_continue
-
-#if BTI_ENFORCED && CONFIG_BTI_TELEMETRY
-	/* BTI telemetry exceptions are recoverable only in telemetry mode */
-	cmp		w6, #ESR_EC_BTI_FAIL
-	b.eq	Lfleh_synchronous_continue
-#endif /* CONFIG_BTI_TELEMETRY */
-
-	/* FALLTHROUGH */
-Lfleh_synchronous_panic_lockdown:
-	/* Save off arguments for sleh as SPTM may clobber */
+	/* Save off arguments needed for sleh_sync as we may clobber */
 	mov		x26, x0
 	mov		x27, x1
 	mov		x28, x2
+
+	/*
+	 * Evaluate the exception state to determine if we should initiate a
+	 * lockdown. While this function is implemented in C, since it is guaranteed
+	 * to not use the stack it should be immune from spill tampering and other
+	 * attacks which may cause it to render the wrong ruling.
+	 */
+	mov		x0, x1  // ESR
+	mov		x1, x25 // ELR
+			        // FAR is already in x2
+	mrs		x3, SPSR_EL1
+	bl		EXT(sleh_panic_lockdown_should_initiate_el1_sp0_sync)
+
+	/* sleh_synchronous needs the lockdown decision in x3 */
+	mov		x3, x0
+	/* Optimistically restore registers on the assumption we won't lockdown */
+	mov		x0, x26
+	mov		x1, x27
+	mov		x2, x28
+
+	cbz		x3, Lfleh_synchronous_continue
+
 	BEGIN_PANIC_LOCKDOWN
 	mov		x0, x26
 	mov		x1, x27
@@ -2394,12 +2226,21 @@ LEXT(_sptm_pre_entry_hook)
 	PUSH_FRAME
 	stp		x20, x21, [sp, #-0x10]!
 
+	/* Save arguments to SPTM function and SPTM function id. */
+	mov		x20, x16
+	stp		x0, x1, [sp, #-0x40]!
+	stp		x2, x3, [sp, #0x10]
+	stp		x4, x5, [sp, #0x20]
+	stp		x6, x7, [sp, #0x30]
+
 	/* Increase the preemption count. */
 	mrs		x9, TPIDR_EL1
 	cbz		x9, Lskip_preemption_check_sptmhook
 	ldr		w10, [x9, ACT_PREEMPT_CNT]
 	add		w10, w10, #1
 	str		w10, [x9, ACT_PREEMPT_CNT]
+
+	/* Update SPTM trace state to see if trace entries were generated post-exit */
 
 #if SCHED_HYGIENE_DEBUG
 	/* Prepare preemption disable measurement, if necessary. */
@@ -2415,23 +2256,8 @@ LEXT(_sptm_pre_entry_hook)
 	cmp		w10, #0
 	b.eq	Lskip_prepare_measurement_sptmhook
 
-	/* Save arguments to SPTM function and SPTM function id. */
-	mov		x20, x16
-	stp		x0, x1, [sp, #-0x40]!
-	stp		x2, x3, [sp, #0x10]
-	stp		x4, x5, [sp, #0x20]
-	stp		x6, x7, [sp, #0x30]
-
 	/* Call prepare function with thread pointer as first arg. */
 	bl		EXT(_prepare_preemption_disable_measurement)
-
-	/* Restore arguments to SPTM function and SPTM function id. */
-	ldp		x6, x7, [sp, #0x30]
-	ldp		x4, x5, [sp, #0x20]
-	ldp		x2, x3, [sp, #0x10]
-	ldp		x0, x1, [sp]
-	add		sp, sp, #0x40
-	mov		x16, x20
 
 Lskip_prepare_measurement_sptmhook:
 #endif /* SCHED_HYGIENE_DEBUG */
@@ -2440,6 +2266,14 @@ Lskip_preemption_check_sptmhook:
 	mrs		x14, CurrentG
 	cmp		x14, #0
 	b.ne	.
+
+	/* Restore arguments to SPTM function and SPTM function id. */
+	ldp		x6, x7, [sp, #0x30]
+	ldp		x4, x5, [sp, #0x20]
+	ldp		x2, x3, [sp, #0x10]
+	ldp		x0, x1, [sp]
+	add		sp, sp, #0x40
+	mov		x16, x20
 
 	ldp		x20, x21, [sp], #0x10
 	POP_FRAME
@@ -2535,6 +2369,68 @@ Lsptm_skip_ast_taken_sptmhook:
 	POP_FRAME
 	ARM64_STACK_EPILOG
 #endif /* CONFIG_SPTM */
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+/**
+ * Record debug data for a panic lockdown event
+ * Clobbers x0, x1, x2
+ */
+	.text
+	.align 2
+	.global EXT(panic_lockdown_record_debug_data)
+LEXT(panic_lockdown_record_debug_data)
+	adrp	x0, EXT(debug_panic_lockdown_initiator_state)@page
+	add		x0, x0, EXT(debug_panic_lockdown_initiator_state)@pageoff
+
+	/*
+	 * To synchronize accesses to the debug state, we use the initiator PC as a
+	 * "lock". It starts out at zero and we try to swap in our initiator's PC
+	 * (which is trivially non-zero) to acquire the debug state and become the
+	 * initiator of record.
+	 *
+	 * Note that other CPUs which are not the initiator of record may still
+	 * initiate panic lockdown (potentially before the initiator of record does
+	 * so) and so this debug data should only be used as a hint for the
+	 * initiating CPU rather than a guarantee of which CPU initiated lockdown
+	 * first.
+	 */
+	mov		x1, #0
+	add		x2, x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_PC
+	cas		x1, lr, [x2]
+	/* If there's a non-zero value there already, we aren't the first. Skip. */
+	cbnz	x1, Lpanic_lockdown_record_debug_data_done
+
+	/*
+	 * We're the first and have exclusive access to the debug structure!
+	 * Record all our data.
+	 */
+	mov		x1, sp
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP]
+
+	mrs		x1, TPIDR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR]
+
+	mrs		x1, MPIDR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_MPIDR]
+
+	mrs		x1, ESR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_ESR]
+
+	mrs		x1, ELR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_ELR]
+
+	mrs		x1, FAR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_FAR]
+
+	/* Sync and then read the timer */
+	dsb		sy
+	isb
+	mrs		x1, CNTVCT_EL0
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_TIMESTAMP]
+
+Lpanic_lockdown_record_debug_data_done:
+	ret
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 /* ARM64_TODO Is globals_asm.h needed? */
 //#include	"globals_asm.h"

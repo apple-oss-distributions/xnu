@@ -230,8 +230,7 @@ kperf_sample_internal(struct kperf_sample *sbuf,
 	}
 
 	if (!task_only) {
-		context->cur_thread->kperf_pet_gen =
-		    os_atomic_load(&kppet_gencount, relaxed);
+		kppet_mark_sampled(context->cur_thread);
 	}
 	bool is_kernel = (context->cur_pid == 0);
 

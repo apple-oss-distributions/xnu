@@ -246,7 +246,7 @@ _kernelrpc_mach_port_insert_right_trap(struct _kernelrpc_mach_port_insert_right_
 	}
 
 	rv = ipc_object_copyin(task->itk_space, args->poly, args->polyPoly,
-	    (ipc_object_t *)&port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND, NULL, &port);
 	if (rv != KERN_SUCCESS) {
 		goto done;
 	}
@@ -254,7 +254,7 @@ _kernelrpc_mach_port_insert_right_trap(struct _kernelrpc_mach_port_insert_right_
 
 	rv = mach_port_insert_right(task->itk_space, args->name, port, disp);
 	if (rv != KERN_SUCCESS && IP_VALID(port)) {
-		ipc_object_destroy(ip_to_object(port), disp);
+		ipc_object_destroy(port, disp);
 	}
 
 done:
@@ -439,7 +439,7 @@ _kernelrpc_mach_port_request_notification_trap(
 
 	if (MACH_PORT_VALID(args->notify)) {
 		rv = ipc_object_copyin(task->itk_space, args->notify, args->notifyPoly,
-		    (ipc_object_t *)&notify, 0, NULL, 0);
+		    IPC_OBJECT_COPYIN_FLAGS_NONE, NULL, &notify);
 	} else {
 		notify = CAST_MACH_NAME_TO_PORT(args->notify);
 	}
@@ -451,7 +451,7 @@ _kernelrpc_mach_port_request_notification_trap(
 	    args->msgid, args->sync, notify, &previous);
 	if (rv != KERN_SUCCESS) {
 		if (IP_VALID(notify)) {
-			ipc_object_destroy(ip_to_object(notify), disp);
+			ipc_object_destroy(notify, disp);
 		}
 		goto done;
 	}
@@ -461,8 +461,9 @@ _kernelrpc_mach_port_request_notification_trap(
 		// We need to make ith_knote NULL as ipc_object_copyout() uses
 		// thread-argument-passing and its value should not be garbage
 		current_thread()->ith_knote = ITH_KNOTE_NULL;
-		rv = ipc_object_copyout(task->itk_space, ip_to_object(previous),
-		    MACH_MSG_TYPE_PORT_SEND_ONCE, IPC_OBJECT_COPYOUT_FLAGS_NONE, NULL, NULL, &previous_name);
+		rv = ipc_object_copyout(task->itk_space, previous,
+		    MACH_MSG_TYPE_PORT_SEND_ONCE, IPC_OBJECT_COPYOUT_FLAGS_NONE,
+		    NULL, &previous_name);
 		if (rv != KERN_SUCCESS) {
 			goto done;
 		}
@@ -757,7 +758,7 @@ copyout_failed:
 			continue;
 		}
 		/* space is locked and active */
-		if (entry->ie_object == ip_to_object(sright) ||
+		if (entry->ie_port == sright ||
 		    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_DEAD_NAME) {
 			(void)ipc_right_dealloc(current_space(), copyout_names[i], entry); /* unlocks space */
 		} else {

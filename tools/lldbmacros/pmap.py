@@ -3,6 +3,7 @@ import xnudefines
 from kdp import *
 from utils import *
 import struct
+from collections import namedtuple
 
 def ReadPhysInt(phys_addr, bitsize = 64, cpuval = None):
     """ Read a physical memory data based on address.
@@ -16,9 +17,9 @@ def ReadPhysInt(phys_addr, bitsize = 64, cpuval = None):
     if "kdp" == GetConnectionProtocol():
         return KDPReadPhysMEM(phys_addr, bitsize)
 
-    #NO KDP. Attempt to use physical memory
+    # NO KDP. Attempt to use physical memory
     paddr_in_kva = kern.PhysToKernelVirt(int(phys_addr))
-    if paddr_in_kva :
+    if paddr_in_kva:
         if bitsize == 64 :
             return kern.GetValueFromAddress(paddr_in_kva, 'uint64_t *').GetSBValue().Dereference().GetValueAsUnsigned()
         if bitsize == 32 :
@@ -39,8 +40,8 @@ def ReadPhys(cmd_args = None):
         address: 1234 or 0x1234 or `foo_ptr`
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print("Insufficient arguments.", ReadPhys.__doc__)
-        return False
+        raise ArgumentError()
+
     else:
         nbits = ArgumentStringToInt(cmd_args[0])
         phys_addr = ArgumentStringToInt(cmd_args[1])
@@ -245,7 +246,8 @@ def WritePhys(cmd_args=None):
         ex. (lldb)writephys 16 0x12345abcd 0x25
     """
     if cmd_args is None or len(cmd_args) < 3:
-        print("Invalid arguments.", WritePhys.__doc__)
+        raise ArgumentError()
+
     else:
         nbits = ArgumentStringToInt(cmd_args[0])
         phys_addr = ArgumentStringToInt(cmd_args[1])
@@ -535,6 +537,8 @@ def PmapBlockBaseMaskARM64(page_size, level):
     assert level >= 0 and level <= 3
     return ((1 << ARM64_VMADDR_BITS) - 1) & ~PmapBlockOffsetMaskARM64(page_size, level)
 
+PmapTTEARM64 = namedtuple('PmapTTEARM64', ['level', 'value', 'stage2'])
+
 def PmapDecodeTTEARM64(tte, level, stage2 = False, is_iommu_tte = False):
     """ Display the bits of an ARM64 translation table or page table entry
         in human-readable form.
@@ -614,7 +618,7 @@ def PmapTTnIndexARM64(vaddr, pmap_pt_attr):
 
     return tt_index
 
-def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
+def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN, extra=None):
     assert(type(vaddr) in (int, int))
     assert_64bit(vaddr)
     assert_64bit(root_tte)
@@ -636,12 +640,23 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
     tte = int(unsigned(root_tte[root_tt_index]))
 
     # Walk the page tables
-    paddr = -1
+    paddr = None
     max_level = unsigned(pmap_pt_attr.pta_max_level)
     is_valid = True
     is_leaf = False
 
+    if extra is not None:
+        extra['page_size'] = page_size
+        extra['page_mask'] = page_size - 1
+        extra['paddr']     = None
+        extra['is_valid']  = True
+        extra['is_leaf']   = False
+        extra['tte']       = []
+
     while (level <= max_level):
+        if extra is not None:
+            extra['tte'].append(PmapTTEARM64(level=level, value=tte, stage2=stage2))
+
         if verbose_level >= vSCRIPT:
             print("L{} entry: {:#x}".format(level, tte))
         if verbose_level >= vDETAIL:
@@ -651,6 +666,8 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
             if verbose_level >= vHUMAN:
                 print("L{} entry invalid: {:#x}\n".format(level, tte))
 
+            if extra is not None:
+                extra['is_valid'] = False
             is_valid = False
             break
 
@@ -664,6 +681,9 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
             if level != max_level:
                 print("phys: {:#x}".format(paddr))
 
+            if extra is not None:
+                extra['is_leaf'] = True
+                extra['paddr'] = paddr
             is_leaf = True
             break
         else:
@@ -929,10 +949,11 @@ def PVWalkARM(pai, verbose_level = vHUMAN):
             if pvh_raw & (1 << 55):
                 pvh_flags.append("RETIRED")
             if pvh_raw & (1 << 54):
+                if kern.globals.page_protection_type > kern.PAGE_PROTECTION_TYPE_PPL:
+                    pvh_flags.append("SLEEPABLE_LOCK")
+            if pvh_raw & (1 << 52):
                 if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
                     pvh_flags.append("SECURE_FLUSH_NEEDED")
-                else:
-                    pvh_flags.append("SLEEPABLE_LOCK")
             if kern.arch.startswith('arm64') and pvh_raw & (1 << 61):
                 pvh_flags.append("LOCK")
 
@@ -993,7 +1014,7 @@ def PVWalk(cmd_args=None):
         as well as dump the page table descriptor (PTD) struct if the entry is a
         PTD.
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to pv_walk.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("pv_walk does not support {0}".format(kern.arch))
@@ -1012,7 +1033,7 @@ def KVToPhys(cmd_args=None):
         Assumes the virtual address falls within the kernel static region.
         Syntax: (lldb) kvtophys <kernel virtual address>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to kvtophys.")
     if kern.arch.startswith('arm'):
         print("{:#x}".format(KVToPhysARM(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
@@ -1025,7 +1046,7 @@ def PhysToKV(cmd_args=None):
         Assumes the physical address corresponds to managed DRAM.
         Syntax: (lldb) phystokv <physical address>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to phystokv.")
     print("{:#x}".format(kern.PhysToKernelVirt(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
 
@@ -1074,7 +1095,7 @@ def PhysToFTE(cmd_args=None):
     """ Translate a physical address to the corresponding SPTM frame table entry pointer
         Syntax: (lldb) phystofte <physical address>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to phystofte.")
 
     fte = PhysToFrameTableEntry(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))
@@ -1182,7 +1203,7 @@ def ShowPTE(cmd_args=None):
     """ Display vital information about the page table entry at VA <pte>
         Syntax: (lldb) showpte <pte_va> [level] [4k|16k|16k_s2]
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to showpte.")
 
     if kern.arch.startswith('arm64'):
@@ -1274,7 +1295,7 @@ def ShowAllMappings(cmd_args=None):
         Syntax: (lldb) showallmappings <physical_address> [<pmap>]
         WARNING: this macro can take a long time (up to 30min.) to complete!
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to showallmappings.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("showallmappings does not support {0}".format(kern.arch))
@@ -1403,7 +1424,7 @@ def PVCheck(cmd_args=None, cmd_options={}):
         Syntax: (lldb) pv_check <addr> [-p]
             -P        : Interpret <addr> as a physical address rather than a PTE
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to pv_check.")
     if kern.arch.startswith('arm64'):
         level = 3
@@ -1439,7 +1460,7 @@ def PmapsForLedger(cmd_args=None):
     """ Find and display all pmaps currently using <ledger>.
         Syntax: (lldb) pmapsforledger <ledger>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to pmapsforledger.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("pmapsforledger does not support {0}".format(kern.arch))
@@ -1510,7 +1531,7 @@ def PmapPaIndex(cmd_args=None):
         NOTE: This macro will throw an exception if the input isn't a valid PAI
               and is also not a kernel-managed physical address.
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Too few arguments to pmappaindex.")
 
     if not kern.arch.startswith('arm'):

@@ -44,9 +44,6 @@ extern kern_return_t
 exclaves_xnuproxy_pmm_usage(void);
 
 extern kern_return_t
-exclaves_xnuproxy_panic_setup(uint64_t *phys, uint64_t *scid);
-
-extern kern_return_t
 exclaves_xnuproxy_ctx_alloc(exclaves_ctx_t *ctx);
 
 extern kern_return_t

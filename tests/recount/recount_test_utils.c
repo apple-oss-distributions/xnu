@@ -14,6 +14,20 @@
 
 #include "recount_test_utils.h"
 
+static bool may_fail_status = false;
+
+void
+set_expects_may_fail(bool may_fail)
+{
+	may_fail_status = may_fail;
+}
+
+bool
+expects_may_fail(void)
+{
+	return may_fail_status;
+}
+
 bool
 has_user_system_times(void)
 {
@@ -137,8 +151,25 @@ bind_to_cluster(char type)
 			&type, sizeof(type));
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.sched_thread_bind_cluster_type");
-	// Ensure the thread has seen a context switch while bound.
-	usleep(10000);
+	// Do a little spin to tighten the odds that we get CPU time on the bound
+	// cluster--needed for devices running the AMP scheduler.
+	volatile int count = 0;
+	while (count++ < 100000);
+}
+
+char *
+sched_policy_name(void)
+{
+	static char policy_name[64] = { 0 };
+	static dispatch_once_t policy_name_once;
+	dispatch_once(&policy_name_once, ^{
+		T_SETUPBEGIN;
+		T_QUIET;
+		T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.sched", &policy_name,
+				&(size_t){ sizeof(policy_name) }, NULL, 0), "kern.sched");
+		T_SETUPEND;
+	});
+	return policy_name;
 }
 
 static void

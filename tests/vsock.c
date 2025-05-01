@@ -450,7 +450,9 @@ T_DECL(connect_non_listening_host, "vsock connect to non-listening host port")
 	T_ASSERT_POSIX_FAILURE(result, EAGAIN, "vsock connect non-listening host port");
 }
 
-T_DECL(connect_non_listening_hypervisor, "vsock connect to non-listening hypervisor port")
+T_DECL(connect_non_listening_hypervisor, "vsock connect to non-listening hypervisor port",
+    T_META_ENABLED(false /* rdar://133461431 */)
+    )
 {
 	int socket;
 	int result = vsock_connect(VMADDR_CID_HYPERVISOR, 4444, &socket);

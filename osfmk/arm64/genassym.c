@@ -93,6 +93,8 @@
 #if XNU_MONITOR
 #include <arm/pmap/pmap_data.h>
 #endif /* XNU_MONITOR */
+#include <kern/debug.h>
+
 /*
  * genassym.c is used to produce an
  * assembly file which, intermingled with unuseful assembly code,
@@ -378,9 +380,9 @@ main(int     argc,
 #endif /* defined(HAS_APPLE_PAC) */
 
 
-#if __ARM_ARCH_8_5__
+#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	DECLARE("CPU_SYNC_ON_CSWITCH", offsetof(cpu_data_t, sync_on_cswitch));
-#endif /* __ARM_ARCH_8_5__ */
+#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 
 #if HIBERNATION
 	DECLARE("HIBHDR_STACKOFFSET", offsetof(IOHibernateImageHeader, restore1StackOffset));
@@ -399,6 +401,18 @@ main(int     argc,
 	DECLARE("SPTM_TRACE_SIZE_SHIFT", SPTM_TRACE_SIZE_SHIFT);
 #endif
 
+
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_PC", offsetof(struct panic_lockdown_initiator_state, initiator_pc));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP", offsetof(struct panic_lockdown_initiator_state, initiator_sp));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR", offsetof(struct panic_lockdown_initiator_state, initiator_tpidr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_MPIDR", offsetof(struct panic_lockdown_initiator_state, initiator_mpidr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_TIMESTAMP", offsetof(struct panic_lockdown_initiator_state, timestamp));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ESR", offsetof(struct panic_lockdown_initiator_state, esr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ELR", offsetof(struct panic_lockdown_initiator_state, elr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_FAR", offsetof(struct panic_lockdown_initiator_state, far));
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 	return 0;
 }

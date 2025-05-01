@@ -102,7 +102,6 @@
 #include <IOKit/IOBSD.h> // IOTaskHasEntitlement
 #include <IOKit/IOKitKeys.h> // DriverKit entitlement strings
 
-
 #if CONFIG_ATM
 #include <atm/atm_internal.h>
 #endif
@@ -211,7 +210,7 @@ host_info(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_type_num
 		basic_info->cpu_type = slot_type(master_id);
 		basic_info->cpu_subtype = slot_subtype(master_id);
 		basic_info->max_cpus = machine_info.max_cpus;
-#if defined(__x86_64__)
+#if CONFIG_SCHED_SMT
 		if (sched_allow_NO_SMT_threads && current_task()->t_flags & TF_NO_SMT) {
 			basic_info->avail_cpus = primary_processor_avail_count_user;
 		} else {
@@ -1309,7 +1308,11 @@ host_set_special_port_from_user(host_priv_t host_priv, int id, ipc_port_t port)
 		return KERN_NO_ACCESS;
 	}
 
-	if (IP_VALID(port) && (port->ip_immovable_receive || port->ip_immovable_send)) {
+	/*
+	 * rdar://70585367
+	 * disallow immovable send so other process can't retrieve it through host_get_special_port()
+	 */
+	if (IP_VALID(port) && port->ip_immovable_send) {
 		return KERN_INVALID_RIGHT;
 	}
 

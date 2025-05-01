@@ -74,6 +74,10 @@ set CONFIG_DIR=$OBJROOT/SETUP/config
 set MASTER_CONF_DIR=.
 
 set DEF_SEED=""
+set DEF_EXCLAVES="-UMASTER_CONFIG_ENABLE_EXCLAVES"
+set DEF_SPTM="-UMASTER_CONFIG_ENABLE_SPTM"
+set DEF_BUILD=""
+set DEF_TAG=""
 
 
 unset doconfig
@@ -150,6 +154,9 @@ while ($#argv >= 1)
 	case "-profile":
 	    set profile
 	    breaksw
+	case "-sptm":
+	    set DEF_SPTM="-DMASTER_CONFIG_ENABLE_SPTM"
+	    breaksw
 	default:
 	    echo "${prog}: ${argv[1]}: unknown switch"
 	    exit 1
@@ -196,7 +203,7 @@ foreach SYS ($argv)
     cat $MASTER $MASTER_CPU - \
         $MASTER $MASTER_CPU \
     | \
-    unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP $DEF_SEED - \
+    unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP $DEF_SEED $DEF_EXCLAVES $DEF_SPTM $DEF_BUILD $DEF_TAG - \
     | \
     sed -n \
 	-e "/^+/{" \

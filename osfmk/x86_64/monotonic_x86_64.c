@@ -63,14 +63,14 @@ bool mt_core_supported = false;
  */
 #define PMC_FIXED_RD(CTR) ((UINT64_C(1) << 30) | (CTR))
 #define PMC_FIXED_WR(CTR) (MSR_IA32_PERF_FIXED_CTR0 + (CTR))
-#define PMC0_RD PMC_FIXED_RD(0)
-#define PMC0_WR PMC_FIXED_WR(0)
-#define PMC1_RD PMC_FIXED_RD(1)
-#define PMC1_WR PMC_FIXED_WR(1)
-#define PMC2_RD PMC_FIXED_RD(2)
-#define PMC2_WR PMC_FIXED_WR(2)
-#define PMC3_RD PMC_FIXED_RD(3)
-#define PMC3_WR PMC_FIXED_WR(3)
+#define S3_2_C15_C0_0_RD PMC_FIXED_RD(0)
+#define S3_2_C15_C0_0_WR PMC_FIXED_WR(0)
+#define S3_2_C15_C1_0_RD PMC_FIXED_RD(1)
+#define S3_2_C15_C1_0_WR PMC_FIXED_WR(1)
+#define S3_2_C15_C2_0_RD PMC_FIXED_RD(2)
+#define S3_2_C15_C2_0_WR PMC_FIXED_WR(2)
+#define S3_2_C15_C3_0_RD PMC_FIXED_RD(3)
+#define S3_2_C15_C3_0_WR PMC_FIXED_WR(3)
 
 struct mt_cpu *
 mt_cur_cpu(void)
@@ -87,13 +87,13 @@ mt_core_snap(unsigned int ctr)
 
 	switch (ctr) {
 	case 0:
-		return __builtin_ia32_rdpmc(PMC0_RD);
+		return __builtin_ia32_rdpmc(S3_2_C15_C0_0_RD);
 	case 1:
-		return __builtin_ia32_rdpmc(PMC1_RD);
+		return __builtin_ia32_rdpmc(S3_2_C15_C1_0_RD);
 	case 2:
-		return __builtin_ia32_rdpmc(PMC2_RD);
+		return __builtin_ia32_rdpmc(S3_2_C15_C2_0_RD);
 	case 3:
-		return __builtin_ia32_rdpmc(PMC3_RD);
+		return __builtin_ia32_rdpmc(S3_2_C15_C3_0_RD);
 	default:
 		panic("monotonic: invalid core counter read: %u", ctr);
 		__builtin_unreachable();
@@ -109,16 +109,16 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 
 	switch (ctr) {
 	case 0:
-		wrmsr64(PMC0_WR, count);
+		wrmsr64(S3_2_C15_C0_0_WR, count);
 		break;
 	case 1:
-		wrmsr64(PMC1_WR, count);
+		wrmsr64(S3_2_C15_C1_0_WR, count);
 		break;
 	case 2:
-		wrmsr64(PMC2_WR, count);
+		wrmsr64(S3_2_C15_C2_0_WR, count);
 		break;
 	case 3:
-		wrmsr64(PMC3_WR, count);
+		wrmsr64(S3_2_C15_C3_0_WR, count);
 		break;
 	default:
 		panic("monotonic: invalid core counter write: %u", ctr);

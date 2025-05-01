@@ -35,6 +35,8 @@
  */
 
 #ifdef KERNEL
+#include <arm64/asm.h>
+
 #define	CKSUM_ERR _kprintf
 #else
 #ifndef LIBSYSCALL_INTERFACE
@@ -113,6 +115,9 @@ _os_cpu_in_cksum_mbuf:
 #endif
 
 
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	mov	needs_swap, #0		// needs_swap = FALSE;
 	mov	started_on_odd, #0	// started_on_odd = FALSE;
 	mov	w3, w3			// clear higher half

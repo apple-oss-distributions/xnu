@@ -73,6 +73,7 @@
 #include <sys/signal.h>
 #ifdef KERNEL_PRIVATE
 #include <mach/mach_types.h>
+#include <mach/memory_object_types.h>
 #endif /* KERNEL_PRIVATE */
 #else
 #include <stdint.h>
@@ -842,6 +843,7 @@ extern int              vttoif_tab[];
 #ifdef BSD_KERNEL_PRIVATE
 #define VNODE_REMOVE_NOFOLLOW_ANY               0x0010
 #endif
+#define VNODE_REMOVE_SYSTEM_DISCARDED           0x0020 /* Update speculative telemetry with SYSTEM_DISCARDED use state (Default USER_DISCARDED use state) */
 
 /* VNOP_READDIR flags: */
 #define VNODE_READDIR_EXTENDED    0x0001   /* use extended directory entries */
@@ -1796,6 +1798,16 @@ vnode_t  vnode_drop(vnode_t vp);
  */
 int     vnode_recycle(vnode_t vp);
 
+/*!
+ *  @function vnode_ismonitored
+ *  @abstract Check whether a file has watchers that would make it useful to query a server
+ *  for file changes.
+ *  @param vp Vnode to examine.
+ *  @discussion Will not reenter the filesystem.
+ *  @return Zero if not monitored, nonzero if monitored.
+ */
+int     vnode_ismonitored(vnode_t vp);
+
 #ifdef KERNEL_PRIVATE
 
 #define VNODE_EVENT_DELETE              0x00000001      /* file was removed */
@@ -1822,17 +1834,6 @@ int     vnode_recycle(vnode_t vp);
 
 
 #endif /* BSD_KERNEL_PRIVATE  */
-
-/*!
- *  @function vnode_ismonitored
- *  @abstract Check whether a file has watchers that would make it useful to query a server
- *  for file changes.
- *  @param vp Vnode to examine.
- *  @discussion Will not reenter the filesystem.
- *  @return Zero if not monitored, nonzero if monitored.
- */
-int     vnode_ismonitored(vnode_t vp);
-
 
 /*!
  *  @function vnode_isdyldsharedcache
@@ -1962,6 +1963,7 @@ int     vn_getpath_ext_with_mntlen(struct vnode *vp, struct vnode *dvp, char *pa
 #define VNODE_UPDATE_PURGE      0x08
 #ifdef BSD_KERNEL_PRIVATE
 #define VNODE_UPDATE_PURGEFIRMLINK      0x10
+#define VNODE_UPDATE_FORCE_PARENT_REF   0x20
 #endif
 /*!
  *  @function vnode_update_identity
@@ -2201,6 +2203,7 @@ int     vnode_iterate(struct mount *mp, int flags, int (*callout)(struct vnode *
 #define VNODE_DRAINO            0x800
 #define VNODE_PAGER             0x1000
 #define VNODE_NOBLOCK           0x2000
+#define VNODE_WITHREF           0x4000
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -2664,6 +2667,7 @@ vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);
 void vnode_setnoflush(vnode_t);
 void vnode_clearnoflush(vnode_t);
+memory_object_control_t vnode_memoryobject(vnode_t);
 #if CONFIG_IO_COMPRESSION_STATS
 void vnode_iocs_record_and_free(vnode_t);
 #endif /* CONFIG_IO_COMPRESSION_STATS */

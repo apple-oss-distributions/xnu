@@ -276,7 +276,7 @@ struct kpc_config_remote {
 	uint32_t classes;
 	kpc_config_t *configv;
 	uint64_t pmc_mask;
-	bool allow_list;
+	bool secure;
 };
 
 /* handler for mp operations */

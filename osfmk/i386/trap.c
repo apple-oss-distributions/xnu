@@ -93,6 +93,7 @@
 #include <kern/debug.h>
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
 #endif
 #include <kern/zalloc_internal.h>
 #include <sys/kdebug.h>
@@ -130,7 +131,7 @@ extern int insn_copyin_count;
 /*
  * Forward declarations
  */
-static void panic_trap(x86_saved_state64_t *saved_state, const char *trapreason, uint32_t pl, kern_return_t fault_result) __dead2;
+static void panic_trap(x86_saved_state64_t *saved_state, uint16_t comment, const char *trapreason, uint32_t pl, kern_return_t fault_result) __dead2;
 static void set_recovery_ip(x86_saved_state64_t *saved_state, vm_offset_t ip);
 #if DEVELOPMENT || DEBUG
 static __attribute__((noinline)) void copy_instruction_stream(thread_t thread, uint64_t rip, int trap_code, bool inspect_cacheline);
@@ -393,12 +394,6 @@ interrupt(x86_saved_state_t *state)
 
 	SCHED_STATS_INC(interrupt_count);
 
-#if CONFIG_TELEMETRY
-	if (telemetry_needs_record) {
-		telemetry_mark_curthread(user_mode, FALSE);
-	}
-#endif
-
 	ipl = get_preemption_level();
 
 	/*
@@ -514,46 +509,84 @@ unsigned kdp_has_active_watchpoints = 0;
 
 static uint32_t bound_chk_violations_event;
 
-static void
-xnu_soft_trap_handle_breakpoint(
-	__unused void     *tstate,
-	uint16_t          comment)
+static const char *
+xnu_soft_trap_handle_breakpoint(void *tstate, uint16_t comment)
 {
+#pragma unused(tstate)
 	if (comment == CLANG_SOFT_TRAP_BOUND_CHK) {
 		os_atomic_inc(&bound_chk_violations_event, relaxed);
+	}
+
+	return NULL;
+}
+
+static const char *
+xnu_hard_trap_handle_breakpoint(void *tstate, uint16_t comment)
+{
+	kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+	x86_saved_state64_t *state = tstate;
+
+	switch (comment) {
+	case XNU_HARD_TRAP_SAFE_UNLINK:
+		snprintf(pr->buf, sizeof(pr->buf),
+		    "panic: corrupt list around element %p",
+		    (void *)state->rax);
+		return pr->buf;
+
+	case XNU_HARD_TRAP_STRING_CHK:
+		return "panic: string operation caused an overflow";
+
+	case XNU_HARD_TRAP_ASSERT_FAILURE:
+		/*
+		 * Read the implicit assert arguments, see:
+		 * ML_TRAP_REGISTER_1: rax
+		 * ML_TRAP_REGISTER_2: r10
+		 * ML_TRAP_REGISTER_3: r11
+		 */
+		panic_assert_format(pr->buf, sizeof(pr->buf),
+		    (struct mach_assert_hdr *)state->rax,
+		    state->r10, state->r11);
+		return pr->buf;
+
+	default:
+		return NULL;
 	}
 }
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
-    .type                = KERNEL_BRK_TYPE_CLANG,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_CLANG,
     .base                = CLANG_X86_TRAP_START,
     .max                 = CLANG_X86_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = NULL);
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_soft_traps_desc,
-    .type                = KERNEL_BRK_TYPE_TELEMETRY,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TELEMETRY,
     .base                = XNU_SOFT_TRAP_START,
     .max                 = XNU_SOFT_TRAP_END,
-    .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ true),
     .handle_breakpoint   = xnu_soft_trap_handle_breakpoint);
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
-    .type                = KERNEL_BRK_TYPE_LIBCXX,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_LIBCXX,
     .base                = LIBCXX_TRAP_START,
     .max                 = LIBCXX_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = NULL);
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_hard_traps_desc,
-    .type                = KERNEL_BRK_TYPE_XNU,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_XNU,
     .base                = XNU_HARD_TRAP_START,
     .max                 = XNU_HARD_TRAP_END,
-    .options             = KERNEL_BRK_UNRECOVERABLE,
-    .handle_breakpoint   = NULL);
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
+    .handle_breakpoint   = xnu_hard_trap_handle_breakpoint);
 
 static bool
-handle_kernel_breakpoint(x86_saved_state64_t *state, uint16_t *out_comment)
+handle_kernel_breakpoint(
+	x86_saved_state64_t    *state,
+	const char            **reason,
+	uint16_t               *out_comment)
 {
 	uint16_t comment;
 	const struct kernel_brk_descriptor *desc;
@@ -587,22 +620,38 @@ handle_kernel_breakpoint(x86_saved_state64_t *state, uint16_t *out_comment)
 		return false;
 	}
 
-	if (desc->options & KERNEL_BRK_TELEMETRY_OPTIONS) {
-		telemetry_kernel_brk(desc->type, desc->options, (void *)state, comment);
+	if (desc->options.enable_trap_telemetry) {
+		trap_telemetry_report_exception(
+			/* trap_type   */ desc->type,
+			/* trap_code   */ comment,
+			/* options     */ desc->options.telemetry_options,
+			/* saved_state */ (void *)state);
 	}
 
 	if (desc->handle_breakpoint) {
-		desc->handle_breakpoint(state, comment); /* May trigger panic */
+		*reason = desc->handle_breakpoint(state, comment);
 	}
 
 	/* Still alive? Check if we should recover. */
-	if (desc->options & KERNEL_BRK_RECOVERABLE) {
+	if (desc->options.recoverable) {
 		/* ud1 can be five or eight-byte long depending on the prefix */
 		set_recovery_ip(state, state->isf.rip + (found_prefix8 ? 5 : 8));
 		return true;
 	}
 
 	return false;
+}
+
+// Find a recovery entry for an instruction address if one is present.
+static struct recovery const*
+find_recovery_entry(vm_offset_t kern_ip)
+{
+	for (struct recovery const* rp = recover_table; rp < recover_table_end; rp++) {
+		if (kern_ip == rp->fault_addr) {
+			return rp;
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -616,8 +665,7 @@ kernel_trap(
 	x86_saved_state_t       *state,
 	uintptr_t *lo_spp)
 {
-	char                    trapreason[32];
-	const char              *trapname = NULL;
+	const char             *reason = NULL;
 	uint16_t                trapcomment = 0;
 
 	x86_saved_state64_t     *saved_state;
@@ -630,7 +678,7 @@ kernel_trap(
 	thread_t                thread;
 	boolean_t               intr;
 	vm_prot_t               prot;
-	struct recovery         *rp;
+	struct recovery const   *rp = NULL;
 	vm_offset_t             kern_ip;
 	int                     is_user;
 	int                     trap_pl = get_preemption_level();
@@ -774,11 +822,8 @@ kernel_trap(
 		goto common_return;
 
 	case T_INVALID_OPCODE:
-		if (handle_kernel_breakpoint(saved_state, &trapcomment)) {
+		if (handle_kernel_breakpoint(saved_state, &reason, &trapcomment)) {
 			goto common_return;
-		} else if (trapcomment != 0) {
-			/* augment trap name with trap comment */
-			trapname = tsnprintf(trapreason, sizeof(trapreason), "%s #%#04hx", trap_type[type], trapcomment);
 		}
 		fpUDflt(kern_ip);
 		goto debugger_entry;
@@ -839,12 +884,21 @@ kernel_trap(
 			fault_result = result = KERN_FAILURE;
 			goto FALL_THROUGH;
 		}
+
+		// VM will query this property when deciding to throttle this fault, we don't want to
+		// throttle kernel faults for copyio faults. The presence of a recovery entry is used as a
+		// proxy for being in copyio code.
+		rp = find_recovery_entry(kern_ip);
+		const bool was_recover = thread->recover;
+		thread->recover = was_recover || (rp != NULL);
+
 		fault_result = result = vm_fault(map,
 		    vaddr,
 		    prot,
 		    FALSE, VM_KERN_MEMORY_NONE,
 		    THREAD_UNINT, NULL, 0);
 
+		thread->recover = was_recover;
 		if (result == KERN_SUCCESS) {
 			goto common_return;
 		}
@@ -858,11 +912,9 @@ FALL_THROUGH:
 		 * If there is a failure recovery address
 		 * for this fault, go there.
 		 */
-		for (rp = recover_table; rp < recover_table_end; rp++) {
-			if (kern_ip == rp->fault_addr) {
-				set_recovery_ip(saved_state, rp->recover_addr);
-				goto common_return;
-			}
+		if ((rp != NULL) || (rp = find_recovery_entry(kern_ip))) {
+			set_recovery_ip(saved_state, rp->recover_addr);
+			goto common_return;
 		}
 
 		/*
@@ -899,11 +951,7 @@ debugger_entry:
 	}
 	pal_cli();
 
-	if (trapname == NULL) {
-		trapname = type < TRAP_TYPES ? trap_type[type] : "Unknown";
-	}
-
-	panic_trap(saved_state, trapname, trap_pl, fault_result);
+	panic_trap(saved_state, trapcomment, reason, trap_pl, fault_result);
 	/*
 	 * NO RETURN
 	 */
@@ -924,8 +972,14 @@ set_recovery_ip(x86_saved_state64_t  *saved_state, vm_offset_t ip)
 }
 
 static void
-panic_trap(x86_saved_state64_t *regs, const char *trapname, uint32_t pl, kern_return_t fault_result)
+panic_trap(
+	x86_saved_state64_t    *regs,
+	uint16_t                trapcomment,
+	const char             *trapreason,
+	uint32_t                pl,
+	kern_return_t           fault_result)
 {
+	char            trapbuf[64];
 	pal_cr_t        cr0, cr2, cr3, cr4;
 	boolean_t       potential_smep_fault = FALSE, potential_kernel_NX_fault = FALSE;
 	boolean_t       potential_smap_fault = FALSE;
@@ -958,8 +1012,30 @@ panic_trap(x86_saved_state64_t *regs, const char *trapname, uint32_t pl, kern_re
 		potential_smap_fault = TRUE;
 	}
 
+	if (trapreason == NULL) {
+		const char *traptype = "Unknown";
+
+		if (regs->isf.trapno < TRAP_TYPES) {
+			traptype = trap_type[regs->isf.trapno];
+		}
+
+		trapreason = "Kernel trap";
+
+		if (trapcomment == 0) {
+			snprintf(trapbuf, sizeof(trapbuf),
+			    "type = %d=%s, ",
+			    regs->isf.trapno, traptype);
+		} else {
+			snprintf(trapbuf, sizeof(trapbuf),
+			    "type = %d=%s #%#04hx, ",
+			    regs->isf.trapno, traptype, trapcomment);
+		}
+	} else {
+		trapbuf[0] = '\0';
+	}
+
 #undef panic
-	panic("Kernel trap at 0x%016llx, type %d=%s, registers:\n"
+	panic("%s at 0x%016llx, %sregisters:\n"
 	    "CR0: 0x%016llx, CR2: 0x%016llx, CR3: 0x%016llx, CR4: 0x%016llx\n"
 	    "RAX: 0x%016llx, RBX: 0x%016llx, RCX: 0x%016llx, RDX: 0x%016llx\n"
 	    "RSP: 0x%016llx, RBP: 0x%016llx, RSI: 0x%016llx, RDI: 0x%016llx\n"
@@ -967,7 +1043,7 @@ panic_trap(x86_saved_state64_t *regs, const char *trapname, uint32_t pl, kern_re
 	    "R12: 0x%016llx, R13: 0x%016llx, R14: 0x%016llx, R15: 0x%016llx\n"
 	    "RFL: 0x%016llx, RIP: 0x%016llx, CS:  0x%016llx, SS:  0x%016llx\n"
 	    "Fault CR2: 0x%016llx, Error code: 0x%016llx, Fault CPU: 0x%x%s%s%s%s, PL: %d, VF: %d\n",
-	    regs->isf.rip, regs->isf.trapno, trapname,
+	    trapreason, regs->isf.rip, trapbuf,
 	    cr0, cr2, cr3, cr4,
 	    regs->rax, regs->rbx, regs->rcx, regs->rdx,
 	    regs->isf.rsp, regs->rbp, regs->rsi, regs->rdi,
@@ -1700,7 +1776,7 @@ thread_exception_return(void)
 #if DEVELOPMENT || DEBUG
 static int trap_handled;
 
-static void
+static const char *
 handle_recoverable_kernel_trap(
 	__unused void     *tstate,
 	uint16_t          comment)
@@ -1709,13 +1785,16 @@ handle_recoverable_kernel_trap(
 
 	printf("Recoverable trap handled.\n");
 	trap_handled = 1;
+
+	return NULL;
 }
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(test_desc,
-    .type                = KERNEL_BRK_TYPE_TEST,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TEST,
     .base                = TEST_RECOVERABLE_SOFT_TRAP,
     .max                 = TEST_RECOVERABLE_SOFT_TRAP,
-    .options             = KERNEL_BRK_RECOVERABLE,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ false),
     .handle_breakpoint   = handle_recoverable_kernel_trap);
 
 static int

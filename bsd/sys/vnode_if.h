@@ -147,6 +147,7 @@ extern struct vnodeop_desc vnop_offtoblk_desc;
 extern struct vnodeop_desc vnop_blockmap_desc;
 extern struct vnodeop_desc vnop_strategy_desc;
 extern struct vnodeop_desc vnop_bwrite_desc;
+extern struct vnodeop_desc vnop_monitor_desc;
 #ifdef KERNEL_PRIVATE
 extern struct vnodeop_desc vnop_verify_desc;
 #endif
@@ -1663,11 +1664,10 @@ extern struct vnodeop_desc vnop_kqfilt_remove_desc;
 errno_t VNOP_KQFILT_REMOVE(vnode_t, uintptr_t, vfs_context_t);
 #endif /* XNU_KERNEL_PRIVATE */
 
-
-#ifdef KERNEL_PRIVATE
 #define VNODE_MONITOR_BEGIN     0x01
 #define VNODE_MONITOR_END       0x02
 #define VNODE_MONITOR_UPDATE    0x04
+
 struct vnop_monitor_args {
 	struct vnodeop_desc *a_desc;
 	vnode_t a_vp;
@@ -1676,10 +1676,7 @@ struct vnop_monitor_args {
 	void *a_handle;
 	vfs_context_t a_context;
 };
-extern struct vnodeop_desc vnop_monitor_desc;
-#endif /* KERNEL_PRIVATE */
 
-#ifdef XNU_KERNEL_PRIVATE
 /*!
  *  @function VNOP_MONITOR
  *  @abstract Indicate to a filesystem that the number of watchers of a file has changed.
@@ -1702,6 +1699,7 @@ extern struct vnodeop_desc vnop_monitor_desc;
  *  Each BEGIN will be matched with an END with the same handle.  Note that vnode_ismonitored() can
  *  be used to see if there are currently watchers for a file.
  */
+#ifdef XNU_KERNEL_PRIVATE
 errno_t VNOP_MONITOR(vnode_t vp, uint32_t events, uint32_t flags, void *handle, vfs_context_t ctx);
 #endif /* XNU_KERNEL_PRIVATE */
 

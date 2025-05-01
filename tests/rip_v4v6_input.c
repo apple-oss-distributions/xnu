@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,8 +26,10 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <sys/errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <darwintest.h>
@@ -37,7 +39,8 @@ T_GLOBAL_META(
 	T_META_ASROOT(true),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("networking"),
-	T_META_CHECK_LEAKS(false));
+	T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED);
 
 
 static void
@@ -58,9 +61,14 @@ udp_port_scan(void)
 		sin.sin_port = htons(port);
 		sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-		ssize_t sent;
-		T_QUIET; T_ASSERT_POSIX_SUCCESS(sent = sendto(v4_udp_fd, buffer, len, 0, (struct sockaddr *)&sin, sin.sin_len),
-		    "sendto() to port %u", port);
+		/*
+		 * It is fine to get `ECONNREFUSED` because the port scanning does
+		 * trigger ICMP port unreachable messages
+		 */
+		ssize_t sent = sendto(v4_udp_fd, buffer, len, 0, (struct sockaddr *)&sin, sin.sin_len);
+		int saved_errno = errno;
+		T_QUIET; T_ASSERT_TRUE(sent >= 0 || errno == ECONNREFUSED, "sendto() to port %u: errno = %d (%s)",
+		    port, saved_errno, strerror(saved_errno));
 	}
 
 	close(v4_udp_fd);

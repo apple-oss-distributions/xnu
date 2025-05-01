@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <TargetConditionals.h>
 
 extern void __posix_spawnattr_init(struct _posix_spawnattr *psattrp);
 
@@ -66,6 +67,22 @@ _simple_getenv(char * const *envp, const char *var)
 }
 
 /*
+ * Check that file exists and is accessible.
+ * access() does not have a cancellation point, so it's already nocancel.
+ */
+static bool
+can_access(const char *path)
+{
+	int saveerrno = errno;
+
+	if (access(path, R_OK) != 0) {
+		errno = saveerrno;
+		return false;
+	}
+	return true;
+}
+
+/*
  * Read filtering rules from /usr/local/share/posix_spawn_filtering_rules, and
  * if the target being launched matches, apply changes to the posix_spawn
  * request. Example contents of the file:
@@ -94,7 +111,7 @@ _simple_getenv(char * const *envp, const char *var)
 static bool
 evaluate_rules(const char *rules_file_path, const char *fname, char **envs,
     size_t envs_capacity, char *env_storage, size_t env_storage_capacity,
-    cpu_type_t *type, cpu_subtype_t *subtype, uint32_t *psa_options)
+    cpu_type_t *type, cpu_subtype_t *subtype, uint32_t *psa_options, uint8_t *sec_flags)
 {
 	int saveerrno = errno;
 	int fd = -1;
@@ -102,11 +119,8 @@ evaluate_rules(const char *rules_file_path, const char *fname, char **envs,
 	/*
 	 * Preflight check on rules_file_path to avoid triggering sandbox reports in
 	 * case the process doesn't have access. We don't care about TOCTOU here.
-	 *
-	 * access() does not have a cancellation point, so it's already nocancel.
 	 */
-	if (access(rules_file_path, R_OK) != 0) {
-		errno = saveerrno;
+	if (!can_access(rules_file_path)) {
 		return false;
 	}
 
@@ -199,7 +213,12 @@ evaluate_rules(const char *rules_file_path, const char *fname, char **envs,
 			} else if (memcmp(line, "has_sec_transition:", strlen("has_sec_transition:")) == 0) {
 				char *enable_sec_transitions = line + strlen("has_sec_transition:");
 				if (strcmp(enable_sec_transitions, "1") == 0) {
-					*psa_options |= PSA_OPTION_USE_SEC_TRANSITION_SHIMS;
+					*sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE;
+				}
+			} else if (memcmp(line, "sec_transition_inherit:", strlen("sec_transition_inherit:")) == 0) {
+				char *enable_sec_transitions = line + strlen("sec_transition_inherit:");
+				if (strcmp(enable_sec_transitions, "1") == 0) {
+					*sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE_INHERIT;
 				}
 			}
 
@@ -237,8 +256,28 @@ _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
 	 * inspect the parent's env instead. For testing only purposes, it's fine.
 	 */
 	const char *rules_file_path =
-	    _simple_getenv(envp, "POSIX_SPAWN_FILTERING_RULES_PATH")
-	    ?: "/usr/local/share/posix_spawn_filtering_rules";
+	    _simple_getenv(envp, "POSIX_SPAWN_FILTERING_RULES_PATH");
+
+#if TARGET_OS_IPHONE
+	/*
+	 * Use `/var/mobile` path (writable by iOS apps) if it exists.
+	 * We don't care about TOCTOU here.
+	 */
+	if (!rules_file_path) {
+		const char *path =
+		    "/private/var/mobile/Library/posix_spawn_filtering_rules";
+		if (can_access(path)) {
+			rules_file_path = path;
+		}
+	}
+#endif
+
+	/*
+	 * Try the default rule file location (on root filesystem).
+	 */
+	if (!rules_file_path) {
+		rules_file_path = "/usr/local/share/posix_spawn_filtering_rules";
+	}
 
 	/*
 	 * Stack-allocated storage for extra env vars to add to the posix_spawn call.
@@ -253,11 +292,12 @@ _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
 	cpu_type_t cputype_binpref = 0;
 	cpu_subtype_t cpusubtype_binpref = 0;
 	uint32_t psa_options = 0;
+	uint8_t sec_flags = 0;
 	bool should_apply_rules = evaluate_rules(rules_file_path, fname,
 	    envs_to_add, sizeof(envs_to_add) / sizeof(envs_to_add[0]),
 	    env_storage, sizeof(env_storage),
 	    &cputype_binpref, &cpusubtype_binpref,
-	    &psa_options);
+	    &psa_options, &sec_flags);
 
 	if (!should_apply_rules) {
 		return false;
@@ -293,6 +333,9 @@ _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
 
 	if (psa_options != 0) {
 		new_attr.psa_options |= psa_options;
+	}
+	if (sec_flags != 0) {
+		new_attr.psa_sec_flags |= sec_flags;
 	}
 
 	/*

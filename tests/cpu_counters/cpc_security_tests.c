@@ -38,22 +38,7 @@ T_GLOBAL_META(
 // Tests prefixed with `secure_` put the development kernel into a secure CPC mode while tests prefixed with `release_` can run on the RELEASE build variant.
 
 // Metadata for running on a development kernel in CPC secure mode.
-//
-// This should require kern.development to be 1 with XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,
-// but libdarwintest has a bug (rdar://111297938) preventing that.
-// In the meantime, manually check in the test whether the kernel is DEVELOPMENT.
-#define _T_META_CPC_SECURE_ON_DEV T_META_SYSCTL_INT("kern.cpc.secure=1")
-
-static void
-_skip_unless_development(void)
-{
-	unsigned int dev = 0;
-	size_t dev_size = sizeof(dev);
-	int ret = sysctlbyname("kern.development", &dev, &dev_size, NULL, 0);
-	if (ret < 0 || dev) {
-		T_SKIP("test must run on DEVELOPMENT kernel");
-	}
-}
+#define _T_META_CPC_SECURE_ON_DEV T_META_SYSCTL_INT("kern.cpc.secure=1"), XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL
 
 static void
 _assert_kpep_ok(int kpep_err, const char *fmt, ...)
@@ -135,6 +120,10 @@ check_secure_cpmu(void)
 	ret = kpep_config_force_counters(config);
 	_assert_kpep_ok(ret, "forcing counters with configuration");
 
+	size_t kpc_count_allocated = 0;
+	uint64_t *kpc_configs = NULL;
+	size_t *kpc_map = NULL;
+
 	unsigned int tested = 0;
 	unsigned int filtered = 0;
 	unsigned int public_tested = 0;
@@ -161,15 +150,44 @@ check_secure_cpmu(void)
 		ret = kpep_config_add_event(config, &event, 0, NULL);
 		_assert_kpep_ok(ret, "adding event %s to configuration", name);
 
+		size_t kpc_count = 0;
+		ret = kpep_config_kpc_count(config, &kpc_count);
+		_assert_kpep_ok(ret, "getting KPC count");
+		if (kpc_count == 0) {
+			T_LOG("skipping event %s with no configuration", name);
+			ret = kpep_config_remove_event(config, 0);
+			_assert_kpep_ok(ret, "removing event %s from configuration", name);
+			continue;
+		}
+		if (kpc_count > kpc_count_allocated) {
+			free(kpc_configs);
+			kpc_configs = calloc(kpc_count, sizeof(kpc_config_t));
+			T_QUIET; T_WITH_ERRNO;
+			T_ASSERT_NOTNULL(kpc_configs, "allocate space for KPC configs");
+
+			free(kpc_map);
+			kpc_map = calloc(kpc_count, sizeof(size_t));
+			T_QUIET; T_WITH_ERRNO;
+			T_ASSERT_NOTNULL(kpc_map, "allocate space for KPC map");
+
+			kpc_count_allocated = kpc_count;
+		}
+
+		ret = kpep_config_kpc_map(config, kpc_map, kpc_count * sizeof(size_t));
+		_assert_kpep_ok(ret, "getting KPC map for event %s", name);
+		ret = kpep_config_kpc(config, (uint8_t *)kpc_configs, kpc_count * sizeof(kpc_config_t));
+		_assert_kpep_ok(ret, "getting KPC configs for event %s", name);
+		kpc_config_t kpc_config = kpc_configs[kpc_map[0]];
+
 		ret = kpep_config_apply(config);
 		bool not_permitted = ret == KPEP_ERR_ERRNO && errno == EPERM;
 		if (not_permitted) {
 			if (!internal_only) {
-				T_LOG("failed to configure public event %s", name);
+				T_LOG("failed to configure public event %s (0x%04llx)", name, kpc_config);
 			}
 			filtered++;
 		} else if (internal_only) {
-			T_FAIL("configured internal-only event %s with secure CPC", name);
+			T_FAIL("configured internal-only event %s (0x%04llx) with secure CPC", name, kpc_config);
 		} else {
 			public_tested++;
 		}
@@ -185,12 +203,13 @@ check_secure_cpmu(void)
 	kpep_config_free(config);
 	kpep_db_free(public_db);
 	kpep_db_free(internal_db);
+	free(kpc_configs);
+	free(kpc_map);
 }
 
 T_DECL(secure_cpmu_event_restrictions, "secured CPMU should be restricted to known events",
     _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
-	_skip_unless_development();
 	check_secure_cpmu();
 }
 
@@ -234,7 +253,6 @@ check_secure_upmu(void)
 T_DECL(secure_upmu_event_restrictions, "secured UPMU should be restricted to no events",
     _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
-	_skip_unless_development();
 	check_secure_upmu();
 }
 
@@ -270,6 +288,10 @@ check_event_coverage(kpep_db_flags_t flag, const char *kind)
 	ret = kpep_config_force_counters(config);
 	_assert_kpep_ok(ret, "forcing counters with configuration");
 
+	size_t kpc_count_allocated = 0;
+	uint64_t *kpc_configs = NULL;
+	size_t *kpc_map = NULL;
+
 	unsigned int tested = 0;
 	for (size_t i = 0; i < event_count; i++) {
 		kpep_event_t event = events[i];
@@ -284,26 +306,49 @@ check_event_coverage(kpep_db_flags_t flag, const char *kind)
 		ret = kpep_config_add_event(config, &event, 0, NULL);
 		_assert_kpep_ok(ret, "adding event %s to configuration", name);
 
+		size_t kpc_count = 0;
+		ret = kpep_config_kpc_count(config, &kpc_count);
+		_assert_kpep_ok(ret, "getting KPC count");
+		if (kpc_count > kpc_count_allocated) {
+			free(kpc_configs);
+			kpc_configs = calloc(kpc_count, sizeof(kpc_config_t));
+			T_QUIET; T_WITH_ERRNO;
+			T_ASSERT_NOTNULL(kpc_configs, "allocate space for KPC configs");
+			kpc_count_allocated = kpc_count;
+
+			free(kpc_map);
+			kpc_map = calloc(kpc_count, sizeof(size_t));
+			T_QUIET; T_WITH_ERRNO;
+			T_ASSERT_NOTNULL(kpc_map, "allocate space for KPC map");
+		}
+
+		ret = kpep_config_kpc_map(config, kpc_map, kpc_count * sizeof(size_t));
+		_assert_kpep_ok(ret, "getting KPC map for event %s", name);
+		ret = kpep_config_kpc(config, (uint8_t *)kpc_configs, kpc_count * sizeof(kpc_config_t));
+		_assert_kpep_ok(ret, "getting KPC configs for event %s", name);
+		kpc_config_t kpc_config = kpc_configs[kpc_map[0]];
+
 		ret = kpep_config_apply(config);
 		if (ret == KPEP_ERR_ERRNO && errno == EPERM) {
-			T_FAIL("failed to configure %s event %s with secure CPC", kind, name);
+			T_FAIL("failed to configure %s event %s (0x%04llx) with secure CPC", kind, name, kpc_config);
 		} else {
-			_assert_kpep_ok(ret, "applying configuration with event %s", name);
+			_assert_kpep_ok(ret, "applying configuration with event %s (0x%04llx)", name, kpc_config);
 		}
 		ret = kpep_config_remove_event(config, 0);
 		_assert_kpep_ok(ret, "removing event %s from configuration", name);
 		tested++;
 	}
 
-	T_LOG("successfully configured %u %s events", tested, kind);
+	T_LOG("attempted to configure %u %s events", tested, kind);
 	kpep_config_free(config);
 	kpep_db_free(db);
+	free(kpc_configs);
+	free(kpc_map);
 }
 
 T_DECL(secure_public_event_coverage, "all public events in kpep should be allowed",
     _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
-	_skip_unless_development();
 	check_event_coverage(KPEP_DB_FLAG_PUBLIC_ONLY, "public");
 }
 
@@ -373,6 +418,7 @@ T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel whe
 			T_FAIL("found configurable counter %u with configuration 0x%llx", i, configs[i]);
 		}
 	}
+	T_LOG("checked %d events for EL2 counting", config_count);
 
 	kpep_config_free(config);
 	kpep_db_free(db);

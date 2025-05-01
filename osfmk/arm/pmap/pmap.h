@@ -295,7 +295,6 @@ extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
 #error Unsupported architecture
 #endif /* defined(__arm64__) */
 
-
 extern pmap_paddr_t get_mmu_ttb(void);
 extern pmap_paddr_t mmu_kvtop(vm_offset_t va);
 extern pmap_paddr_t mmu_kvtop_wpreflight(vm_offset_t va);

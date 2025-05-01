@@ -124,9 +124,8 @@ fileport_invoke(task_t task, mach_port_name_t name,
 	ipc_port_t fileport;
 	struct fileglob *fg;
 
-	kr = ipc_object_copyin(task->itk_space, name,
-	    MACH_MSG_TYPE_COPY_SEND, (ipc_object_t *)&fileport, 0, NULL,
-	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+	kr = ipc_typed_port_copyin_send(task->itk_space, name,
+	    IKOT_FILEPORT, &fileport);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -136,7 +135,7 @@ fileport_invoke(task_t task, mach_port_name_t name,
 	} else {
 		kr = KERN_FAILURE;
 	}
-	ipc_port_release_send(fileport);
+	ipc_typed_port_release_send(fileport, IKOT_FILEPORT);
 	return kr;
 }
 
@@ -175,13 +174,14 @@ fileport_walk(task_t task, size_t *countp,
 
 	for (;;) {
 		ipc_entry_bits_t bits = entry->ie_bits;
-		ipc_object_t io = entry->ie_object;
 		mach_port_name_t name;
 		struct fileglob *fg;
 
 		if (IE_BITS_TYPE(bits) & MACH_PORT_TYPE_SEND) {
+			ipc_port_t port = entry->ie_port;
+
 			name = MACH_PORT_MAKE(index, IE_BITS_GEN(bits));
-			fg   = fileport_port_to_fileglob(ip_object_to_port(io));
+			fg   = fileport_port_to_fileglob(port);
 
 			if (fg) {
 				if (cb && !cb(count, name, fg)) {

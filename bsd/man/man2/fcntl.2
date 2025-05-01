@@ -1004,6 +1004,13 @@ The argument cmd is
 .Dv F_PUNCHHOLE
 and the calling process does not have file write permission.
 .\" ==========
+.It Bq Er EPERM
+The argument cmd is
+.Dv F_SETSIZE
+and the named file has its append-only flag set, see the
+.Xr chflags 2
+manual page for more information.
+.\" ==========
 .It Bq Er ESRCH
 .Fa Cmd
 is

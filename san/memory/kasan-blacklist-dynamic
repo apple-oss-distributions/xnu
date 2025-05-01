@@ -1,3 +1,5 @@
+#!special-case-list-v1
+# rdar://139815990
 # entry = <kext>:<func>:<type>
 #
 # <type> = [ kfree zfree fsfree memr memw strr strw read write rw free mem str poison ]

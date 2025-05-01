@@ -324,7 +324,7 @@ parent_helper_singleproc(int spin)
 	stackshot_config = take_stackshot(getpid(), 0, 0);
 
 	/* check that the stackshot has the stack frames */
-	check_stackshot(stackshot_config, 0);
+	check_stackshot(stackshot_config, WRITE_STACKSHOT_BUFFER_TO_TMP);
 
 	T_LOG("done!");
 }
@@ -373,7 +373,7 @@ T_DECL(basic, "test that no-fault stackshot works correctly", T_META_TAG_VM_PREF
 	stackshot_config = take_stackshot(child_pid, 0, 0);
 
 	/* check that the stackshot has the stack frames */
-	check_stackshot(stackshot_config, 0);	
+	check_stackshot(stackshot_config, WRITE_STACKSHOT_BUFFER_TO_TMP);
 
 	T_LOG("all done, killing child");
 
@@ -456,7 +456,7 @@ T_DECL(fault, "test that faulting stackshots work correctly", T_META_TAG_VM_PREF
 	stackshot_config = take_stackshot(child_pid, STACKSHOT_ENABLE_BT_FAULTING | STACKSHOT_ENABLE_UUID_FAULTING, 0);
 
 	/* check that the stackshot has the stack frames */
-	check_stackshot(stackshot_config, CHECK_FOR_FAULT_STATS);
+	check_stackshot(stackshot_config, CHECK_FOR_FAULT_STATS | WRITE_STACKSHOT_BUFFER_TO_TMP);
 
 	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.memorystatus_freeze_to_memory", NULL, 0, &oldftm, sizeof(oldftm)),
 			"reset freezing to disk");
@@ -482,6 +482,8 @@ T_DECL(fault_singleproc, "test that faulting stackshots work correctly in a sing
 #if !TARGET_OS_OSX
 	T_SKIP("madvise(..., ..., MADV_PAGEOUT) is not available on embedded platforms");
 #endif /* !TARGET_OS_OSX */
+
+	current_scenario_name = __func__;
 
 	dispatch_async(dq, ^{
 		char padding[16 * 1024];
@@ -509,7 +511,7 @@ T_DECL(fault_singleproc, "test that faulting stackshots work correctly in a sing
 	stackshot_config = take_stackshot(getpid(), STACKSHOT_ENABLE_BT_FAULTING | STACKSHOT_ENABLE_UUID_FAULTING, 0);
 
 	/* check that the stackshot has the stack frames */
-	check_stackshot(stackshot_config, CHECK_FOR_FAULT_STATS);
+	check_stackshot(stackshot_config, CHECK_FOR_FAULT_STATS | WRITE_STACKSHOT_BUFFER_TO_TMP);
 
 	T_LOG("done!");
 }
@@ -556,7 +558,7 @@ T_DECL(zombie, "test that threads wedged in the kernel can be stackshot'd", T_ME
 	stackshot_config = take_stackshot(child_pid, 0, 0);
 
 	/* check that the stackshot has the stack frames */
-	check_stackshot(stackshot_config, CHECK_FOR_KERNEL_THREADS);
+	check_stackshot(stackshot_config, CHECK_FOR_KERNEL_THREADS | WRITE_STACKSHOT_BUFFER_TO_TMP);
 
 	T_LOG("all done, unwedging and killing child");
 

@@ -1551,7 +1551,7 @@ necp_client_update_alloc(const void * __sized_by(length)data, size_t length)
 static void
 necp_client_update_free(struct necp_client_update *client_update)
 {
-	kfree_data_counted_by(client_update->update, client_update->update_length);
+	kfree_data_sized_by(client_update->update, client_update->update_length);
 	kfree_type(struct necp_client_update, client_update);
 }
 
@@ -2581,7 +2581,12 @@ necp_client_add_agent_interface_options(struct necp_client *client,
     const struct necp_client_parsed_parameters *parsed_parameters,
     ifnet_t ifp)
 {
-	if (ifp != NULL && ifp->if_agentids != NULL) {
+	if (ifp == NULL) {
+		return;
+	}
+
+	ifnet_lock_shared(ifp);
+	if (ifp->if_agentids != NULL) {
 		for (u_int32_t i = 0; i < ifp->if_agentcount; i++) {
 			if (uuid_is_null(ifp->if_agentids[i])) {
 				continue;
@@ -2591,6 +2596,7 @@ necp_client_add_agent_interface_options(struct necp_client *client,
 			    ifp->if_index, ifnet_get_generation(ifp));
 		}
 	}
+	ifnet_lock_done(ifp);
 }
 
 static void
@@ -2598,7 +2604,12 @@ necp_client_add_browse_interface_options(struct necp_client *client,
     const struct necp_client_parsed_parameters *parsed_parameters,
     ifnet_t ifp)
 {
-	if (ifp != NULL && ifp->if_agentids != NULL) {
+	if (ifp == NULL) {
+		return;
+	}
+
+	ifnet_lock_shared(ifp);
+	if (ifp->if_agentids != NULL) {
 		for (u_int32_t i = 0; i < ifp->if_agentcount; i++) {
 			if (uuid_is_null(ifp->if_agentids[i])) {
 				continue;
@@ -2617,6 +2628,7 @@ necp_client_add_browse_interface_options(struct necp_client *client,
 			}
 		}
 	}
+	ifnet_lock_done(ifp);
 }
 
 static inline bool
@@ -6528,8 +6540,20 @@ necp_request_tcp_netstats(userland_stats_provider_context *ctx,
 		    client->proc_pid, proc_pid(current_proc()), proc_best_name(current_proc()));
 	}
 
+	const struct sk_stats_flow *sf = &flow_registration->nexus_stats->fs_stats;
+	if (sf == NULL) {
+		nstat_diagnostic_flags |= NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE;
+		char namebuf[MAXCOMLEN + 1];
+		(void) strlcpy(namebuf, "unknown", sizeof(namebuf));
+		proc_name(client->proc_pid, namebuf, sizeof(namebuf));
+		NECPLOG(LOG_ERR, "req tcp stats, necp_client flow_registration flow_stats missing for pid %d %s curproc %d %s\n",
+		    client->proc_pid, namebuf, proc_pid(current_proc()), proc_best_name(current_proc()));
+		sf = &ntstat_sk_stats_zero;
+	}
+
 	if (ifflagsp) {
 		*ifflagsp = route_ifflags | nstat_diagnostic_flags;
+		*ifflagsp |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 		if (tcpstats->necp_tcp_extra.flags1 & SOF1_CELLFALLBACK) {
 			*ifflagsp |= NSTAT_IFNET_VIA_CELLFALLBACK;
 		}
@@ -6540,7 +6564,6 @@ necp_request_tcp_netstats(userland_stats_provider_context *ctx,
 
 	if (digestp) {
 		// The digest is intended to give information that may help give insight into the state of the link
-		// while avoiding the need to do the relatively expensive flowswitch lookup
 		digestp->rxbytes = tcpstats->necp_tcp_counts.necp_stat_rxbytes;
 		digestp->txbytes = tcpstats->necp_tcp_counts.necp_stat_txbytes;
 		digestp->rxduplicatebytes = tcpstats->necp_tcp_counts.necp_stat_rxduplicatebytes;
@@ -6558,17 +6581,6 @@ necp_request_tcp_netstats(userland_stats_provider_context *ctx,
 		if ((countsp == NULL) && (metadatap == NULL)) {
 			return true;
 		}
-	}
-
-	const struct sk_stats_flow *sf = &flow_registration->nexus_stats->fs_stats;
-	if (sf == NULL) {
-		nstat_diagnostic_flags |= NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE;
-		char namebuf[MAXCOMLEN + 1];
-		(void) strlcpy(namebuf, "unknown", sizeof(namebuf));
-		proc_name(client->proc_pid, namebuf, sizeof(namebuf));
-		NECPLOG(LOG_ERR, "req tcp stats, necp_client flow_registration flow_stats missing for pid %d %s curproc %d %s\n",
-		    client->proc_pid, namebuf, proc_pid(current_proc()), proc_best_name(current_proc()));
-		sf = &ntstat_sk_stats_zero;
 	}
 
 	if (countsp) {
@@ -6704,12 +6716,6 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 		    client->proc_pid, proc_pid(current_proc()), proc_best_name(current_proc()));
 	}
 
-	if (ifflagsp) {
-		*ifflagsp = route_ifflags | nstat_diagnostic_flags;
-		if ((countsp == NULL) && (metadatap == NULL)) {
-			return true;
-		}
-	}
 	const struct sk_stats_flow *sf = &flow_registration->nexus_stats->fs_stats;
 	if (sf == NULL) {
 		nstat_diagnostic_flags |= NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE;
@@ -6719,6 +6725,14 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 		NECPLOG(LOG_ERR, "req udp stats, necp_client flow_registration flow_stats missing for pid %d %s curproc %d %s\n",
 		    client->proc_pid, namebuf, proc_pid(current_proc()), proc_best_name(current_proc()));
 		sf = &ntstat_sk_stats_zero;
+	}
+
+	if (ifflagsp) {
+		*ifflagsp = route_ifflags | nstat_diagnostic_flags;
+		*ifflagsp |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
+		if ((countsp == NULL) && (metadatap == NULL)) {
+			return true;
+		}
 	}
 
 	if (countsp) {
@@ -6830,8 +6844,20 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 		    client->proc_pid, proc_pid(current_proc()), proc_best_name(current_proc()));
 	}
 
+	const struct sk_stats_flow *sf = &flow_registration->nexus_stats->fs_stats;
+	if (sf == NULL) {
+		nstat_diagnostic_flags |= NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE;
+		char namebuf[MAXCOMLEN + 1];
+		(void) strlcpy(namebuf, "unknown", sizeof(namebuf));
+		proc_name(client->proc_pid, namebuf, sizeof(namebuf));
+		NECPLOG(LOG_ERR, "req quic stats, necp_client flow_registration flow_stats missing for pid %d %s curproc %d %s\n",
+		    client->proc_pid, namebuf, proc_pid(current_proc()), proc_best_name(current_proc()));
+		sf = &ntstat_sk_stats_zero;
+	}
+
 	if (ifflagsp) {
 		*ifflagsp = route_ifflags | nstat_diagnostic_flags;
+		*ifflagsp |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 		if ((digestp == NULL) && (countsp == NULL) && (metadatap == NULL)) {
 			return true;
 		}
@@ -6839,7 +6865,6 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 
 	if (digestp) {
 		// The digest is intended to give information that may help give insight into the state of the link
-		// while avoiding the need to do the relatively expensive flowswitch lookup
 		digestp->rxbytes = quicstats->necp_quic_counts.necp_stat_rxbytes;
 		digestp->txbytes = quicstats->necp_quic_counts.necp_stat_txbytes;
 		digestp->rxduplicatebytes = quicstats->necp_quic_counts.necp_stat_rxduplicatebytes;
@@ -6857,17 +6882,6 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 		if ((countsp == NULL) && (metadatap == NULL)) {
 			return true;
 		}
-	}
-
-	const struct sk_stats_flow *sf = &flow_registration->nexus_stats->fs_stats;
-	if (sf == NULL) {
-		nstat_diagnostic_flags |= NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE;
-		char namebuf[MAXCOMLEN + 1];
-		(void) strlcpy(namebuf, "unknown", sizeof(namebuf));
-		proc_name(client->proc_pid, namebuf, sizeof(namebuf));
-		NECPLOG(LOG_ERR, "req quic stats, necp_client flow_registration flow_stats missing for pid %d %s curproc %d %s\n",
-		    client->proc_pid, namebuf, proc_pid(current_proc()), proc_best_name(current_proc()));
-		sf = &ntstat_sk_stats_zero;
 	}
 
 	if (countsp) {
@@ -7718,8 +7732,8 @@ necp_client_remove_flow(struct necp_fd_data *fd_data, struct necp_client_action_
 		goto done;
 	}
 
-	if (uap->buffer != 0 && buffer_size == sizeof(flow_ifnet_stats)) {
-		error = copyin(uap->buffer, &flow_ifnet_stats, buffer_size);
+	if (uap->buffer != 0 && buffer_size != 0) {
+		error = copyin(uap->buffer, &flow_ifnet_stats, MIN(buffer_size, sizeof(flow_ifnet_stats)));
 		if (error) {
 			NECPLOG(LOG_ERR, "necp_client_remove flow_ifnet_stats copyin error (%d)", error);
 			// Not fatal
@@ -7861,7 +7875,7 @@ necp_client_calculate_flow_tlv_size(struct necp_client_flow_registration *flow_r
 	size_t assigned_results_size = 0;
 	struct necp_client_flow *flow = NULL;
 	LIST_FOREACH(flow, &flow_registration->flow_list, flow_chain) {
-		if (flow->assigned || !necp_client_endpoint_is_unspecified((struct necp_client_endpoint *)&flow->remote_addr)) {
+		if (flow->assigned || flow_registration->defunct || !necp_client_endpoint_is_unspecified((struct necp_client_endpoint *)&flow->remote_addr)) {
 			size_t header_length = 0;
 			if (flow->nexus) {
 				header_length = sizeof(struct necp_client_nexus_flow_header);
@@ -7888,7 +7902,7 @@ necp_client_fillout_flow_tlvs(struct necp_client *client,
 	int error = 0;
 	struct necp_client_flow *flow = NULL;
 	LIST_FOREACH(flow, &flow_registration->flow_list, flow_chain) {
-		if (flow->assigned || !necp_client_endpoint_is_unspecified((struct necp_client_endpoint *)&flow->remote_addr)) {
+		if (flow->assigned || flow_registration->defunct || !necp_client_endpoint_is_unspecified((struct necp_client_endpoint *)&flow->remote_addr)) {
 			// Write TLV headers
 			struct necp_client_nexus_flow_header header = {};
 			u_int32_t length = 0;

@@ -126,6 +126,7 @@
 		3546C83B2758402300517973 /* event_wrappers.c in Sources */ = {isa = PBXBuildFile; fileRef = 3546C83A2758402300517973 /* event_wrappers.c */; };
 		3695DCC91F3D2C5F0072C0B3 /* reboot.c in Sources */ = {isa = PBXBuildFile; fileRef = 3695DCC81F3D2C5A0072C0B3 /* reboot.c */; };
 		374A36E314748F1300AAF39D /* varargs_wrappers.s in Sources */ = {isa = PBXBuildFile; fileRef = 374A36E214748EE400AAF39D /* varargs_wrappers.s */; };
+		3EC621C72BDAACF000707EC0 /* os_log_coprocessor.c in Sources */ = {isa = PBXBuildFile; fileRef = 3EC621C62BDAACF000707EC0 /* os_log_coprocessor.c */; };
 		3F538F891A659C5600B37EFD /* persona.c in Sources */ = {isa = PBXBuildFile; fileRef = 3F538F881A659C5600B37EFD /* persona.c */; };
 		401BB71A1BCAE57B005080D3 /* os_channel.c in Sources */ = {isa = PBXBuildFile; fileRef = 401BB7161BCAE539005080D3 /* os_channel.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
 		401BB71C1BCAE57B005080D3 /* os_nexus.c in Sources */ = {isa = PBXBuildFile; fileRef = 401BB7181BCAE539005080D3 /* os_nexus.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
@@ -191,6 +192,7 @@
 		BAFE90E01C3A4D960012084F /* libsystem_kernel.a in CopyFiles */ = {isa = PBXBuildFile; fileRef = D2AAC0630554660B00DB518D /* libsystem_kernel.a */; };
 		BAFE90E21C3A4DB00012084F /* libsystem_kernel.a in CopyFiles */ = {isa = PBXBuildFile; fileRef = D2AAC0630554660B00DB518D /* libsystem_kernel.a */; };
 		C48FA19027A6A95200337F46 /* nfsclnt.c in Sources */ = {isa = PBXBuildFile; fileRef = C48FA18F27A6A95200337F46 /* nfsclnt.c */; };
+		C49DD38E2C99B78C002CA9E7 /* statfs_ext.c in Sources */ = {isa = PBXBuildFile; fileRef = C49DD38D2C99B78C002CA9E7 /* statfs_ext.c */; };
 		C639F0E51741C25800A39F47 /* gethostuuid.h in Headers */ = {isa = PBXBuildFile; fileRef = C639F0E41741C09A00A39F47 /* gethostuuid.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		C6460B7C182025DF00F73CCA /* sfi.c in Sources */ = {isa = PBXBuildFile; fileRef = C6460B7B182025DF00F73CCA /* sfi.c */; };
 		C6AB38DB174202C10036DD9F /* gethostuuid.h in Headers */ = {isa = PBXBuildFile; fileRef = C639F0E41741C09A00A39F47 /* gethostuuid.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -575,6 +577,7 @@
 		3695DCC81F3D2C5A0072C0B3 /* reboot.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = reboot.c; sourceTree = "<group>"; };
 		374A36E214748EE400AAF39D /* varargs_wrappers.s */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.asm; path = varargs_wrappers.s; sourceTree = "<group>"; };
 		37DDFB7614748713009D3355 /* syscall.map */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = syscall.map; sourceTree = "<group>"; };
+		3EC621C62BDAACF000707EC0 /* os_log_coprocessor.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = os_log_coprocessor.c; sourceTree = "<group>"; };
 		3F538F881A659C5600B37EFD /* persona.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = persona.c; sourceTree = "<group>"; };
 		401BB7161BCAE539005080D3 /* os_channel.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = os_channel.c; path = skywalk/os_channel.c; sourceTree = "<group>"; };
 		401BB7181BCAE539005080D3 /* os_nexus.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = os_nexus.c; path = skywalk/os_nexus.c; sourceTree = "<group>"; };
@@ -589,6 +592,7 @@
 		4BCDD8B120741C2F00FA37A3 /* mach_right.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mach_right.c; sourceTree = "<group>"; };
 		4BDD5F1B1891AB2F004BF300 /* mach_approximate_time.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = mach_approximate_time.c; sourceTree = "<group>"; };
 		4BDD5F1C1891AB2F004BF300 /* mach_approximate_time.s */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.asm; path = mach_approximate_time.s; sourceTree = "<group>"; };
+		69B003732C94CCC400121BD6 /* err_vm.sub */ = {isa = PBXFileReference; lastKnownFileType = text; path = err_vm.sub; sourceTree = "<group>"; };
 		6E6EAA8021EA5AAE001C5D04 /* restartable.defs */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.mig; path = restartable.defs; sourceTree = "<group>"; };
 		726D915420ACD7FC0039A2FE /* mach_bridge_remote_time.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mach_bridge_remote_time.c; sourceTree = "<group>"; };
 		72AAD8692241878C001511C3 /* proc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = proc.h; sourceTree = "<group>"; };
@@ -623,6 +627,7 @@
 		BA9973461C3B4C8A00B14D8C /* quota_obsolete.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = quota_obsolete.c; sourceTree = "<group>"; };
 		BABA36CA1A856C4700BBBCF7 /* host.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = host.c; sourceTree = "<group>"; };
 		C48FA18F27A6A95200337F46 /* nfsclnt.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = nfsclnt.c; sourceTree = "<group>"; };
+		C49DD38D2C99B78C002CA9E7 /* statfs_ext.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = statfs_ext.c; sourceTree = "<group>"; };
 		C639F0E41741C09A00A39F47 /* gethostuuid.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = gethostuuid.h; sourceTree = "<group>"; };
 		C6460B7B182025DF00F73CCA /* sfi.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = sfi.c; sourceTree = "<group>"; };
 		C6BEE9171806840200D25AAB /* posix_sem_obsolete.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = posix_sem_obsolete.c; sourceTree = "<group>"; };
@@ -769,6 +774,7 @@
 		08FB7795FE84155DC02AAC07 /* mach */ = {
 			isa = PBXGroup;
 			children = (
+				69B003732C94CCC400121BD6 /* err_vm.sub */,
 				96D0FB9D273B5CB8003032F5 /* vm_reclaim.c */,
 				247A08FF11F8E18000E4693F /* abort.h */,
 				C9D9BCC5114B00600000D8B9 /* clock_priv.defs */,
@@ -878,6 +884,7 @@
 			isa = PBXGroup;
 			children = (
 				C48FA18F27A6A95200337F46 /* nfsclnt.c */,
+				C49DD38D2C99B78C002CA9E7 /* statfs_ext.c */,
 				3546C83A2758402300517973 /* event_wrappers.c */,
 				E4D45C2116F856900002AF25 /* __commpage_gettimeofday.c */,
 				C99A4F4E1305B1B70054B7B7 /* __get_cpu_capabilities.s */,
@@ -1108,6 +1115,7 @@
 		C9C1824E15338BEB00933F23 /* os */ = {
 			isa = PBXGroup;
 			children = (
+				3EC621C62BDAACF000707EC0 /* os_log_coprocessor.c */,
 				C9C1824F15338C0B00933F23 /* alloc_once.c */,
 				9C4B507322273E0F00F068C1 /* log_data.c */,
 				72AAD8692241878C001511C3 /* proc.h */,
@@ -1561,11 +1569,13 @@
 				928336A11B83ED9100873B90 /* thread_register_state.c in Sources */,
 				9002401118FC9A7F00D73BFA /* renamex.c in Sources */,
 				132B8BEC245D0B2C00F546A7 /* system-version-compat-support.c in Sources */,
+				C49DD38E2C99B78C002CA9E7 /* statfs_ext.c in Sources */,
 				2419382B12135FF6003CDE41 /* chmod.c in Sources */,
 				248BA01D121C56BF008C073F /* connect.c in Sources */,
 				9C4B507422273E0F00F068C1 /* log_data.c in Sources */,
 				248BA01F121C607E008C073F /* fchmod.c in Sources */,
 				E4D45C3616F86BD80002AF25 /* posix_spawn.c in Sources */,
+				3EC621C72BDAACF000707EC0 /* os_log_coprocessor.c in Sources */,
 				13B598941A142F6400DB2D5A /* stackshot.c in Sources */,
 				C962B16C18DBA2C80031244A /* setpriority.c in Sources */,
 				248BA04F121C8F06008C073F /* fcntl.c in Sources */,

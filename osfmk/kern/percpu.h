@@ -152,7 +152,7 @@ extern vm_offset_t other_percpu_base(int cpu_number);
  * @param name          the per-CPU variable name
  */
 #define PERCPU_GET_WITH_BASE(base, name) \
-	__PERCPU_CAST(name, base + __PERCPU_ADDR(name))
+	__PERCPU_CAST(name, (vm_address_t)base + __PERCPU_ADDR(name))
 
 /*!
  * @macro PERCPU_GET_RELATIVE
@@ -255,7 +255,7 @@ extern vm_offset_t other_percpu_base(int cpu_number);
 
 #define __percpu                        __attribute__((section("__DATA, __percpu")))
 #define __PERCPU_NAME(name)             percpu_slot_ ## name
-#define __PERCPU_ADDR(name)             ((caddr_t)&__PERCPU_NAME(name))
+#define __PERCPU_ADDR(name)             ((vm_address_t)&__PERCPU_NAME(name))
 #define __PERCPU_TYPE(name)             typeof(&__PERCPU_NAME(name))
 #define __PERCPU_CAST(name, expr)       __unsafe_forge_bidi_indexable(__PERCPU_TYPE(name), (vm_address_t)(expr), sizeof(__PERCPU_NAME(name)))
 

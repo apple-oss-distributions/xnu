@@ -211,6 +211,10 @@ enum {
 	HIB_COMPR_RATIO_INTEL  = (0x80)   // compression 50%
 };
 
+enum {
+	kIOHibernateDiskFreeSpace = 1ULL * 1024ULL * 1024ULL * 1024ULL  // 1gb
+};
+
 #if defined(__arm64__)
 static uint64_t                 gIOHibernateCompression = HIB_COMPR_RATIO_ARM64;
 #else
@@ -286,6 +290,7 @@ HibernationCopyHandoffRegionFromPageArray(uint32_t page_array[], uint32_t page_c
 
 	uint8_t *copyDest = (uint8_t *)vars->handoffBuffer->getBytesNoCopy();
 
+
 	for (unsigned i = 0; i < page_count; i++) {
 		/*
 		 * Each entry in the page array is a physical page number, so convert
@@ -293,6 +298,7 @@ HibernationCopyHandoffRegionFromPageArray(uint32_t page_array[], uint32_t page_c
 		 */
 		memcpy(&copyDest[i * PAGE_SIZE], (void *)phystokv(ptoa_64(page_array[i])), PAGE_SIZE);
 	}
+
 }
 #endif /* CONFIG_SPTM */
 
@@ -320,12 +326,7 @@ IOMemoryDescriptorWriteFromPhysical(IOMemoryDescriptor * md,
 			dstLen = remaining;
 		}
 
-#if 1
 		bcopy_phys(srcAddr, dstAddr64, dstLen);
-#else
-		copypv(srcAddr, dstAddr64, dstLen,
-		    cppvPsnk | cppvFsnk | cppvNoRefSrc | cppvNoModSnk | cppvKmap);
-#endif
 		srcAddr   += dstLen;
 		offset    += dstLen;
 		remaining -= dstLen;
@@ -360,12 +361,7 @@ IOMemoryDescriptorReadToPhysical(IOMemoryDescriptor * md,
 			dstLen = remaining;
 		}
 
-#if 1
 		bcopy_phys(srcAddr64, dstAddr, dstLen);
-#else
-		copypv(srcAddr, dstAddr64, dstLen,
-		    cppvPsnk | cppvFsnk | cppvNoRefSrc | cppvNoModSnk | cppvKmap);
-#endif
 		dstAddr    += dstLen;
 		offset     += dstLen;
 		remaining  -= dstLen;
@@ -476,7 +472,7 @@ IOHibernateSystemSleep(void)
 	OSNumber * num;
 	bool       dsSSD, vmflush, swapPinned;
 	IOHibernateVars * vars;
-	uint64_t   setFileSize = 0;
+	uint64_t   setFileSizeMin = 0, setFileSizeMax = 0;
 
 	gIOHibernateState = kIOHibernateStateInactive;
 
@@ -592,26 +588,38 @@ IOHibernateSystemSleep(void)
 
 			// estimate: 6% increase in pages compressed
 			// screen preview 2 images compressed 0%
-			setFileSize = ((ptoa_64((106 * pageCount) / 100) * gIOHibernateCompression) >> 8)
+			setFileSizeMin = ((ptoa_64((106 * pageCount) / 100) * gIOHibernateCompression) >> 8)
 			    + vars->page_list->list_size
 			    + (consoleInfo.v_width * consoleInfo.v_height * 8);
 			enum { setFileRound = 1024 * 1024ULL };
-			setFileSize = ((setFileSize + setFileRound) & ~(setFileRound - 1));
+			setFileSizeMin = ((setFileSizeMin + setFileRound) & ~(setFileRound - 1));
 
-			HIBLOG("hibernate_page_list_setall preflight pageCount %d est comp %qd setfile %qd min %qd\n",
+			setFileSizeMax = setFileSizeMin;
+			HIBLOG("hibernate_page_list_setall preflight pageCount %d est comp %qd setfilemin %qd setfilemax %qd min %qd\n",
 			    pageCount, (100ULL * gIOHibernateCompression) >> 8,
-			    setFileSize, vars->fileMinSize);
+			    setFileSizeMin, setFileSizeMax, vars->fileMinSize);
 
 			if (!(kIOHibernateModeFileResize & gIOHibernateMode)
-			    && (setFileSize < vars->fileMinSize)) {
-				setFileSize = vars->fileMinSize;
+			    && (setFileSizeMin < vars->fileMinSize)) {
+				setFileSizeMin = vars->fileMinSize;
 			}
+
+#if TEST_XXX
+			{
+				vm_size_t extraAlloc = 2ULL * 1024ULL * 1024ULL * 1024ULL / sizeof(uint64_t);
+				uint64_t * leak = IONew(uint64_t, extraAlloc);
+				assert(leak);
+				for (uint64_t idx = 0; idx < extraAlloc; idx++) {
+					leak[idx] = idx;
+				}
+			}
+#endif
 		}
 
 		vars->volumeCryptKeySize = sizeof(vars->volumeCryptKey);
 		err = IOPolledFileOpen(gIOHibernateFilename,
 		    (kIOPolledFileCreate | kIOPolledFileHibernate),
-		    setFileSize, 0,
+		    setFileSizeMin, setFileSizeMax, kIOHibernateDiskFreeSpace,
 		    gIOHibernateCurrentHeader, sizeof(gIOHibernateCurrentHeader),
 		    &vars->fileVars, &nvramData,
 		    &vars->volumeCryptKey[0], &vars->volumeCryptKeySize);
@@ -872,7 +880,7 @@ IOHibernateSystemSleep(void)
 #if DISABLE_TRIM
 		    0, NULL, 0, 0, 0, false);
 #else
-		    0, NULL, 0, sizeof(IOHibernateImageHeader), setFileSize, false);
+		    0, NULL, 0, sizeof(IOHibernateImageHeader), setFileSizeMin, false);
 #endif
 		gFSState = kFSIdle;
 	}
@@ -1695,6 +1703,14 @@ hibernate_write_image(void)
 	svPageCount         = 0;
 	zvPageCount         = 0;
 
+#if DEVELOPMENT || DEBUG
+	// Enable panic injection on the entry path.
+	// The panic must occur after boot-image is set but before the image is written.
+	if ((panic_test_case & PANIC_TEST_CASE_HIBERNATION_ENTRY) && (panic_test_failure_mode & PANIC_TEST_FAILURE_MODE_PANIC)) {
+		panic("injected panic on hibernation entry");
+	}
+#endif
+
 	if (!vars->fileVars
 	    || !vars->fileVars->pollers
 	    || !(kIOHibernateModeOn & gIOHibernateMode)) {
@@ -2087,6 +2103,7 @@ hibernate_write_image(void)
 				}
 
 				for (page = ppnum; page < (ppnum + count); page++) {
+					uint8_t *encrypted = NULL;
 					err = IOMemoryDescriptorWriteFromPhysical(vars->srcBuffer, 0, ptoa_64(page), page_size);
 					if (err) {
 						HIBLOG("IOMemoryDescriptorWriteFromPhysical %d [%ld] %x\n", __LINE__, (long)page, err);
@@ -2113,7 +2130,9 @@ hibernate_write_image(void)
 					compBytes += page_size;
 					pageCompressedSize = (-1 == wkresult) ? page_size : wkresult;
 
-					if (pageCompressedSize == 0) {
+					if (encrypted != NULL) {
+						data = encrypted;
+					} else if (pageCompressedSize == 0) {
 						pageCompressedSize = 4;
 						data = src;
 
@@ -2131,7 +2150,8 @@ hibernate_write_image(void)
 					}
 
 					assert(pageCompressedSize <= page_size);
-					tag = ((uint32_t) pageCompressedSize) | kIOHibernateTagSignature;
+					tag = ((uint32_t) pageCompressedSize) | kIOHibernateTagSignature |
+					    (encrypted != NULL ? kIOHibernateTagSKCrypt : 0);
 					err = IOHibernatePolledFileWrite(vars, (const uint8_t *) &tag, sizeof(tag), cryptvars);
 					if (kIOReturnSuccess != err) {
 						break;
@@ -2328,7 +2348,8 @@ hibernate_write_image(void)
 	} else {
 		// on ARM, once ApplePMGR decides we're hibernating, we can't turn back
 		// see: <rdar://problem/63848862> Tonga ApplePMGR diff quiesce path support
-		vm_panic_hibernate_write_image_failed(err);
+		vm_panic_hibernate_write_image_failed(err, vars->fileVars->fileSizeMin,
+		    vars->fileVars->fileSizeMax, vars->fileVars->fileSize);
 		return err; //not coming here post panic
 	}
 #else
@@ -2631,7 +2652,7 @@ hibernate_machine_init(void)
 			}
 
 			compressedSize = kIOHibernateTagLength & tag;
-			if (kIOHibernateTagSignature != (tag & ~kIOHibernateTagLength)) {
+			if (kIOHibernateTagSignature != (tag & kIOHibernateTagSigMask)) {
 				err = kIOReturnIPCError;
 				panic("Hibernate restore error %x", err);
 			}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -133,6 +133,8 @@ extern void wait_while_mp_kdp_trap(bool check_SIGPdebug);
 /*
  *	Exported variables:
  */
+
+TUNABLE(long, wdt, "wdt", 0);
 
 struct machine_info     machine_info;
 
@@ -568,12 +570,20 @@ processor_cpu_reinit(void* machine_param,
 	ml_cpu_up();
 #endif
 
+	/*
+	 * Interrupts must be disabled while processor_start_state_lock is
+	 * held to prevent a deadlock with CPU startup of other CPUs that
+	 * may be proceeding in parallel to this CPU's reinitialization.
+	 */
+	spl_t s = splsched();
 	processor_t processor = current_processor();
 
 	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
 	assert(processor->processor_instartup == true || is_final_system_sleep);
 	processor->processor_instartup = false;
 	simple_unlock(&processor_start_state_lock);
+
+	splx(s);
 
 	thread_wakeup((event_t)&processor->processor_instartup);
 }
@@ -987,7 +997,7 @@ ml_io_read(uintptr_t vaddr, int size)
 #endif /* __x86_64__ */
 
 	if (__improbable(report_read_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_io_timestamp();
 		timeread = TRUE;
 	}
@@ -1057,15 +1067,11 @@ ml_io_read(uintptr_t vaddr, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -1092,7 +1098,7 @@ ml_io_read(uintptr_t vaddr, int size)
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, result);
 		}
 
-		(void)ml_set_interrupts_enabled(istate);
+		(void)ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 	return result;
@@ -1144,7 +1150,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 	uint64_t trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
 #endif /* !defined(__x86_64__) */
 	if (__improbable(report_write_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_io_timestamp();
 		timewrite = TRUE;
 	}
@@ -1212,15 +1218,11 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -1248,7 +1250,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, val);
 		}
 
-		(void)ml_set_interrupts_enabled(istate);
+		(void)ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 }
@@ -1329,7 +1331,7 @@ ml_broadcast_cpu_event(enum cpu_event event, unsigned int cpu_or_cluster)
 void
 machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *suffix)
 {
-	if (spec->skip_predicate != NULL && spec->skip_predicate(spec)) {
+	if (wdt == -1 || (spec->skip_predicate != NULL && spec->skip_predicate(spec))) {
 		// This timeout should be disabled.
 		os_atomic_store_wide((uint64_t*)spec->ptr, 0, relaxed);
 		return;

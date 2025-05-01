@@ -824,7 +824,7 @@ current_percpu_base(void)
 vm_offset_t
 other_percpu_base(int cpu)
 {
-	return (char *)cpu_datap(cpu) - __PERCPU_ADDR(cpu_data);
+	return (vm_address_t)cpu_datap(cpu) - __PERCPU_ADDR(cpu_data);
 }
 
 uint64_t

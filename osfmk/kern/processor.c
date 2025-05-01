@@ -139,8 +139,9 @@ SIMPLE_LOCK_DECLARE(processor_start_state_lock, 0);
 
 uint32_t                processor_avail_count;
 uint32_t                processor_avail_count_user;
-uint32_t                primary_processor_avail_count;
+#if CONFIG_SCHED_SMT
 uint32_t                primary_processor_avail_count_user;
+#endif /* CONFIG_SCHED_SMT */
 
 #if XNU_SUPPORT_BOOTCPU_SHUTDOWN
 TUNABLE(bool, support_bootcpu_shutdown, "support_bootcpu_shutdown", true);
@@ -319,9 +320,11 @@ processor_init(
 	processor->deadline = UINT64_MAX;
 	processor->first_timeslice = FALSE;
 	processor->processor_online = false;
+#if CONFIG_SCHED_SMT
 	processor->processor_primary = processor; /* no SMT relationship known at this point */
 	processor->processor_secondary = NULL;
 	processor->is_SMT = false;
+#endif /* CONFIG_SCHED_SMT */
 	processor->processor_self = IP_NULL;
 	processor->processor_list = NULL;
 	processor->must_idle = false;
@@ -347,7 +350,9 @@ processor_init(
 	bit_set(pset->cpu_bitmask, cpu_id);
 	bit_set(pset->recommended_bitmask, cpu_id);
 	atomic_bit_set(&pset->node->pset_recommended_map, pset->pset_id, memory_order_relaxed);
+#if CONFIG_SCHED_SMT
 	bit_set(pset->primary_map, cpu_id);
+#endif /* CONFIG_SCHED_SMT */
 	bit_set(pset->cpu_state_map[PROCESSOR_OFF_LINE], cpu_id);
 	if (pset->cpu_set_count++ == 0) {
 		pset->cpu_set_low = pset->cpu_set_hi = cpu_id;
@@ -382,6 +387,7 @@ processor_init(
 	processor_array[cpu_id] = processor;
 }
 
+#if CONFIG_SCHED_SMT
 bool system_is_SMT = false;
 
 void
@@ -421,6 +427,7 @@ processor_set_primary(
 		splx(s);
 	}
 }
+#endif /* CONFIG_SCHED_SMT */
 
 processor_set_t
 processor_pset(
@@ -503,7 +510,9 @@ processor_state_update_idle(processor_t processor)
 #endif
 	processor->current_perfctl_class = PERFCONTROL_CLASS_IDLE;
 	processor->current_urgency = THREAD_URGENCY_NONE;
+#if CONFIG_SCHED_SMT
 	processor->current_is_NO_SMT = false;
+#endif /* CONFIG_SCHED_SMT */
 	processor->current_is_bound = false;
 	processor->current_is_eagerpreempt = false;
 #if CONFIG_SCHED_EDGE
@@ -533,29 +542,15 @@ processor_state_update_from_thread(processor_t processor, thread_t thread, boole
 #endif
 	processor->current_perfctl_class = thread_get_perfcontrol_class(thread);
 	processor->current_urgency = thread_get_urgency(thread, NULL, NULL);
+#if CONFIG_SCHED_SMT
 	processor->current_is_NO_SMT = thread_no_smt(thread);
+#endif /* CONFIG_SCHED_SMT */
 	processor->current_is_bound = thread->bound_processor != PROCESSOR_NULL;
 	processor->current_is_eagerpreempt = thread_is_eager_preempt(thread);
 	if (pset_lock_held) {
 		/* Only update the pset load average when the pset lock is held */
 		sched_update_pset_load_average(processor->processor_set, 0);
 	}
-}
-
-void
-processor_state_update_explicit(processor_t processor, int pri, sfi_class_id_t sfi_class,
-    pset_cluster_type_t pset_type, perfcontrol_class_t perfctl_class, thread_urgency_t urgency, __unused sched_bucket_t bucket)
-{
-	processor->current_pri = pri;
-	processor->current_sfi_class = sfi_class;
-	processor->current_recommended_pset_type = pset_type;
-	processor->current_perfctl_class = perfctl_class;
-	processor->current_urgency = urgency;
-#if CONFIG_SCHED_EDGE
-	os_atomic_store(&processor->processor_set->cpu_running_buckets[processor->cpu_id], bucket, relaxed);
-	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_RR], processor->cpu_id);
-	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST], processor->cpu_id);
-#endif /* CONFIG_SCHED_EDGE */
 }
 
 pset_node_t
@@ -640,17 +635,20 @@ pset_init(
 	pset_node_t                     node)
 {
 	pset->online_processor_count = 0;
-	pset->load_average = 0;
-	bzero(&pset->pset_load_average, sizeof(pset->pset_load_average));
 #if CONFIG_SCHED_EDGE
+	bzero(&pset->pset_load_average, sizeof(pset->pset_load_average));
 	bzero(&pset->pset_runnable_depth, sizeof(pset->pset_runnable_depth));
+#else /* !CONFIG_SCHED_EDGE */
+	pset->load_average = 0;
 #endif /* CONFIG_SCHED_EDGE */
 	pset->cpu_set_low = pset->cpu_set_hi = 0;
 	pset->cpu_set_count = 0;
 	pset->last_chosen = -1;
 	pset->cpu_bitmask = 0;
 	pset->recommended_bitmask = 0;
+#if CONFIG_SCHED_SMT
 	pset->primary_map = 0;
+#endif /* CONFIG_SCHED_SMT */
 	pset->realtime_map = 0;
 	pset->cpu_available_map = 0;
 
@@ -668,7 +666,9 @@ pset_init(
 	pset->pset_self = IP_NULL;
 	pset->pset_name_self = IP_NULL;
 	pset->pset_list = PROCESSOR_SET_NULL;
+#if CONFIG_SCHED_SMT
 	pset->is_SMT = false;
+#endif /* CONFIG_SCHED_SMT */
 #if CONFIG_SCHED_EDGE
 	bzero(&pset->pset_execution_time, sizeof(pset->pset_execution_time));
 	pset->cpu_running_foreign = 0;
@@ -1178,6 +1178,7 @@ processor_wake(
 	processor_start_reason(processor, REASON_SYSTEM);
 }
 
+#if CONFIG_SCHED_SMT
 kern_return_t
 enable_smt_processors(bool enable)
 {
@@ -1218,6 +1219,7 @@ enable_smt_processors(bool enable)
 
 	return KERN_SUCCESS;
 }
+#endif /* CONFIG_SCHED_SMT */
 
 bool
 processor_should_kprintf(processor_t processor, bool starting)

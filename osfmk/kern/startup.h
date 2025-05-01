@@ -97,6 +97,18 @@ __options_decl(startup_debug_t, uint32_t, {
 	STARTUP_DEBUG_VERBOSE = 0x00000001,
 });
 
+/*!
+ * @enum startup_source_t
+ *
+ * @abstract
+ * The source from which a tunable was resolved.
+ */
+__options_decl(startup_source_t, uint32_t, {
+	STARTUP_SOURCE_DEFAULT,
+	STARTUP_SOURCE_DEVICETREE,
+	STARTUP_SOURCE_BOOTPARAM,
+});
+
 extern startup_debug_t startup_debug;
 
 /*!
@@ -409,6 +421,42 @@ __options_decl(tunable_dt_flags_t, uint32_t, {
 #define TUNABLE_DT_DEV_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags) \
 	TUNABLE_DT(type_t, var, dt_base, dt_name, boot_arg, default_value, flags)
 #endif
+
+/*!
+ * @macro TUNABLE_DT_WRITEABLE_SOURCE
+ *
+ * @abstract
+ * Like TUNABLE_DT_WRITEABLE, but records the source from which the value was resolved.
+ *
+ * @param type_t
+ * Should be an integer type or bool.
+ *
+ * @param var
+ * The name of the C variable to use for storage.
+ *
+ * @param source_var
+ * The name of the C variable to record the source. It will be of type startup_source_t.
+ *
+ * @param dt_base
+ * The name of the DT node containing the property.
+ *
+ * @param dt_name
+ * The name of the DT property containing the default value.
+ *
+ * @param boot_arg
+ * The name of the boot-arg overriding the initial value from the DT.
+ *
+ * @param default_value
+ * The default value for the tunable if both DT entry and boot-arg are
+ * absent.
+ *
+ * @param flags
+ * See the description for @c tunable_dt_flags_t.
+ */
+#define TUNABLE_DT_WRITEABLE_SOURCE(type_t, var, source_var, dt_base, dt_name, boot_arg, default_value, flags) \
+	type_t var = default_value; \
+    startup_source_t source_var; \
+	__TUNABLE_DT_SOURCE(type_t, var, source_var, dt_base, dt_name, boot_arg, flags)
 
 /*
  * Machine Timeouts
@@ -741,6 +789,24 @@ __BEGIN_DECLS
 	__STARTUP_ARG(var, __LINE__, TUNABLES, STARTUP_RANK_FIRST, \
 	    kernel_startup_tunable_dt_init, &__startup_TUNABLES_DT_spec_ ## var)
 
+#define __TUNABLE_DT_SOURCE(type_t, var, source_var, dt_base_key, dt_name_key, boot_arg_key, flags) \
+	static __startup_const char __startup_TUNABLES_dt_base_ ## var[] = dt_base_key; \
+	static __startup_const char __startup_TUNABLES_dt_name_ ## var[] = dt_name_key; \
+	static __startup_const char __startup_TUNABLES_name_ ## var[] = boot_arg_key; \
+	static __startup_const struct startup_tunable_dt_source_spec \
+	__startup_TUNABLES_DT_spec_ ## var = { \
+	        .dt_base = __startup_TUNABLES_dt_base_ ## var, \
+	        .dt_name = __startup_TUNABLES_dt_name_ ## var, \
+	        .dt_chosen_override = (bool)((flags) & TUNABLE_DT_CHECK_CHOSEN), \
+	        .boot_arg_name = __startup_TUNABLES_name_ ## var, \
+	        .var_addr = (void *)&var, \
+	        .var_len = sizeof(type_t), \
+	        .var_is_bool = __startup_type_is_bool(type_t), \
+	    .source_addr = &source_var, \
+	}; \
+	__STARTUP_ARG(var, __LINE__, TUNABLES, STARTUP_RANK_FIRST, \
+	    kernel_startup_tunable_dt_source_init, &__startup_TUNABLES_DT_spec_ ## var)
+
 #ifdef __cplusplus
 #define __STARTUP_FUNC_CAST(func, a) \
 	    (void(*)(const void *))func
@@ -789,6 +855,17 @@ struct startup_tunable_dt_spec {
 	bool        var_is_bool;
 };
 
+struct startup_tunable_dt_source_spec {
+	const char       *dt_base;
+	const char       *dt_name;
+	bool              dt_chosen_override;
+	const char       *boot_arg_name;
+	void             *var_addr;
+	int               var_len;
+	bool              var_is_bool;
+	startup_source_t *source_addr;
+};
+
 #if DEBUG || DEVELOPMENT
 struct sysctl_test_setup_spec {
 	const char *st_name;
@@ -808,6 +885,7 @@ extern void kernel_startup_bootstrap(void);
 extern void kernel_startup_initialize_upto(startup_subsystem_id_t upto);
 extern void kernel_startup_tunable_init(const struct startup_tunable_spec *);
 extern void kernel_startup_tunable_dt_init(const struct startup_tunable_dt_spec *);
+extern void kernel_startup_tunable_dt_source_init(const struct startup_tunable_dt_source_spec *);
 extern void kernel_bootstrap(void);
 
 /* Initialize machine dependent stuff */

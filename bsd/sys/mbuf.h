@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -247,8 +247,9 @@ struct pf_fragment_tag {
 struct tcp_pktinfo {
 	union {
 		struct {
-			uint32_t segsz;        /* segment size (actual MSS) */
-			uint32_t start_seq;    /* start seq of this packet */
+			uint16_t  seg_size;  /* segment size (actual MSS) */
+			uint16_t  hdr_len;   /* size of IP+TCP header, might be zero */
+			uint32_t  start_seq; /* start seq of this packet */
 			pid_t     pid;
 			pid_t     e_pid;
 		} __tx;
@@ -256,11 +257,14 @@ struct tcp_pktinfo {
 			uint8_t  seg_cnt;    /* # of coalesced TCP pkts */
 		} __rx;
 	} __offload;
-#define tso_segsz       proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.segsz
+#define tx_seg_size     proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.seg_size
+#define tso_segsz       tx_seg_size
+#define tx_hdr_len      proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.hdr_len
 #define tx_start_seq    proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.start_seq
 #define tx_tcp_pid      proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.pid
 #define tx_tcp_e_pid    proto_mtag.__pr_u.tcp.tm_tcp.__offload.__tx.e_pid
-#define seg_cnt         proto_mtag.__pr_u.tcp.tm_tcp.__offload.__rx.seg_cnt
+
+#define rx_seg_cnt      proto_mtag.__pr_u.tcp.tm_tcp.__offload.__rx.seg_cnt
 };
 
 /*
@@ -450,8 +454,10 @@ struct pkthdr {
 	union builtin_mtag builtin_mtag;
 
 	uint32_t comp_gencnt;
-	uint16_t pkt_ext_flags;
-	uint16_t pkt_crumbs;
+	uint32_t pkt_crumbs:16,
+	    pkt_compl_callbacks:8,
+	    pkt_ext_flags:3,
+	    pkt_unused:5; /* Currently unused - feel free to grab those 5 bits */
 	/*
 	 * Module private scratch space (32-bit aligned), currently 16-bytes
 	 * large. Anything stored here is not guaranteed to survive across
@@ -476,9 +482,6 @@ struct pkthdr {
 #define pkt_mpriv_flags pkt_mpriv.__mpriv_u.__mpriv32[1].__mpriv32_u.__val32
 #define pkt_mpriv_srcid pkt_mpriv.__mpriv_u.__mpriv32[2].__mpriv32_u.__val32
 #define pkt_mpriv_fidx  pkt_mpriv.__mpriv_u.__mpriv32[3].__mpriv32_u.__val32
-
-	u_int32_t redzone;              /* red zone */
-	u_int32_t pkt_compl_callbacks;  /* Packet completion callbacks */
 };
 
 /*
@@ -580,6 +583,10 @@ struct pkthdr {
 #define PKT_CRUMB_TCP_INPUT     0x1000
 #define PKT_CRUMB_UDP_INPUT     0x2000
 
+/* m_hdr_common crumbs flags */
+#define CRUMB_INPUT_FLAG 0x0000000000010000
+#define CRUMB_INTERFACE_FLAG 0x000000000001ffff
+
 /* flags related to flow control/advisory and identification */
 #define PKTF_FLOW_MASK  \
 	(PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC | PKTF_FLOW_RAWSOCK)
@@ -587,12 +594,12 @@ struct pkthdr {
 /*
  * Description of external storage mapped into mbuf, valid only if M_EXT set.
  */
-typedef void (*m_ext_free_func_t)(caddr_t, u_int, caddr_t);
+typedef void (*__single m_ext_free_func_t)(caddr_t, u_int, caddr_t);
 struct m_ext {
-	caddr_t __counted_by(ext_size) ext_buf; /* start of buffer */
-	m_ext_free_func_t ext_free;     /* free routine if not the usual */
-	u_int   ext_size;               /* size of buffer, for ext_free */
-	caddr_t ext_arg;                /* additional ext_free argument */
+	caddr_t __counted_by(ext_size) ext_buf;   /* start of buffer */
+	m_ext_free_func_t              ext_free;  /* free routine (plain-text), if not the usual */
+	u_int                          ext_size;  /* size of the external buffer */
+	caddr_t                        ext_arg;   /* additional ext_free argument (plain-text) */
 	struct ext_ref {
 		struct mbuf *paired;
 		u_int16_t minref;
@@ -600,7 +607,6 @@ struct m_ext {
 		u_int16_t prefcnt;
 		u_int16_t flags;
 		u_int32_t priv;
-		uintptr_t ext_token;
 	} *ext_refflags;
 };
 
@@ -662,8 +668,16 @@ struct mbuf {
 struct m_hdr_common {
 	struct m_hdr M_hdr;
 	struct m_ext M_ext  __attribute__((aligned(16)));             /* M_EXT set */
+#if defined(__arm64__)
+	uint64_t m_hdr_crumbs;
+#endif
 	struct pkthdr M_pkthdr  __attribute__((aligned(16)));         /* M_PKTHDR set */
 };
+
+_Static_assert(sizeof(struct m_hdr_common) == 224, "Crumbs effecting size of struct");
+#if defined(__arm64__)
+_Static_assert(sizeof(struct m_hdr_common) == 224, "Crumbs effecting size of struct");
+#endif
 
 /*
  * The mbuf object
@@ -686,7 +700,9 @@ struct mbuf {
 #define m_ext           M_hdr_common.M_ext
 #define m_pkthdr        M_hdr_common.M_pkthdr
 #define m_pktdat        M_dat.MH_databuf
-
+#if defined(__arm64__)
+#define m_mhdrcommon_crumbs M_hdr_common.m_hdr_crumbs
+#endif /* __arm64__ */
 #endif /* CONFIG_MBUF_MCACHE */
 
 #define m_act           m_nextpkt
@@ -1137,6 +1153,16 @@ struct name {                                                   \
 	(q)->mq_last = &MBUFQ_FIRST(q);                         \
 } while (0)
 
+#define MBUFQ_DROP_AND_DRAIN(q, d, r) do {                  \
+	struct mbuf *__m0;                                      \
+	while ((__m0 = MBUFQ_FIRST(q)) != NULL) {               \
+	        MBUFQ_FIRST(q) = MBUFQ_NEXT(__m0);              \
+	        MBUFQ_NEXT(__m0) = NULL;                        \
+	        m_drop(__m0, (d) | DROPTAP_FLAG_L2_MISSING, (r), NULL, 0); \
+	}                                                       \
+	(q)->mq_last = &MBUFQ_FIRST(q);                         \
+} while (0)
+
 #define MBUFQ_FOREACH(m, q)                                     \
 	for ((m) = MBUFQ_FIRST(q);                              \
 	    (m);                                                \
@@ -1292,11 +1318,15 @@ typedef struct mb_class_stat {
 #define MCS_OFFLINE     3       /* cache is offline (resizing) */
 
 #if defined(XNU_KERNEL_PRIVATE)
+#define MB_STAT_MAX_MB_CLASSES 8 /* Max number of distinct Mbuf classes. */
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if defined(XNU_KERNEL_PRIVATE)
 /* For backwards compatibility with 32-bit userland process */
 struct omb_stat {
 	u_int32_t               mbs_cnt;        /* number of classes */
 	u_int32_t               mbs_pad;        /* padding */
-	struct omb_class_stat   mbs_class[1];   /* class array */
+	struct omb_class_stat   mbs_class[MB_STAT_MAX_MB_CLASSES];   /* class array */
 } __attribute__((__packed__));
 #endif /* XNU_KERNEL_PRIVATE */
 
@@ -1305,7 +1335,11 @@ typedef struct mb_stat {
 #if defined(KERNEL) || defined(__LP64__)
 	u_int32_t       mbs_pad;        /* padding */
 #endif /* KERNEL || __LP64__ */
+#if defined(XNU_KERNEL_PRIVATE)
+	mb_class_stat_t mbs_class[MB_STAT_MAX_MB_CLASSES];
+#else /* XNU_KERNEL_PRIVATE */
 	mb_class_stat_t mbs_class[1];   /* class array */
+#endif /* XNU_KERNEL_PRIVATE */
 } mb_stat_t;
 
 #ifdef PRIVATE
@@ -1405,11 +1439,12 @@ struct mbuf;
 
 extern void m_freem(struct mbuf *) __XNU_INTERNAL(m_freem);
 extern void m_drop(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
-extern void m_drop_list(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
+extern void m_drop_if(mbuf_t, struct ifnet *, uint16_t, uint32_t, const char *, uint16_t);
+extern void m_drop_list(mbuf_t, struct ifnet *, uint16_t, uint32_t, const char *, uint16_t);
 extern u_int64_t mcl_to_paddr(char *);
 extern void m_adj(struct mbuf *, int);
 extern void m_cat(struct mbuf *, struct mbuf *);
-extern void m_copydata(struct mbuf *, int, int, void *);
+extern void m_copydata(struct mbuf *, int, int len, void * __sized_by(len));
 extern struct mbuf *m_copym(struct mbuf *, int, int, int);
 extern struct mbuf *m_copym_mode(struct mbuf *, int, int, int, struct mbuf **, int *, uint32_t);
 extern struct mbuf *m_get(int, int);
@@ -1590,12 +1625,12 @@ extern int max_protohdr;       /* largest protocol header */
 
 __private_extern__ unsigned int mbuf_default_ncl(uint64_t);
 __private_extern__ void mbinit(void);
-__private_extern__ struct mbuf *m_clattach(struct mbuf *, int, caddr_t,
-    void (*)(caddr_t, u_int, caddr_t), size_t, caddr_t, int, int);
-__private_extern__ caddr_t m_bigalloc(int);
+__private_extern__ struct mbuf *m_clattach(struct mbuf *, int, caddr_t __sized_by(extsize),
+    void (*)(caddr_t, u_int, caddr_t), size_t extsize, caddr_t, int, int);
+__private_extern__ char * __sized_by_or_null(MBIGCLBYTES) m_bigalloc(int);
 __private_extern__ void m_bigfree(caddr_t, u_int, caddr_t);
 __private_extern__ struct mbuf *m_mbigget(struct mbuf *, int);
-__private_extern__ caddr_t m_16kalloc(int);
+__private_extern__ char * __sized_by_or_null(M16KCLBYTES) m_16kalloc(int);
 __private_extern__ void m_16kfree(caddr_t, u_int, caddr_t);
 __private_extern__ struct mbuf *m_m16kget(struct mbuf *, int);
 __private_extern__ int m_reinit(struct mbuf *, int);
@@ -1612,14 +1647,12 @@ __private_extern__ struct mbuf *m_copyup(struct mbuf *, int, int);
 __private_extern__ struct mbuf *m_retry(int, int);
 __private_extern__ struct mbuf *m_retryhdr(int, int);
 __private_extern__ int m_freem_list(struct mbuf *);
-__private_extern__ int m_append(struct mbuf *, int, caddr_t);
+__private_extern__ int m_append(struct mbuf *, int len, caddr_t __sized_by(len));
 __private_extern__ struct mbuf *m_last(struct mbuf *);
-__private_extern__ struct mbuf *m_devget(char *, int, int, struct ifnet *,
-    void (*)(const void *, void *, size_t));
 __private_extern__ struct mbuf *m_pulldown(struct mbuf *, int, int, int *);
 
 __private_extern__ struct mbuf *m_getcl(int, int, int);
-__private_extern__ caddr_t m_mclalloc(int);
+__private_extern__ char * __sized_by_or_null(MCLBYTES) m_mclalloc(int);
 __private_extern__ int m_mclhasreference(struct mbuf *);
 __private_extern__ void m_copy_pkthdr(struct mbuf *, struct mbuf *);
 __private_extern__ int m_dup_pkthdr(struct mbuf *, struct mbuf *, int);
@@ -1637,9 +1670,9 @@ __private_extern__ struct mbuf *m_normalize(struct mbuf *m);
 __private_extern__ void m_mchtype(struct mbuf *m, int t);
 __private_extern__ void m_mcheck(struct mbuf *);
 
-__private_extern__ void m_copyback(struct mbuf *, int, int, const void *);
-__private_extern__ struct mbuf *m_copyback_cow(struct mbuf *, int, int,
-    const void *, int);
+__private_extern__ void m_copyback(struct mbuf *, int, int len, const void * __sized_by(len));
+__private_extern__ struct mbuf *m_copyback_cow(struct mbuf *, int, int len,
+    const void * __sized_by(len), int);
 __private_extern__ int m_makewritable(struct mbuf **, int, int, int);
 __private_extern__ struct mbuf *m_dup(struct mbuf *m, int how);
 __private_extern__ struct mbuf *m_copym_with_hdrs(struct mbuf *, int, int, int,
@@ -1657,7 +1690,28 @@ __private_extern__ int m_ext_paired_is_active(struct mbuf *);
 __private_extern__ void m_ext_paired_activate(struct mbuf *);
 
 __private_extern__ void m_add_crumb(struct mbuf *, uint16_t);
+__private_extern__ void m_add_hdr_crumb(struct mbuf *, uint64_t, uint64_t);
+__private_extern__ void m_add_hdr_crumb_chain(struct mbuf *, uint64_t, uint64_t);
 
+static inline void
+m_add_hdr_crumb_interface_output(mbuf_t m, int index, bool chain)
+{
+	if (chain) {
+		m_add_hdr_crumb_chain(m, index, CRUMB_INTERFACE_FLAG);
+	} else {
+		m_add_hdr_crumb(m, index, CRUMB_INTERFACE_FLAG);
+	}
+}
+
+static inline void
+m_add_hdr_crumb_interface_input(mbuf_t m, int index, bool chain)
+{
+	if (chain) {
+		m_add_hdr_crumb_chain(m, index | CRUMB_INPUT_FLAG, CRUMB_INTERFACE_FLAG);
+	} else {
+		m_add_hdr_crumb(m, index | CRUMB_INPUT_FLAG, CRUMB_INTERFACE_FLAG);
+	}
+}
 __private_extern__ void mbuf_drain(boolean_t);
 
 /*

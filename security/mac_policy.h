@@ -1561,6 +1561,22 @@ typedef int mpo_mount_label_internalize_t(
 	char *element_data
 	);
 /**
+ *  @brief Notify on successful filesystem mount
+ *  @param cred Subject credential
+ *  @param mp Mount point of file system being mounted
+ *  @param mntlabel Label to associate with the new mount point
+ *  @see mpo_mount_label_init_t
+ *
+ *  Notify on  successful filesystem mount. The mntlabel associated
+ *  to this mount point should be initalized with mac_mount_label_init
+ *  prior to this call.
+ */
+typedef void mpo_mount_notify_mount_t(
+	kauth_cred_t cred,
+	struct mount *mp,
+	struct label *mntlabel
+	);
+/**
  *  @brief Access control check for opening an NECP file descriptor
  *  @param cred Subject credential
  *  @param flags Open flags
@@ -2580,7 +2596,8 @@ typedef int mpo_proc_check_setauid_t(
 /**
  *  @brief Access control check for delivering signal
  *  @param cred Subject credential
- *  @param proc Object process
+ *  @param instigator Process which instigated the signal (optional)
+ *  @param target Object process
  *  @param signum Signal number; see kill(2)
  *
  *  Determine whether the subject identified by the credential can deliver
@@ -2590,43 +2607,21 @@ typedef int mpo_proc_check_setauid_t(
  *  signals as part or their normal process lifecycle; caution should be
  *  exercised when implementing access controls over signal events.
  *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned. Suggested failure: EACCES for label mismatch,
- *  EPERM for lack of privilege, or ESRCH to limit visibility.
- */
-typedef int mpo_proc_check_signal_t(
-	kauth_cred_t cred,
-	struct proc *proc,
-	int signum
-	);
-/**
- *  @brief Access control check for delivering a delegated signal
- *  @param caller Caller credential
- *  @param instigator Instigator process audit token
- *  @param target Target process audit token
- *  @param signum Signal number; see kill(2)
- *
- *  Determine whether the caller and instigator combination identified by
- *  the provided credentials can deliver the specified signal to the target process.
- *
- *  @note Caller will always be current_proc(). But the instigator may not be
- *  the current proc, and may no longer be running.
+ *  @note Caller will always be current_proc(). But the instigator may be NULL,
+ *  may not be the current proc, and may no longer be running.
  *
  *  @warning Policy implementations must avoid obtaining proc refs of
  *  two different processes simultaneously.
  *
- *  @warning Programs typically expect to be able to send and receive
- *  signals as part or their normal process lifecycle; caution should be
- *  exercised when implementing access controls over signal events.
- *
  *  @return Return 0 if access is granted, otherwise an appropriate value for
  *  errno should be returned. Suggested failure: EACCES for label mismatch,
  *  EPERM for lack of privilege, or ESRCH to limit visibility.
  */
-typedef int mpo_proc_check_delegated_signal_t(
-	kauth_cred_t caller,
-	audit_token_t instigator,
-	audit_token_t target,
+#define NEEDS_RDAR_132584934 1 // Required until both EndpointSecurity & Sandbox are updated
+typedef int mpo_proc_check_signal_t(
+	kauth_cred_t cred,
+	proc_ident_t instigator,
+	proc_ident_t target,
 	int signum
 	);
 /**
@@ -5842,7 +5837,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 86 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 87 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -5896,7 +5891,6 @@ struct mac_policy_ops {
 	mpo_proc_notify_service_port_derive_t   *mpo_proc_notify_service_port_derive;
 	mpo_proc_check_set_task_exception_port_t *mpo_proc_check_set_task_exception_port;
 	mpo_proc_check_set_thread_exception_port_t *mpo_proc_check_set_thread_exception_port;
-	mpo_proc_check_delegated_signal_t       *mpo_proc_check_delegated_signal;
 
 	mpo_reserved_hook_t                     *mpo_reserved08;
 	mpo_reserved_hook_t                     *mpo_reserved09;
@@ -5912,6 +5906,7 @@ struct mac_policy_ops {
 	mpo_reserved_hook_t                     *mpo_reserved19;
 	mpo_reserved_hook_t                     *mpo_reserved20;
 	mpo_reserved_hook_t                     *mpo_reserved21;
+	mpo_reserved_hook_t                     *mpo_reserved22;
 
 	mpo_necp_check_open_t                   *mpo_necp_check_open;
 	mpo_necp_check_client_action_t          *mpo_necp_check_client_action;
@@ -5936,7 +5931,7 @@ struct mac_policy_ops {
 	mpo_vnode_check_swap_t                  *mpo_vnode_check_swap;
 	mpo_reserved_hook_t                     *mpo_reserved33;
 	mpo_reserved_hook_t                     *mpo_reserved34;
-	mpo_reserved_hook_t                     *mpo_reserved35;
+	mpo_mount_notify_mount_t                *mpo_mount_notify_mount;
 	mpo_vnode_check_copyfile_t              *mpo_vnode_check_copyfile;
 
 	mpo_mount_check_quotactl_t              *mpo_mount_check_quotactl;

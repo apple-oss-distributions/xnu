@@ -114,7 +114,7 @@ int     posix_spawnattr_set_crash_behavior_deadline_np(posix_spawnattr_t *attr, 
 
 int     posix_spawnattr_set_launch_type_np(posix_spawnattr_t *attr, uint8_t launch_type) __SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
 
-int     posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_t flags) __SPI_AVAILABLE(macos(14.0), ios(17.0), tvos(17.0), watchos(10.0));
+int     posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_t flags) __SPI_AVAILABLE(macos(15.2), ios(18.2), tvos(18.2), watchos(11.2));
 
 int     posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr, const int policy) __SPI_AVAILABLE(macos(13.3), ios(16.4), tvos(16.4), watchos(9.4));
 

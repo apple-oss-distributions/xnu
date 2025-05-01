@@ -56,7 +56,6 @@
 #include "../mach/arm/vm_param.h"
 #define kVectorSize 16
 
-
 /*****************************************************************************
  *  Constants                                                                *
  *****************************************************************************/
@@ -208,14 +207,14 @@ L_vectorDone:
 	ClearFrameAndReturn
 
 L_scalar:
+0:
   ldrb      w4,     [x0],#1  // load byte from src1
   ldrb      w5,     [x1],#1  // load byte from src2
   subs      x3,      x4, x5  // if the are not equal
   ccmp      w4,  #0, #4, eq  //    or we find an EOS
   b.eq      1f               // return the difference
   subs      x2,      x2, #1  // decrement length
-  b.ne      L_scalar         // continue loop if non-zero
+  b.ne      0b               // continue loop if non-zero
 1:
 	mov       x0,      x3
 	ClearFrameAndReturn
-  

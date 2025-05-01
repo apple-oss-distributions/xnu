@@ -992,7 +992,12 @@ sysctl_sysctl_next_ls(struct sysctl_oid_list *lsp, int *name, u_int namelen,
 			return 0;
 		}
 next:
-		namelen = 1;
+		/* We expect to be reducing namelen here, don't reset to 1 if this
+		 * is actually an increase.
+		 */
+		if (namelen > 1) {
+			namelen = 1;
+		}
 		*len = level;
 	}
 	return 1;
@@ -1233,6 +1238,69 @@ SYSCTL_PROC(_sysctl, 3, name2oid, CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_KERN | 
     sysctl_sysctl_name2oid, "I", "");
 
 /*
+ * find_oid_by_name
+ *
+ * Description: Support function for use by sysctl_sysctl_oidfmt() and
+ *		sysctl_sysctl_oiddescr()); looks up an OID given an
+ *		OID name.
+ *
+ * Parameters:	name				A pointer to the OID name list
+ *						integer array
+ *		namelen				The length of the OID name
+ *		oidp				Pointer to receive OID pointer
+ *
+ * Returns:	0				Success
+ *		ENOENT				Entry not found
+ *		EISDIR				Malformed request
+ *
+ * Implicit:	*oidp				Modified to contain pointer to
+ *                                              the OID, or NULL if not found
+ *
+ * Locks:	Assumes sysctl_geometry_lock is held prior to calling
+ */
+STATIC int
+find_oid_by_name(int *name, u_int namelen, struct sysctl_oid **oidp)
+{
+	LCK_RW_ASSERT(&sysctl_geometry_lock, LCK_RW_ASSERT_SHARED);
+
+	struct sysctl_oid_iterator it = sysctl_oid_iterator_begin(&sysctl__children);
+	struct sysctl_oid *oid = sysctl_oid_iterator_next_system_order(&it);
+
+	u_int indx = 0;
+
+	*oidp = NULL;
+
+	while (oid && indx < CTL_MAXNAME) {
+		if (oid->oid_number == name[indx]) {
+			indx++;
+			if ((oid->oid_kind & CTLTYPE) == CTLTYPE_NODE) {
+				if (oid->oid_handler) {
+					goto found;
+				}
+				if (indx == namelen) {
+					goto found;
+				}
+				it = sysctl_oid_iterator_begin(oid->oid_arg1);
+				oid = sysctl_oid_iterator_next_system_order(&it);
+			} else {
+				if (indx != namelen) {
+					return EISDIR;
+				}
+				goto found;
+			}
+		} else {
+			oid = sysctl_oid_iterator_next_system_order(&it);
+		}
+	}
+
+	return ENOENT;
+
+found:
+	*oidp = oid;
+	return 0;
+}
+
+/*
  * sysctl_sysctl_oidfmt
  *
  * Description:	For a given OID name, determine the format of the data which
@@ -1274,60 +1342,101 @@ sysctl_sysctl_oidfmt(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
     struct sysctl_req *req)
 {
 	int *name = (int *) arg1;
-	int error = ENOENT;             /* default error: not found */
+	int error;
 	u_int namelen = arg2;
-	u_int indx;
-	struct sysctl_oid_iterator it;
 	struct sysctl_oid *oid;
 
 	lck_rw_lock_shared(&sysctl_geometry_lock);
 
-	it = sysctl_oid_iterator_begin(&sysctl__children);
-	oid = sysctl_oid_iterator_next_system_order(&it);
-
-	indx = 0;
-	while (oid && indx < CTL_MAXNAME) {
-		if (oid->oid_number == name[indx]) {
-			indx++;
-			if ((oid->oid_kind & CTLTYPE) == CTLTYPE_NODE) {
-				if (oid->oid_handler) {
-					goto found;
-				}
-				if (indx == namelen) {
-					goto found;
-				}
-				it = sysctl_oid_iterator_begin(oid->oid_arg1);
-				oid = sysctl_oid_iterator_next_system_order(&it);
-			} else {
-				if (indx != namelen) {
-					error =  EISDIR;
-					goto err;
-				}
-				goto found;
-			}
-		} else {
-			oid = sysctl_oid_iterator_next_system_order(&it);
-		}
-	}
-	/* Not found */
-	goto err;
-
-found:
-	if (!oid->oid_fmt) {
+	error = find_oid_by_name(name, namelen, &oid);
+	if (error) {
 		goto err;
 	}
+
+	if (!oid->oid_fmt) {
+		error = ENOENT;
+		goto err;
+	}
+
 	error = SYSCTL_OUT(req,
 	    &oid->oid_kind, sizeof(oid->oid_kind));
 	if (!error) {
 		error = SYSCTL_OUT(req, oid->oid_fmt,
 		    strlen(oid->oid_fmt) + 1);
 	}
+
 err:
-	lck_rw_done(&sysctl_geometry_lock);
+	lck_rw_unlock_shared(&sysctl_geometry_lock);
 	return error;
 }
 
 SYSCTL_NODE(_sysctl, 4, oidfmt, CTLFLAG_RD | CTLFLAG_LOCKED, sysctl_sysctl_oidfmt, "");
+
+/*
+ * sysctl_sysctl_oiddescr
+ *
+ * Description: For a given OID name, determine the description of the
+ *		data which is associated with it.  This is used by the
+ *		"sysctl" command line command.
+ *
+ * OID:		0, 5
+ *
+ * Parameters:	oidp				__unused
+ *		arg1				The OID name to look up
+ *		arg2				The length of the OID name
+ *		req				Pointer to user request buffer
+ *
+ * Returns:	0				Success
+ *		EISDIR				Malformed request
+ *		ENOENT				No such OID name
+ *	SYSCTL_OUT:EPERM			Permission denied
+ *	SYSCTL_OUT:EFAULT			Bad user supplied buffer
+ *	SYSCTL_OUT:???				Return value from user function
+ *
+ * Implict:	Contents of user request buffer, modified
+ *
+ * Locks:	Acquires and then releases a read lock on the
+ *		sysctl_geometry_lock
+ *
+ * Notes:	SPI (System Programming Interface); this is subject to change
+ *		and may not be relied upon by third party applications; use
+ *		a subprocess to communicate with the "sysctl" command line
+ *		command instead, if you believe you need this functionality.
+ *
+ *		This function differs from other sysctl functions in that
+ *		it can not take an output buffer length of 0 to determine the
+ *		space which will be required.  It is suggested that the buffer
+ *		length be PATH_MAX, and that authors of new sysctl's refrain
+ *		from exceeding this string length.
+ */
+STATIC int
+sysctl_sysctl_oiddescr(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
+    struct sysctl_req *req)
+{
+	int *name = (int *) arg1;
+	int error;
+	u_int namelen = arg2;
+	struct sysctl_oid *oid;
+
+	lck_rw_lock_shared(&sysctl_geometry_lock);
+
+	error = find_oid_by_name(name, namelen, &oid);
+	if (error) {
+		goto err;
+	}
+
+	if (!oid->oid_descr) {
+		error = ENOENT;
+		goto err;
+	}
+
+	error = SYSCTL_OUT(req, oid->oid_descr, strlen(oid->oid_descr) + 1);
+err:
+	lck_rw_unlock_shared(&sysctl_geometry_lock);
+	return error;
+}
+
+SYSCTL_NODE(_sysctl, 5, oiddescr, CTLFLAG_RD | CTLFLAG_LOCKED, sysctl_sysctl_oiddescr, "");
 
 
 /*
@@ -2326,3 +2435,25 @@ SYSCTL_UINT(_vm, OID_AUTO, swapout_sleep_threshold, CTLFLAG_RW | CTLFLAG_LOCKED,
 SYSCTL_UINT(_vm, OID_AUTO, swapout_sleep_threshold, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_sleep_threshold, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 #endif /* CONFIG_JETSAM */
+
+#if DEBUG || DEVELOPMENT
+
+/* The following sysctl nodes set up a tree that our walking logic
+ * previously stumbled on. This tree gets walked in a unit test.
+ */
+SYSCTL_NODE(_debug_test, OID_AUTO, sysctl_node_test, CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, "rdar://138698424 parent node");
+
+SYSCTL_NODE(_debug_test_sysctl_node_test, OID_AUTO, l2, CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, "rdar://138698424 L2 node");
+
+SYSCTL_NODE(_debug_test_sysctl_node_test_l2, OID_AUTO, l3,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "rdar://138698424 L3 node");
+
+SYSCTL_NODE(_debug_test_sysctl_node_test_l2_l3, OID_AUTO, l4,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "rdar://138698424 L4 node");
+
+SYSCTL_OID(_debug_test_sysctl_node_test_l2, OID_AUTO, hanging_oid,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, NULL, "", "rdar://138698424 L2 hanging OID");
+
+#endif /* DEBUG || DEVELOPMENT */

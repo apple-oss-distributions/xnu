@@ -1745,6 +1745,18 @@ mach_continuous_time(void)
 }
 
 uint64_t
+mach_continuous_speculative_time(void)
+{
+#if HIBERNATION && HAS_CONTINUOUS_HWCLOCK
+	return ml_get_hwclock_speculative() + hwclock_conttime_offset;
+#elif HAS_CONTINUOUS_HWCLOCK
+	return ml_get_hwclock_speculative();
+#else
+	return mach_continuous_time();
+#endif
+}
+
+uint64_t
 mach_continuous_approximate_time(void)
 {
 #if HAS_CONTINUOUS_HWCLOCK

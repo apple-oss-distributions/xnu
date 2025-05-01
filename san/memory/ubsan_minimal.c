@@ -36,7 +36,7 @@
  */
 #include <sys/sysctl.h>
 #include <kern/kalloc.h>
-#include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
 #include <machine/machine_routines.h>
 #include <san/ubsan_minimal.h>
 

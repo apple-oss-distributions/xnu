@@ -95,6 +95,7 @@
 #include <kern/timer.h>
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
 #endif
 #include <kern/kpc.h>
 #include <kern/zalloc.h>
@@ -116,6 +117,7 @@
 #include <machine/pmap.h>
 #include <machine/commpage.h>
 #include <machine/machine_routines.h>
+#include <machine/static_if.h>
 #include <libkern/version.h>
 #include <pexpert/device_tree.h>
 #include <sys/codesign.h>
@@ -278,6 +280,10 @@ kernel_startup_bootstrap(void)
 
 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
 
+#if !CONFIG_SPTM
+	static_if_init(PE_boot_args());
+#endif
+
 	/*
 	 * Then initialize all tunables, timeouts, and locks
 	 */
@@ -295,6 +301,57 @@ kernel_startup_tunable_init(const struct startup_tunable_spec *spec)
 			/* make sure bool's are valued in {0, 1} */
 			*(bool *)spec->var_addr = *(uint8_t *)spec->var_addr;
 		}
+	}
+}
+
+__startup_func
+void
+kernel_startup_tunable_dt_source_init(const struct startup_tunable_dt_source_spec *spec)
+{
+	DTEntry base;
+
+	*spec->source_addr = STARTUP_SOURCE_DEFAULT;
+	if (SecureDTLookupEntry(NULL, spec->dt_base, &base) != kSuccess) {
+		base = NULL;
+	}
+
+	bool found_in_chosen = false;
+
+	if (spec->dt_chosen_override) {
+		DTEntry chosen, chosen_base;
+
+		if (SecureDTLookupEntry(NULL, "chosen", &chosen) != kSuccess) {
+			chosen = NULL;
+		}
+
+		if (chosen != NULL && SecureDTLookupEntry(chosen, spec->dt_base, &chosen_base) == kSuccess) {
+			base = chosen_base;
+			found_in_chosen = true;
+			*spec->source_addr = STARTUP_SOURCE_DEVICETREE;
+		}
+	}
+
+	uint64_t const *data;
+	unsigned int data_size = spec->var_len;
+
+	if (base != NULL && SecureDTGetProperty(base, spec->dt_name, (const void **)&data, &data_size) == kSuccess) {
+		if (data_size != spec->var_len) {
+			panic("unexpected tunable size %u in DT entry %s/%s/%s",
+			    data_size, found_in_chosen ? "/chosen" : "", spec->dt_base, spec->dt_name);
+		}
+
+		/* No need to handle bools specially, they are 1 byte integers in the DT. */
+		memcpy(spec->var_addr, data, spec->var_len);
+		*spec->source_addr = STARTUP_SOURCE_DEVICETREE;
+	}
+
+	/* boot-arg overrides. */
+
+	if (PE_parse_boot_argn(spec->boot_arg_name, spec->var_addr, spec->var_len)) {
+		if (spec->var_is_bool) {
+			*(bool *)spec->var_addr = *(uint8_t *)spec->var_addr;
+		}
+		*spec->source_addr = STARTUP_SOURCE_BOOTPARAM;
 	}
 }
 
@@ -468,8 +525,8 @@ kernel_bootstrap(void)
 #endif
 
 #if CONFIG_TELEMETRY
-	kernel_bootstrap_log("telemetry_init");
-	telemetry_init();
+	kernel_bootstrap_log("trap_telemetry_init");
+	trap_telemetry_init();
 #endif
 
 	if (PE_i_can_has_debugger(NULL)) {
@@ -553,6 +610,11 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("turnstiles_init");
 	turnstiles_init();
+
+#if PAGE_SLEEP_WITH_INHERITOR
+	kernel_bootstrap_log("page_worker_init");
+	page_worker_init();
+#endif /* PAGE_SLEEP_WITH_INHERITOR */
 
 	kernel_bootstrap_log("mach_init_activity_id");
 	mach_init_activity_id();
@@ -664,6 +726,12 @@ kernel_bootstrap_thread(void)
 
 	phys_carveout_init();
 
+	/* Now that carveouts are allocated, start tracing (primary CPU). */
+#if __arm64__ && (DEVELOPMENT || DEBUG)
+	pe_arm_debug_init_late();
+	PE_arm_debug_enable_trace(true);
+#endif /* __arm64__ && (DEVELOPMENT || DEBUG) */
+
 #if MACH_KDP
 	kernel_bootstrap_log("kdp_init");
 	kdp_init();
@@ -676,11 +744,6 @@ kernel_bootstrap_thread(void)
 #if HYPERVISOR
 	kernel_bootstrap_thread_log("hv_support_init");
 	hv_support_init();
-#endif
-
-#if CONFIG_TELEMETRY
-	kernel_bootstrap_log("bootprofile_init");
-	bootprofile_init();
 #endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
@@ -832,12 +895,16 @@ kernel_bootstrap_thread(void)
 	thread_bind(PROCESSOR_NULL);
 	resume_cluster_powerdown();
 
+#if XNU_VM_HAS_DELAYED_PAGES
 	/*
 	 * Now that all CPUs are available to run threads, this is essentially
 	 * a background thread. Take this opportunity to initialize and free
 	 * any remaining vm_pages that were delayed earlier by pmap_startup().
 	 */
 	vm_free_delayed_pages();
+#endif /* XNU_VM_HAS_DELAYED_PAGES */
+
+	vm_pages_array_finalize();
 
 	/*
 	 *	Become the pageout daemon.
@@ -956,15 +1023,7 @@ load_context(
 	}
 
 	processor->active_thread = thread;
-	processor_state_update_explicit(processor, thread->sched_pri,
-	    SFI_CLASS_KERNEL, PSET_SMP, thread_get_perfcontrol_class(thread), THREAD_URGENCY_NONE,
-	    ((thread->state & TH_IDLE) || (thread->bound_processor != PROCESSOR_NULL)) ? TH_BUCKET_SCHED_MAX : thread->th_sched_bucket);
-	processor->current_is_bound = thread->bound_processor != PROCESSOR_NULL;
-	processor->current_is_NO_SMT = false;
-	processor->current_is_eagerpreempt = false;
-#if CONFIG_THREAD_GROUPS
-	processor->current_thread_group = thread_group_get(thread);
-#endif
+	processor_state_update_from_thread(processor, thread, false);
 	processor->starting_pri = thread->sched_pri;
 	processor->deadline = UINT64_MAX;
 	thread->last_processor = processor;
@@ -988,7 +1047,6 @@ load_context(
 	/*NOTREACHED*/
 }
 
-#define SERVER_PERF_MODE_VALIDATION_DISABLES 0x5dee
 extern unsigned int kern_feature_overrides;
 
 void
@@ -997,13 +1055,11 @@ scale_setup(void)
 	boolean_t pe_serverperfmode = FALSE;
 	int scale = 0;
 
-	/* First, check boot-arg only for the feature overrides. Only then we
-	 * take the device-tree setting into account.
+	/*
+	 * kern_feature_override_init() will update kern_feature_override
+	 * based on the serverperfmode=1 boot-arg being present,
+	 * but doesn't take the device-tree setting into account on purpose.
 	 */
-	if (serverperfmode) {
-		/* If running in serverperfmode disable some internal only diagnostics. */
-		kern_feature_overrides |= SERVER_PERF_MODE_VALIDATION_DISABLES;
-	}
 
 	pe_serverperfmode = PE_get_default("kern.serverperfmode",
 	    &pe_serverperfmode, sizeof(pe_serverperfmode));

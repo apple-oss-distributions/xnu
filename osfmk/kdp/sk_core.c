@@ -224,7 +224,7 @@ static const struct page_level_config {
 		.shift      = ARM_16K_TT_L3_SHIFT,
 		.index_mask = ARM_16K_TT_L3_INDEX_MASK,
 		.valid_mask = ARM_PTE_TYPE_VALID,
-		.type_mask  = ARM_PTE_TYPE_MASK,
+		.type_mask  = ARM_TTE_TYPE_MASK,
 		.type_block = ARM_TTE_TYPE_L3BLOCK
 	}
 };

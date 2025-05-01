@@ -56,6 +56,13 @@ exception_handler(mach_port_t task __unused, mach_port_t thread __unused,
 }
 
 /*
+ * To trigger PAC failure, we create a validly-signed pointer and then flip an
+ * arbitrary PAC bit before accessing it.  The exact number and location of PAC
+ * bits depends on the device configuration.  For instruction pointers, the PAC
+ * field always includes bit 63.  For data pointers, it may start as low as bit
+ * 54: bits 63-56 can be carved out for software tagging, and bit 55 is always
+ * reserved for addressing.
+ *
  * Real-world software should use ptrauth.h when it needs to manually sign or
  * auth pointers.  But for testing purposes we need clang to emit specific
  * ptrauth instructions, so we use inline asm here instead.
@@ -117,7 +124,7 @@ combined_load_auth(void)
 	asm volatile (
                 "mov	x0, sp"                 "\n"
                 "pacdza	x0"                     "\n"
-                "eor	x0, x0, (1 << 63)"      "\n"
+                "eor	x0, x0, (1 << 54)"      "\n"
                 "ldraa	x0, [x0]"               "\n"
                 :
                 :

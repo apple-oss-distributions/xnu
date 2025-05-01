@@ -148,6 +148,36 @@ do_unifdef_headers::
 .PHONY: do_unifdef_headers
 endef
 
+# Helper function to call a verifier
+# Generally, a verifier is a function that post-processes a .o file to validate
+# some characteristics.
+#
+# This ensures that the output .o file is renamed if the verifier rejects the
+# input or fails. This forces the .o file to be re-generated & re-verified if
+# another build is run.
+#
+# Note: currently, it is possible to end up in an inconsistent state by
+# Ctrl+C-ing in the middle of a verifier run, causing a .o file that would
+# have failed verification to still exist as a .o instead o a .o.unverified.
+# The next build should be a "clean" build to prevent the .o file avoiding
+# verification.
+#
+# Any stderr output from the verifier is printed with an "error:" prefix.
+#
+# $(1) is the name of the verifier to call
+# $(2) is the name of the .o file to pass to the verifier
+define VERIFY
+{ ERROR_OUTPUT="$$({ $(call $(1),$(2)) } 2>&1 1>&3)"; } 3>&1; \
+RETURN=$$?; \
+$(ERR) "$$($(SED) -e 's/^/error: /' <<< "$$ERROR_OUTPUT")"; \
+if [ $$RETURN -ne 0 ]; then \
+	UNVERIFIED_FILE=$(@:o=o.unverified) ; \
+	$(MV) '$(2)' "$$UNVERIFIED_FILE"; \
+	$(ERR) "error: Moved object file $(2) with verifier failures to $$PWD/$$UNVERIFIED_FILE"; \
+	exit $$RETURN; \
+fi;
+endef
+
 
 #
 # Empty the install lists of non-host and non-exclave headers if building the
@@ -437,42 +467,40 @@ do_installhdrs_md: $(INSTALL_MD_INC_FILES) $(INSTALL_MD_INC_GEN_FILES) $(INSTALL
 #
 # Generic Export rules
 #
-EXPORT_MI_INC_FILES = $(addprefix $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)/, $(EXPORT_MI_LIST))
-EXPORT_MI_GEN_INC_FILES = $(addprefix $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)/, $(EXPORT_MI_GEN_LIST))
+EXP_MI_INC_DIR = $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)
+EXPORT_MI_INC_FILES = $(addprefix $(EXP_MI_INC_DIR)/, $(EXPORT_MI_LIST))
+EXPORT_MI_GEN_INC_FILES = $(addprefix $(EXP_MI_INC_DIR)/, $(EXPORT_MI_GEN_LIST))
 
-.PHONY: EXP_MI_INC_DIR
+$(EXP_MI_INC_DIR)::
+	$(_v)$(MKDIR) $@
 
-EXP_MI_INC_DIR:
-	$(_v)$(MKDIR) $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)
-
-$(EXPORT_MI_GEN_INC_FILES): $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)/% : % | EXP_MI_INC_DIR
+$(EXPORT_MI_GEN_INC_FILES): $(EXP_MI_INC_DIR)/% : % | $(EXP_MI_INC_DIR)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS_RO) $< $@
 
-$(EXPORT_MI_INC_FILES): $(OBJROOT)/$(EXPDIR)/$(EXPORT_MI_DIR)/% : $(SOURCE)/% | EXP_MI_INC_DIR
+$(EXPORT_MI_INC_FILES): $(EXP_MI_INC_DIR)/% : $(SOURCE)/% | $(EXP_MI_INC_DIR)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS_RO) $< $@
 
-EXPORT_MD_INC_FILES = $(addprefix $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)/, $(EXPORT_MD_LIST))
-EXPORT_MD_GEN_INC_FILES = $(addprefix $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)/, $(EXPORT_MD_GEN_LIST))
+EXP_MD_INC_DIR = $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)
+EXPORT_MD_INC_FILES = $(addprefix $(EXP_MD_INC_DIR)/, $(EXPORT_MD_LIST))
+EXPORT_MD_GEN_INC_FILES = $(addprefix $(EXP_MD_INC_DIR)/, $(EXPORT_MD_GEN_LIST))
 
-.PHONY: EXP_MD_INC_DIR
+$(EXP_MD_INC_DIR)::
+	$(_v)$(MKDIR) $@
 
-EXP_MD_INC_DIR:
-	$(_v)$(MKDIR) $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)
-
-$(EXPORT_MD_GEN_INC_FILES): $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)/% : % | EXP_MD_INC_DIR
+$(EXPORT_MD_GEN_INC_FILES): $(EXP_MD_INC_DIR)/% : % | $(EXP_MD_INC_DIR)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS_RO) $< $@
 
-$(EXPORT_MD_INC_FILES): $(OBJROOT)/$(EXPDIR)/$(EXPORT_MD_DIR)/% : $(SOURCE)/% | EXP_MD_INC_DIR
+$(EXPORT_MD_INC_FILES): $(EXP_MD_INC_DIR)/% : $(SOURCE)/% | $(EXP_MD_INC_DIR)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS_RO) $< $@
 
 .PHONY: do_exporthdrs_mi
 
-do_exporthdrs_mi: $(EXPORT_MI_GEN_INC_FILES) $(EXPORT_MI_INC_FILES)
+do_exporthdrs_mi: $(EXPORT_MI_GEN_INC_FILES) $(EXPORT_MI_INC_FILES) | $(EXP_MI_INC_DIR)
 	@:
 
 .PHONY: do_exporthdrs_md
 
-do_exporthdrs_md: $(EXPORT_MD_GEN_INC_FILES)  $(EXPORT_MD_INC_FILES)
+do_exporthdrs_md: $(EXPORT_MD_GEN_INC_FILES)  $(EXPORT_MD_INC_FILES) | $(EXP_MD_INC_DIR)
 	@:
 
 #
@@ -495,10 +523,9 @@ C_RULE_0=@$(LOG_CC) "$@"
 C_RULE_1A=$(_v)$(KCC) -c $(filter-out $($@_CFLAGS_RM), $(CFLAGS) $(CWARNFLAGS)) -MD -MF $(@:o=d) -MJ $(@:o=o.json) -MP $($@_CFLAGS_ADD) $($@_CWARNFLAGS_ADD) $(INCFLAGS) $($@_INCFLAGS)
 C_RULE_1B=$(<F)
 C_RULE_2=
-
 C_RULE_3=
-C_RULE_4A=
-C_RULE_4B=
+C_RULE_4=
+
 
 #
 # Compilation rules to generate .o from .c for driver files
@@ -508,8 +535,7 @@ C_RULE_1A_D=$(C_RULE_1A)
 C_RULE_1B_D=$(C_RULE_1B)
 C_RULE_2_D=$(C_RULE_2)
 C_RULE_3_D=$(C_RULE_3)
-C_RULE_4A_D=$(C_RULE_4A)
-C_RULE_4B_D=$(C_RULE_4B)
+C_RULE_4_D=$(C_RULE_4)
 
 #
 # Compilation rules to generate .co from .cp or .cpo from .cpp
@@ -520,9 +546,8 @@ P_RULE_1A=$(_v)$(KC++) -o $@ -c $(CXXFLAGS) $(filter-out $($@_CFLAGS_RM), $(CFLA
 P_RULE_1B=$(<F)
 P_RULE_2=
 
-P_RULE_3=
-P_RULE_4A=
-P_RULE_4B=
+P_RULE_3=@$(if $($@_VERIFIER), $(LOG_VERIFIER) "$@")
+P_RULE_4=@$(if $($@_VERIFIER), $(call VERIFY,$($@_VERIFIER),$@))
 
 #
 # Explain how to make the bsd syscall list

@@ -20,7 +20,14 @@ def PrintNvramVars(cmd_args=[]):
         print("Couldn't obtain options IORegistryEntry")
         return
 
-    var_dict = kern.GetValueFromAddress('((IODTNVRAM*)' + hex(options) + ')->_varDict', 'OSDictionary *')
+    nvram_diags = kern.GetValueFromAddress('((IODTNVRAM *)' + hex(options) + ')->_diags', 'IOService *')
+    nvram_vers = LookupKeyInPropTable(nvram_diags.fPropertyTable, "Version")
+
+    if (GetNumber(nvram_vers) == "3"):
+        var_dict = kern.GetValueFromAddress('((IONVRAMV3Handler *)((IODTNVRAM *)' + hex(options) + ')->_format)->_varDict.ptr_', 'OSDictionary *')
+    else:
+        var_dict = kern.GetValueFromAddress('((IONVRAMCHRPHandler *)((IODTNVRAM *)' + hex(options) + ')->_format)->_varDict.ptr_', 'OSDictionary *')
+
     if var_dict is None:
         print("Couldn't obtain varDict")
         return

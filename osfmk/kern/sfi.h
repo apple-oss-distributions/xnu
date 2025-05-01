@@ -37,9 +37,15 @@
 #include <kern/kern_types.h>
 #include <kern/ledger.h>
 
+#if KERNEL_PRIVATE
+#if !XNU_KERNEL_PRIVATE
+#error "This file is for internal use and will be deleted in future versions of the SDK."
+#endif /* !XNU_KERNEL_PRIVATE */
+#endif /* KERNEL_PRIVATE */
+
+#if XNU_KERNEL_PRIVATE
 extern void sfi_init(void);
 extern sfi_class_id_t sfi_get_ledger_alias_for_class(sfi_class_id_t class_id);
-extern int sfi_ledger_entry_add(ledger_template_t template, sfi_class_id_t class_id);
 
 kern_return_t sfi_set_window(uint64_t window_usecs);
 kern_return_t sfi_window_cancel(void);
@@ -64,6 +70,9 @@ ast_t sfi_processor_needs_ast(processor_t processor);
 void sfi_ast(thread_t thread);
 void sfi_reevaluate(thread_t thread);
 kern_return_t sfi_defer(uint64_t);
+
+extern int sfi_ledger_entry_add(ledger_template_t template, sfi_class_id_t class_id);
 #endif /* MACH_KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* _KERN_SFI_H_ */

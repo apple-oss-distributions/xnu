@@ -37,7 +37,6 @@
 #include <kern/debug.h>
 #include <kern/machine.h>
 #include <kern/misc_protos.h>
-#include <kern/processor.h>
 #include <kern/queue.h>
 #include <kern/sched.h>
 #include <kern/task.h>
@@ -49,6 +48,7 @@
 
 #endif /* !SCHED_TEST_HARNESS */
 
+#include <kern/processor.h>
 #include <kern/sched_prim.h>
 
 #if CONFIG_SCHED_EDGE
@@ -163,7 +163,6 @@ static inline bool sched_clutch_pri_greater_than_tiebreak(int, int, bool);
 
 #if CONFIG_SCHED_EDGE
 /* System based routines */
-static bool sched_edge_pset_available(processor_set_t);
 static uint32_t sched_edge_thread_bound_cluster_id(thread_t);
 static int sched_edge_iterate_clusters_ordered(processor_set_t, uint64_t, int);
 
@@ -2243,7 +2242,7 @@ __options_decl(edge_shared_rsrc_sched_policy_t, uint32_t, {
 	EDGE_SHARED_RSRC_SCHED_POLICY_NATIVE_FIRST      = 1,
 });
 
-const edge_shared_rsrc_sched_policy_t edge_shared_rsrc_policy[CLUSTER_SHARED_RSRC_TYPE_COUNT] = {
+static const edge_shared_rsrc_sched_policy_t edge_shared_rsrc_policy[CLUSTER_SHARED_RSRC_TYPE_COUNT] = {
 	[CLUSTER_SHARED_RSRC_TYPE_RR] = EDGE_SHARED_RSRC_SCHED_POLICY_RR,
 	[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST] = EDGE_SHARED_RSRC_SCHED_POLICY_NATIVE_FIRST,
 };
@@ -2438,10 +2437,7 @@ sched_edge_thread_should_be_inserted_as_bound(
 {
 	/*
 	 * Check if the thread is bound and is being enqueued in its desired bound cluster.
-	 * One scenario where a bound thread might not be getting enqueued in the bound cluster
-	 * hierarchy would be if the thread is "soft" bound and the bound cluster is
-	 * de-recommended. In that case, the thread should be treated as an unbound
-	 * thread.
+	 * If the thread is cluster-bound but to a different cluster, we should enqueue as unbound.
 	 */
 	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread) && (sched_edge_thread_bound_cluster_id(thread) == root_clutch->scr_cluster_id)) {
 		return TRUE;
@@ -3029,10 +3025,10 @@ sched_clutch_thread_pri_shift(
 static void
 sched_clutch_init(void);
 
-#if !SCHED_TEST_HARNESS
-
 static thread_t
 sched_clutch_steal_thread(processor_set_t pset);
+
+#if !SCHED_TEST_HARNESS
 
 static void
 sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context);
@@ -3116,6 +3112,7 @@ const struct sched_dispatch_table sched_clutch_dispatch = {
 	.processor_init                                 = sched_clutch_processor_init,
 	.pset_init                                      = sched_clutch_pset_init,
 	.choose_thread                                  = sched_clutch_choose_thread,
+	.steal_thread                                   = sched_clutch_steal_thread,
 	.processor_enqueue                              = sched_clutch_processor_enqueue,
 	.processor_queue_remove                         = sched_clutch_processor_queue_remove,
 	.processor_queue_empty                          = sched_clutch_processor_queue_empty,
@@ -3135,10 +3132,13 @@ const struct sched_dispatch_table sched_clutch_dispatch = {
 #if !SCHED_TEST_HARNESS
 	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
 	.steal_thread_enabled                           = sched_steal_thread_enabled,
-	.steal_thread                                   = sched_clutch_steal_thread,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
 	.choose_node                                    = sched_choose_node,
+#if CONFIG_SCHED_SMT
+	.choose_processor                               = choose_processor_smt,
+#else /* CONFIG_SCHED_SMT */
 	.choose_processor                               = choose_processor,
+#endif
 	.processor_queue_shutdown                       = sched_clutch_processor_queue_shutdown,
 	.can_update_priority                            = can_update_priority,
 	.update_priority                                = update_priority,
@@ -3478,14 +3478,14 @@ sched_clutch_processor_queue_remove(
 	return processor != PROCESSOR_NULL;
 }
 
-#if !SCHED_TEST_HARNESS
-
 static thread_t
 sched_clutch_steal_thread(__unused processor_set_t pset)
 {
 	/* Thread stealing is not enabled for single cluster clutch scheduler platforms */
 	return THREAD_NULL;
 }
+
+#if !SCHED_TEST_HARNESS
 
 static void
 sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context)
@@ -3609,8 +3609,7 @@ sched_clutch_run_decr(thread_t thread)
 static boolean_t
 sched_thread_sched_pri_promoted(thread_t thread)
 {
-	return (thread->sched_flags & TH_SFLAG_PROMOTED) ||
-	       (thread->sched_flags & TH_SFLAG_PROMOTE_REASON_MASK) ||
+	return (thread->sched_flags & TH_SFLAG_PROMOTE_REASON_MASK) ||
 	       (thread->sched_flags & TH_SFLAG_DEMOTED_MASK) ||
 	       (thread->sched_flags & TH_SFLAG_DEPRESSED_MASK) ||
 	       (thread->kern_promotion_schedpri != 0);
@@ -3734,15 +3733,11 @@ const struct sched_dispatch_table sched_edge_dispatch = {
 	.timebase_init                                  = sched_timeshare_timebase_init,
 	.processor_init                                 = sched_clutch_processor_init,
 	.pset_init                                      = sched_edge_pset_init,
-	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
 	.choose_thread                                  = sched_clutch_choose_thread,
 	.steal_thread_enabled                           = sched_edge_steal_thread_enabled,
 	.steal_thread                                   = sched_edge_processor_idle,
-	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
-	.choose_node                                    = sched_choose_node,
 	.choose_processor                               = sched_edge_choose_processor,
 	.processor_enqueue                              = sched_clutch_processor_enqueue,
-	.processor_queue_shutdown                       = sched_edge_processor_queue_shutdown,
 	.processor_queue_remove                         = sched_clutch_processor_queue_remove,
 	.processor_queue_empty                          = sched_edge_processor_queue_empty,
 	.priority_is_urgent                             = priority_is_urgent,
@@ -3750,54 +3745,44 @@ const struct sched_dispatch_table sched_edge_dispatch = {
 	.processor_queue_has_priority                   = sched_clutch_processor_queue_has_priority,
 	.initial_quantum_size                           = sched_clutch_initial_quantum_size,
 	.initial_thread_sched_mode                      = sched_clutch_initial_thread_sched_mode,
-	.can_update_priority                            = can_update_priority,
-	.update_priority                                = update_priority,
-	.lightweight_update_priority                    = lightweight_update_priority,
-	.quantum_expire                                 = sched_default_quantum_expire,
 	.processor_runq_count                           = sched_clutch_runq_count,
-	.processor_runq_stats_count_sum                 = sched_clutch_runq_stats_count_sum,
 	.processor_bound_count                          = sched_clutch_processor_bound_count,
-	.thread_update_scan                             = sched_clutch_thread_update_scan,
 	.multiple_psets_enabled                         = TRUE,
 	.avoid_processor_enabled                        = TRUE,
 	.thread_avoid_processor                         = sched_edge_thread_avoid_processor,
 	.processor_balance                              = sched_edge_balance,
-
+	.qos_max_parallelism                            = sched_edge_qos_max_parallelism,
+	.check_spill                                    = sched_edge_check_spill,
+	.ipi_policy                                     = sched_edge_ipi_policy,
+	.thread_should_yield                            = sched_edge_thread_should_yield,
+	.update_thread_bucket                           = sched_clutch_update_thread_bucket,
+	.cpu_init_completed                             = sched_edge_cpu_init_completed,
+	.thread_eligible_for_pset                       = sched_edge_thread_eligible_for_pset,
+#if !SCHED_TEST_HARNESS
+	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
+	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
+	.choose_node                                    = sched_choose_node,
+	.processor_queue_shutdown                       = sched_edge_processor_queue_shutdown,
+	.can_update_priority                            = can_update_priority,
+	.update_priority                                = update_priority,
+	.lightweight_update_priority                    = lightweight_update_priority,
+	.quantum_expire                                 = sched_default_quantum_expire,
+	.processor_runq_stats_count_sum                 = sched_clutch_runq_stats_count_sum,
+	.thread_update_scan                             = sched_clutch_thread_update_scan,
 	.rt_runq                                        = sched_rtlocal_runq,
 	.rt_init                                        = sched_rtlocal_init,
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
 	.rt_steal_thread                                = sched_rtlocal_steal_thread,
-
-	.qos_max_parallelism                            = sched_edge_qos_max_parallelism,
-	.check_spill                                    = sched_edge_check_spill,
-	.ipi_policy                                     = sched_edge_ipi_policy,
-	.thread_should_yield                            = sched_edge_thread_should_yield,
 	.run_count_incr                                 = sched_clutch_run_incr,
 	.run_count_decr                                 = sched_clutch_run_decr,
-	.update_thread_bucket                           = sched_clutch_update_thread_bucket,
 	.pset_made_schedulable                          = sched_edge_pset_made_schedulable,
 	.thread_group_recommendation_change             = NULL,
-	.cpu_init_completed                             = sched_edge_cpu_init_completed,
-	.thread_eligible_for_pset                       = sched_edge_thread_eligible_for_pset,
+#endif /* !SCHED_TEST_HARNESS */
 };
 
 static bitmap_t sched_edge_available_pset_bitmask[BITMAP_LEN(MAX_PSETS)];
-
-/*
- * sched_edge_pset_available()
- *
- * Routine to determine if a pset is available for scheduling.
- */
-static bool
-sched_edge_pset_available(processor_set_t pset)
-{
-	if (pset == NULL) {
-		return false;
-	}
-	return pset_available_cpu_count(pset) > 0;
-}
 
 /*
  * sched_edge_thread_bound_cluster_id()
@@ -3979,6 +3964,8 @@ sched_edge_thread_should_yield(processor_t processor, __unused thread_t thread)
 	return false;
 }
 
+#if !SCHED_TEST_HARNESS
+
 static void
 sched_edge_processor_queue_shutdown(processor_t processor)
 {
@@ -4010,6 +3997,8 @@ sched_edge_processor_queue_shutdown(processor_t processor)
 	}
 }
 
+#endif /* !SCHED_TEST_HARNESS */
+
 /*
  * sched_edge_cluster_load_metric()
  *
@@ -4025,7 +4014,7 @@ sched_edge_processor_queue_shutdown(processor_t processor)
 static uint32_t
 sched_edge_cluster_load_metric(processor_set_t pset, sched_bucket_t sched_bucket)
 {
-	if (sched_edge_pset_available(pset) == false) {
+	if (pset_is_recommended(pset) == false) {
 		return UINT32_MAX;
 	}
 	return (uint32_t)sched_get_pset_load_average(pset, sched_bucket);
@@ -4123,7 +4112,7 @@ sched_edge_foreign_runnable_thread_available(processor_set_t pset)
 		 * the common case.
 		 */
 		processor_set_t target_pset = pset_array[cluster];
-		if (sched_edge_pset_available(target_pset) == false) {
+		if (pset_is_recommended(target_pset) == false) {
 			continue;
 		}
 
@@ -4148,7 +4137,7 @@ sched_edge_foreign_runnable_thread_remove(processor_set_t pset, uint64_t ctime)
 		 * the common case.
 		 */
 		processor_set_t target_pset = pset_array[cluster];
-		if (sched_edge_pset_available(target_pset) == false) {
+		if (pset_is_recommended(target_pset) == false) {
 			continue;
 		}
 
@@ -4160,7 +4149,7 @@ sched_edge_foreign_runnable_thread_remove(processor_set_t pset, uint64_t ctime)
 		 * and get the highest priority thread.
 		 */
 		pset_lock(target_pset);
-		if (sched_edge_pset_available(target_pset)) {
+		if (pset_is_recommended(target_pset)) {
 			thread = sched_clutch_root_highest_foreign_thread_remove(&target_pset->pset_clutch_root);
 			sched_update_pset_load_average(target_pset, ctime);
 		}
@@ -4215,7 +4204,7 @@ sched_edge_foreign_running_thread_available(processor_set_t pset)
 	while ((cluster = sched_edge_iterate_clusters_ordered(pset, foreign_pset_bitmap[0], cluster)) != -1) {
 		/* Skip the pset if its not schedulable */
 		processor_set_t target_pset = pset_array[cluster];
-		if (sched_edge_pset_available(target_pset) == false) {
+		if (pset_is_recommended(target_pset) == false) {
 			continue;
 		}
 
@@ -4410,7 +4399,27 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 		return false;
 	}
 
+	/*
+	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
+	 * A migration is only recommended if there's also an idle core available that needn't be avoided.
+	 */
+	if (reason & AST_QUANTUM) {
+		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id)) {
+			uint64_t non_avoided_idle_primary_map = processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->recommended_bitmask & ~processor->processor_set->perfcontrol_cpu_migration_bitmask;
+			if (non_avoided_idle_primary_map != 0) {
+				return true;
+			}
+		}
+	}
+
 	processor_set_t preferred_pset = pset_array[sched_edge_thread_preferred_cluster(thread)];
+
+	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread) &&
+	    preferred_pset->pset_id != processor->processor_set->pset_id &&
+	    pset_type_is_recommended(preferred_pset)) {
+		/* We should send this thread to the bound cluster */
+		return true;
+	}
 
 	/* Evaluate shared resource policies */
 	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_RR)) {
@@ -4440,19 +4449,6 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 		return true;
 	}
 
-	/*
-	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
-	 * A migration is only recommended if there's also an idle core available that needn't be avoided.
-	 */
-	if (reason & AST_QUANTUM) {
-		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id)) {
-			uint64_t non_avoided_idle_primary_map = processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->recommended_bitmask & ~processor->processor_set->perfcontrol_cpu_migration_bitmask;
-			if (non_avoided_idle_primary_map != 0) {
-				return true;
-			}
-		}
-	}
-
 	return false;
 }
 
@@ -4469,7 +4465,7 @@ sched_edge_balance(__unused processor_t cprocessor, processor_set_t cpset)
 	for (int cluster = bitmap_first(foreign_pset_bitmap, sched_edge_max_clusters); cluster >= 0; cluster = bitmap_next(foreign_pset_bitmap, cluster)) {
 		/* Skip the pset if its not schedulable */
 		processor_set_t target_pset = pset_array[cluster];
-		if (sched_edge_pset_available(target_pset) == false) {
+		if (pset_is_recommended(target_pset) == false) {
 			continue;
 		}
 
@@ -4790,16 +4786,15 @@ sched_edge_migrate_candidate(processor_set_t _Nullable preferred_pset, thread_t 
 	bool shared_rsrc_thread = (shared_rsrc_type != CLUSTER_SHARED_RSRC_TYPE_NONE);
 
 	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)) {
-		/* For bound threads always recommend the cluster it's bound to */
+		/*
+		 * For cluster-bound threads, choose the cluster to which the thread is bound, unless that
+		 * cluster is unavailable. If it's not available, fall through to the regular cluster selection
+		 * logic which handles derecommended clusters appropriately.
+		 */
 		selected_pset = pset_array[sched_edge_thread_bound_cluster_id(thread)];
 		if (selected_pset != NULL) {
 			locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
-			if (sched_edge_pset_available(selected_pset) || (SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread) == false)) {
-				/*
-				 * If the bound cluster is not available, check if the thread is soft bound. For soft bound threads,
-				 * fall through to the regular cluster selection logic which handles unavailable clusters
-				 * appropriately. If the thread is hard bound, then return the bound cluster always.
-				 */
+			if (pset_is_recommended(selected_pset)) {
 				return selected_pset;
 			}
 		}
@@ -4864,7 +4859,7 @@ migrate_candidate_available_check:
 	}
 
 	locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
-	if (sched_edge_pset_available(selected_pset) == true) {
+	if (pset_is_recommended(selected_pset) == true) {
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_CLUSTER_OVERLOAD) | DBG_FUNC_NONE, thread_tid(thread), preferred_pset->pset_cluster_id, selected_pset->pset_cluster_id, preferred_cluster_load);
 		return selected_pset;
 	}
@@ -4928,6 +4923,8 @@ sched_edge_clutch_bucket_threads_drain(sched_clutch_bucket_t clutch_bucket, sche
 	}
 }
 
+#if !SCHED_TEST_HARNESS
+
 /*
  * sched_edge_run_drained_threads()
  *
@@ -4946,6 +4943,8 @@ sched_edge_run_drained_threads(queue_t clutch_threads)
 	}
 }
 
+#endif /* !SCHED_TEST_HARNESS */
+
 /*
  * sched_edge_update_preferred_cluster()
  *
@@ -4962,6 +4961,8 @@ sched_edge_update_preferred_cluster(
 		os_atomic_store(&sched_clutch->sc_clutch_groups[bucket].scbg_preferred_cluster, tg_bucket_preferred_cluster[bucket], relaxed);
 	}
 }
+
+#if !SCHED_TEST_HARNESS
 
 /*
  * sched_edge_migrate_thread_group_runnable_threads()
@@ -5133,16 +5134,17 @@ sched_edge_tg_preferred_cluster_change(struct thread_group *tg, uint32_t *tg_buc
 		return;
 	}
 
+	/*
+	 * The first operation is to update the preferred cluster for all QoS buckets within the
+	 * thread group so that any future threads becoming runnable would see the new preferred
+	 * cluster value.
+	 */
+	sched_edge_update_preferred_cluster(clutch, clutch_bucket_modify_bitmap, tg_bucket_preferred_cluster);
+
 	for (uint32_t cluster_id = 0; cluster_id < sched_edge_max_clusters; cluster_id++) {
 		processor_set_t pset = pset_array[cluster_id];
 		spl_t s = splsched();
 		pset_lock(pset);
-		/*
-		 * The first operation is to update the preferred cluster for all QoS buckets within the
-		 * thread group so that any future threads becoming runnable would see the new preferred
-		 * cluster value.
-		 */
-		sched_edge_update_preferred_cluster(clutch, clutch_bucket_modify_bitmap, tg_bucket_preferred_cluster);
 		/*
 		 * Currently iterates all clusters looking for running threads for a TG to be migrated. Can be optimized
 		 * by keeping a per-clutch bitmap of clusters running threads for a particular TG.
@@ -5193,6 +5195,8 @@ sched_edge_pset_made_schedulable(__unused processor_t processor, processor_set_t
 		pset_lock(dst_pset);
 	}
 }
+
+#endif /* !SCHED_TEST_HARNESS */
 
 /*
  * sched_edge_cpu_init_completed()
@@ -5298,7 +5302,7 @@ sched_edge_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sche
 					return dst_idle ? SCHED_IPI_IDLE : SCHED_IPI_IMMEDIATE;
 				}
 				/*
-				 * For workloads that are going wide, it might be useful use Immediate IPI to
+				 * For workloads that are going wide, it might be useful to use Immediate IPI to
 				 * wakeup the idle CPU if the scheduler estimates that the preferred pset will
 				 * be busy for the deferred IPI timeout. The Edge Scheduler uses the avg execution
 				 * latency on the preferred pset as an estimate of busyness.
@@ -5353,7 +5357,6 @@ sched_edge_qos_max_parallelism(int qos, uint64_t options)
 		return (options & QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE) ? (ecluster_count + pcluster_count) : (ecpu_count + pcpu_count);
 	}
 }
-
 
 
 #endif /* CONFIG_SCHED_EDGE */

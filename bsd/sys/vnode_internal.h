@@ -172,7 +172,8 @@ struct vnode {
 	int32_t  v_usecount;                    /* reference count of users */
 	int32_t  v_iocount;                     /* iocounters */
 	void *   XNU_PTRAUTH_SIGNED_PTR("vnode.v_owner") v_owner; /* act that owns the vnode */
-	uint16_t v_type;                        /* vnode type */
+	uint8_t  v_ext_flag;                    /* additional vnode flags, (v_flags is not enough) */
+	uint8_t  v_type;                        /* vnode type */
 	uint16_t v_tag;                         /* type of underlying data */
 	uint32_t v_id;                          /* identity of vnode contents */
 	union {
@@ -316,6 +317,10 @@ struct vnode {
 /*
  *  0x80000000 not used.
  */
+
+/* v_ext_flags (8 bits) */
+#define VE_LINKCHANGE            0x01
+#define VE_LINKCHANGEWAIT        0x02
 
 /*
  * This structure describes vnode data which is specific to a file descriptor.
@@ -555,6 +560,8 @@ int     vnode_getalways_from_pager(vnode_t);
 int     vget_internal(vnode_t, int, int);
 errno_t vnode_getiocount(vnode_t, unsigned int, int);
 vnode_t vnode_getparent_if_different(vnode_t, vnode_t);
+void    vnode_link_lock(vnode_t);
+void    vnode_link_unlock(vnode_t);
 #endif /* BSD_KERNEL_PRIVATE */
 int     vnode_get_locked(vnode_t);
 int     vnode_put_locked(vnode_t);

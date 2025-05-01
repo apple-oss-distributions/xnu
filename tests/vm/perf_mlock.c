@@ -55,7 +55,8 @@ T_GLOBAL_META(
 extern int vfs_purge(void);
 
 T_DECL(mlock_external,
-    "File-backed wire microbenchmark")
+    "File-backed wire microbenchmark",
+    T_META_ENABLED(false /* rdar://133954365 */))
 {
 	void *buf = NULL;
 	int fd, ret;

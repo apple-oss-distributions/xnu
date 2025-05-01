@@ -31,6 +31,7 @@
 
 #define APPLEEVEREST
 #define NO_MONITOR               1 /* No EL3 for this CPU -- ever */
+#define HAS_EL2                  1 /* Has EL2 for this CPU */
 #define HAS_CTRR                 1 /* Has CTRR registers */
 #define HAS_NEX_PG               1 /* Supports p-Core NEX powergating during Neon inactivity */
 #define HAS_BP_RET               1 /* Supports branch predictor state retention across ACC sleep */
@@ -46,6 +47,7 @@
 #define HAS_ARM_FEAT_SSBS2       1 /* Supports Speculative Store Bypass Safe with MSR controls */
 #define HAS_E0PD                 1 /* Supports E0PD0 and E0PD1 in TCR for Meltdown mitigation (ARMv8.5)*/
 #define HAS_APPLE_GENERIC_TIMER  1 /* Supports 24 MHz Apple timer */
+#define HAS_ARM_FEAT_PAN3        1 /* Supports ARM FEAT_PAN3 extension */
 
 
 #define HAS_ACFG                 1 /* Supports ACFG_EL1 system register */
@@ -105,7 +107,10 @@
 
 #define __ARM_RANGE_TLBI__                   1
 
+#if !CONFIG_SPTM
+/* VHE is disabled at runtime on SPTM-based systems. */
 #include <pexpert/arm64/vhe_disable.h>
+#endif /* !CONFIG_SPTM */
 
 #include <pexpert/arm64/apple_arm64_common.h>
 

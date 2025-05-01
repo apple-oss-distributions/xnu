@@ -91,6 +91,13 @@ ipc_port_set_init(ipc_pset_t pset, mach_port_name_t name, int policy)
 	pset->ips_wqset.wqset_index = MACH_PORT_INDEX(name);
 }
 
+void
+ipc_pset_lock(ipc_pset_t pset)
+{
+	ips_validate(pset);
+	waitq_lock(&pset->ips_wqset);
+}
+
 /*
  *	Routine:	ipc_pset_alloc
  *	Purpose:
@@ -446,7 +453,7 @@ filt_machport_turnstile_prepare_lazily(
 	if ((msgt_name == MACH_MSG_TYPE_PORT_SEND_ONCE && port->ip_specialreply) ||
 	    (msgt_name == MACH_MSG_TYPE_PORT_RECEIVE)) {
 		struct turnstile *kn_ts = turnstile_alloc();
-		struct turnstile *ts_store;
+		struct turnstile *ts_store = TURNSTILE_NULL;
 		kn_ts = turnstile_prepare((uintptr_t)kn, &ts_store, kn_ts, TURNSTILE_KNOTE);
 		knote_kn_hook_set_raw(kn, ts_store);
 
@@ -1058,8 +1065,9 @@ filt_machportprocess(
 	self->ith_option = option64;
 	self->ith_knote  = kn;
 
-	ipc_object_lock(object, otype);
+	ipc_object_validate(object, otype);
 
+	waitq_lock(io_waitq(object));
 	wresult = ipc_mqueue_receive_on_thread_and_unlock(io_waitq(object),
 	    MACH_MSG_TIMEOUT_NONE, THREAD_INTERRUPTIBLE, self);
 	/* port unlocked */

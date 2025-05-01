@@ -139,7 +139,7 @@ struct pqueue {
 	unpack_child(entry_t e)
 	{
 #if CONFIG_KERNEL_TAGGING
-		return (entry_t)(vm_memtag_add_ptr_tag(e->child, e->tag));
+		return (entry_t)(vm_memtag_insert_tag(e->child, e->tag));
 #endif /* CONFIG_KERNEL_TAGGING */
 		return (entry_t)e->child;
 	}

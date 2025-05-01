@@ -98,7 +98,7 @@ static int kNYI = 4;
 
 static void parse_arguments(int argc, const char **argv, test_args_t *args /* OUT */);
 static void print_help(const char** argv);
-static unsigned char *alloc_and_fill_buffer(size_t size, allocation_type_t alloc_type);
+static unsigned char *alloc_and_fill_buffer(size_t size, allocation_type_t alloc_type, int flags);
 void fill_with_typical_data(unsigned char *buf, size_t size);
 static void run_compress_benchmark(const test_args_t *args);
 static uint64_t decompress_buffer(unsigned char *buf, size_t size);
@@ -132,7 +132,6 @@ run_compress_benchmark(const test_args_t *args)
 		size_t len = sizeof(sysctl_data);
 
 		benchmark_log(args->ta_verbose, "Start allocation\n");
-		buf = alloc_and_fill_buffer(args->ta_buffer_size, args->ta_alloc_type);
 		if (!buf) {
 			err(kAllocationFailure, "Unable to allocate test buffer\n");
 		}
@@ -190,9 +189,9 @@ run_compress_benchmark(const test_args_t *args)
 }
 
 static unsigned char *
-alloc_and_fill_buffer(size_t size, allocation_type_t alloc_type)
+alloc_and_fill_buffer(size_t size, allocation_type_t alloc_type, int flags)
 {
-	unsigned char *buf = mmap_buffer(size);
+	unsigned char *buf = map_buffer(size, flags);
 	if (!buf) {
 		return buf;
 	}
@@ -257,7 +256,8 @@ parse_arguments(int argc, const char** argv, test_args_t *args)
 		if (argv[current_argument][0] == '-') {
 			if (strcmp(argv[current_argument], "-v") == 0) {
 				args->ta_verbose = true;
-			} else {
+			}
+			else {
 				fprintf(stderr, "Unknown argument %s\n", argv[current_argument]);
 				print_help(argv);
 				exit(kInvalidArgument);

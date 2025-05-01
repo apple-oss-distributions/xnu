@@ -558,7 +558,7 @@ kdp_reply(
 
 	/* Packet size cannot be larger than the static space allocated for it. */
 	if (pkt.len > KDP_MAXPACKET) {
-		kdp_panic("kdp_send: packet too large (%d > %u)", pkt.len, KDP_MAXPACKET);
+		kdp_panic("kdp_send: packet too large (%u > %d)", pkt.len, KDP_MAXPACKET);
 	}
 
 	pkt.off -= (unsigned int)sizeof(struct kdp_udpiphdr);
@@ -636,7 +636,7 @@ kdp_send(
 
 	/* Packet size cannot be larger than the static space allocated for it. */
 	if (pkt.len > KDP_MAXPACKET) {
-		kdp_panic("kdp_send: packet too large (%d > %u)", pkt.len, KDP_MAXPACKET);
+		kdp_panic("kdp_send: packet too large (%u > %d)", pkt.len, KDP_MAXPACKET);
 	}
 
 	pkt.off -= (unsigned int)sizeof(struct kdp_udpiphdr);
@@ -1229,13 +1229,13 @@ kdp_connection_wait(void)
 		    kdp_mac_addr.ether_addr_octet[4] & 0xff,
 		    kdp_mac_addr.ether_addr_octet[5] & 0xff);
 
-		printf("ip address: %d.%d.%d.%d\n",
+		printf("ip address: %u.%u.%u.%u\n",
 		    (ip_addr & 0xff000000) >> 24,
 		    (ip_addr & 0xff0000) >> 16,
 		    (ip_addr & 0xff00) >> 8,
 		    (ip_addr & 0xff));
 
-		kprintf("ip address: %d.%d.%d.%d\n",
+		kprintf("ip address: %u.%u.%u.%u\n",
 		    (ip_addr & 0xff000000) >> 24,
 		    (ip_addr & 0xff0000) >> 16,
 		    (ip_addr & 0xff00) >> 8,
@@ -1470,7 +1470,7 @@ again:
 
 	if (kdp_reentry_deadline) {
 		kdp_schedule_debugger_reentry(kdp_reentry_deadline);
-		printf("Debugger re-entry scheduled in %d milliseconds\n", kdp_reentry_deadline);
+		printf("Debugger re-entry scheduled in %u milliseconds\n", kdp_reentry_deadline);
 		kdp_reentry_deadline = 0;
 	}
 
@@ -1509,7 +1509,7 @@ kdp_setup_packet_size(void)
 	if (PE_parse_boot_argn("kdp_crashdump_pkt_size", &kdp_crashdump_pkt_size, sizeof(kdp_crashdump_pkt_size)) &&
 	    (kdp_crashdump_pkt_size > KDP_LARGE_CRASHDUMP_PKT_SIZE)) {
 		kdp_crashdump_pkt_size = KDP_LARGE_CRASHDUMP_PKT_SIZE;
-		printf("kdp_crashdump_pkt_size is too large. Reverting to %d\n", kdp_crashdump_pkt_size);
+		printf("kdp_crashdump_pkt_size is too large. Reverting to %u\n", kdp_crashdump_pkt_size);
 	}
 }
 
@@ -1764,7 +1764,7 @@ RECEIVE_RETRY:
 		if (ntohs(th->th_opcode) == KDP_ACK && ntohl(th->th_block) == panic_block) {
 		} else {
 			if (ntohs(th->th_opcode) == KDP_ERROR) {
-				printf("Panic server returned error %d, retrying\n", ntohl(th->th_code));
+				printf("Panic server returned error %u, retrying\n", ntohl(th->th_code));
 				poll_count = 1000;
 				goto TRANSMIT_RETRY;
 			} else if (ntohl(th->th_block) == (panic_block - 1)) {
@@ -1804,7 +1804,7 @@ RECEIVE_RETRY:
 	}
 
 	if (request == KDP_EOF) {
-		printf("\nTotal number of packets transmitted: %d\n", panic_block);
+		printf("\nTotal number of packets transmitted: %u\n", panic_block);
 		printf("Avg. superblock transfer abstime 0x%llx\n", ((mach_absolute_time() - kdp_dump_start_time) / panic_block) * SBLOCKSZ);
 		printf("Minimum superblock transfer abstime: 0x%llx\n", kdp_min_superblock_dump_time);
 		printf("Maximum superblock transfer abstime: 0x%llx\n", kdp_max_superblock_dump_time);
@@ -1887,7 +1887,7 @@ kdp_set_dump_info(const uint32_t flags, const char *filename,
 	if (port && port <= USHRT_MAX) {
 		panicd_port = (unsigned short)port;
 	} else {
-		kdb_printf("kdp_set_dump_info: Skipping invalid panicd port %d (using %d)\n", port, panicd_port);
+		kdb_printf("kdp_set_dump_info: Skipping invalid panicd port %u (using %d)\n", port, panicd_port);
 	}
 
 	/* on a disconnect, should we stay in KDP or not? */
@@ -2027,7 +2027,7 @@ kdp_panic_dump(void)
 		pkt.data[20] = '\0';
 		snprintf(corename_str,
 		    sizeof(corename_str),
-		    "%s-%s-%d.%d.%d.%d-%x%s",
+		    "%s-%s-%u.%u.%u.%u-%x%s",
 		    coreprefix, &pkt.data[0],
 		    (current_ip & 0xff000000) >> 24,
 		    (current_ip & 0xff0000) >> 16,
@@ -2059,7 +2059,7 @@ kdp_panic_dump(void)
 				router_ip = parsed_router_ip;
 				if (kdp_arp_resolve(router_ip, &temp_mac)) {
 					destination_mac = temp_mac;
-					kdb_printf("Routing through specified router IP %s (%d)\n", router_ip_str, router_ip);
+					kdb_printf("Routing through specified router IP %s (%u)\n", router_ip_str, router_ip);
 				}
 			}
 		}

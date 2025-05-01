@@ -243,6 +243,8 @@ Lsave_neon_state_done_\@:
 	mrs		x19, SPSel
 	msr		SPSel, #1
 	bl		_ml_sign_thread_state
+	/* ml_sign_thread_state has special ABI, overwrites x1, x2, x17 */
+	mov		x17, x5
 	msr		SPSel, x19
 	mov		lr, x20
 	mov		x1, x21

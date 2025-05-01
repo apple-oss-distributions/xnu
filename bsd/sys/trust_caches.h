@@ -36,6 +36,8 @@
 /* Availability macros to check for support */
 #define XNU_HAS_TRUST_CACHE_LOADING 1
 #define XNU_HAS_TRUST_CACHE_CHECK_RUNTIME_FOR_UUID 1
+#define XNU_HAS_TRUST_CACHE_QUERY_FOR_REM 1
+#define XNU_HAS_TRUST_CACHE_UNLOADING 1
 
 #ifdef XNU_PLATFORM_BridgeOS
 #define XNU_HAS_LEGACY_TRUST_CACHE_LOADING 1
@@ -48,6 +50,11 @@
 __BEGIN_DECLS
 
 #if XNU_KERNEL_PRIVATE
+
+/* Common variables which represent the number of loaded trust caches */
+extern uint32_t num_static_trust_caches;
+extern uint32_t num_engineering_trust_caches;
+extern uint32_t num_loadable_trust_caches;
 
 /* Temporary definition until we get a proper shared one */
 typedef struct DTTrustCacheRange {
@@ -103,6 +110,14 @@ check_trust_cache_runtime_for_uuid(
 	const uint8_t check_uuid[kUUIDSize]);
 
 /**
+ * Unload a trust cache from the system given a UUID. Depending on the implementation, this
+ * may eiher genuinely unload the trust cache from the system, or it may simply tombstone
+ * the trust cache such that it can't be used any more.
+ */
+kern_return_t
+unload_trust_cache(uuid_t uuid);
+
+/**
  * Load an image4 trust cache. Since the type of trust cache isn't specified, this interface
  * attempts to validate the trust cache through all known types. Therefore, this evaluation
  * can be expensive.
@@ -145,13 +160,25 @@ load_legacy_trust_cache(
  * Query a trust cache based on the type passed in.
  *
  * Based on the system environment, the trust cache may be queried from kernel memory, or it may
- * be queried from memory controller by the kernel monitor environment.
+ * be queried from memory controlled by the kernel monitor environment.
  */
 kern_return_t
 query_trust_cache(
 	TCQueryType_t query_type,
 	const uint8_t cdhash[kTCEntryHashSize],
 	TrustCacheQueryToken_t *query_token);
+
+/**
+ * Query the set of loaded trust caches to find the most relevant REM permissions for a given
+ * CDHash.
+ *
+ * Based on the system environment, the trust cache may be queried from kernel memory, or it may
+ * be queried from memory controlled by the kernel monitor environment.
+ */
+kern_return_t
+query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	uint8_t *rem_perms);
 
 __END_DECLS
 

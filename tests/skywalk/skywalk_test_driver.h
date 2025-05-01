@@ -305,7 +305,6 @@ extern struct skywalk_mptest skt_xferudppingllink_wmm;
 extern struct skywalk_mptest skt_xferudppingllink_multi;
 extern struct skywalk_mptest skt_xferudpchanevents;
 extern struct skywalk_mptest skt_xferudpchaneventsasync;
-extern struct skywalk_mptest skt_xferudppingllink_multi_combined;
 extern struct skywalk_mptest skt_xferparentchildflow;
 extern struct skywalk_mptest skt_xferparentchildflown;
 extern struct skywalk_mptest skt_xferparentchildflow_offset_400;

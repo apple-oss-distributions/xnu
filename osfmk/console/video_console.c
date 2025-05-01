@@ -2860,7 +2860,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 			gc_acquired = TRUE;
 		} else {
 			if (makeMapping) {
-#if HAS_UCNORMAL_MEM
+#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
 				/*
 				 * Framebuffers would normally use VM_WIMG_RT, which
 				 * io_map doesn't support.  However this buffer is set up

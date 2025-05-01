@@ -22,3 +22,7 @@
 
 #include <pexpert/arm64/board_config.h>
 
+/* Enforce XNU_PLATFORM_ERROR_HANDLER support for all new platforms */
+#if !defined(NO_XNU_PLATFORM_ERROR_HANDLER)
+#error XNU_PLATFORM_ERROR_HANDLER is not defined in board_config.h
+#endif /* !NO_XNU_PLATFORM_ERROR_HANDLER */

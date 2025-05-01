@@ -111,6 +111,7 @@ _kmem_alloc:_kmem_alloc_external
 _kmem_free:_kmem_free_external
 _kmputc
 _krealloc_data:_krealloc_data_external
+_krealloc_shared_data:_krealloc_shared_data_external
 _lck_mtx_assert
 _lck_rw_done
 _ldisc_deregister

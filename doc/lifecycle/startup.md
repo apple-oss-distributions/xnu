@@ -71,8 +71,9 @@ configurable timeouts for low level machine code.
 See the comments for the MACHINE_TIMEOUT macro on how they are used in
 detail.
 
-- Rank 1: `MACHINE_TIMEOUT`
-- Middle: global lock timeouts that are derived from machine timeouts.
+- Rank 1: `MACHINE_TIMEOUT` specifications.
+- Rank 2: `ml_io_timeouts_init` for scheduler hygiene.
+- Middle: Global lock timeouts that are derived from machine timeouts.
 
 `STARTUP_SUB_LOCKS`
 -------------------
@@ -119,8 +120,13 @@ Allows for subsystems to steal early memory.
 
 ### Rank usage
 
-N/A.
+- First rank:
+  - `cpu_data_startup_init`: Allocate per-CPU memory that needs to be accessible with MMU disabled
+  - `socd_client_init`: Steal memory for SoC diagnostics
+  - `vm_map_steal_memory`: Allocate bootstrap VM maps prior to the zone allocator coming up
 
+- Last rank:
+  - `init_ecc_bad_pages`: Exclude frames detected as bad from frame allocator
 
 `STARTUP_SUB_KMEM`
 ------------------
@@ -131,7 +137,19 @@ Denotes that `kmem_alloc` is now usable.
 
 ### Rank usage
 
-N/A.
+- First rank:
+  - `zone_set_map_sizes`: Select physical limits for zone map
+  - `vm_compressor_set_size`: Reserve VA for the compressor submap
+
+- Rank 2:
+  - `kmem_range_startup_init`: Initialize data structures associated wiht ranges registered via
+    the `KMEM_RANGE_REGISTER_[STATIC|DYNAMIC]` mechanisms.
+
+- Rank 3:
+  - `kmem_range_init`: Shuffle and initialize ranges that have been registered up to now
+
+- Last rank:
+  - `io_map_init`: Creates an early `kernel_map` carve-out for mapping memory shared with devices
 
 `STARTUP_SUB_ZALLOC`
 --------------------

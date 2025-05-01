@@ -244,9 +244,9 @@ ast_taken_user(void)
 		thread_apc_ast(thread);
 	}
 
-	if (reasons & AST_GUARD) {
-		thread_ast_clear(thread, AST_GUARD);
-		guard_ast(thread);
+	if (reasons & AST_MACH_EXCEPTION) {
+		thread_ast_clear(thread, AST_MACH_EXCEPTION);
+		mach_exception_ast(thread);
 	}
 
 	if (reasons & AST_LEDGER) {
@@ -378,7 +378,6 @@ ast_taken_user(void)
 	    TH_SFLAG_RW_PROMOTED |
 	    TH_SFLAG_EXEC_PROMOTED |
 	    TH_SFLAG_FLOOR_PROMOTED |
-	    TH_SFLAG_PROMOTED |
 	    TH_SFLAG_DEPRESS));
 }
 

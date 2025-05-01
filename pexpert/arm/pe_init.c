@@ -445,7 +445,6 @@ PE_init_platform(boolean_t vm_initialized, void *args)
 		pe_identify_machine(boot_args_ptr);
 	} else {
 		pe_arm_init_interrupts(args);
-		pe_arm_init_debug(args);
 	}
 
 	if (!vm_initialized) {
@@ -879,25 +878,48 @@ PE_init_socd_client(void)
 }
 
 /*
+ *  see comments in PE_write_socd_client_buffer
+ */
+void
+PE_read_socd_client_buffer(vm_offset_t offset, void *out_buff, vm_size_t size)
+{
+	volatile uint32_t *client_buff = (volatile uint32_t *)(socd_trace_ram_base + offset);
+	vm_size_t len = size / sizeof(client_buff[0]);
+
+	assert(out_buff);
+	assert3u((offset + size), <=, socd_trace_ram_size);
+
+	/* Perform 4 byte aligned accesses */
+	if ((offset % 4 != 0) || (size % 4 != 0)) {
+		panic("unaligned read of 0x%lu bytes from socd trace ram address 0x%lu", size, offset);
+	}
+
+	for (vm_size_t i = 0; i < len; i++) {
+		((uint32_t *)out_buff)[i] = client_buff[i];
+	}
+}
+
+/*
  * PE_write_socd_client_buffer solves two problems:
  * 1. Prevents accidentally trusting a value read from socd client buffer. socd client buffer is considered untrusted.
  * 2. Ensures only 4 byte store instructions are used. On some platforms, socd client buffer is backed up
  *    by a SRAM that must be written to only 4 bytes at a time.
  */
 void
-PE_write_socd_client_buffer(vm_offset_t offset, const void *buff, vm_size_t size)
+PE_write_socd_client_buffer(vm_offset_t offset, const void *in_buff, vm_size_t size)
 {
-	volatile uint32_t *dst = (volatile uint32_t *)(socd_trace_ram_base + offset);
-	vm_size_t len = size / sizeof(dst[0]);
+	volatile uint32_t *client_buff = (volatile uint32_t *)(socd_trace_ram_base + offset);
+	vm_size_t len = size / sizeof(client_buff[0]);
 
-	assert(offset + size <= socd_trace_ram_size);
+	assert(in_buff);
+	assert3u((offset + size), <=, socd_trace_ram_size);
 
 	/* Perform 4 byte aligned accesses */
 	if ((offset % 4 != 0) || (size % 4 != 0)) {
-		panic("unaligned acccess to socd trace ram");
+		panic("unaligned write of 0x%lu bytes to socd trace ram address 0x%lu", size, offset);
 	}
 
 	for (vm_size_t i = 0; i < len; i++) {
-		dst[i] = ((const uint32_t *)buff)[i];
+		client_buff[i] = ((const uint32_t *)in_buff)[i];
 	}
 }

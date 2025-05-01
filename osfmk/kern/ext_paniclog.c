@@ -438,7 +438,7 @@ ext_paniclog_multiple_handles_panic_test(void)
 
 	ext_paniclog_create_multiple_handles(handles, data_id, data);
 
-	panic_with_data(uuid, data, 16, "Extensible panic log test");
+	panic_with_data(uuid, data, 16, 0, "Extensible panic log test");
 }
 
 /*

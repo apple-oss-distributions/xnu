@@ -35,12 +35,13 @@
 
 
 /*
- * c_segment_info and c_slot_info are used for output of ###
+ * c_segment_info and c_slot_info are used in the serialization protocol of sysctl vm.compressor_segments
  * one c_segment_info is dumped for every c_segment in memory, followed by a number of c_slot_info
- * Every change to this format should increment the version number in vm_compressor_segments()
+ * Every change to this format should increment the version number in VM_C_SEGMENT_INFO_MAGIC
  */
 struct c_slot_info {
-	uint32_t       csi_size;
+	uint16_t       csi_size;
+	uint16_t       csi_unused;
 } __attribute__((packed));
 
 struct c_segment_info {
@@ -63,7 +64,7 @@ struct c_segment_info {
 	struct c_slot_info  csi_slots[0];
 } __attribute__((packed));
 
-#define VM_C_SEGMENT_INFO_MAGIC 'C001'
+#define VM_C_SEGMENT_INFO_MAGIC 'C002'
 
 /*
  * vm_map_info_hdr and vm_map_entry_info are used for output of ###

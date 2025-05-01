@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,6 +95,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/protosw.h>
+#include <sys/kauth.h>
 #include <sys/kernel.h>
 #include <sys/domain.h>
 #include <sys/mbuf.h>
@@ -143,6 +144,8 @@
 
 #include <net/net_osdep.h>
 #include <os/log.h>
+
+#include <IOKit/IOBSD.h>
 
 /*
  * TCP/IP protocol family: IP6, ICMP6, UDP, TCP.
@@ -720,6 +723,56 @@ done:
 	return error;
 }
 
+static int sysctl_nd6_debug SYSCTL_HANDLER_ARGS;
+
+SYSCTL_PROC(_net_inet6_icmp6, ICMPV6CTL_ND6_DEBUG, nd6_debug,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, &nd6_debug, 0,
+    sysctl_nd6_debug, "I", "");
+
+static int
+sysctl_nd6_debug SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error;
+	int old_value = nd6_debug;
+	int value = old_value;
+#if (DEBUG || DEVELOPMENT)
+	char proc_name_string[MAXCOMLEN + 1];
+
+	proc_name(proc_pid(current_proc()), proc_name_string, sizeof(proc_name_string));
+#endif
+
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error || req->newptr == USER_ADDR_NULL) {
+		goto done;
+	}
+
+	if (!(kauth_cred_issuser(kauth_cred_get()) != 0 ||
+	    IOCurrentTaskHasEntitlement("com.apple.private.networking.elevated-logging"))) {
+#if (DEBUG || DEVELOPMENT)
+		os_log(OS_LOG_DEFAULT, "%s:%s: sysctl not allowed\n",
+		    proc_name_string, __func__);
+#endif
+		error = EPERM;
+		goto done;
+	}
+
+	/* impose bounds */
+	if (value < 0) {
+		error = EINVAL;
+		goto done;
+	}
+
+	nd6_debug = value;
+
+done:
+#if (DEBUG || DEVELOPMENT)
+	os_log(OS_LOG_DEFAULT, "%s:%s return: nd6_debug is %d "
+	    "and error is %d\n", proc_name_string, __func__, nd6_debug, error);
+#endif
+	return error;
+}
+
 /*
  * One single sysctl to set v6 stack profile for IPv6 compliance testing.
  * A lot of compliance test suites are not aware of other enhancements in IPv6
@@ -794,8 +847,6 @@ SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ERRPPSLIMIT_RANDOM_INCR,
     errppslimit_random_incr, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6errppslim_random_incr, 0, "");
 SYSCTL_INT(_net_inet6_icmp6, OID_AUTO,
     rappslimit, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6rappslim, 0, "");
-SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ND6_DEBUG,
-    nd6_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &nd6_debug, 0, "");
 SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ND6_ONLINKNSRFC4861,
     nd6_onlink_ns_rfc4861, CTLFLAG_RW | CTLFLAG_LOCKED, &nd6_onlink_ns_rfc4861, 0,
     "Accept 'on-link' nd6 NS in compliance with RFC 4861.");

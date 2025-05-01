@@ -91,6 +91,12 @@ compact_id_resolve(compact_id_table_t table, compact_id_t cid)
 	return table->cidt_array[compact_id_slab_index(cid)] + cid;
 }
 
+bool
+compact_id_slab_valid(compact_id_table_t table, compact_id_t cid)
+{
+	return table->cidt_array[compact_id_slab_index(cid)] != NULL;
+}
+
 __attribute__((noinline))
 static void
 compact_id_table_grow(compact_id_table_t table, uint32_t idx)

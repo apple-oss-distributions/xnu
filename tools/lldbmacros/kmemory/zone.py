@@ -7,6 +7,7 @@ from core import (
     xnu_format,
 )
 from .kmem   import KMem, MemoryRange
+from .vm     import Pmap
 from .btlog  import BTLog, BTLibrary
 from .whatis import *
 
@@ -377,6 +378,8 @@ class ZoneHeapMemoryObject(MemoryObject):
         start  = (eaddr & -16) - min(rz, 16) - 16
         end    = (eend + 16 + 15) & -16
         marks  = { self.address: '>' }
+        phex   = print_hex_data
+
 
         if rz > 16:
             print(" " + "=" * 88)
@@ -384,13 +387,13 @@ class ZoneHeapMemoryObject(MemoryObject):
 
             try:
                 data = target.xReadBytes(start + delta, eaddr - start)
-                print_hex_data(data, start, "", marks)
+                phex(data, start, "", marks)
             except:
                 print(" *** unable to read redzone memory ***")
         else:
             try:
                 data = target.xReadBytes(start + delta, eaddr - rz - start)
-                print_hex_data(data, start, "", marks)
+                phex(data, start, "", marks)
             except:
                 pass
 
@@ -399,7 +402,7 @@ class ZoneHeapMemoryObject(MemoryObject):
             if rz:
                 try:
                     data = target.xReadBytes(eaddr - rz + delta, rz)
-                    print_hex_data(data, eaddr - rz, "", marks)
+                    phex(data, eaddr - rz, "", marks)
                 except:
                     print(" *** unable to read redzone memory ***")
 
@@ -408,7 +411,7 @@ class ZoneHeapMemoryObject(MemoryObject):
 
         try:
             data = target.xReadBytes(eaddr + delta, eend - eaddr)
-            print_hex_data(data, eaddr, "", marks)
+            phex(data, eaddr, "", marks)
         except:
             print(" *** unable to read element memory ***")
 
@@ -416,7 +419,7 @@ class ZoneHeapMemoryObject(MemoryObject):
 
         try:
             data = target.xReadBytes(eend + delta, end - eend)
-            print_hex_data(data, eend, "", marks)
+            phex(data, eend, "", marks)
         except:
             pass
 
@@ -431,6 +434,7 @@ class ZoneHeapMemoryObject(MemoryObject):
         meta.describe()
 
         print("Zone Heap Object Info")
+
         print(" element index        : {}".format(self.elem_idx))
         print(" chunk offset         : {}".format(self.address - meta.page_addr))
         print(" status               : {}".format(status))
@@ -509,7 +513,7 @@ class ZPercpuValue(object):
     def __iter__(self):
         sbv  = self.sbv
         kmem = KMem.get_shared()
-        addr = sbv.GetValueAsAddress() | 0xc0c0000000000000
+        addr = sbv.GetValueAsAddress()
         name = sbv.GetName()
         ty   = sbv.GetType().GetPointeeType()
 

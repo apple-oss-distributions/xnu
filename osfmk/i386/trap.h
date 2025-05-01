@@ -113,52 +113,18 @@
 #define T_PF_EXECUTE            0x10            /* instruction fetch when NX */
 
 #if !defined(ASSEMBLER)
-#if __OPTIMIZE__
-__attribute__((cold, always_inline))
-static inline void
-ml_recoverable_trap(unsigned int code)
-__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
-{
-	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
-}
 
-__attribute__((cold, noreturn, always_inline))
-static inline void
-ml_fatal_trap(unsigned int code)
-__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
-{
-	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
-	__builtin_unreachable();
-}
+#define ML_TRAP_REGISTER_1      "rax"
+#define ML_TRAP_REGISTER_2      "r10"
+#define ML_TRAP_REGISTER_3      "r11"
 
-__attribute__((cold, noreturn, always_inline))
-static inline void
-ml_fatal_trap_with_value(unsigned int code, unsigned long value)
-__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
-{
-	register unsigned long long _value __asm__("rax") = value;
-	__asm__ volatile ("ud1l %[_code](%%eax), %%eax"
-                : "=r"(_value)
-                : [_code]"p"((void *)((unsigned long long)code))
-                , "0"(_value));
-	__builtin_unreachable();
-}
-#else
 #define ml_recoverable_trap(code) \
 	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code))
+
 #define ml_fatal_trap(code)  ({ \
-	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code)); \
+	ml_recoverable_trap(code); \
 	__builtin_unreachable(); \
 })
-#define ml_fatal_trap_with_value(code, value)  ({ \
-	register unsigned long long _value __asm__("rax") = (value); \
-	__asm__ volatile ("ud1l %[_code](%%eax), %%eax" \
-	        : "=r"(_value) \
-	        : [_code]"p"((void *)((unsigned long long)code)) \
-	        , "0"(_value)); \
-	__builtin_unreachable(); \
-})
-#endif
 
 #if defined(XNU_KERNEL_PRIVATE)
 __attribute__((cold, always_inline))

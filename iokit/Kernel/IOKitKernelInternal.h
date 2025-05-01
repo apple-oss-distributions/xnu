@@ -91,6 +91,9 @@ extern queue_head_t   gIOPageAllocList;
 
 /* Physical to physical copy (ints must be disabled) */
 extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t size);
+#if defined (__arm64__)
+extern void bcopy_phys_with_options(addr64_t from, addr64_t to, vm_size_t nbytes, int options);
+#endif /* __arm64__ */
 
 __END_DECLS
 

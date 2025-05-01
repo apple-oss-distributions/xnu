@@ -27,7 +27,7 @@
  */
 
 #include <vm/pmap.h>
-#include <vm/vm_page.h>
+#include <vm/vm_page_internal.h>
 
 /**
  * Initialize a unified page list iterator object from a source list of pages.
@@ -149,7 +149,7 @@ unified_page_list_iterator_page(
 	case UNIFIED_PAGE_LIST_TYPE_VM_PAGE_OBJ_Q:
 	case UNIFIED_PAGE_LIST_TYPE_VM_PAGE_FIFO_Q:
 		phys_page = VM_PAGE_GET_PHYS_PAGE(iter->pageq_pos);
-		*is_fictitious = (iter->pageq_pos->vmp_fictitious != 0);
+		*is_fictitious = (vm_page_is_fictitious(iter->pageq_pos) != 0);
 		break;
 	}
 

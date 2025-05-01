@@ -379,9 +379,9 @@ cpu_powerstats(__unused void *arg)
 #if CONFIG_CPU_COUNTERS
 		mt_update_fixed_counts();
 #else /* CONFIG_CPU_COUNTERS */
-		uint64_t insns = read_pmc(FIXED_PMC0);
-		uint64_t ucc = read_pmc(FIXED_PMC1);
-		uint64_t urc = read_pmc(FIXED_PMC2);
+		uint64_t insns = read_pmc(FIXED_S3_2_C15_C0_0);
+		uint64_t ucc = read_pmc(FIXED_S3_2_C15_C1_0);
+		uint64_t urc = read_pmc(FIXED_S3_2_C15_C2_0);
 #endif /* !CONFIG_CPU_COUNTERS */
 #if DIAG_ALL_PMCS
 		int i;

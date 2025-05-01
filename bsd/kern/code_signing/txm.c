@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <os/overflow.h>
+#include <os/atomic_private.h>
 #include <machine/atomic.h>
 #include <mach/vm_param.h>
 #include <mach/vm_map.h>
@@ -44,7 +45,9 @@
 #include <sys/proc.h>
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <sys/trust_caches.h>
 #include <sys/sysctl.h>
+#include <sys/reboot.h>
 #include <uuid/uuid.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBSD.h>
@@ -550,10 +553,11 @@ txm_print_logs(void)
 
 #pragma mark Initialization
 
+SECURITY_READ_ONLY_LATE(const TXMReadWriteData_t*) txm_rw_data = NULL;
 SECURITY_READ_ONLY_LATE(const TXMReadOnlyData_t*) txm_ro_data = NULL;
-SECURITY_READ_ONLY_LATE(const TXMStatistics_t*) txm_stats = NULL;
 SECURITY_READ_ONLY_LATE(const CSConfig_t*) txm_cs_config = NULL;
 SECURITY_READ_ONLY_LATE(CSRestrictedModeState_t*) txm_restricted_mode_state = NULL;
+SECURITY_READ_ONLY_LATE(const TXMMetrics_t*) txm_metrics = NULL;
 
 SECURITY_READ_ONLY_LATE(bool*) developer_mode_enabled = NULL;
 static SECURITY_READ_ONLY_LATE(bool) code_signing_enabled = true;
@@ -592,15 +596,19 @@ get_code_signing_info(void)
 	 * code_signing_enabled field, but we've since switched to acquiring that
 	 * value from TXM's read-only data.
 	 *
+	 * Not using txm_call.return_words[2] for now. This was previously the
+	 * metrics field, but we've since switched to acquiring that value from
+	 * TXM's read-write data.
+	 *
 	 * Not using txm_call.return_words[4] for now. This was previously the
 	 * txm_cs_config field, but we've since switched to acquiring that value
 	 * from TXM's read-only data.
 	 */
-
+	txm_rw_data = (TXMReadWriteData_t*)txm_call.return_words[0];
 	developer_mode_enabled = (bool*)txm_call.return_words[1];
-	txm_stats = (TXMStatistics_t*)txm_call.return_words[2];
 	managed_signature_size = (uint32_t)txm_call.return_words[3];
 	txm_ro_data = (TXMReadOnlyData_t*)txm_call.return_words[5];
+	txm_metrics = &txm_rw_data->metrics;
 
 	/* Set code_signing_disabled based on read-only data */
 	code_signing_enabled = txm_ro_data->codeSigningDisabled == false;
@@ -612,6 +620,10 @@ get_code_signing_info(void)
 	if (txm_cs_config->systemPolicy->featureSet.restrictedExecutionMode == true) {
 		txm_restricted_mode_state = txm_ro_data->restrictedModeState;
 	}
+
+	/* Setup the number of boot trust caches */
+	num_static_trust_caches = os_atomic_load(&txm_metrics->trustCaches.numStatic, relaxed);
+	num_engineering_trust_caches = os_atomic_load(&txm_metrics->trustCaches.numEngineering, relaxed);
 }
 
 static void
@@ -631,10 +643,8 @@ set_shared_region_base_address(void)
 void
 code_signing_init(void)
 {
-#if kTXMKernelAPIVersion >= 6
 	printf("libTXM_KernelVersion: %u\n", libTrustedExecutionMonitor_KernelVersion);
 	printf("libTXM_Image4Version: %u\n", libTrustedExecutionMonitor_Image4Version);
-#endif
 
 	/* Setup the thread stacks used by TXM */
 	setup_thread_stacks();
@@ -1068,6 +1078,21 @@ txm_unregister_code_signature(
 	vm_size_t signature_size = 0;
 	bool txm_managed = false;
 
+	/*
+	 * Unregistering a code signature can cause lock contention in TXM against a
+	 * set of other functions. The unregistration operation is very common when the
+	 * system is about to reboot because the VFS layer unmounts all volumes.
+	 *
+	 * In order to avoid this issue, we detect if the code signature in question
+	 * has been mapped in other address spaces, and if so, we avoid unregistering
+	 * the code signature when we're about to shut down. This leaks memory, but
+	 * we're about to shut down.
+	 */
+	if ((cs_obj->referenceCount > 0) && (get_system_inshutdown() != 0)) {
+		printf("TXM [XNU]: unregistration of signature skipped as system is in shutdown\n");
+		return KERN_ABORTED;
+	}
+
 	/* Check if the signature memory is TXM managed */
 	txm_managed = cs_obj->sptmType != TXM_BULK_DATA;
 
@@ -1096,24 +1121,23 @@ txm_unregister_code_signature(
 
 kern_return_t
 txm_verify_code_signature(
-	void *sig_obj)
+	void *sig_obj,
+	uint32_t *trust_level)
 {
 	txm_call_t txm_call = {
 		.selector = kTXMKernelSelectorValidateCodeSignature,
 		.num_input_args = 1,
 	};
-	kern_return_t ret = KERN_DENIED;
+	kern_return_t ret = txm_kernel_call(&txm_call, sig_obj);
 
-	/*
-	 * Verification of the code signature may perform a trust cache look up.
-	 * In order to avoid any collisions with threads which may be loading a
-	 * trust cache, we take a reader lock on the trust cache runtime.
-	 */
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, sig_obj);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
-
+	if ((ret == KERN_SUCCESS) && (trust_level != NULL)) {
+		/*
+		 * Abolsutely gross, but it's not worth linking all of libCodeSignature just for
+		 * this simple change. We should either return the trust level from TXM, or when
+		 * we adopt libCodeSignature more broadly, then use an accessor function.
+		 */
+		*trust_level = ((TXMCodeSignature_t*)sig_obj)->sig.trustLevel;
+	}
 	return ret;
 }
 
@@ -1389,6 +1413,31 @@ txm_associate_debug_region(
 	const vm_address_t region_addr,
 	const vm_size_t region_size)
 {
+#if kTXMKernelAPIVersion >= 10
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorAssociateDebugRegion,
+		.num_input_args = 3,
+	};
+	TXMAddressSpace_t *txm_addr_space = pmap_txm_addr_space(pmap);
+	kern_return_t ret = KERN_DENIED;
+
+	/*
+	 * Associating a debug region may require exclusive access to the TXM address
+	 * space lock within TXM.
+	 */
+	pmap_txm_acquire_exclusive_lock(pmap);
+
+	ret = txm_kernel_call(
+		&txm_call,
+		txm_addr_space,
+		region_addr,
+		region_size);
+
+	/* Unlock the TXM address space lock */
+	pmap_txm_release_exclusive_lock(pmap);
+
+	return ret;
+#else
 	/*
 	 * This function is an interesting one. There is no need for us to make
 	 * a call into TXM for this one and instead, all we need to do here is
@@ -1404,6 +1453,7 @@ txm_associate_debug_region(
 	}
 
 	return ret;
+#endif
 }
 
 kern_return_t
@@ -1796,6 +1846,73 @@ txm_image4_monitor_trap(
 	/* Return a generic error */
 	return EPERM;
 }
+
+#pragma mark Metrics
+
+#if DEVELOPMENT || DEBUG
+
+SYSCTL_DECL(_txm);
+SYSCTL_NODE(, OID_AUTO, txm, CTLFLAG_RD, 0, "TXM");
+
+SYSCTL_DECL(_txm_metrics);
+SYSCTL_NODE(_txm, OID_AUTO, metrics, CTLFLAG_RD, 0, "TXM Metrics");
+
+#define TXM_METRIC(type, name, field)                                               \
+static int __txm_metric_ ## type ## _ ## name SYSCTL_HANDLER_ARGS;                  \
+SYSCTL_DECL(_txm_metrics_ ## type);                                                 \
+SYSCTL_PROC(                                                                        \
+	_txm_metrics_ ## type, OID_AUTO,                                                \
+	name, CTLTYPE_INT | CTLFLAG_RD,                                                 \
+	NULL, 0, __txm_metric_ ## type ## _ ## name,                                    \
+	"I", "collected data from \'" #type "\':\'" #field "\'");                       \
+static int __txm_metric_ ## type ## _ ## name SYSCTL_HANDLER_ARGS                   \
+{                                                                                   \
+	if (req->newptr) {                                                              \
+	    return EPERM;                                                               \
+	}                                                                               \
+	uint32_t value = os_atomic_load(&txm_metrics->field, relaxed);                  \
+	return SYSCTL_OUT(req, &value, sizeof(value));                                  \
+}
+
+SYSCTL_DECL(_txm_metrics_memory);
+SYSCTL_NODE(_txm_metrics, OID_AUTO, memory, CTLFLAG_RD, 0, "TXM Metrics - Memory");
+
+#define TXM_ALLOCATOR_METRIC(name, field)                                                   \
+SYSCTL_DECL(_txm_metrics_memory_ ## name);                                                  \
+SYSCTL_NODE(_txm_metrics_memory, OID_AUTO, name, CTLFLAG_RD, 0, "\'" #name "\' allocator"); \
+TXM_METRIC(memory_ ## name, bytes_allocated, field->allocated);                             \
+TXM_METRIC(memory_ ## name, bytes_unused, field->unused);                                   \
+TXM_METRIC(memory_ ## name, bytes_wasted, field->wasted);                                   \
+
+TXM_METRIC(memory, bootstrap, memory.bootstrap);
+TXM_METRIC(memory, free_list, memory.freeList);
+TXM_METRIC(memory, bulk_data, memory.bulkData);
+TXM_ALLOCATOR_METRIC(trust_cache, memory.slabs.trustCache);
+TXM_ALLOCATOR_METRIC(provisioning_profile, memory.slabs.profile);
+TXM_ALLOCATOR_METRIC(code_signature, memory.slabs.codeSignature);
+TXM_ALLOCATOR_METRIC(code_region, memory.slabs.codeRegion);
+TXM_ALLOCATOR_METRIC(address_space, memory.slabs.addressSpace);
+TXM_ALLOCATOR_METRIC(bucket_1024, memory.buckets.b1024);
+TXM_ALLOCATOR_METRIC(bucket_2048, memory.buckets.b2048);
+TXM_ALLOCATOR_METRIC(bucket_4096, memory.buckets.b4096);
+TXM_ALLOCATOR_METRIC(bucket_8192, memory.buckets.b8192);
+
+SYSCTL_DECL(_txm_metrics_acceleration);
+SYSCTL_NODE(_txm_metrics, OID_AUTO, acceleration, CTLFLAG_RD, 0, "TXM Metrics - Acceleration");
+TXM_METRIC(acceleration, num_signature, acceleration.signature);
+TXM_METRIC(acceleration, num_bucket, acceleration.bucket);
+TXM_METRIC(acceleration, num_page, acceleration.page);
+TXM_METRIC(acceleration, bucket_256, acceleration.bucket256);
+TXM_METRIC(acceleration, unsupported, acceleration.large);
+
+SYSCTL_DECL(_txm_metrics_trustcaches);
+SYSCTL_NODE(_txm_metrics, OID_AUTO, trustcaches, CTLFLAG_RD, 0, "TXM Metrics - Trust Caches");
+TXM_METRIC(trustcaches, bytes_needed, trustCaches.bytesNeeded);
+TXM_METRIC(trustcaches, bytes_allocated, trustCaches.bytesAllocated);
+TXM_METRIC(trustcaches, bytes_locked, trustCaches.bytesLocked);
+TXM_METRIC(trustcaches, bytes_tombstoned, trustCaches.bytesTombstoned);
+
+#endif /* DEVELOPMENT || DEBUG */
 
 
 #endif /* CONFIG_SPTM */

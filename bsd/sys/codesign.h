@@ -101,7 +101,7 @@ int     cs_entitlements_blob_get(struct proc *, void **, size_t *);
 int     cs_entitlements_dictionary_copy(struct proc *, void **);
 #endif
 int     cs_restricted(struct proc *);
-uint8_t * cs_get_cdhash(struct proc *);
+uint8_t *__counted_by_or_null(CS_CDHASH_LEN) cs_get_cdhash(struct proc *);
 cs_launch_type_t launch_constraint_data_get_launch_type(launch_constraint_data_t lcd);
 
 struct cs_blob * csproc_get_blob(struct proc *);
@@ -128,6 +128,13 @@ void            csproc_clear_platform_binary(struct proc *);
 #define XNU_CSBLOB_HAS_VALIDATION_CATEGORY 1
 int             csblob_set_validation_category(struct cs_blob *, unsigned int);
 unsigned int    csblob_get_validation_category(struct cs_blob *);
+
+#define XNU_CSBLOB_HAS_AUXILIARY_INFO 1
+int             csblob_set_auxiliary_info(struct cs_blob *, uint64_t);
+uint64_t        csblob_get_auxiliary_info(struct cs_blob *);
+
+#define XNU_CSBLOB_HAS_TRUST_LEVEL 1
+uint32_t        csblob_get_trust_level(struct cs_blob *);
 
 #include <uuid/uuid.h>
 #define XNU_SUPPORTS_PROVISIONING_PROFILE_UUID 1

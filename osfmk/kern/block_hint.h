@@ -53,10 +53,6 @@ typedef enum thread_snapshot_wait_flags {
 	kThreadWaitCompressor           = 0x14,
 	kThreadWaitParkedBoundWorkQueue = 0x15,
 	kThreadWaitPageBusy             = 0x16,
-	/*
-	 * The vm_object wait types should be kept in the same order as
-	 * vm_object_wait_reason_t
-	 */
 	kThreadWaitPagerInit            = 0x17,
 	kThreadWaitPagerReady           = 0x18,
 	kThreadWaitPagingActivity       = 0x19,
@@ -64,6 +60,8 @@ typedef enum thread_snapshot_wait_flags {
 	kThreadWaitMemoryBlocked        = 0x1b,
 	kThreadWaitPagingInProgress     = 0x1c,
 	kThreadWaitPageInThrottle       = 0x1d,
+	kThreadWaitExclaveCore          = 0x1e,
+	kThreadWaitExclaveKit           = 0x1f,
 } __attribute__((packed)) block_hint_t;
 
 _Static_assert(sizeof(block_hint_t) <= sizeof(short),
@@ -96,6 +94,9 @@ extern void kdp_ipc_fill_splabel(struct ipc_service_port_label *ispl, struct por
 extern void kdp_ipc_splabel_size(size_t *ispl_size, size_t *maxnamelen);
 extern const bool kdp_ipc_have_splabel;
 void kdp_eventlink_find_owner(struct waitq *waitq, event64_t event, thread_waitinfo_t *waitinfo);
+#if CONFIG_EXCLAVES
+extern void kdp_esync_find_owner(struct waitq *waitq, event64_t event, thread_waitinfo_t *waitinfo);
+#endif /* CONFIG_EXCLAVES */
 
 #endif /* XNU_KERNEL_PRIVATE */
 

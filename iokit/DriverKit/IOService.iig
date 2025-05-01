@@ -257,6 +257,16 @@ public:
 	ChangePowerState(
 		uint32_t powerFlags);
 
+	/*!
+     * @brief       Request provider to create a power override.
+     * @discussion  Allows a driver to ignore power desires of its children, similar to powerOverrideOnPriv in IOKit, enabling its power state to be governed solely by its own desire (set via IOService::ChangePowerState)
+     * @param       enable Whether to enable or disable the power override.
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+	virtual kern_return_t
+	SetPowerOverride(
+		bool enable);
+
     /*!
      * @brief       Request create a new user client for a client process.
      * @discussion  An application may request an IOUserClient be opened with the IOKit framework

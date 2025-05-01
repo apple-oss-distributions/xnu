@@ -5,9 +5,9 @@ def PrintCoreAnalyticsFormatStr(cmd_args=None):
     """ Pretty prints the full format string for a core analyics event
         Usage: showcoreanalyticsformatstr <event>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify an event.")
-        return
+
     #event_ptr = kern.GetValueFromAddress(cmd_args[0], "struct _ca_event *").GetSBValue().GetValueAsUnsigned()
     #print(event_ptr)
     event = kern.GetValueFromAddress(cmd_args[0], "struct _ca_event *")

@@ -41,12 +41,6 @@
 #include <kern/task_ident.h>
 #include <corpses/task_corpse.h>
 
-struct proc_ident {
-	uint64_t        p_uniqueid;
-	pid_t           p_pid;
-	int             p_idversion;
-};
-
 extern void* proc_find_ident(struct proc_ident const *i);
 extern int proc_rele(void* p);
 extern task_t proc_task(void* p);
@@ -55,13 +49,6 @@ extern kern_return_t task_conversion_eval(task_t caller, task_t victim, int flav
 
 /* Exported to kexts */
 extern typeof(task_id_token_port_name_to_task) task_id_token_port_name_to_task_external;
-
-struct task_id_token {
-	struct proc_ident ident;
-	ipc_port_t        port;
-	uint64_t          task_uniqueid; /* for corpse task */
-	os_refcnt_t       tidt_refs;
-};
 
 static ZONE_DEFINE_TYPE(task_id_token_zone, "task_id_token",
     struct task_id_token, ZC_ZFREE_CLEARMEM);

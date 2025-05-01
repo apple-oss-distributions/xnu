@@ -232,8 +232,10 @@ int sig_try_locked(struct proc *p);
 #if defined(KERNEL_PRIVATE)
 /* Forward-declare these for consumers of the SDK that don't know about BSD types */
 struct proc;
+struct thread;
 struct os_reason;
 void    psignal_sigkill_with_reason(struct proc *p, struct os_reason *signal_reason);
+void    psignal_sigkill_try_thread_with_reason(struct proc *p, struct thread *thread, struct os_reason *signal_reason);
 #endif /* defined(KERNEL_PRIVATE) */
 
 #ifdef XNU_KERNEL_PRIVATE

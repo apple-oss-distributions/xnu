@@ -76,6 +76,7 @@ __BEGIN_DECLS
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_iokit.h>
 #include <vm/vm_map_xnu.h>
+#include <kern/thread.h>
 
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern void ipc_port_release_send(ipc_port_t port);
@@ -666,11 +667,12 @@ IOGeneralMemoryDescriptor::memoryReferenceCreate(
 					}
 				}
 
+				mach_vm_offset_t entryAddrForVm = entryAddr;
 				err = mach_make_memory_entry_internal(map,
-				    &actualSize, entryAddr, prot, vmne_kflags, &entry, cloneEntry);
+				    &actualSize, entryAddrForVm, prot, vmne_kflags, &entry, cloneEntry);
 
 				if (KERN_SUCCESS != err) {
-					DEBUG4K_ERROR("make_memory_entry(map %p, addr 0x%llx, size 0x%llx, prot 0x%x) err 0x%x\n", map, entryAddr, actualSize, prot, err);
+					DEBUG4K_ERROR("make_memory_entry(map %p, addr 0x%llx, size 0x%llx, prot 0x%x) err 0x%x\n", map, entryAddrForVm, actualSize, prot, err);
 					break;
 				}
 				if (MAP_MEM_USE_DATA_ADDR & prot) {
@@ -873,11 +875,11 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 	vmk_flags.vm_tag = ref->tag;
 
 	/*
-	 * Mapping memory into the kernel_map using IOMDs use the data range.
+	 * Mapping memory into the kernel_map using IOMDs use a dedicated range.
 	 * Memory being mapped should not contain kernel pointers.
 	 */
 	if (map == kernel_map) {
-		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_IOKIT;
 	}
 
 	err = mach_vm_map_kernel(map, &addr, size,
@@ -900,9 +902,9 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 		if (kIOMapGuardedMask & ref->options) {
 			vm_map_offset_t lastpage = vm_map_trunc_page(addr + size - guardSize, vm_map_page_mask(map));
 
-			err = vm_map_protect(map, addr, addr + guardSize, VM_PROT_NONE, false /*set_max*/);
+			err = mach_vm_protect(map, addr, guardSize, false /*set max*/, VM_PROT_NONE);
 			assert(KERN_SUCCESS == err);
-			err = vm_map_protect(map, lastpage, lastpage + guardSize, VM_PROT_NONE, false /*set_max*/);
+			err = mach_vm_protect(map, lastpage, guardSize, false /*set max*/, VM_PROT_NONE);
 			assert(KERN_SUCCESS == err);
 			ref->mapped += guardSize;
 		}
@@ -2209,7 +2211,7 @@ IOGeneralMemoryDescriptor::initWithOptions(void *       buffers,
 				    && (((IOAddressRange *) buffers)->address + ((IOAddressRange *) buffers)->length) <= 0x100000000ULL
 #endif
 				    ) {
-					if (kIOMemoryTypeVirtual64 == type) {
+					if (type == kIOMemoryTypeVirtual64) {
 						type = kIOMemoryTypeVirtual;
 					} else {
 						type = kIOMemoryTypePhysical;
@@ -2300,7 +2302,6 @@ IOGeneralMemoryDescriptor::initWithOptions(void *       buffers,
 
 		// Auto-prepare memory at creation time.
 		// Implied completion when descriptor is free-ed
-
 
 		if ((kIOMemoryTypePhysical == type) || (kIOMemoryTypePhysical64 == type)) {
 			_wireCount++; // Physical MDs are, by definition, wired
@@ -2530,6 +2531,7 @@ IOMemoryDescriptor::getSourceSegment( IOByteCount   offset, IOByteCount * length
 
 #endif /* !__LP64__ */
 
+
 IOByteCount
 IOMemoryDescriptor::readBytes
 (IOByteCount offset, void *bytes, IOByteCount length)
@@ -2537,7 +2539,6 @@ IOMemoryDescriptor::readBytes
 	addr64_t dstAddr = CAST_DOWN(addr64_t, bytes);
 	IOByteCount endoffset;
 	IOByteCount remaining;
-
 
 	// Check that this entire I/O is within the available range
 	if ((offset > _length)
@@ -2563,8 +2564,10 @@ IOMemoryDescriptor::readBytes
 	while (remaining) { // (process another target segment?)
 		addr64_t        srcAddr64;
 		IOByteCount     srcLen;
+		int             options = cppvPsrc | cppvNoRefSrc | cppvFsnk | cppvKmap;
 
-		srcAddr64 = getPhysicalSegment(offset, &srcLen, kIOMemoryMapperNone);
+		IOOptionBits getPhysSegmentOptions = kIOMemoryMapperNone;
+		srcAddr64 = getPhysicalSegment(offset, &srcLen, getPhysSegmentOptions);
 		if (!srcAddr64) {
 			break;
 		}
@@ -2577,8 +2580,10 @@ IOMemoryDescriptor::readBytes
 		if (srcLen > (UINT_MAX - PAGE_SIZE + 1)) {
 			srcLen = (UINT_MAX - PAGE_SIZE + 1);
 		}
-		copypv(srcAddr64, dstAddr, (unsigned int) srcLen,
-		    cppvPsrc | cppvNoRefSrc | cppvFsnk | cppvKmap);
+
+
+		kern_return_t copy_ret = copypv(srcAddr64, dstAddr, (unsigned int) srcLen, options);
+#pragma unused(copy_ret)
 
 		dstAddr   += srcLen;
 		offset    += srcLen;
@@ -2632,8 +2637,10 @@ IOMemoryDescriptor::writeBytes
 	while (remaining) { // (process another target segment?)
 		addr64_t    dstAddr64;
 		IOByteCount dstLen;
+		int         options = cppvPsnk | cppvFsnk | cppvNoRefSrc | cppvNoModSnk | cppvKmap;
 
-		dstAddr64 = getPhysicalSegment(offset, &dstLen, kIOMemoryMapperNone);
+		IOOptionBits getPhysSegmentOptions = kIOMemoryMapperNone;
+		dstAddr64 = getPhysicalSegment(offset, &dstLen, getPhysSegmentOptions);
 		if (!dstAddr64) {
 			break;
 		}
@@ -2646,11 +2653,13 @@ IOMemoryDescriptor::writeBytes
 		if (dstLen > (UINT_MAX - PAGE_SIZE + 1)) {
 			dstLen = (UINT_MAX - PAGE_SIZE + 1);
 		}
+
+
 		if (!srcAddr) {
 			bzero_phys(dstAddr64, (unsigned int) dstLen);
 		} else {
-			copypv(srcAddr, (addr64_t) dstAddr64, (unsigned int) dstLen,
-			    cppvPsnk | cppvFsnk | cppvNoRefSrc | cppvNoModSnk | cppvKmap);
+			kern_return_t copy_ret = copypv(srcAddr, (addr64_t) dstAddr64, (unsigned int) dstLen, options);
+#pragma unused(copy_ret)
 			srcAddr   += dstLen;
 		}
 		offset    += dstLen;
@@ -3327,7 +3336,6 @@ IOGeneralMemoryDescriptor::dmaCommandOperation(DMACommandOps op, void *vData, UI
 				length = contigLength;
 			}
 
-
 			assert(address);
 			assert(length);
 		} while (false);
@@ -3448,6 +3456,22 @@ IOGeneralMemoryDescriptor::getPhysicalSegment(IOByteCount offset, IOByteCount *l
 	}
 
 	return address;
+}
+
+IOByteCount
+IOGeneralMemoryDescriptor::readBytes
+(IOByteCount offset, void *bytes, IOByteCount length)
+{
+	IOByteCount count = super::readBytes(offset, bytes, length);
+	return count;
+}
+
+IOByteCount
+IOGeneralMemoryDescriptor::writeBytes
+(IOByteCount offset, const void* bytes, IOByteCount withLength)
+{
+	IOByteCount count = super::writeBytes(offset, bytes, withLength);
+	return count;
 }
 
 #ifndef __LP64__
@@ -4961,6 +4985,7 @@ IOGeneralMemoryDescriptor::doMap(
 		}
 	}
 
+
 	memory_object_t pager;
 	pager = (memory_object_t) (reserved ? reserved->dp.devicePager : NULL);
 
@@ -5765,6 +5790,23 @@ IOMemoryDescriptor::createMappingInTask(
 	}
 
 	mapping = new IOMemoryMap;
+
+#if 136275805
+	/*
+	 * XXX: Redundantly check the mapping size here so that failure stack traces
+	 *      are more useful. This has no functional value but is helpful because
+	 *      telemetry traps can currently only capture the last five calls and
+	 *      so we want to trap as shallow as possible in a select few cases
+	 *      where we anticipate issues.
+	 *
+	 *      When telemetry collection is complete, this will be removed.
+	 */
+	if (__improbable(mapping && !vm_map_is_map_size_valid(
+		    get_task_map(intoTask), length, /* no_soft_limit */ false))) {
+		mapping->release();
+		mapping = NULL;
+	}
+#endif /* 136275805 */
 
 	if (mapping
 	    && !mapping->init( intoTask, atAddress,

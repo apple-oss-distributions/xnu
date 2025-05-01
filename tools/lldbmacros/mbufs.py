@@ -157,7 +157,7 @@ def MbufDecode(cmd_args=None, cmd_options={}):
     """Decode an mbuf using scapy.
         Usage: mbuf_decode <mbuf address>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("usage: mbuf_decode <address> [decode_as]")
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
@@ -174,9 +174,9 @@ def MbufDumpData(cmd_args=None, cmd_options={}):
     """Dump the mbuf data
         Usage: mbuf_dumpdata  <mbuf address> [-C <count>]
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print(MbufDumpData.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
     if kern.globals.mb_uses_mcache == 1:
         mdata = mp.m_hdr.mh_data
@@ -252,7 +252,7 @@ def MbufWalkPacket(cmd_args=None, cmd_options={}):
     """ Walk the mbuf packet chain (m_nextpkt)
         Usage: mbuf_walkpkt  <mbuf address> [-C <count>]
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
 
@@ -286,7 +286,7 @@ def MbufWalk(cmd_args=None, cmd_options={}):
     """ Walk the mbuf chain (m_next)
         Usage: mbuf_walk  <mbuf address> [-C <count>]
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
 
@@ -305,7 +305,7 @@ def MbufWalk(cmd_args=None, cmd_options={}):
 def MbufBuf2Slab(cmd_args=None):
     """ Given an mbuf object, find its corresponding slab address
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
 
     if int(kern.globals.mb_uses_mcache) == 0:
@@ -347,7 +347,7 @@ def MbufSlabs(cmd_args=None):
         return
 
     out_string = ""
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid arguments passed.")
 
     slg = kern.GetValueFromAddress(cmd_args[0], 'mcl_slabg_t *')
@@ -738,6 +738,9 @@ def GetMbufType(m):
 def MbufShowFlags(cmd_args=None):
     """ Return a formatted string description of the mbuf flags
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     m = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
     print(GetMbufFlags(m))
 
@@ -775,6 +778,9 @@ def GetMbufPktCrumbs(m):
 def MbufShowPktCrumbs(cmd_args=None):
     """ Print the packet crumbs of an mbuf object mca
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     m = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
     print(GetMbufPktCrumbs(m))
 
@@ -1087,7 +1093,7 @@ def MbufShowAll(cmd_args=None):
 def MbufCountChain(cmd_args=None):
     """ Count the length of an mbuf chain
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
 
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
@@ -1107,7 +1113,7 @@ def MbufCountChain(cmd_args=None):
                 mn = mn.m_hdr.mh_next
             else:
                 mn = mn.M_hdr_common.M_hdr.mh_next
-            print1("mp 0x{:x} mn 0x{:x}".format(mp, mn))
+            print("mp 0x{:x} mn 0x{:x}".format(mp, mn))
 
         if kern.globals.mb_uses_mcache == 1:
             mp = mp.m_hdr.mh_nextpkt
@@ -1187,8 +1193,9 @@ def MbufTraceLeak(cmd_args=None):
         stored information with that trace
         syntax: (lldb) mbuf_traceleak <addr>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
+
     if int(kern.globals.mb_uses_mcache) == 0:
         print("mcache is disabled, use kasan whatis")
         return
@@ -1203,8 +1210,9 @@ def MbufTraceLeak(cmd_args=None):
 def McacheWalkObject(cmd_args=None):
     """ Given a mcache object address, walk its obj_next pointer
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Missing argument 0 in user function.")
+
     if int(kern.globals.mb_uses_mcache) == 0:
         print("mcache is disabled, use kasan whatis")
         return

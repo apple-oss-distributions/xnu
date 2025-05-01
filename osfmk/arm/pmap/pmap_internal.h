@@ -90,6 +90,12 @@ extern void pmap_ledger_free_internal(ledger_t);
  */
 #define GEN_ASM_NAME(__function_name) _##__function_name##_ppl
 
+#if BTI_ENFORCED
+#define PMAP_SUPPORT_PROTOTYPES_BTI_LANDING_PAD "bti c\n"
+#else
+#define PMAP_SUPPORT_PROTOTYPES_BTI_LANDING_PAD ""
+#endif /* BTI_ENFROCED */
+
 #define PMAP_SUPPORT_PROTOTYPES_WITH_ASM_INTERNAL(__return_type, __function_name, __function_args, __function_index, __assembly_function_name) \
 	extern __return_type __function_name##_internal __function_args; \
 	extern __return_type __function_name##_ppl __function_args; \
@@ -97,6 +103,7 @@ extern void pmap_ledger_free_internal(ledger_t);
 	         ".align 2 \n" \
 	         ".globl " #__assembly_function_name "\n" \
 	         #__assembly_function_name ":\n" \
+	         PMAP_SUPPORT_PROTOTYPES_BTI_LANDING_PAD \
 	         "mov x15, " #__function_index "\n" \
 	         "b _aprr_ppl_enter\n")
 

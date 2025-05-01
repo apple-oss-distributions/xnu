@@ -269,7 +269,7 @@ Lupdate_mdscr_panic_str:
 	.align 2
 	.globl EXT(set_mmu_ttb_alternate)
 LEXT(set_mmu_ttb_alternate)
-	ARM64_JUMP_TARGET
+	ARM64_PROLOG
 	dsb		sy
 #if defined(KERNEL_INTEGRITY_KTRR)
 	mov		x1, lr
@@ -458,36 +458,34 @@ L_mmu_kvtop_wpreflight_invalid:
 	.text
 	.align 2
 copyio_error:
-	mov		x0, #EFAULT					// Return an EFAULT error
-	POP_FRAME
-	ARM64_STACK_EPILOG
-
-#if CONFIG_SPTM
-/*
- * The copyio fault region is a contiguous set of instructions which are exempt
- * from fatal panic lockdown events due to data abort exceptions. This region
- * exists because copyio faults are generally expected to be recoverable.
- */
-	.globl EXT(copyio_fault_region_begin)
-LEXT(copyio_fault_region_begin)
-#endif /* CONFIG_SPTM */
+	POP_FRAME							// Return the error populated in x0
+	ARM64_STACK_EPILOG					// by the exception handler
 
 #if CONFIG_XNUPOST
 /*
- * Test function for panic lockdown which can cause a data abort from within the
- * copyio fault region.
+ * Test function for panic lockdown which can cause a data abort at a well known
+ * PC with a copyio recovery handler.
  */
 	.text
 	.align 2
 	.globl EXT(arm64_panic_lockdown_test_copyio)
 LEXT(arm64_panic_lockdown_test_copyio)
 	ARM64_PROLOG
+	COPYIO_RECOVER_RANGE 1f, 2f
+	/* RECOVER_RANGE can change code layout, breaking implicit fault PC */
+	.globl EXT(arm64_panic_lockdown_test_copyio_fault_pc)
+LEXT(arm64_panic_lockdown_test_copyio_fault_pc)
 	ldr		x0, [x0]
+1:
 	ret
+2:
+	mov		x0, 0xAA
+	ret
+
 #endif /* CONFIG_XNUPOST */
 
 /*
- * int _bcopyin(const char *src, char *dst, vm_size_t len)
+ * int _bcopyin(const user_addr_t src, char *dst, vm_size_t len)
  */
 	.text
 	.align 2
@@ -624,7 +622,7 @@ LEXT(dtrace_nofault_copy16)
 
 /*
  * int dtrace_nofault_copy32(const char *src, uint32_t *dst)
- * int _copyin_atomic32(const char *src, uint32_t *dst)
+ * int _copyin_atomic32(const user_addr_t src, uint32_t *dst)
  */
 	.text
 	.align 2
@@ -650,7 +648,7 @@ LEXT(_copyin_atomic32)
 	ARM64_STACK_EPILOG
 
 /*
- * int _copyin_atomic32_wait_if_equals(const char *src, uint32_t value)
+ * int _copyin_atomic32_wait_if_equals(const user_addr_t src, uint32_t value)
  */
 	.text
 	.align 2
@@ -676,6 +674,7 @@ LEXT(_copyin_atomic32_wait_if_equals)
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
+
 /*
  * int dtrace_nofault_copy64(const char *src, uint32_t *dst)
  * int _copyin_atomic64(const char *src, uint32_t *dst)
@@ -690,9 +689,9 @@ LEXT(dtrace_nofault_copy64)
 LEXT(_copyin_atomic64)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	COPYIO_RECOVER_RANGE 1f
+	COPYIO_RECOVER_RANGE Lcopyin_atomic64_common
 	ldr		x8, [x0]
-1:
+Lcopyin_atomic64_common:
 	str		x8, [x1]
 	mov		x0, #0
 	/*
@@ -705,7 +704,7 @@ LEXT(_copyin_atomic64)
 
 
 /*
- * int _copyout_atomic32(uint32_t value, char *dst)
+ * int _copyout_atomic32(uint32_t u32, user_addr_t dst)
  */
 	.text
 	.align 2
@@ -721,7 +720,7 @@ LEXT(_copyout_atomic32)
 	ARM64_STACK_EPILOG
 
 /*
- * int _copyout_atomic64(uint64_t value, char *dst)
+ * int _copyout_atomic64(uint64_t u64, user_addr_t dst)
  */
 	.text
 	.align 2
@@ -738,7 +737,7 @@ LEXT(_copyout_atomic64)
 
 
 /*
- * int _bcopyout(const char *src, char *dst, vm_size_t len)
+ * int _bcopyout(const char *src, user_addr_t dst, vm_size_t len)
  */
 	.text
 	.align 2
@@ -827,7 +826,7 @@ LEXT(_bcopyout)
 /*
  * int _bcopyinstr(
  *	  const user_addr_t user_addr,
- *	  char *kernel_addr,
+ *	  char *dst,
  *	  vm_size_t max,
  *	  vm_size_t *actual)
  */
@@ -935,10 +934,6 @@ Lcopyinframe_done:
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
-#if CONFIG_SPTM
-	.globl EXT(copyio_fault_region_end)
-LEXT(copyio_fault_region_end)
-#endif /* CONFIG_SPTM */
 
 /*
  * hw_lck_ticket_t
@@ -1276,9 +1271,14 @@ LEXT(monitor_call)
  *
  * Computes the thread state hash by hashing critical state with gkey.  The hash is
  * diversified by &arm_saved_state_t.
+ *
+ * To fix rdar://118357645 we bind every step of the sequence to both the PC it
+ * belongs to and to the EL level it came from.
+ *
+ * Special ABI: preserves all registers, except x1, x2 and x17
+ * x1 is used to return the result.
  */
 .macro COMPUTE_THREAD_STATE_HASH
-	pacga	x1, x1, x0
 	/*
 	 * Mask off the carry flag for EL0 states so we don't need to re-sign when
 	 * that flag is touched by the system call return path.
@@ -1287,10 +1287,41 @@ LEXT(monitor_call)
 	b.ne	1f
 	bic		x2, x2, PSR_CF
 1:
-	pacga	x1, x2, x1		/* SPSR hash (gkey + pc hash) */
-	pacga	x1, x3, x1		/* LR Hash (gkey + spsr hash) */
-	pacga	x1, x4, x1		/* X16 hash (gkey + lr hash) */
-	pacga	x1, x5, x1		/* X17 hash (gkey + x16 hash) */
+
+	/*
+	 * first pacga, bind with context << 4 || PACGA_TAG
+	 */
+	lsl		x17, x0, #4
+	orr		x17, x17, PACGA_TAG_THREAD
+	pacga	x17, x17, x1				/* pc hash = hash(context, pc) */
+
+	/*
+	 * pacga puts the result in the upper half of x1. We use the lower half
+	 * to add the data to bind the hash to PC, EL and PACGA_TAG
+	 *
+	 * binding state will be 27 bits of PC, 2 bits of EL, 3 bits of PACGA_TAG
+	 * we have reserved both 0b0001 and 0b1001 for thread state tagging.
+	 * So we can use the top bit of the tag to store part of EL, and use
+	 * more bits of PC.
+	 */
+
+	lsl		x1, x1, #2
+	bfxil	x1, x2, PSR64_MODE_EL_SHIFT, #2
+	lsl		x1, x1, #3
+	orr		x1, x1, PACGA_TAG_THREAD
+
+
+	bfxil	x17, x1, #0, #32
+	pacga	x17, x17, x2				/* SPSR(x2) hash (gkey + pc hash) */
+
+	bfxil   x17, x1, #0, #32			/* add binding state */
+	pacga	x17, x17, x3				/* LR(x3) Hash (gkey + spsr hash) */
+
+	bfxil   x17, x1, #0, #32			/* add binding state */
+	pacga	x17, x17, x4				/* X16(x4) hash (gkey + lr hash) */
+
+	bfxil   x17, x1, #0, #32			/* add binding state */
+	pacga	x1, x17, x5					/* X17(x5) hash (gkey + x16 hash) */
 .endm
 
 /*
@@ -1311,7 +1342,7 @@ LEXT(monitor_call)
  *							 uint64_t x17)
  *
  * ml_sign_thread_state uses a custom calling convention that
- * preserves all registers except x1 and x2.
+ * preserves all registers except x1, x2 and x17.
  */
 	.text
 	.align 2
@@ -1331,7 +1362,7 @@ LEXT(ml_sign_thread_state)
  *							  uint64_t x17)
  *
  * ml_check_signed_state uses a custom calling convention that
- * preserves all registers except x1, x2, and x16.
+ * preserves all registers except x1, x2, x16 and x17.
  */
 	.text
 	.align 2
@@ -1491,16 +1522,18 @@ LEXT(ptrauth_utils_sign_blob_generic)
 	mov		w16, #0xde43		// Prologue cookie: ptrauth_string_discriminator("ptrauth_utils_sign_blob_generic-prologue") | 0x01
 
 	// x16 is used to accumulate the signature because it is interrupt-safe
-	pacga	x16, x1, x16		// Mix in the data length. This helps distinguish e.g. a signature of 2 zeros from a signature of 3 zeros.
+	lsl		x16, x16, 4
+	orr		x16, x16, PACGA_TAG_BLOB
+	pacga	x16, x16, x1		// Mix in the data length. This helps distinguish e.g. a signature of 2 zeros from a signature of 3 zeros.
+	orr		x16, x16, PACGA_TAG_BLOB
 	pacga	x16, x16, x17		// Mix in the diversifier
-	orr		x16, x16, #1
 	cbz		x10, Lsmall_size	// Handle the case of < 8 bytes
 
 	// Handle as many full 64-bit words as possible first.
 Lloop_rounds:
 	ldr		x17, [x0], #0x8		// Load the next full 64-bit value
-	pacga	x16, x17, x16		// Mix in the next 8 bytes of data
-	orr		x16, x16, #1
+	orr		x16, x16, PACGA_TAG_BLOB
+	pacga	x16, x16, x17		// Mix in the next 8 bytes of data
 	subs	x10, x10, #0x1
 	b.ne	Lloop_rounds
 	cbz		x9, Lepilogue_cookie	// If there are no trailing bytes, skip to the epilogue
@@ -1524,11 +1557,12 @@ Lloop_ntrailing:
 	add		x10, x10, #0x8		// Advance x10 by 8 bits
 	cmp		x9, x10				// Check if we're done with all bytes
 	b.ne	Lloop_ntrailing
-	pacga	x16, x17, x16		// Mix in the accumulated trailing bytes
-	orr		x16, x16, #1
+	orr		x16, x16, PACGA_TAG_BLOB
+	pacga	x16, x16, x17		// Mix in the accumulated trailing bytes
 
 Lepilogue_cookie:
 	mov		w17, #0x9a2d		// Epilogue cookie: ptrauth_string_discriminator("ptrauth_utils_sign_blob_generic-epilogue") | 0x01
+	orr		x16, x16, PACGA_TAG_BLOB
 	pacga	x0, x16, x17		// Mix in the epilogue cookie
 
 Lsign_ret:

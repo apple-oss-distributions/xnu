@@ -599,7 +599,7 @@ IOGetHibernationCryptKey(uint8_t * hibernationKey,
 IOReturn
 IOPolledFileOpen(const char * filename,
     uint32_t flags,
-    uint64_t setFileSize, uint64_t fsFreeSize,
+    uint64_t setFileSizeMin, uint64_t setFileSizeMax, uint64_t fsFreeSize,
     void * write_file_addr, size_t write_file_len,
     IOPolledFileIOVars ** fileVars,
     OSData ** imagePath,
@@ -628,7 +628,8 @@ IOPolledFileOpen(const char * filename,
 		vars->fileRef = kern_open_file_for_direct_io(filename,
 		    flags,
 		    &file_extent_callback, &ctx,
-		    setFileSize,
+		    setFileSizeMin,
+		    setFileSizeMax,
 		    fsFreeSize,
 		    // write file:
 		    0, write_file_addr, write_file_len,
@@ -665,7 +666,9 @@ IOPolledFileOpen(const char * filename,
 			break;
 		}
 
-		vars->fileSize = ctx.size;
+		vars->fileSizeMin = setFileSizeMin;
+		vars->fileSizeMax = setFileSizeMax;
+		vars->fileSize    = ctx.size;
 		vars->extentMap = (IOPolledFileExtent *) extentsData->getBytesNoCopy();
 
 		part = IOCopyMediaForDev(image_dev);
@@ -768,22 +771,6 @@ IOPolledFileOpen(const char * filename,
 	}
 
 	return err;
-}
-
-IOReturn
-IOPolledFileOpen(const char * filename,
-    uint32_t flags,
-    uint64_t setFileSize, uint64_t fsFreeSize,
-    void * write_file_addr, size_t write_file_len,
-    IOPolledFileIOVars ** fileVars,
-    OSSharedPtr<OSData>& imagePath,
-    uint8_t * volumeCryptKey, size_t * keySize)
-{
-	OSData* imagePathRaw = NULL;
-	IOReturn result = IOPolledFileOpen(filename, flags, setFileSize, fsFreeSize, write_file_addr, write_file_len,
-	    fileVars, &imagePathRaw, volumeCryptKey, keySize);
-	imagePath.reset(imagePathRaw, OSNoRetain);
-	return result;
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

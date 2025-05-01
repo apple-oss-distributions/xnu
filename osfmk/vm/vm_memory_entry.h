@@ -49,6 +49,17 @@ extern kern_return_t mach_memory_entry_range_op(
 	int                     *range);
 #endif /* XNU_PLATFORM_MacOSX */
 
+/*
+ *	Routine:	vm_convert_port_to_copy_object
+ *	Purpose:
+ *		Convert from a port specifying a named entry
+ *              backed by a copy map to the VM object itself.
+ *              Returns NULL if the port does not refer to an copy map-backed named entry.
+ *	Conditions:
+ *		Nothing locked.
+ */
+extern vm_object_t vm_convert_port_to_copy_object(
+	ipc_port_t      port);
 
 __END_DECLS
 

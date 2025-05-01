@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2020, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -919,7 +919,7 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
 			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
-			    m != NULL ? m_length(m) : 0, false,
+			    m != NULL ? m_length(m) : 0, SOFLOW_DIRECTION_INBOUND,
 			    (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
@@ -1000,7 +1000,7 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
 			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
-			    m != NULL ? m_length(m) : 0, false,
+			    m != NULL ? m_length(m) : 0, SOFLOW_DIRECTION_INBOUND,
 			    (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
@@ -1168,7 +1168,7 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
 			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
-			    m0 != NULL ? m_length(m0) : 0, false,
+			    m0 != NULL ? m_length(m0) : 0, SOFLOW_DIRECTION_INBOUND,
 			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
@@ -1389,8 +1389,7 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
 			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control,
-			    m0 != NULL ? m_length(m0) : 0,
-			    false,
+			    m0 != NULL ? m_length(m0) : 0, SOFLOW_DIRECTION_INBOUND,
 			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
@@ -1552,7 +1551,7 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
 			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control,
-			    m0 != NULL ? m_length(m0) : 0, false,
+			    m0 != NULL ? m_length(m0) : 0, SOFLOW_DIRECTION_INBOUND,
 			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 

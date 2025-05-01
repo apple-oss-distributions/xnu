@@ -29,7 +29,7 @@
 #ifndef __VM_RECLAIM_XNU__
 #define __VM_RECLAIM_XNU__
 
-#ifdef XNU_KERNEL_PRIVATE
+#if XNU_KERNEL_PRIVATE
 #if CONFIG_DEFERRED_RECLAIM
 #include <mach/mach_types.h>
 #if BSD_KERNEL_PRIVATE
@@ -38,8 +38,16 @@
 #include <mach/mach_vm_server.h>
 #endif /* BSD_KERNEL_PRIVATE */
 
-extern uint64_t vm_reclaim_max_threshold;
 typedef struct vm_deferred_reclamation_metadata_s *vm_deferred_reclamation_metadata_t;
+
+__enum_closed_decl(vm_deferred_reclamation_gc_action_t, uint8_t, {
+	/* Trim all buffers */
+	RECLAIM_GC_TRIM = 0,
+	/* Fully drain all buffers */
+	RECLAIM_GC_DRAIN = 1,
+	/* Drain any buffers belonging to suspended tasks */
+	RECLAIM_GC_SCAVENGE = 2,
+});
 
 __options_closed_decl(vm_deferred_reclamation_options_t, uint8_t, {
 	RECLAIM_OPTIONS_NONE = 0x00,
@@ -57,53 +65,69 @@ __options_closed_decl(vm_deferred_reclamation_options_t, uint8_t, {
  */
 void vm_deferred_reclamation_buffer_deallocate(vm_deferred_reclamation_metadata_t metadata);
 
-
 /*
- * Uninstall the the kernel metadata associated with this reclamation buffer from all global queues. This
- * is called during task termination to ensure no kernel thread may start trying to reclaim from a task
- * that is about to exit
+ * Synchronously drain all reclamation ring's belonging to a task.
  */
-void vm_deferred_reclamation_buffer_uninstall(vm_deferred_reclamation_metadata_t metadata);
-
-/*
- * Equivalent to vm_deferred_reclamation_reclaim_memory(RECLAIM_FULL);
- */
-void vm_deferred_reclamation_reclaim_all_memory(
+kern_return_t vm_deferred_reclamation_task_drain(
+	task_t                            task,
 	vm_deferred_reclamation_options_t options);
 
-bool vm_deferred_reclamation_reclaim_from_task_async(task_t task);
-
-kern_return_t vm_deferred_reclamation_reclaim_from_task_sync(
-	task_t task,
-	size_t max_entries_to_reclaim);
+/*
+ * Return true if this task has a reclamation ring
+ */
+bool vm_deferred_reclamation_task_has_ring(task_t task);
 
 /*
  * Create a fork of the given reclamation buffer for a new task.
  * Parent buffer must be locked and will be unlocked on return.
  *
  * This must be called when forking a task that has a reclamation buffer
- * to ensure that the kernel knows about the child's reclamation buffer.
+ * to duplicate the parent's buffer, and the new buffer must later be
+ * registered by vm_deferred_reclamation_task_fork_register.
+ *
  * The caller must lock the parent's reclamation buffer BEFORE forking
  * the parent's vm_map. Otherwise the parent's buffer could get reclaimed
  * in between the map fork and the buffer fork causing the child's
  * data strucutres to be out of sync.
  */
-vm_deferred_reclamation_metadata_t vm_deferred_reclamation_buffer_fork(
+vm_deferred_reclamation_metadata_t vm_deferred_reclamation_task_fork(
 	task_t task,
 	vm_deferred_reclamation_metadata_t parent);
 
 /*
- * Set the current thread as the owner of a reclaim buffer. May block. Will
- * propagate priority.
+ * Add a reclamation buffer returned by vm_deferred_reclamation_task_fork to
+ * the global reclamation queues.
+ *
+ * The child task should call this to ensure that the kernel knows about its
+ * reclamation buffer. This must happen after the child's address space is
+ * fully initialized and able to recieve VM API calls.
  */
-void vm_deferred_reclamation_buffer_own(vm_deferred_reclamation_metadata_t metadata);
+void
+vm_deferred_reclamation_task_fork_register(vm_deferred_reclamation_metadata_t metadata);
+
+/*
+ * Set the current thread as the owner of a reclaim buffer. May block. Will
+ * propagate priority. Should be called before forking the owning task.
+ */
+void vm_deferred_reclamation_ring_own(vm_deferred_reclamation_metadata_t metadata);
 
 /*
  * Release ownership of a reclaim buffer and wakeup any threads waiting for
  * ownership. Must be called from the thread that acquired ownership.
  */
-void vm_deferred_reclamation_buffer_disown(vm_deferred_reclamation_metadata_t metadata);
+void vm_deferred_reclamation_ring_disown(vm_deferred_reclamation_metadata_t metadata);
 
+/*
+ * Should be called when a task is suspended -- will trigger asynchronous
+ * reclamation of any reclaim rings owned by the task.
+ */
+void vm_deferred_reclamation_task_suspend(task_t task);
+
+/*
+ * Perform Garbage Collection on all reclaim rings
+ */
+void vm_deferred_reclamation_gc(vm_deferred_reclamation_gc_action_t action,
+    vm_deferred_reclamation_options_t options);
 
 #endif /* CONFIG_DEFERRED_RECLAIM */
 #endif /* XNU_KERNEL_PRIVATE */

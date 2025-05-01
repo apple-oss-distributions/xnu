@@ -502,6 +502,9 @@ rip6_output(
 	if (INP_MANAGEMENT_ALLOWED(in6p)) {
 		ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
 	}
+	if (INP_ULTRA_CONSTRAINED_ALLOWED(in6p)) {
+		ip6oa.ip6oa_flags |= IP6OAF_ULTRA_CONSTRAINED_ALLOWED;
+	}
 
 	dst = &dstsock->sin6_addr;
 	if (control) {
@@ -623,6 +626,9 @@ rip6_output(
 
 		ip6_output_setdstifscope(m, difscope, NULL);
 	}
+
+	in_pcb_check_management_entitled(in6p);
+	in_pcb_check_ultra_constrained_entitled(in6p);
 
 	/*
 	 * Source address selection.

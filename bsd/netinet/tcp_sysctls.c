@@ -49,7 +49,7 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_rfc_compliant, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_cubic_rfc_compliant, 1, "RFC Compliance for TCP Cubic");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, rack, CTLFLAG_RW | CTLFLAG_LOCKED,
-    int, tcp_rack, 0, "TCP RACK");
+    int, tcp_rack, 1, "TCP RACK");
 /* Target queuing delay in milliseconds. This includes the processing
  * and scheduling delay on both of the end-hosts. A LEDBAT sender tries
  * to keep queuing delay below this limit. When the queuing delay

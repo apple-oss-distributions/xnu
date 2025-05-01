@@ -57,9 +57,9 @@ typedef struct kcdata_item      *task_crashinfo_item_t;
 #define BTINFO_ALLOCATION_SIZE (1024 * 20)
 
 #if XNU_TARGET_OS_WATCH
-#define TOTAL_CORPSES_ALLOWED 4
+#define DEFAULT_TOTAL_CORPSES_ALLOWED 4
 #else /* XNU_TARGET_OS_WATCH */
-#define TOTAL_CORPSES_ALLOWED 5
+#define DEFAULT_TOTAL_CORPSES_ALLOWED 5
 #endif /* XNU_TARGET_OS_WATCH */
 
 #define TOTAL_USER_FAULTS_ALLOWED 1

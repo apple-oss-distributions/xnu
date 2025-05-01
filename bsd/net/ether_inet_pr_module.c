@@ -236,15 +236,13 @@ ether_inet_input(ifnet_t ifp, protocol_family_t protocol_family,
 
 static errno_t
 ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
-    mbuf_t *m0, const struct sockaddr *dst_netaddr,
-    void *route, char *type, char *edst)
+    mbuf_t *m0, const struct sockaddr *dst_netaddr, void *route,
+    IFNET_FRAME_TYPE_RW_T frame_type, IFNET_LLADDR_RW_T dst_host_lladdr)
 {
 #pragma unused(protocol_family)
 	struct mbuf *m = *m0;
 	const struct ether_header *eh;
 	errno_t result = 0;
-	uint8_t *frame_type = dlil_frame_type(type);
-	uint8_t *dst_host_lladdr = dlil_link_addr(edst);
 
 	if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING)) {
 		return ENETDOWN;

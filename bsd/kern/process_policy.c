@@ -568,6 +568,7 @@ handle_boost(int scope,
 	return error;
 }
 
+#if CONFIG_SCHED_SMT
 static int
 handle_no_smt(int scope, int action, proc_t target_proc, uint64_t target_threadid)
 {
@@ -590,9 +591,15 @@ handle_no_smt(int scope, int action, proc_t target_proc, uint64_t target_threadi
 	} else {
 		return EINVAL;
 	}
-
 	return 0;
 }
+#else /* CONFIG_SCHED_SMT */
+static int
+handle_no_smt(__unused int scope, __unused int action, __unused proc_t target_proc, __unused uint64_t target_threadid)
+{
+	return 0;
+}
+#endif /* CONFIG_SCHED_SMT */
 
 static int
 handle_tecs(int scope, int action, proc_t target_proc, uint64_t target_threadid)

@@ -39,7 +39,7 @@
  * Do not use these macros!
  *
  * Instead, you should use kcdata_iter_* functions defined in kcdata.h.  These
- * macoros have no idea where the kcdata buffer ends, so they are all unsafe.
+ * macros have no idea where the kcdata buffer ends, so they are all unsafe.
  */
 #define KCDATA_ITEM_HEADER_SIZE         (sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t))
 #define KCDATA_ITEM_ITER(item)          kcdata_iter_unsafe((void*)(item))

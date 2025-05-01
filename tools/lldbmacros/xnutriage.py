@@ -13,10 +13,9 @@ def OutputAddress(cmd_args=None):
     """ Returns out address and symbol corresponding to it without newline
         Parameters: <address whose symbol is needed>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(OutputAddress.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     a = unsigned(cmd_args[0])
     cmd_str = "image lookup -a {:#x}".format(a)
     cmd_out = lldb_run_command(cmd_str)
@@ -36,10 +35,9 @@ def SymbolicateWithInstruction(cmd_args=None):
     """ Prints out address and symbol similar to x/i
         Usage: xi <address whose symbol is needed>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(SymbolicateWithInstruction.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     a = ArgumentStringToInt(cmd_args[0])
     print(OutputAddress([a]))
 
@@ -50,10 +48,9 @@ def SymbolicateWithInstruction(cmd_args=None):
 def NewBt(cmd_args=None):
     """ Prints all the instructions by walking the given stack pointer
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(NewBt.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     a = ArgumentStringToInt(cmd_args[0])
     while a != 0:
         if kern.arch == "x86_64" or kern.arch.startswith("arm64"):
@@ -74,6 +71,8 @@ def NewBt(cmd_args=None):
 
 # EndMacro: newbt
 
+paniclog_data = ""
+
 # Macro: parseLR
 @lldb_command('parseLR')
 def parseLR(cmd_args=None):
@@ -84,9 +83,9 @@ def parseLR(cmd_args=None):
 
     if not paniclog_data:
         if kern.arch == "x86_64":
-            paniclog_data += returnfunc("\n(lldb) paniclog\n", "paniclog -v")
+            paniclog_data += lldb_run_command("paniclog -v")
         else:
-            paniclog_data += returnfunc("\n(lldb) paniclog\n", "paniclog")
+            paniclog_data += lldb_run_command("paniclog")
 
     if panic_found == 1:
         srch_string = "lr:\s+0x[a-fA-F0-9]+\s"
@@ -107,8 +106,13 @@ def parseLR(cmd_args=None):
 @lldb_command('parseLRfromfile')
 def parseLRfromfile(cmd_args=None):
     """ Decode the LR value from file into source code location
+        
+        Usage: parseLRfromfile [file_path]
     """
-    f = open('/tmp/lrparsefile', 'r')
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+    
+    f = open(cmd_args[0], 'r')
     parse_data= f.read()
     srch_string = "lr:\s+0x[a-fA-F0-9]+\s"
     lr_pc_srch = re.findall(srch_string, parse_data)

@@ -48,6 +48,17 @@ int fs_snapshot_delete(int, const char *, uint32_t) __OSX_AVAILABLE(10.12) __IOS
 
 int fs_snapshot_rename(int, const char *, const char *, uint32_t) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0);
 
+#endif /* !KERNEL */
+
+/* fs_snapshot_mount() supported flags */
+#define SNAPSHOT_MNT_NOSUID             0x00000008    /* same as MNT_NOSUID */
+#define SNAPSHOT_MNT_NODEV              0x00000010    /* same as MNT_NODEV */
+#define SNAPSHOT_MNT_DONTBROWSE         0x00100000    /* same as MNT_DONTBROWSE */
+#define SNAPSHOT_MNT_IGNORE_OWNERSHIP   0x00200000    /* same as MNT_IGNORE_OWNERSHIP */
+#define SNAPSHOT_MNT_NOFOLLOW           0x08000000    /* same as MNT_NOFOLLOW */
+
+#ifndef KERNEL
+
 int fs_snapshot_mount(int, const char *, const char *, uint32_t) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)       __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0);
 
 int fs_snapshot_revert(int, const char *, uint32_t) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0);

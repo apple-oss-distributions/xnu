@@ -31,8 +31,9 @@
 #include <mach/port.h>
 
 #include <kern/assert.h>
-#include <kern/kern_types.h>
+#include <kern/exc_guard.h>
 #include <kern/ipc_kobject.h>
+#include <kern/kern_types.h>
 #include <kern/mach_filter.h>
 #include <kern/task.h>
 
@@ -48,12 +49,18 @@
 #endif
 #include <sys/codesign.h>
 #include <sys/proc_ro.h>
+#include <sys/reason.h>
 
 #include <libkern/coreanalytics/coreanalytics.h>
 
 extern int  proc_isinitproc(struct proc *p);
 extern bool proc_is_simulated(struct proc *);
 extern char *proc_name_address(struct proc *p);
+extern int  exit_with_guard_exception(
+	struct proc            *p,
+	mach_exception_data_type_t code,
+	mach_exception_data_type_t subcode);
+
 
 
 #pragma mark policy tunables
@@ -65,18 +72,6 @@ extern const vm_size_t  ipc_kmsg_max_vm_space;
 static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", false);
 #endif /* DEVELOPMENT || DEBUG */
 #endif /* IPC_HAS_LEGACY_MACH_MSG_TRAP */
-
-
-#pragma mark policy utils
-
-__abortlike void
-__ipc_unreachable(
-	const char *reason,
-	const char *file,
-	int         line)
-{
-	(panic)("%s @%s:%d", reason, file, line);
-}
 
 
 #pragma mark policy options
@@ -167,7 +162,7 @@ ipc_preflight_msg_option64(mach_msg_option64_t opts)
 		return MACH_MSG_SUCCESS;
 	}
 
-	mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
+	mach_port_guard_exception(0, opts, kGUARD_EXC_INVALID_OPTIONS);
 	if (opts & MACH64_MACH_MSG2) {
 		return MACH_SEND_INVALID_OPTIONS;
 	}
@@ -229,25 +224,17 @@ ipc_policy_allow_legacy_mach_msg_trap_for_platform(
 
 	/*
 	 * Special rules, due to unfortunate bincompat reasons,
-	 * allow for a hardcoded list of MIG calls to XNU to go through:
-	 * - for iOS, Catalyst and iOS Simulator apps linked against
-	 *   an SDK older than 15.x,
-	 * - for macOS apps linked against an SDK older than 12.x.
+	 * allow for a hardcoded list of MIG calls to XNU to go through
+	 * for macOS apps linked against an SDK older than 12.x.
 	 */
 	switch (platform) {
-	case PLATFORM_IOS:
-	case PLATFORM_IOSSIMULATOR:
-	case PLATFORM_MACCATALYST:
-		if (sdk == 0 || sdk_major > 15) {
-			return false;
-		}
-		break;
 	case PLATFORM_MACOS:
 		if (sdk == 0 || sdk_major > 12) {
 			return false;
 		}
 		break;
 	default:
+		/* disallow for any non-macOS for platform */
 		return false;
 	}
 
@@ -300,7 +287,7 @@ ipc_policy_allow_legacy_send_trap(
 		}
 	}
 
-	mach_port_guard_exception(msgid, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
+	mach_port_guard_exception(msgid, opts, kGUARD_EXC_INVALID_OPTIONS);
 	/*
 	 * this should be MACH_SEND_INVALID_OPTIONS,
 	 * but this is a new mach_msg2 error only.
@@ -310,36 +297,40 @@ ipc_policy_allow_legacy_send_trap(
 
 
 #endif /* IPC_HAS_LEGACY_MACH_MSG_TRAP */
-#pragma mark reply port semantics telemetry
+#pragma mark ipc policy telemetry
 
 /*
  * As CA framework replies on successfully allocating zalloc memory,
  * we maintain a small buffer that gets flushed when full. This helps us avoid taking spinlocks when working with CA.
  */
-#define REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE         2
+#define IPC_POLICY_VIOLATIONS_RB_SIZE         2
 
 /*
  * Stripped down version of service port's string name. This is to avoid overwhelming CA's dynamic memory allocation.
  */
-#define CA_MACH_SERVICE_PORT_NAME_LEN                   86
+#define CA_MACH_SERVICE_PORT_NAME_LEN         86
 
-struct reply_port_semantics_violations_rb_entry {
+struct ipc_policy_violations_rb_entry {
 	char proc_name[CA_PROCNAME_LEN];
 	char service_name[CA_MACH_SERVICE_PORT_NAME_LEN];
 	char team_id[CA_TEAMID_MAX_LEN];
 	char signing_id[CA_SIGNINGID_MAX_LEN];
-	int  reply_port_semantics_violation;
+	ipc_policy_violation_id_t violation_id;
 	int  sw_platform;
 	int  msgh_id;
 	int  sdk;
 };
-struct reply_port_semantics_violations_rb_entry reply_port_semantics_violations_rb[REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE];
-static uint8_t reply_port_semantics_violations_rb_index = 0;
+struct ipc_policy_violations_rb_entry ipc_policy_violations_rb[IPC_POLICY_VIOLATIONS_RB_SIZE];
+static uint8_t ipc_policy_violations_rb_index = 0;
 
-LCK_GRP_DECLARE(reply_port_telemetry_lock_grp, "reply_port_telemetry_lock_grp");
-LCK_SPIN_DECLARE(reply_port_telemetry_lock, &reply_port_telemetry_lock_grp);
+LCK_GRP_DECLARE(ipc_telemetry_lock_grp, "ipc_telemetry_lock_grp");
+LCK_TICKET_DECLARE(ipc_telemetry_lock, &ipc_telemetry_lock_grp);
 
-/* Telemetry: report back the process name violating reply port semantics */
+/*
+ * Telemetry: report back the process name violating ipc policy. Note that this event can be used to report
+ * any type of ipc violation through a ipc_policy_violation_id_t. It is named reply_port_semantics_violations
+ * because we are reusing an existing event.
+ */
 CA_EVENT(reply_port_semantics_violations,
     CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name,
     CA_STATIC_STRING(CA_MACH_SERVICE_PORT_NAME_LEN), service_name,
@@ -348,8 +339,8 @@ CA_EVENT(reply_port_semantics_violations,
     CA_INT, reply_port_semantics_violation);
 
 static void
-send_reply_port_telemetry(
-	const struct reply_port_semantics_violations_rb_entry *entry)
+send_telemetry(
+	const struct ipc_policy_violations_rb_entry *entry)
 {
 	ca_event_t ca_event = CA_EVENT_ALLOCATE_FLAGS(reply_port_semantics_violations, Z_NOWAIT);
 	if (ca_event) {
@@ -359,26 +350,27 @@ send_reply_port_telemetry(
 		strlcpy(event->proc_name, entry->proc_name, CA_PROCNAME_LEN);
 		strlcpy(event->team_id, entry->team_id, CA_TEAMID_MAX_LEN);
 		strlcpy(event->signing_id, entry->signing_id, CA_SIGNINGID_MAX_LEN);
-		event->reply_port_semantics_violation = entry->reply_port_semantics_violation;
+		event->reply_port_semantics_violation = entry->violation_id;
 
 		CA_EVENT_SEND(ca_event);
 	}
 }
 
-/* Routine: flush_reply_port_semantics_violations_telemetry
+/* Routine: flush_ipc_policy_violations_telemetry
  * Conditions:
- *              Assumes the reply_port_telemetry_lock is held.
+ *              Assumes ipc_policy_type is valid
+ *              Assumes ipc telemetry lock is held.
  *              Unlocks it before returning.
  */
 static void
-flush_reply_port_semantics_violations_telemetry(void)
+flush_ipc_policy_violations_telemetry(void)
 {
-	struct reply_port_semantics_violations_rb_entry local_rb[REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE];
+	struct ipc_policy_violations_rb_entry local_rb[IPC_POLICY_VIOLATIONS_RB_SIZE];
 	uint8_t local_rb_index = 0;
 
-	if (__improbable(reply_port_semantics_violations_rb_index > REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE)) {
-		panic("Invalid reply port semantics violations buffer index %d > %d",
-		    reply_port_semantics_violations_rb_index, REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE);
+	if (__improbable(ipc_policy_violations_rb_index > IPC_POLICY_VIOLATIONS_RB_SIZE)) {
+		panic("Invalid ipc policy violation buffer index %d > %d",
+		    ipc_policy_violations_rb_index, IPC_POLICY_VIOLATIONS_RB_SIZE);
 	}
 
 	/*
@@ -386,36 +378,60 @@ flush_reply_port_semantics_violations_telemetry(void)
 	 * allocating zalloc memory. It can not do that if we are accessing the shared buffer
 	 * with spin locks held.
 	 */
-	while (local_rb_index != reply_port_semantics_violations_rb_index) {
-		local_rb[local_rb_index] = reply_port_semantics_violations_rb[local_rb_index];
+	while (local_rb_index != ipc_policy_violations_rb_index) {
+		local_rb[local_rb_index] = ipc_policy_violations_rb[local_rb_index];
 		local_rb_index++;
 	}
 
-	lck_spin_unlock(&reply_port_telemetry_lock);
+	lck_ticket_unlock(&ipc_telemetry_lock);
 
 	while (local_rb_index > 0) {
-		struct reply_port_semantics_violations_rb_entry *entry = &local_rb[--local_rb_index];
-
-		send_reply_port_telemetry(entry);
+		struct ipc_policy_violations_rb_entry *entry = &local_rb[--local_rb_index];
+		send_telemetry(entry);
 	}
 
 	/*
 	 * Finally call out the buffer as empty. This is also a sort of rate limiting mechanisms for the events.
 	 * Events will get dropped until the buffer is not fully flushed.
 	 */
-	lck_spin_lock(&reply_port_telemetry_lock);
-	reply_port_semantics_violations_rb_index = 0;
+	lck_ticket_lock(&ipc_telemetry_lock, &ipc_telemetry_lock_grp);
+	ipc_policy_violations_rb_index = 0;
 }
 
 void
-stash_reply_port_semantics_violations_telemetry(
-	mach_service_port_info_t sp_info,
-	int                     reply_port_semantics_violation,
-	int                     msgh_id)
+ipc_stash_policy_violations_telemetry(
+	ipc_policy_violation_id_t    violation_id,
+	mach_service_port_info_t     sp_info,
+	int                          aux_data)
 {
-	struct reply_port_semantics_violations_rb_entry *entry;
-
+	struct ipc_policy_violations_rb_entry *entry;
+	char *service_name = (char *) "unknown";
 	task_t task = current_task_early();
+	int pid = -1;
+	bool skip_telemetry = false;
+
+	if (task && violation_id == IPCPV_REPLY_PORT_SEMANTICS_OPTOUT) {
+		task_lock(task);
+		/* Telemetry rate limited to once per task per host. */
+		skip_telemetry = task_has_reply_port_telemetry(task);
+		if (!skip_telemetry) {
+			task_set_reply_port_telemetry(task);
+		}
+		task_unlock(task);
+	}
+
+	if (skip_telemetry) {
+		return;
+	}
+
+	if (sp_info) {
+		service_name = sp_info->mspi_string_name;
+	}
+
+	if (task) {
+		pid = task_pid(task);
+	}
+
 	if (task) {
 		struct proc_ro *pro = current_thread_ro()->tro_proc_ro;
 		uint32_t platform = pro->p_platform_data.p_platform;
@@ -426,23 +442,20 @@ stash_reply_port_semantics_violations_telemetry(
 #endif /* MACH_BSD */
 		const char *team_id = csproc_get_identity(current_proc());
 		const char *signing_id = csproc_get_teamid(current_proc());
-		char *service_name = (char *) "unknown";
-		if (sp_info) {
-			service_name = sp_info->mspi_string_name;
-		}
 
-		lck_spin_lock(&reply_port_telemetry_lock);
+		lck_ticket_lock(&ipc_telemetry_lock, &ipc_telemetry_lock_grp);
 
-		if (reply_port_semantics_violations_rb_index >= REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
+		if (ipc_policy_violations_rb_index >= IPC_POLICY_VIOLATIONS_RB_SIZE) {
 			/* Dropping the event since buffer is full. */
-			lck_spin_unlock(&reply_port_telemetry_lock);
+			lck_ticket_unlock(&ipc_telemetry_lock);
 			return;
 		}
-		entry = &reply_port_semantics_violations_rb[reply_port_semantics_violations_rb_index++];
+		entry = &ipc_policy_violations_rb[ipc_policy_violations_rb_index++];
 		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
 
 		strlcpy(entry->service_name, service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
-		entry->reply_port_semantics_violation = reply_port_semantics_violation;
+		entry->violation_id = violation_id;
+
 		if (team_id) {
 			strlcpy(entry->team_id, team_id, CA_TEAMID_MAX_LEN);
 		}
@@ -450,28 +463,24 @@ stash_reply_port_semantics_violations_telemetry(
 		if (signing_id) {
 			strlcpy(entry->signing_id, signing_id, CA_SIGNINGID_MAX_LEN);
 		}
-		entry->msgh_id = msgh_id;
+		entry->msgh_id = aux_data;
 		entry->sw_platform = platform;
 		entry->sdk = sdk;
 	}
 
-	if (reply_port_semantics_violations_rb_index == REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
-		flush_reply_port_semantics_violations_telemetry();
+	if (ipc_policy_violations_rb_index == IPC_POLICY_VIOLATIONS_RB_SIZE) {
+		flush_ipc_policy_violations_telemetry();
 	}
 
-	lck_spin_unlock(&reply_port_telemetry_lock);
+	lck_ticket_unlock(&ipc_telemetry_lock);
 }
 
 void
 send_prp_telemetry(int msgh_id)
 {
-	if (csproc_hardened_runtime(current_proc())) {
-		stash_reply_port_semantics_violations_telemetry(NULL, MRP_HARDENED_RUNTIME_VIOLATOR, msgh_id);
-	} else {
-		stash_reply_port_semantics_violations_telemetry(NULL, MRP_3P_VIOLATOR, msgh_id);
-	}
+	ipc_policy_violation_id_t violation_type = (csproc_hardened_runtime(current_proc())) ? IPCPV_MOVE_REPLY_PORT_HARDENED_RUNTIME : IPCPV_MOVE_REPLY_PORT_3P;
+	ipc_stash_policy_violations_telemetry(violation_type, NULL, msgh_id);
 }
-
 
 #pragma mark MACH_SEND_MSG policies
 
@@ -573,7 +582,8 @@ filtered_msg:
 	if ((opts & MACH64_POLICY_FILTER_NON_FATAL) == 0) {
 		mach_port_name_t dest_name = CAST_MACH_PORT_TO_NAME(hdr->msgh_remote_port);
 
-		mach_port_guard_exception(dest_name, 0, 0, kGUARD_EXC_MSG_FILTERED);
+		mach_port_guard_exception(dest_name, hdr->msgh_id,
+		    kGUARD_EXC_MSG_FILTERED);
 	}
 	return MACH_SEND_MSG_FILTERED;
 }
@@ -730,7 +740,184 @@ ipc_validate_kmsg_header_from_user(
 
 out:
 	if (mr == MACH_SEND_INVALID_OPTIONS) {
-		mach_port_guard_exception(0, 0, 0, kGUARD_EXC_INVALID_OPTIONS);
+		mach_port_guard_exception(0, opts, kGUARD_EXC_INVALID_OPTIONS);
 	}
 	return mr;
+}
+
+
+#pragma mark policy guard violations
+
+void
+mach_port_guard_exception(uint32_t target, uint64_t payload, unsigned reason)
+{
+	mach_exception_code_t code = 0;
+	EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_MACH_PORT);
+	EXC_GUARD_ENCODE_FLAVOR(code, reason);
+	EXC_GUARD_ENCODE_TARGET(code, target);
+	mach_exception_subcode_t subcode = (uint64_t)payload;
+	thread_t t = current_thread();
+	bool fatal = FALSE;
+
+	if (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE &&
+	    (get_threadtask(t)->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
+		fatal = true;
+	} else if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
+		fatal = true;
+	}
+	thread_guard_violation(t, code, subcode, fatal);
+}
+
+void
+mach_port_guard_exception_immovable(
+	ipc_space_t             space,
+	mach_port_name_t        name,
+	mach_port_t             port)
+{
+	if (space == current_space()) {
+		assert(ip_is_immovable_send(port));
+
+		boolean_t hard = task_get_control_port_options(current_task()) & TASK_CONTROL_PORT_IMMOVABLE_HARD;
+
+		if (ip_is_control(port)) {
+			assert(task_is_immovable(current_task()));
+			mach_port_guard_exception(name, MPG_FLAGS_NONE,
+			    hard ? kGUARD_EXC_IMMOVABLE : kGUARD_EXC_IMMOVABLE_NON_FATAL);
+		} else {
+			/* always fatal exception for non-control port violation */
+			mach_port_guard_exception(name, MPG_FLAGS_NONE,
+			    kGUARD_EXC_IMMOVABLE);
+		}
+	}
+}
+
+/*
+ * Deliver a soft or hard immovable guard exception.
+ *
+ * Conditions: port is marked as immovable and pinned.
+ */
+void
+mach_port_guard_exception_pinned(
+	ipc_space_t             space,
+	mach_port_name_t        name,
+	__assert_only mach_port_t port,
+	uint64_t                payload)
+{
+	if (space == current_space()) {
+		assert(ip_is_immovable_send(port));
+		assert(ip_is_control(port)); /* only task/thread control ports can be pinned */
+
+		boolean_t hard = task_get_control_port_options(current_task()) & TASK_CONTROL_PORT_PINNED_HARD;
+
+		assert(task_is_pinned(current_task()));
+
+		mach_port_guard_exception(name, payload,
+		    hard ? kGUARD_EXC_MOD_REFS : kGUARD_EXC_MOD_REFS_NON_FATAL);
+	}
+}
+
+/*
+ *	Routine:	mach_port_guard_ast
+ *	Purpose:
+ *		Raises an exception for mach port guard violation.
+ *	Conditions:
+ *		None.
+ *	Returns:
+ *		None.
+ */
+
+void
+mach_port_guard_ast(
+	thread_t                t,
+	mach_exception_data_type_t code,
+	mach_exception_data_type_t subcode)
+{
+	unsigned int reason = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
+	task_t task = get_threadtask(t);
+	unsigned int behavior = task->task_exc_guard;
+	bool fatal = true;
+
+	assert(task == current_task());
+	assert(task != kernel_task);
+
+	if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
+		/*
+		 * Fatal Mach port guards - always delivered synchronously if dev mode is on.
+		 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
+		 * deliver it synchronously and then kill the process, else kill the process
+		 * and deliver the exception via EXC_CORPSE_NOTIFY.
+		 */
+
+		int flags = PX_DEBUG_NO_HONOR;
+		exception_info_t info = {
+			.os_reason = OS_REASON_GUARD,
+			.exception_type = EXC_GUARD,
+			.mx_code = code,
+			.mx_subcode = subcode,
+		};
+
+		if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
+			flags |= PX_PSIGNAL;
+		}
+		exit_with_mach_exception(get_bsdtask_info(task), info, flags);
+	} else {
+		/*
+		 * Mach port guards controlled by task settings.
+		 */
+
+		/* Is delivery enabled */
+		if ((behavior & TASK_EXC_GUARD_MP_DELIVER) == 0) {
+			return;
+		}
+
+		/* If only once, make sure we're that once */
+		while (behavior & TASK_EXC_GUARD_MP_ONCE) {
+			uint32_t new_behavior = behavior & ~TASK_EXC_GUARD_MP_DELIVER;
+
+			if (OSCompareAndSwap(behavior, new_behavior, &task->task_exc_guard)) {
+				break;
+			}
+			behavior = task->task_exc_guard;
+			if ((behavior & TASK_EXC_GUARD_MP_DELIVER) == 0) {
+				return;
+			}
+		}
+		fatal = (task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)
+		    && (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE);
+		kern_return_t sync_exception_result;
+		sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode, fatal);
+
+		if (task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL) {
+			if (reason > MAX_OPTIONAL_kGUARD_EXC_CODE) {
+				/* generate a simulated crash if not handled synchronously */
+				if (sync_exception_result != KERN_SUCCESS) {
+					task_violated_guard(code, subcode, NULL, TRUE);
+				}
+			} else {
+				/*
+				 * Only generate crash report if synchronous EXC_GUARD wasn't handled,
+				 * but it has to die regardless.
+				 */
+
+				int flags = PX_DEBUG_NO_HONOR;
+				exception_info_t info = {
+					.os_reason = OS_REASON_GUARD,
+					.exception_type = EXC_GUARD,
+					.mx_code = code,
+					.mx_subcode = subcode
+				};
+
+				if (sync_exception_result == KERN_SUCCESS) {
+					flags |= PX_PSIGNAL;
+				}
+
+				exit_with_mach_exception(get_bsdtask_info(task), info, flags);
+			}
+		} else if (task->task_exc_guard & TASK_EXC_GUARD_MP_CORPSE) {
+			/* Raise exception via corpse fork if not handled synchronously */
+			if (sync_exception_result != KERN_SUCCESS) {
+				task_violated_guard(code, subcode, NULL, TRUE);
+			}
+		}
+	}
 }

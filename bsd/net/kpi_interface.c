@@ -1055,7 +1055,7 @@ static const ifnet_offload_t offload_mask =
     IFNET_IPV6_FRAGMENT | IFNET_CSUM_PARTIAL | IFNET_CSUM_ZERO_INVERT |
     IFNET_VLAN_TAGGING | IFNET_VLAN_MTU | IFNET_MULTIPAGES |
     IFNET_TSO_IPV4 | IFNET_TSO_IPV6 | IFNET_TX_STATUS | IFNET_HW_TIMESTAMP |
-    IFNET_SW_TIMESTAMP);
+    IFNET_SW_TIMESTAMP | IFNET_LRO | IFNET_LRO_NUM_SEG);
 
 static const ifnet_offload_t any_offload_csum = IFNET_CHECKSUMF;
 
@@ -1095,6 +1095,9 @@ ifnet_set_offload_common(ifnet_t interface, ifnet_offload_t offload, boolean_t s
 	}
 	if ((offload & IFNET_LRO)) {
 		ifcaps |= IFCAP_LRO;
+	}
+	if ((offload & IFNET_LRO_NUM_SEG)) {
+		ifcaps |= IFCAP_LRO_NUM_SEG;
 	}
 	if ((offload & IFNET_VLAN_MTU)) {
 		ifcaps |= IFCAP_VLAN_MTU;

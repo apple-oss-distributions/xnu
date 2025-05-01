@@ -118,6 +118,7 @@ int
 ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 {
 	struct proc     *t; /* target process */
+	struct proc_ident tident; /* target ident */
 	task_t          task;
 	thread_t        th_act = THREAD_NULL;
 	struct uthread  *ut;
@@ -252,6 +253,7 @@ retry_proc_find:
 	AUDIT_ARG(process, t);
 
 	task = proc_task(t);
+	tident = proc_ident(t);
 	if (uap->req == PT_ATTACHEXC) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -391,7 +393,7 @@ retry_proc_find:
 		 */
 		proc_unlock(t);
 #if CONFIG_MACF
-		error = mac_proc_check_signal(p, t, SIGKILL);
+		error = mac_proc_check_signal(p, NULL, &tident, SIGKILL);
 		if (0 != error) {
 			goto resume;
 		}
@@ -421,7 +423,7 @@ retry_proc_find:
 
 		if (uap->data != 0) {
 #if CONFIG_MACF
-			error = mac_proc_check_signal(p, t, uap->data);
+			error = mac_proc_check_signal(p, NULL, &tident, uap->data);
 			if (0 != error) {
 				goto out;
 			}
@@ -435,7 +437,7 @@ retry_proc_find:
 			 * we use sending SIGSTOP as a comparable security check.
 			 */
 #if CONFIG_MACF
-			error = mac_proc_check_signal(p, t, SIGSTOP);
+			error = mac_proc_check_signal(p, NULL, &tident, SIGSTOP);
 			if (0 != error) {
 				goto out;
 			}
@@ -450,7 +452,7 @@ retry_proc_find:
 			 * we use sending SIGCONT as a comparable security check.
 			 */
 #if CONFIG_MACF
-			error = mac_proc_check_signal(p, t, SIGCONT);
+			error = mac_proc_check_signal(p, NULL, &tident, SIGCONT);
 			if (0 != error) {
 				goto out;
 			}

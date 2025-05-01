@@ -249,6 +249,7 @@ typedef struct _posix_spawnattr {
 	int             psa_dataless_iopolicy;   /* materialize dataless iopolicy parameter */
 	uint64_t        psa_crash_behavior_deadline; /* crash behavior deadline */
 	uint8_t         psa_launch_type;         /* type of launch for launch constraint enforcement */
+	uint16_t        psa_sec_flags;           /* flags for task_sec */
 
 	/* For exponential backoff */
 	uint32_t        psa_crash_count;
@@ -270,6 +271,22 @@ typedef struct _posix_spawnattr {
 	char                                *psa_subsystem_root_path; /* pass given path in apple strings */
 	char                                *psa_conclave_id;         /* conclave string */
 } *_posix_spawnattr_t;
+
+/*
+ * Task Sec flags, psa_sec_flags
+ */
+__options_decl(posix_spawn_secflag_options, uint16_t, {
+	POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE                 = 0x01,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE                = 0x02,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_NEVER_CHECK_ENABLE     = 0x04,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_NEVER_CHECK_DISABLE    = 0x08,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_VM_POLICY_BYPASS       = 0x10,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_VM_POLICY_ENFORCE      = 0x20,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS           = 0x40,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_ENFORCE          = 0x80,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE_INHERIT        = 0x100,
+	POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE_INHERIT         = 0x200,
+});
 
 /*
  * Jetsam flags  eg: psa_jetsam_flags
@@ -365,7 +382,6 @@ __options_decl(posix_spawn_options, uint32_t, {
 	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
 	PSA_OPTION_ALT_ROSETTA                  = 0x2,
 	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
-	PSA_OPTION_USE_SEC_TRANSITION_SHIMS     = 0x8,
 });
 
 /*

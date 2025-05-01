@@ -79,9 +79,11 @@
 	* Arg1: PC to check (loaded above)
 	* Arg2: CPSR to check (loaded above)
 	* Arg3: the LR to check
+	* Arg4: the X16 to check
+	* Arg5: the X17 to check
 	*
 	* Stash saved state PC and CPSR in other registers to avoid reloading potentially unauthed
-	* values from memory.  (ml_check_signed_state will clobber x1, x2, and x16.)
+	* values from memory.  (ml_check_signed_state will clobber x1, x2, x16 and x17.)
 	*/
 	mov		\tmp1, x1
 	mov		\tmp2, x2
@@ -92,6 +94,7 @@
 	mov		x1, \tmp1
 	mov		x2, \tmp2
 	mov		x16, x4
+	mov		x17, x5
 	msr		SPSel, #0
 
 .if \el0_state_allowed==0

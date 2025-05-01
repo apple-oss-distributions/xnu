@@ -23,6 +23,8 @@ def ShowOSRefGrpHelper(cmd_args=None):
     """ Display a summary of the specified os reference group
         Usage: showosrefgrp <refgrp address>
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     refgrp = kern.GetValueFromAddress(cmd_args[0], 'struct os_refgrp *')
     if not refgrp:
@@ -40,6 +42,8 @@ def ShowOSRefGrpHierarchy(cmd_args=None):
         os reference group
         Usage: showosrefgrphierarchy <refgrp address>
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     refgrp = kern.GetValueFromAddress(cmd_args[0], 'struct os_refgrp *')
     if not refgrp:
@@ -76,14 +80,15 @@ def ShowGlobalTaskRefGrps(cmd_args=None):
 
     # Then print kext groups
     count = kern.globals.sKextAccountsCount
-    i = 0
-    while i < count:
-        a = GetObjectAtIndexFromArray(addressof(kern.globals.sKextAccounts[0]), i)
-        g = a.account.task_refgrp
+    kext_accounts_base = addressof(kern.globals.sKextAccounts[0])
+    for i in range(count):
+        kextaccount = GetObjectAtIndexFromArray(kext_accounts_base, i)
+        if not kextaccount.account:
+            continue
+        task_refgrp = kextaccount.account.task_refgrp
 
-        if g.grp_retain_total != 0:
-            print(GetOSRefGrpSummary(addressof(g)))
-        i += 1
+        if task_refgrp.grp_retain_total != 0:
+            print(GetOSRefGrpSummary(addressof(task_refgrp)))
 # EndMacro: showglobaltaskrefgrps
 
 
@@ -94,7 +99,7 @@ def ShowTaskRefGrps(cmd_args=None):
         Usage: showtaskrefgrps <address of task>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid arguments passed.")
     tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
 

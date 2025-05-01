@@ -1034,7 +1034,7 @@ __btlog_unlock(btlogu_t btlu)
 static void *
 __btlog_elem_normalize(void *addr)
 {
-	addr = (void *)vm_memtag_canonicalize_address((vm_offset_t)addr);
+	addr = (void *)vm_memtag_canonicalize_kernel((vm_offset_t)addr);
 	return addr;
 }
 

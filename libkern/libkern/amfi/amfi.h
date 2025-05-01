@@ -33,7 +33,7 @@
 #include <sys/cdefs.h>
 #include <kern/cs_blobs.h>
 
-#define KERN_AMFI_INTERFACE_VERSION 6
+#define KERN_AMFI_INTERFACE_VERSION 7
 #define KERN_AMFI_SUPPORTS_DATA_ALLOC 2
 
 #pragma mark Forward Declarations
@@ -234,6 +234,8 @@ typedef struct _TrustCacheInterface {
 	getUUID_t getUUID;
 } TrustCacheInterface_t;
 
+
+
 #pragma mark Main AMFI Structure
 
 typedef struct _amfi {
@@ -256,6 +258,7 @@ typedef struct _amfi {
 	/* Interface to interact with OSEntitlements */
 	OSEntitlementsInterface_t OSEntitlements;
 #endif
+
 } amfi_t;
 
 __BEGIN_DECLS

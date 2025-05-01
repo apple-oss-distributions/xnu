@@ -67,6 +67,11 @@ extern void IOBSDLowSpaceUnlinkKernelCore(void);
 extern boolean_t IOCurrentTaskHasEntitlement(const char * entitlement);
 extern boolean_t IOTaskHasEntitlement(task_t task, const char *entitlement);
 extern boolean_t IOVnodeHasEntitlement(struct vnode *vnode, int64_t off, const char *entitlement);
+extern boolean_t IOVnodeGetBooleanEntitlement(
+	struct vnode *vnode,
+	int64_t off,
+	const char *entitlement,
+	bool *value);
 extern char * IOCurrentTaskGetEntitlement(const char * entitlement);
 extern char * IOTaskGetEntitlement(task_t task, const char * entitlement);
 /*

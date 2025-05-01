@@ -209,7 +209,7 @@ kperf_on_cpu_internal(thread_t thread, thread_continue_t continuation,
 		int pid = task_pid(get_threadtask(thread));
 		BUF_DATA(PERF_TI_CSWITCH, thread_tid(thread), pid);
 	}
-	if (kppet_lightweight_active) {
+	if (kppet_lightweight_start_time != 0) {
 		kppet_on_cpu(thread, continuation, starting_fp);
 	}
 	if (kperf_lazy_wait_action != 0) {
@@ -221,7 +221,7 @@ void
 kperf_on_cpu_update(void)
 {
 	kperf_on_cpu_active = kperf_kdebug_cswitch ||
-	    kppet_lightweight_active ||
+	    kppet_lightweight_start_time != 0 ||
 	    kperf_lazy_wait_action != 0;
 }
 

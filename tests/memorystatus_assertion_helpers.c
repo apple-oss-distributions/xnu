@@ -236,4 +236,8 @@ log_state(uint32_t state)
 	T_LOG("\t%s kMemorystatusSupportsIdleExit", ((state & kMemorystatusSupportsIdleExit) ? "IS " : "NOT"));
 	T_LOG("\t%s kMemorystatusDirty", ((state & kMemorystatusDirty)            ? "IS " : "NOT"));
 	T_LOG("\t%s kMemorystatusAssertion", ((state & kMemorystatusAssertion)        ? "IS " : "NOT"));
+	T_LOG("\t%s kMemorystatusActive", ((state & kMemorystatusActive)                ? "IS " : "NOT"));
+	T_LOG("\t%s kMemorystatusRelaunchLow", ((state & kMemorystatusRelaunchLow)      ? "IS " : "NOT"));
+	T_LOG("\t%s kMemorystatusRelaunchMed", ((state & kMemorystatusRelaunchMed)      ? "IS " : "NOT"));
+	T_LOG("\t%s kMemorystatusRelaunchHigh", ((state & kMemorystatusRelaunchHigh)    ? "IS " : "NOT"));
 }

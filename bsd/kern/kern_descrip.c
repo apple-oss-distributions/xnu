@@ -111,6 +111,7 @@
 #include <kern/kern_types.h>
 #include <kern/kalloc.h>
 #include <kern/waitq.h>
+#include <kern/ipc_kobject.h>
 #include <kern/ipc_misc.h>
 #include <kern/ast.h>
 
@@ -126,11 +127,6 @@
 #include <os/atomic_private.h>
 #include <os/overflow.h>
 #include <IOKit/IOBSD.h>
-
-#define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
-kern_return_t ipc_object_copyin(ipc_space_t, mach_port_name_t,
-    mach_msg_type_name_t, ipc_port_t *, mach_port_context_t, mach_msg_guard_flags_t *, uint32_t);
-void ipc_port_release_send(ipc_port_t);
 
 void fileport_releasefg(struct fileglob *fg);
 
@@ -1121,11 +1117,7 @@ fileproc_alloc_init(void)
 void
 fileproc_free(struct fileproc *fp)
 {
-	os_ref_count_t refc = os_ref_release(&fp->fp_iocount);
-	if (0 != refc) {
-		panic("%s: pid %d refc: %u != 0",
-		    __func__, proc_pid(current_proc()), refc);
-	}
+	os_ref_release_last(&fp->fp_iocount);
 	if (fp->fp_guard_attrs) {
 		guarded_fileproc_unguard(fp);
 	}
@@ -2283,6 +2275,10 @@ file_drop(int fd)
 #define APFSIOC_REVERT_TO_SNAPSHOT  _IOW('J', 1, u_int64_t)
 #endif
 
+#ifndef APFSIOC_IS_GRAFT_SUPPORTED
+#define APFSIOC_IS_GRAFT_SUPPORTED _IO('J', 133)
+#endif
+
 #define CHECK_ADD_OVERFLOW_INT64L(x, y) \
 	        (((((x) > 0) && ((y) > 0) && ((x) > LLONG_MAX - (y))) || \
 	        (((x) < 0) && ((y) < 0) && ((x) < LLONG_MIN - (y)))) \
@@ -2537,13 +2533,13 @@ closeit:
  *
  * Description:	The file control system call.
  *
- * Parameters:	p				Process performing the fcntl
+ * Parameters:	p			Process performing the fcntl
  *		uap->fd				The fd to operate against
  *		uap->cmd			The command to perform
  *		uap->arg			Pointer to the command argument
  *		retval				Pointer to the call return area
  *
- * Returns:	0				Success
+ * Returns:	0			Success
  *		!0				Errno (see fcntl_nocancel)
  *
  * Implicit returns:
@@ -3486,7 +3482,9 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		goto outdrop;
 	}
-	case F_SETSIZE:
+	case F_SETSIZE: {
+		struct vnode_attr va;
+
 		if (fp->f_type != DTYPE_VNODE) {
 			error = EBADF;
 			goto out;
@@ -3507,6 +3505,22 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		error = vnode_getwithref(vp);
 		if (error) {
+			goto outdrop;
+		}
+
+		VATTR_INIT(&va);
+		VATTR_WANTED(&va, va_flags);
+
+		error = vnode_getattr(vp, &va, vfs_context_current());
+		if (error) {
+			vnode_put(vp);
+			goto outdrop;
+		}
+
+		/* Don't allow F_SETSIZE if the file has append-only flag set. */
+		if (va.va_flags & APPEND) {
+			error = EPERM;
+			vnode_put(vp);
 			goto outdrop;
 		}
 
@@ -3545,6 +3559,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		(void)vnode_put(vp);
 		goto outdrop;
+	}
 
 	case F_RDAHEAD:
 		if (fp->f_type != DTYPE_VNODE) {
@@ -5217,6 +5232,7 @@ dropboth:
 		case (int)FSIOC_KERNEL_ROOTAUTH:
 		case (int)FSIOC_GRAFT_FS:
 		case (int)FSIOC_UNGRAFT_FS:
+		case (int)APFSIOC_IS_GRAFT_SUPPORTED:
 		case (int)FSIOC_AUTH_FS:
 		case HFS_GET_BOOT_INFO:
 		case HFS_SET_BOOT_INFO:
@@ -5989,8 +6005,8 @@ sys_fileport_makefd(proc_t p, struct fileport_makefd_args *uap, int32_t *retval)
 	kern_return_t res;
 	int err;
 
-	res = ipc_object_copyin(get_task_ipcspace(proc_task(p)),
-	    send, MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+	res = ipc_typed_port_copyin_send(get_task_ipcspace(proc_task(p)),
+	    send, IKOT_FILEPORT, &port);
 
 	if (res == KERN_SUCCESS) {
 		err = fileport_makefd(p, port, FP_CLOEXEC, retval);
@@ -5999,7 +6015,7 @@ sys_fileport_makefd(proc_t p, struct fileport_makefd_args *uap, int32_t *retval)
 	}
 
 	if (IPC_PORT_NULL != port) {
-		ipc_port_release_send(port);
+		ipc_typed_port_release_send(port, IKOT_FILEPORT);
 	}
 
 	return err;

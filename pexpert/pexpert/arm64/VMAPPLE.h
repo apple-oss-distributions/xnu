@@ -41,6 +41,7 @@
 #define HAS_ARM_FEAT_SSBS2        1
 #define HAS_ARM_FEAT_SME          1
 #define HAS_ARM_FEAT_SME2         1
+#define HAS_ARM_FEAT_PAN3         1
 
 #define __ARM_PAN_AVAILABLE__     1
 #define __ARM_16K_PG__            1

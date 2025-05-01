@@ -109,10 +109,13 @@ tcp_rack_reordering_window(struct tcpcb *tp, uint32_t dup_acks, bool in_rto)
 	}
 	/*
 	 * reordering window = N * Min_RTT/4,
-	 * limited to a max value of SRTT.
+	 * limited to a max value of 2*SRTT.
 	 */
-	uint32_t reordering_window = MIN((tp->rack.reo_wnd_multi * (get_base_rtt(tp) >> 2)),
-	    (uint32_t)(tp->t_srtt >> TCP_RTT_SHIFT));
+	uint32_t srtt = (uint32_t)tp->t_srtt >> TCP_RTT_SHIFT;
+	uint32_t reordering_window = (tp->rack.reo_wnd_multi * get_base_rtt(tp)) >> 2;
+	if (reordering_window > 2 * srtt) {
+		reordering_window = 2 * srtt;
+	}
 	reordering_window = MAX(reordering_window, REORDERING_WINDOW_FLOOR);
 
 	return reordering_window;
@@ -122,16 +125,6 @@ static uint32_t
 tcp_rack_detect_segment_lost(struct tcpcb *tp, struct tcp_seg_sent *seg,
     uint32_t reordering_window, bool *loss_detected)
 {
-	/* Skip already marked lost but not yet retransmitted segments */
-	if (seg->flags & TCP_SEGMENT_LOST &&
-	    !(seg->flags & TCP_RACK_RETRANSMITTED)) {
-		return 0;
-	}
-
-	if (seg->flags & TCP_SEGMENT_SACKED) {
-		return 0;
-	}
-
 	/* After the segment is sent, wait for (RTT + reordering window) */
 	uint32_t wait_ts = seg->xmit_ts + tp->rack.rtt + reordering_window;
 	if (TSTMP_GEQ(tcp_now, wait_ts)) {
@@ -182,11 +175,11 @@ tcp_rack_update_segment_acked(struct tcpcb *tp, uint32_t tsecr,
 	if (retransmitted) {
 		if ((tsecr != 0 && (TSTMP_LT(tsecr, xmit_ts) || TSTMP_GT(tsecr, tcp_now)))
 		    || rtt < get_base_rtt(tp)) {
-			// Spurious inference
-			TCP_LOG(tp, "Spurious inference as either "
-			    "tsecr (%u) doesn't lie between xmit_ts(%u) and now (%u) OR "
-			    "the rtt (%u) is less than base-rtt (%u). end_seq is:%u",
-			    tsecr, xmit_ts, tcp_now, rtt, get_base_rtt(tp), end_seq);
+			/* This is a spurious inference as either
+			 * tsecr doesn't lie between xmit_ts and now OR
+			 * the rtt computed using the xmit_ts of this segment
+			 * is less than base-rtt.
+			 */
 			return;
 		}
 	}
@@ -207,7 +200,7 @@ tcp_rack_update_segment_acked(struct tcpcb *tp, uint32_t tsecr,
  * Step 4: Update the RACK reordering window.
  */
 void
-tcp_rack_update_reordering_window(struct tcpcb *tp, tcp_seq th_ack)
+tcp_rack_update_reordering_window(struct tcpcb *tp, tcp_seq highest_acked_sacked)
 {
 	/*
 	 * RACK.reo_wnd starts with a value of RACK.min_RTT/4. After that, RACK
@@ -219,9 +212,10 @@ tcp_rack_update_reordering_window(struct tcpcb *tp, tcp_seq th_ack)
 	 */
 
 	/*
-	 * Ignore DSACK if an RTT hasn't passed as th_ack < previous dsack_round_end
+	 * Ignore DSACK if an RTT hasn't passed as
+	 * highest_acked_sacked <= previous dsack_round_end
 	 */
-	if (SEQ_LT(th_ack, tp->rack.dsack_round_end)) {
+	if (SEQ_LEQ(highest_acked_sacked, tp->rack.dsack_round_end)) {
 		tp->rack.dsack_round_seen = 0;
 	}
 	/*
@@ -261,6 +255,16 @@ tcp_rack_detect_loss(struct tcpcb *tp, uint32_t dup_acks, bool *loss_detected)
 		if (!tcp_rack_sent_after(tp->rack.xmit_ts, tp->rack.end_seq,
 		    seg->xmit_ts, seg->end_seq)) {
 			break;
+		}
+
+		/* Skip already marked lost but not yet retransmitted segments */
+		if (seg->flags & TCP_SEGMENT_LOST &&
+		    !(seg->flags & TCP_RACK_RETRANSMITTED)) {
+			continue;
+		}
+
+		if (seg->flags & TCP_SEGMENT_SACKED) {
+			continue;
 		}
 
 		uint32_t remaining = tcp_rack_detect_segment_lost(tp, seg, reordering_window, loss_detected);
@@ -368,7 +372,7 @@ tcp_rack_adjust(struct tcpcb *tp, uint32_t cwin)
 			    SEQ_GEQ(tp->snd_nxt, seg->start_seq)) {
 				tp->snd_nxt = seg->end_seq;
 			}
-			continue;
+			break;
 		}
 		if (SEQ_LT(tp->snd_nxt, seg->end_seq)) {
 			max_len += tcp_seg_len(seg);

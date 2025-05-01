@@ -1425,6 +1425,67 @@ uio_duplicate(uio_t uio)
 }
 
 int
+uio_restore(uio_t uio, uio_t snapshot_uio)
+{
+	struct kern_iovec *kiovp;
+	struct user_iovec *uiovp;
+	size_t n;
+
+	if (uio->uio_max_iovs != snapshot_uio->uio_max_iovs) {
+		return EINVAL;
+	}
+	if (uio->uio_max_iovs < 0 || uio->uio_max_iovs > UIO_MAXIOV) {
+		return EINVAL;
+	}
+
+//	printf("*******  FBDP %s:%d uio %p (iovs %p cnt %d resid 0x%llx) snap %p (iovs %p cnt %d resid 0x%llx)\n", __FUNCTION__, __LINE__, uio, uio->uio_iovs, uio_iovcnt(uio), uio_resid(uio), snapshot_uio, snapshot_uio->uio_iovs, uio_iovcnt(snapshot_uio), uio_resid(snapshot_uio));
+
+	uio->uio_iovcnt = snapshot_uio->uio_iovcnt;
+	uio->uio_offset = snapshot_uio->uio_offset;
+	uio->uio_rw = snapshot_uio->uio_rw;
+	uio->uio_resid_64 = snapshot_uio->uio_resid_64;
+
+	if (uio->uio_max_iovs > 0) {
+		n = UIO_SIZEOF_IOVS(snapshot_uio->uio_max_iovs);
+		bcopy((const void *)snapshot_uio->uio_iovbase, (void *)uio->uio_iovbase, n);
+		if (UIO_IS_SYS_SPACE(uio)) {
+			struct kern_iovec *kiovp_old = uio_kiovp(snapshot_uio);
+
+			kiovp = uio_kiovp(uio);
+
+			for (n = 0; n < snapshot_uio->uio_max_iovs; ++n) {
+				kiovp_set_base(&kiovp[n],
+				    kiovp_get_base(&kiovp_old[n]));
+			}
+		} else {
+			uiovp = uio_uiovp(uio);
+		}
+
+		/* advance to first nonzero iovec */
+		for (n = 0; n < uio->uio_max_iovs; ++n) {
+			if (UIO_IS_USER_SPACE(uio)) {
+				if (uiovp->iov_len != 0) {
+					break;
+				}
+
+				uiovp = uio_advance_user(uio);
+			} else {
+				if (kiovp->iov_len != 0) {
+					break;
+				}
+
+				kiovp = uio_advance_sys(uio);
+			}
+		}
+
+		uio->uio_iovs = uio->uio_iovbase;
+	} else {
+		assert(uio->uio_iovs == NULL);
+	}
+	return 0;
+}
+
+int
 copyin_user_iovec_array(user_addr_t uaddr, int spacetype, int count, struct user_iovec *dst)
 {
 	size_t size_of_iovec = (spacetype == UIO_USERSPACE64 ? sizeof(struct user64_iovec) : sizeof(struct user32_iovec));

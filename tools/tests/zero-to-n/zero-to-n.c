@@ -1083,6 +1083,7 @@ main(int argc, char **argv)
 		size_t result_size = sizeof(result);
 		ret = sysctlbyname("hw.perflevel1.logicalcpu", &result, &result_size, NULL, 0);
 		if ((ret == 0) && (result > 0)) {
+			/* <rdar://137716223> */
 			/* Multiple perf levels detected, so bind this task to the highest perf node */
 			ret = set_recommended_cluster('p');
 			if (ret && g_test_rt) {

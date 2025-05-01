@@ -246,15 +246,16 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_LOCKDOWN_RO (1ULL << 56)
 
-#define PVH_FLAG_RETIRED 0
-
-#define PVH_FLAG_TAGS 0
-#define PVH_FLAG_TAGGGED 0
+/**
+ * Marking a pv_head_table entry with this flag denotes that this page is
+ * retired without any mappings and never should be mapped again.
+ */
+#define PVH_FLAG_RETIRED (1ULL << 55)
 
 /**
  * Flags which disallow a new mapping to a page.
  */
-#define PVH_FLAG_NOMAP_MASK (PVH_FLAG_RETIRED | PVH_FLAG_TAGS)
+#define PVH_FLAG_NOMAP_MASK (PVH_FLAG_RETIRED)
 
 /**
  * Marking a pv_head_table entry with this flag denotes that this page has
@@ -279,10 +280,8 @@ pai_to_pvh(unsigned int pai)
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
-
 #define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | \
     PVH_FLAG_HASHED | PVH_FLAG_FLUSH_NEEDED | PVH_FLAG_RETIRED)
-
 
 #endif /* defined(__arm64__) */
 

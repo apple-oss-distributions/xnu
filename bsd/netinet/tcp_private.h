@@ -280,6 +280,7 @@ struct tcp_info {
 	    tcpi_tfo_recv_blackhole:1, /* A receiver-blackhole got detected */
 	    tcpi_tfo_onebyte_proxy:1; /* A proxy acknowledges all but one byte of the SYN */
 
+#define TCPINFO_HAS_L4S_STATE 1
 	u_int16_t       tcpi_ecn_client_setup:1,    /* Attempted ECN setup from client side */
 	    tcpi_ecn_server_setup:1,                /* Attempted ECN setup from server side */
 	    tcpi_ecn_success:1,                     /* peer negotiated ECN */
@@ -292,7 +293,8 @@ struct tcp_info {
 	    tcpi_if_wifi_infra:1,           /* Interface is wifi infrastructure */
 	    tcpi_if_wifi_awdl:1,            /* Interface is wifi AWDL */
 	    tcpi_snd_background:1,          /* Using delay based algorithm on sender side */
-	    tcpi_rcv_background:1;          /* Using delay based algorithm on receive side */
+	    tcpi_rcv_background:1,          /* Using delay based algorithm on receive side */
+	    tcpi_l4s_enabled:1;             /* Whether L4S is enabled or not */
 
 	u_int32_t       tcpi_ecn_recv_ce;   /* Packets received with CE */
 	u_int32_t       tcpi_ecn_recv_cwr;  /* Packets received with CWR */

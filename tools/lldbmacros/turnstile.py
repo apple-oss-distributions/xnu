@@ -1,4 +1,4 @@
-from core import xnu_format
+from core import xnu_format, iter_SLIST_HEAD
 from xnu import *
 import sys, shlex
 from utils import *
@@ -119,7 +119,7 @@ def ShowTurnstile(cmd_args=None, cmd_options={}, O=None):
     """ show the turnstile and all free turnstiles hanging off the turnstile.
         Usage: (lldb)showturnstile <struct turnstile *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
       raise ArgumentError("Please provide arguments")
 
     turnstile = kern.GetValueFromAddress(cmd_args[0], 'struct turnstile *')
@@ -136,7 +136,7 @@ def ShowTurnstileHashTable(cmd_args=None, cmd_options={}, O=None):
         turnstile_htable_buckets = kern.globals.ts_htable_buckets
         for index in range(0, turnstile_htable_buckets):
             turnstile_bucket = GetObjectAtIndexFromArray(kern.globals.turnstile_htable, index)
-            for turnstile in IterateQueue(turnstile_bucket.ts_ht_bucket_list, 'struct turnstile *', 'ts_htable_link'):
+            for turnstile in iter_SLIST_HEAD(turnstile_bucket.ts_ht_bucket_list.GetSBValue(), 'ts_htable_link'):
                 PrintTurnstile(turnstile, O=O)
 
 # Macro: showallturnstiles
@@ -184,7 +184,7 @@ def ShowThreadInheritorBase(cmd_args=None, cmd_options={}, O=None):
     """ A macro that walks the list of userspace turnstiles pushing on a thread and prints them.
         usage: (lldb) showthreadbaseturnstiles thread_pointer
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('invalid thread pointer')
 
     thread = kern.GetValueFromAddress(cmd_args[0], "thread_t")
@@ -198,7 +198,7 @@ def ShowThreadInheritorSched(cmd_args=None, cmd_options={}, O=None):
         and prints them.
         usage: (lldb) showthreadschedturnstiles thread_pointer
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('invalid thread pointer')
 
     thread = kern.GetValueFromAddress(cmd_args[0], "thread_t")

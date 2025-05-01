@@ -67,15 +67,28 @@
 #define _VM_VM_PAGE_H_
 
 #include <debug.h>
+#include <stdbool.h>
 #include <vm/vm_options.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_far.h>
 #include <mach/boolean.h>
 #include <mach/vm_prot.h>
 #include <mach/vm_param.h>
 #include <mach/memory_object_types.h> /* for VMP_CS_BITS... */
+#include <kern/thread.h>
+#include <kern/queue.h>
+#include <kern/locks.h>
+#include <sys/kern_memorystatus_xnu.h>
+
+#if __x86_64__
+#define XNU_VM_HAS_DELAYED_PAGES        1
+#define XNU_VM_HAS_LINEAR_PAGES_ARRAY   0
+#else
+#define XNU_VM_HAS_DELAYED_PAGES        0
+#define XNU_VM_HAS_LINEAR_PAGES_ARRAY   1
+#endif
 
 
-#if    defined(__LP64__)
 
 /*
  * in order to make the size of a vm_page_t 64 bytes (cache line size for both arm64 and x86_64)
@@ -98,30 +111,55 @@ typedef struct vm_page_packed_queue_entry       *vm_page_queue_entry_t;
 
 typedef vm_page_packed_t                        vm_page_object_t;
 
-#else // __LP64__
 
 /*
- * we can't do the packing trick on 32 bit architectures
- * so just turn the macros into noops.
+ * vm_relocate_reason_t:
+ * A type to describe why a page relocation is being attempted.  Depending on
+ * the reason, certain pages may or may not be relocatable.
+ *
+ * VM_RELOCATE_REASON_CONTIGUOUS:
+ * The relocation is on behalf of the contiguous allocator; it is likely to be
+ * wired, so do not consider pages that cannot be wired for any reason.
  */
-typedef struct vm_page          *vm_page_packed_t;
+__enum_closed_decl(vm_relocate_reason_t, unsigned int, {
+	VM_RELOCATE_REASON_CONTIGUOUS,
 
-#define vm_page_queue_t         queue_t
-#define vm_page_queue_head_t    queue_head_t
-#define vm_page_queue_chain_t   queue_chain_t
-#define vm_page_queue_entry_t   queue_entry_t
+	VM_RELOCATE_REASON_COUNT,
+});
 
-#define vm_page_object_t        vm_object_t
-#endif // __LP64__
+/*
+ * vm_remove_reason_t:
+ * A type to describe why a page is being removed from a global free queue.
+ *
+ * VM_REMOVE_REASON_USE:
+ * The page is going to be used by the system (likely through the vm_page_grab
+ * path).  Do any state updates to the page that are relevant.
+ *
+ * VM_REMOVE_REASON_REBALANCE:
+ * The page is going to be put onto a different free queue.  Don't do any state
+ * updates to the page; the client will do such updates.  Structured this way
+ * because rebalance operations are likely to be done in bulk, so this allows
+ * clients to perform any operations in bulk.
+ */
+__enum_closed_decl(vm_remove_reason_t, unsigned int, {
+	VM_REMOVE_REASON_USE,
+	VM_REMOVE_REASON_REBALANCE,
 
+	VM_REMOVE_REASON_COUNT,
+});
 
-#include <vm/vm_object_xnu.h>
-#include <kern/queue.h>
-#include <kern/locks.h>
+/*
+ * vm_memory_class_t:
+ * A type to describe what kind of memory a page represents.
+ *
+ * VM_MEMORY_CLASS_REGULAR:
+ * Normal memory, which should participate in the normal page lifecycle.
+ */
+__enum_closed_decl(vm_memory_class_t, unsigned int, {
+	VM_MEMORY_CLASS_REGULAR,
 
-#include <kern/macro_help.h>
-#include <libkern/OSAtomic.h>
-
+	VM_MEMORY_CLASS_COUNT,
+});
 
 /* pages of compressed data */
 #define VM_PAGE_COMPRESSOR_COUNT os_atomic_load(&compressor_object->resident_page_count, relaxed)
@@ -154,11 +192,6 @@ typedef struct vm_page          *vm_page_packed_t;
 
 #define VM_PAGE_NULL            ((vm_page_t) 0)
 
-extern  char    vm_page_inactive_states[];
-extern  char    vm_page_pageable_states[];
-extern  char    vm_page_non_speculative_pageable_states[];
-extern  char    vm_page_active_or_inactive_states[];
-
 
 #define VM_PAGE_INACTIVE(m)                     (vm_page_inactive_states[m->vmp_q_state])
 #define VM_PAGE_PAGEABLE(m)                     (vm_page_pageable_states[m->vmp_q_state])
@@ -184,6 +217,11 @@ extern  char    vm_page_active_or_inactive_states[];
 #define VM_PAGE_Q_STATE_LAST_VALID_VALUE        14      /* we currently use 4 bits for the state... don't let this go beyond 15 */
 
 #define VM_PAGE_Q_STATE_ARRAY_SIZE      (VM_PAGE_Q_STATE_LAST_VALID_VALUE+1)
+
+extern const bool vm_page_inactive_states[VM_PAGE_Q_STATE_ARRAY_SIZE];
+extern const bool vm_page_pageable_states[VM_PAGE_Q_STATE_ARRAY_SIZE];
+extern const bool vm_page_non_speculative_pageable_states[VM_PAGE_Q_STATE_ARRAY_SIZE];
+extern const bool vm_page_active_or_inactive_states[VM_PAGE_Q_STATE_ARRAY_SIZE];
 
 
 /*
@@ -221,11 +259,11 @@ struct vm_page {
 	unsigned int vmp_wire_count:16,      /* how many wired down maps use me? (O&P) */
 	    vmp_q_state:4,                   /* which q is the page on (P) */
 	    vmp_on_specialq:2,
+	    vmp_canonical:1,                 /* this page is a canonical kernel page (immutable) */
 	    vmp_gobbled:1,                   /* page used internally (P) */
 	    vmp_laundry:1,                   /* page is being cleaned now (P)*/
 	    vmp_no_cache:1,                  /* page is not to be cached and should */
 	                                     /* be reused ahead of other pages (P) */
-	    vmp_private:1,                   /* Page should not be returned to the free list (P) */
 	    vmp_reference:1,                 /* page has been used (P) */
 	    vmp_lopage:1,
 	    vmp_realtime:1,                  /* page used by realtime thread */
@@ -258,8 +296,8 @@ struct vm_page {
 	    vmp_wanted:1,                     /* someone is waiting for page (O) */
 	    vmp_tabled:1,                     /* page is in VP table (O) */
 	    vmp_hashed:1,                     /* page is in vm_page_buckets[] (O) + the bucket lock */
-	    vmp_fictitious:1,                 /* Physical page doesn't exist (O) */
-	    vmp_clustered:1,                  /* page is not the faulted page (O) or (O-shared AND pmap_page) */
+	__vmp_unused : 1,
+	vmp_clustered:1,                      /* page is not the faulted page (O) or (O-shared AND pmap_page) */
 	    vmp_pmapped:1,                    /* page has at some time been entered into a pmap (O) or */
 	                                      /* (O-shared AND pmap_page) */
 	    vmp_xpmapped:1,                   /* page has been entered with execute permission (O) or */
@@ -276,75 +314,142 @@ struct vm_page {
 	    vmp_restart:1,                    /* Page was pushed higher in shadow chain by copy_call-related pagers */
 	                                      /* start again at top of chain */
 	    vmp_unusual:1,                    /* Page is absent, error, restart or page locked */
-	    vmp_cs_validated:VMP_CS_BITS, /* code-signing: page was checked */
-	    vmp_cs_tainted:VMP_CS_BITS,   /* code-signing: page is tainted */
-	    vmp_cs_nx:VMP_CS_BITS,        /* code-signing: page is nx */
+	    vmp_cs_validated:VMP_CS_BITS,     /* code-signing: page was checked */
+	    vmp_cs_tainted:VMP_CS_BITS,       /* code-signing: page is tainted */
+	    vmp_cs_nx:VMP_CS_BITS,            /* code-signing: page is nx */
 	    vmp_reusable:1,
-	    vmp_written_by_kernel:1;             /* page was written by kernel (i.e. decompressed) */
+	    vmp_written_by_kernel:1;          /* page was written by kernel (i.e. decompressed) */
 
-
-#if    !defined(__arm64__)
-	ppnum_t         vmp_phys_page;        /* Physical page number of the page */
-#endif
+#if !XNU_VM_HAS_LINEAR_PAGES_ARRAY
+	/*
+	 * Physical number of the page
+	 *
+	 * Setting this value to or away from vm_page_fictitious_addr
+	 * must be done with (P) held
+	 */
+	ppnum_t         vmp_phys_page;
+#endif /* !XNU_VM_HAS_LINEAR_PAGES_ARRAY */
 };
 
-extern vm_page_t        vm_pages;
-extern vm_page_t        vm_page_array_beginning_addr;
-extern vm_page_t        vm_page_array_ending_addr;
+/*!
+ * @var vm_pages
+ * The so called VM pages array
+ *
+ * @var vm_pages_end
+ * The pointer past the last valid page in the VM pages array.
+ *
+ * @var vm_pages_count
+ * The number of elements in the VM pages array.
+ * (vm_pages + vm_pages_count == vm_pages_end).
+ *
+ * @var vm_pages_first_pnum
+ * For linear page arrays, the pnum of the first page in the array.
+ * In other words VM_PAGE_GET_PHYS_PAGE(&vm_pages_array()[0]).
+ */
+extern vm_page_t        vm_pages_end;
+extern uint32_t         vm_pages_count;
+#if XNU_VM_HAS_LINEAR_PAGES_ARRAY
+extern ppnum_t          vm_pages_first_pnum;
+#endif /* XNU_VM_HAS_LINEAR_PAGES_ARRAY */
 
-#if defined(__arm64__)
+/**
+ * Internal accessor which returns the raw vm_pages pointer.
+ *
+ * This pointer must not be indexed directly. Use vm_page_get instead when
+ * indexing into the array.
+ *
+ * __pure2 helps explain to the compiler that the value vm_pages is a constant.
+ */
+__pure2
+static inline struct vm_page *
+vm_pages_array_internal(void)
+{
+	extern vm_page_t vm_pages;
+	return vm_pages;
+}
 
-extern  unsigned int vm_first_phys_ppnum;
+/**
+ * Get a pointer to page at index i.
+ *
+ * This getter is the only legal way to index into the vm_pages array.
+ */
+__pure2
+static inline vm_page_t
+vm_page_get(uint32_t i)
+{
+	return VM_FAR_ADD_PTR_UNBOUNDED(vm_pages_array_internal(), i);
+}
 
+__pure2
+static inline bool
+vm_page_in_array(const struct vm_page *m)
+{
+	return vm_pages_array_internal() <= m && m < vm_pages_end;
+}
+
+#if XNU_VM_HAS_LINEAR_PAGES_ARRAY
 struct vm_page_with_ppnum {
-	struct  vm_page vm_page_wo_ppnum;
-
-	ppnum_t vmp_phys_page;
+	struct vm_page          vmp_page;
+	ppnum_t                 vmp_phys_page;
 };
+
+/*!
+ * @abstract
+ * Looks up the canonical kernel page for a given physical page number.
+ *
+ * @discussion
+ * This function may return VM_PAGE_NULL for kernel pages that aren't managed
+ * by the VM.
+ *
+ * @param pnum          The page number to lookup.  It must be within
+ *                      [pmap_first_pnum, vm_pages_first_pnum + vm_pages_count)
+ */
+extern vm_page_t vm_page_find_canonical(ppnum_t pnum) __pure2;
+#else
+#define vm_page_with_ppnum vm_page
+#endif /* !XNU_VM_HAS_LINEAR_PAGES_ARRAY */
 typedef struct vm_page_with_ppnum *vm_page_with_ppnum_t;
 
 static inline ppnum_t
-VM_PAGE_GET_PHYS_PAGE(vm_page_t m)
+VM_PAGE_GET_PHYS_PAGE(const struct vm_page *m)
 {
-	if (m >= vm_page_array_beginning_addr && m < vm_page_array_ending_addr) { /* real pages in vm_pages array */
-		return (ppnum_t)((uintptr_t)(m - vm_page_array_beginning_addr) + vm_first_phys_ppnum);
-	} else {
-		return ((vm_page_with_ppnum_t)m)->vmp_phys_page;  /* pages in vm_page_zone */
+#if XNU_VM_HAS_LINEAR_PAGES_ARRAY
+	if (vm_page_in_array(m)) {
+		uintptr_t index = (uintptr_t)(m - vm_pages_array_internal());
+
+		return (ppnum_t)(vm_pages_first_pnum + index);
 	}
+#endif /* XNU_VM_HAS_LINEAR_PAGES_ARRAY */
+	return ((const struct vm_page_with_ppnum *)m)->vmp_phys_page;
 }
 
-#define VM_PAGE_SET_PHYS_PAGE(m, ppnum)         \
-	MACRO_BEGIN                             \
-	if ((m) < vm_page_array_beginning_addr || (m) >= vm_page_array_ending_addr)     \
-	        ((vm_page_with_ppnum_t)(m))->vmp_phys_page = ppnum;     \
-	assert(ppnum == VM_PAGE_GET_PHYS_PAGE(m));              \
-	MACRO_END
+static inline void
+VM_PAGE_INIT_PHYS_PAGE(struct vm_page *m, ppnum_t pnum)
+{
+#if XNU_VM_HAS_LINEAR_PAGES_ARRAY
+	if (vm_page_in_array(m)) {
+		assert(pnum == VM_PAGE_GET_PHYS_PAGE(m));
+		return;
+	}
+#endif /* XNU_VM_HAS_LINEAR_PAGES_ARRAY */
+	((vm_page_with_ppnum_t)(m))->vmp_phys_page = pnum;
+}
 
-#define VM_PAGE_GET_COLOR(m)    (VM_PAGE_GET_PHYS_PAGE(m) & vm_color_mask)
+static inline void
+VM_PAGE_SET_PHYS_PAGE(struct vm_page *m, ppnum_t pnum)
+{
+	assert(!vm_page_in_array(m) && !m->vmp_canonical);
+	((vm_page_with_ppnum_t)(m))->vmp_phys_page = pnum;
+}
 
-#else   /* defined(__arm64__) */
-
-
-struct vm_page_with_ppnum {
-	struct  vm_page vm_page_with_ppnum;
-};
-typedef struct vm_page_with_ppnum *vm_page_with_ppnum_t;
-
-
-#define VM_PAGE_GET_PHYS_PAGE(page)     (page)->vmp_phys_page
-#define VM_PAGE_SET_PHYS_PAGE(page, ppnum)      \
-	MACRO_BEGIN                             \
-	(page)->vmp_phys_page = ppnum;          \
-	MACRO_END
-
+#if defined(__x86_64__)
+extern unsigned int     vm_clump_mask, vm_clump_shift;
 #define VM_PAGE_GET_CLUMP(m)    ((VM_PAGE_GET_PHYS_PAGE(m)) >> vm_clump_shift)
 #define VM_PAGE_GET_COLOR(m)    ((VM_PAGE_GET_CLUMP(m)) & vm_color_mask)
+#else
+#define VM_PAGE_GET_COLOR(m)    (VM_PAGE_GET_PHYS_PAGE(m) & vm_color_mask)
+#endif
 
-#endif  /* defined(__arm64__) */
-
-
-
-#if defined(__LP64__)
 /*
  * Parameters for pointer packing
  *
@@ -377,10 +482,9 @@ typedef struct vm_page_with_ppnum *vm_page_with_ppnum_t;
 static inline vm_page_packed_t
 vm_page_pack_ptr(uintptr_t p)
 {
-	if (p >= (uintptr_t)vm_page_array_beginning_addr &&
-	    p < (uintptr_t)vm_page_array_ending_addr) {
-		ptrdiff_t diff = (vm_page_t)p - vm_page_array_beginning_addr;
-		assert((vm_page_t)p == &vm_pages[diff]);
+	if (vm_page_in_array((vm_page_t)p)) {
+		ptrdiff_t diff = (vm_page_t)p - vm_pages_array_internal();
+		assert((vm_page_t)p == vm_page_get((uint32_t)diff));
 		return (vm_page_packed_t)(diff | VM_PAGE_PACKED_FROM_ARRAY);
 	}
 
@@ -393,12 +497,10 @@ vm_page_pack_ptr(uintptr_t p)
 static inline uintptr_t
 vm_page_unpack_ptr(uintptr_t p)
 {
-	extern unsigned int vm_pages_count;
-
 	if (p >= VM_PAGE_PACKED_FROM_ARRAY) {
 		p &= ~VM_PAGE_PACKED_FROM_ARRAY;
 		assert(p < (uintptr_t)vm_pages_count);
-		return (uintptr_t)&vm_pages[p];
+		return (uintptr_t)vm_page_get((uint32_t)p);
 	}
 
 	return VM_UNPACK_POINTER(p, VM_PAGE_PACKED_PTR);
@@ -744,53 +846,6 @@ MACRO_END
 	    !vm_page_queue_end((head), (vm_page_queue_entry_t)(elt)); \
 	    (elt) = (vm_page_t)vm_page_queue_next(&(elt)->field))     \
 
-#else // LP64
-
-#define VM_VPLQ_ALIGNMENT               128
-#define VM_PAGE_PACKED_PTR_ALIGNMENT    sizeof(vm_offset_t)
-#define VM_PAGE_PACKED_ALIGNED
-#define VM_PAGE_PACKED_PTR_BITS         32
-#define VM_PAGE_PACKED_PTR_SHIFT        0
-#define VM_PAGE_PACKED_PTR_BASE         0
-
-#define VM_PAGE_PACKED_FROM_ARRAY       0
-
-#define VM_PAGE_PACK_PTR(p)     (p)
-#define VM_PAGE_UNPACK_PTR(p)   ((uintptr_t)(p))
-
-#define VM_OBJECT_PACK(o)       ((vm_page_object_t)(o))
-#define VM_OBJECT_UNPACK(p)     ((vm_object_t)(p))
-
-#define VM_PAGE_PACK_OBJECT(o)  VM_OBJECT_PACK(o)
-#define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
-
-
-#define VM_PAGE_ZERO_PAGEQ_ENTRY(p)     \
-MACRO_BEGIN                             \
-	(p)->vmp_pageq.next = 0;                \
-	(p)->vmp_pageq.prev = 0;                \
-MACRO_END
-
-#define VM_PAGE_CONVERT_TO_QUEUE_ENTRY(p)   ((queue_entry_t)(p))
-
-#define vm_page_remque                      remque
-#define vm_page_enqueue_tail                enqueue_tail
-#define vm_page_queue_init                  queue_init
-#define vm_page_queue_enter(h, e, f)        queue_enter(h, e, vm_page_t, f)
-#define vm_page_queue_enter_first(h, e, f)  queue_enter_first(h, e, vm_page_t, f)
-#define vm_page_queue_remove(h, e, f)       queue_remove(h, e, vm_page_t, f)
-#define vm_page_queue_remove_first(h, e, f) queue_remove_first(h, e, vm_page_t, f)
-#define vm_page_queue_end                   queue_end
-#define vm_page_queue_empty                 queue_empty
-#define vm_page_queue_first                 queue_first
-#define vm_page_queue_last                  queue_last
-#define vm_page_queue_next                  queue_next
-#define vm_page_queue_prev                  queue_prev
-#define vm_page_queue_iterate(h, e, f)      queue_iterate(h, e, vm_page_t, f)
-
-#endif // __LP64__
-
-
 
 /*
  * VM_PAGE_MIN_SPECULATIVE_AGE_Q through vm_page_max_speculative_age_q
@@ -859,6 +914,31 @@ typedef struct vm_locks_array {
 #define NEXT_PAGE(m)            ((m)->vmp_snext)
 #define NEXT_PAGE_PTR(m)        (&(m)->vmp_snext)
 
+static inline vm_page_t
+vm_page_list_pop(vm_page_t *list)
+{
+	vm_page_t mem = *list;
+
+	if (mem) {
+		*list = NEXT_PAGE(mem);
+		VM_PAGE_ZERO_PAGEQ_ENTRY(mem);
+	}
+	return mem;
+}
+
+static inline void
+vm_page_list_push(vm_page_t *list, vm_page_t mem)
+{
+	mem->vmp_snext = *list;
+	*list = mem;
+}
+
+#define vm_page_list_foreach(m, list) \
+	for ((m) = (list); (m); (m) = (m)->vmp_snext)
+
+#define vm_page_list_foreach_consume(it, list) \
+	while (((it) = vm_page_list_pop((list))))
+
 /*
  * XXX	The unusual bit should not be necessary.  Most of the bit
  * XXX	fields above really want to be masks.
@@ -888,12 +968,10 @@ typedef struct vm_locks_array {
 #define MAX_COLORS      128
 #define DEFAULT_COLORS  32
 
-extern
-unsigned int    vm_colors;              /* must be in range 1..MAX_COLORS */
-extern
-unsigned int    vm_color_mask;          /* must be (vm_colors-1) */
-extern
-unsigned int    vm_cache_geometry_colors; /* optimal #colors based on cache geometry */
+extern unsigned int    vm_colors;              /* must be in range 1..MAX_COLORS */
+extern unsigned int    vm_color_mask;          /* must be (vm_colors-1) */
+extern unsigned int    vm_cache_geometry_colors; /* optimal #colors based on cache geometry */
+
 
 /*
  * Wired memory is a very limited resource and we can't let users exhaust it
@@ -912,19 +990,12 @@ unsigned int    vm_cache_geometry_colors; /* optimal #colors based on cache geom
  * Regardless of the amount of memory in the system, we never reserve
  * more than VM_NOT_USER_WIREABLE_MAX bytes as unlockable.
  */
-#if defined(__LP64__)
 #define VM_NOT_USER_WIREABLE_MAX (32ULL*1024*1024*1024)     /* 32GB */
-#else
-#define VM_NOT_USER_WIREABLE_MAX (1UL*1024*1024*1024)     /* 1GB */
-#endif /* __LP64__ */
-extern
-vm_map_size_t   vm_per_task_user_wire_limit;
-extern
-vm_map_size_t   vm_global_user_wire_limit;
-extern
-uint64_t        vm_add_wire_count_over_global_limit;
-extern
-uint64_t        vm_add_wire_count_over_user_limit;
+
+extern vm_map_size_t   vm_per_task_user_wire_limit;
+extern vm_map_size_t   vm_global_user_wire_limit;
+extern uint64_t        vm_add_wire_count_over_global_limit;
+extern uint64_t        vm_add_wire_count_over_user_limit;
 
 /*
  *	Each pageable resident page falls into one of three lists:
@@ -1155,10 +1226,14 @@ extern boolean_t        vm_page_deactivate_hint;
 
 extern int              vm_compressor_mode;
 
+#if __x86_64__
 /*
  * Defaults to true, so highest memory is used first.
  */
 extern boolean_t        vm_himemory_mode;
+#else
+#define vm_himemory_mode TRUE
+#endif
 
 extern boolean_t        vm_lopage_needed;
 extern uint32_t         vm_lopage_free_count;
@@ -1174,18 +1249,15 @@ extern ppnum_t          max_valid_low_ppnum;
 
 extern void             vm_page_init_local_q(unsigned int num_cpus);
 
-extern void             vm_page_create(
-	ppnum_t         start,
-	ppnum_t         end);
+extern void             vm_page_create_canonical(ppnum_t pnum);
 
-extern void             vm_page_create_retired(
-	ppnum_t         pn);
+extern void             vm_page_create_retired(ppnum_t pn);
 
-extern boolean_t        vm_page_created(
-	vm_page_t       page);
-
-
+#if XNU_VM_HAS_DELAYED_PAGES
 extern void             vm_free_delayed_pages(void);
+#endif /* XNU_VM_HAS_DELAYED_PAGES */
+
+extern void             vm_pages_array_finalize(void);
 
 extern vm_page_t        vm_page_alloc(
 	vm_object_t             object,
@@ -1195,17 +1267,18 @@ extern void             vm_page_reactivate_all_throttled(void);
 
 extern void vm_pressure_response(void);
 
-#if CONFIG_JETSAM
-extern void memorystatus_pages_update(unsigned int pages_avail);
+#define AVAILABLE_NON_COMPRESSED_MEMORY         (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
+#define AVAILABLE_MEMORY                        (AVAILABLE_NON_COMPRESSED_MEMORY + VM_PAGE_COMPRESSOR_COUNT)
 
-#define VM_CHECK_MEMORYSTATUS do { \
-	memorystatus_pages_update(              \
+#if CONFIG_JETSAM
+
+#define VM_CHECK_MEMORYSTATUS \
+	memorystatus_update_available_page_count( \
 	        vm_page_pageable_external_count + \
-	        vm_page_free_count +            \
+	        vm_page_free_count +              \
 	        VM_PAGE_SECLUDED_COUNT_OVER_TARGET() + \
 	        (VM_DYNAMIC_PAGING_ENABLED() ? 0 : vm_page_purgeable_count) \
-	        ); \
-	} while(0)
+	        )
 
 #else /* CONFIG_JETSAM */
 
@@ -1215,7 +1288,7 @@ extern void memorystatus_pages_update(unsigned int pages_avail);
 
 #else /* !XNU_TARGET_OS_OSX */
 
-#define VM_CHECK_MEMORYSTATUS   vm_pressure_response()
+#define VM_CHECK_MEMORYSTATUS memorystatus_update_available_page_count(AVAILABLE_NON_COMPRESSED_MEMORY)
 
 #endif /* !XNU_TARGET_OS_OSX */
 

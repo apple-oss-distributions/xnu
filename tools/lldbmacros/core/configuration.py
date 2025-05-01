@@ -1,5 +1,6 @@
 # global configs to be included by everybody. The recommended way is 
 # from core.configuration import *
+
 # verbosity levels
 (vSILENT, vHUMAN, vSCRIPT, vDETAIL) = (0, 1, 2, 3)
 

@@ -201,7 +201,7 @@ private:
 
 	uint8_t                      *_nvramImage;
 
-	OSSharedPtr<OSDictionary>    &_varDict;
+	OSSharedPtr<OSDictionary>    _varDict;
 
 	uint32_t                     _commonSize;
 	uint32_t                     _systemSize;
@@ -212,6 +212,9 @@ private:
 	uint32_t                     _currentOffset;
 
 	OSSharedPtr<OSArray>         _varEntries;
+
+	IORWLock                     *_variableLock;
+	IOLock                       *_controllerLock;
 
 	IOReturn unserializeImage(const uint8_t *image, IOByteCount length);
 	IOReturn reclaim(void);
@@ -234,12 +237,9 @@ private:
 public:
 	virtual
 	~IONVRAMV3Handler() APPLE_KEXT_OVERRIDE;
-	IONVRAMV3Handler(OSSharedPtr<OSDictionary> &varDict);
-
+	IONVRAMV3Handler();
 	static bool isValidImage(const uint8_t *image, IOByteCount length);
-
-	static  IONVRAMV3Handler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-	    OSSharedPtr<OSDictionary> &varDict);
+	static  IONVRAMV3Handler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length);
 
 	virtual bool     getNVRAMProperties(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
@@ -253,14 +253,14 @@ public:
 	virtual uint32_t getSystemUsed(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getCommonUsed(void) const APPLE_KEXT_OVERRIDE;
 	virtual bool     getSystemPartitionActive(void) const APPLE_KEXT_OVERRIDE;
+	virtual IOReturn getVarDict(OSSharedPtr<OSDictionary> &varDictCopy) APPLE_KEXT_OVERRIDE;
 };
 
 IONVRAMV3Handler::~IONVRAMV3Handler()
 {
 }
 
-IONVRAMV3Handler::IONVRAMV3Handler(OSSharedPtr<OSDictionary> &varDict) :
-	_varDict(varDict)
+IONVRAMV3Handler::IONVRAMV3Handler()
 {
 }
 
@@ -277,16 +277,21 @@ IONVRAMV3Handler::isValidImage(const uint8_t *image, IOByteCount length)
 }
 
 IONVRAMV3Handler*
-IONVRAMV3Handler::init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
-    OSSharedPtr<OSDictionary> &varDict)
+IONVRAMV3Handler::init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length)
 {
 	OSSharedPtr<IORegistryEntry> entry;
 	OSSharedPtr<OSObject>        prop;
 	bool                         propertiesOk;
 
-	IONVRAMV3Handler *handler = new IONVRAMV3Handler(varDict);
+	IONVRAMV3Handler *handler = new IONVRAMV3Handler();
 
 	handler->_provider = provider;
+
+	handler->_variableLock = IORWLockAlloc();
+	require(handler->_variableLock != nullptr, exit);
+
+	handler->_controllerLock = IOLockAlloc();
+	require(handler->_controllerLock != nullptr, exit);
 
 	propertiesOk = handler->getNVRAMProperties();
 	require_action(propertiesOk, exit, DEBUG_ERROR("Unable to get NVRAM properties\n"));
@@ -348,6 +353,7 @@ IONVRAMV3Handler::flush(const uuid_t guid, IONVRAMOperation op)
 
 	DEBUG_INFO("flushSystem=%d, flushCommon=%d\n", flushSystem, flushCommon);
 
+	NVRAMWRITELOCK(_variableLock);
 	if (flushSystem || flushCommon) {
 		const OSSymbol                    *canonicalKey;
 		OSSharedPtr<OSDictionary>         dictCopy;
@@ -385,6 +391,7 @@ IONVRAMV3Handler::flush(const uuid_t guid, IONVRAMOperation op)
 	DEBUG_INFO("_commonUsed %#x, _systemUsed %#x\n", _commonUsed, _systemUsed);
 
 exit:
+	NVRAMRWUNLOCK(_variableLock);
 	return ret;
 }
 
@@ -399,10 +406,12 @@ IONVRAMV3Handler::reloadInternal(void)
 	const struct v3_var_header   *storeVar;
 	OSData                       *entryContainer;
 
+	NVRAMLOCKASSERTHELD(_controllerLock);
+
 	controllerBank = findCurrentBank();
 
 	if (_currentBank != controllerBank) {
-		DEBUG_ERROR("_currentBank %#x != controllerBank %#x", _currentBank, controllerBank);
+		DEBUG_ERROR("_currentBank %#x != controllerBank %#x\n", _currentBank, controllerBank);
 	}
 
 	_currentBank = controllerBank;
@@ -426,6 +435,7 @@ IONVRAMV3Handler::reloadInternal(void)
 	// as VAR_NEW_STATE_NONE meaning no action needed
 	// Otherwise if the data is different or it is not found on the controller image we mark it as VAR_NEW_STATE_APPEND
 	// which will have us invalidate the existing entry if there is one and append it on the next save
+	NVRAMREADLOCK(_variableLock);
 	for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
 		uint32_t offset = sizeof(struct v3_store_header);
 		uint32_t latestOffset;
@@ -444,7 +454,7 @@ IONVRAMV3Handler::reloadInternal(void)
 				uint8_t state = prevVarHeader->state & VAR_DELETED & VAR_IN_DELETED_TRANSITION;
 
 				ret = _nvramController->write(prevOffset + offsetof(struct v3_var_header, state), &state, sizeof(state));
-				require_noerr_action(ret, exit, DEBUG_ERROR("existing state w fail, ret=%#x\n", ret));
+				require_noerr_action(ret, unlock, DEBUG_ERROR("existing state w fail, ret=%#x\n", ret));
 			}
 
 			prevOffset = latestOffset;
@@ -482,15 +492,12 @@ IONVRAMV3Handler::reloadInternal(void)
 			}
 		}
 	}
-
 	ret = find_current_offset_in_image(controllerImage, _bankSize, &_currentOffset);
-	if (ret != kIOReturnSuccess) {
-		DEBUG_ERROR("Unidentified bytes in image, reclaiming\n");
-		ret = reclaim();
-		require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim byte recovery failed, invalid controller state!!! ret=%#x\n", ret));
-	}
+	require_noerr_action(ret, unlock, DEBUG_ERROR("Unidentified bytes in image\n"));
 	DEBUG_INFO("New _currentOffset=%#x\n", _currentOffset);
 
+unlock:
+	NVRAMRWUNLOCK(_variableLock);
 exit:
 	IOFreeData(controllerImage, _bankSize);
 	return ret;
@@ -511,6 +518,9 @@ IONVRAMV3Handler::setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool sys
 	const char                  *variableName;
 	uint32_t                    variableSize;
 
+	// Anyone calling setEntryForRemove should've already held the lock for write.
+	NVRAMRWLOCKASSERTEXCLUSIVE(_variableLock);
+
 	require_action(v3Entry != nullptr, exit, DEBUG_INFO("remove with no entry\n"));
 
 	variableName = (const char *)v3Entry->header.name_data_buf;
@@ -524,7 +534,7 @@ IONVRAMV3Handler::setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool sys
 
 		v3Entry->new_state = VAR_NEW_STATE_REMOVE;
 
-		_provider->_varDict->removeObject(canonicalKey.get());
+		_varDict->removeObject(canonicalKey.get());
 
 		if (system) {
 			if (_systemUsed < variableSize) {
@@ -856,6 +866,9 @@ IONVRAMV3Handler::setVariableInternal(const uuid_t varGuid, const char *variable
 	size_t                      newEntrySize;
 	uuid_string_t               uuidString;
 
+	// Anyone calling setVariableInternal should've already held the lock for write.
+	NVRAMRWLOCKASSERTEXCLUSIVE(_variableLock);
+
 	system = (uuid_compare(varGuid, gAppleSystemVariableGuid) == 0);
 	canonicalKey = keyWithGuidAndCString(varGuid, variableName);
 
@@ -951,9 +964,13 @@ IOReturn
 IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OSObject *object)
 {
 	uuid_t destGuid;
+	IOReturn ret = kIOReturnError;
 
 	if (strcmp(variableName, "reclaim-int") == 0) {
-		return reclaim();
+		NVRAMLOCK(_controllerLock);
+		ret = reclaim();
+		NVRAMUNLOCK(_controllerLock);
+		return ret;
 	}
 
 	if (getSystemPartitionActive()) {
@@ -973,7 +990,11 @@ IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OS
 		}
 	}
 
-	return setVariableInternal(destGuid, variableName, object);
+	NVRAMWRITELOCK(_variableLock);
+	ret = setVariableInternal(destGuid, variableName, object);
+	NVRAMRWUNLOCK(_variableLock);
+
+	return ret;
 }
 
 uint32_t
@@ -982,6 +1003,8 @@ IONVRAMV3Handler::findCurrentBank(void)
 	struct v3_store_header storeHeader;
 	uint32_t               maxGen = 0;
 	uint32_t               currentBank = 0;
+
+	NVRAMLOCKASSERTHELD(_controllerLock);
 
 	for (unsigned int i = 0; i < _bankCount; i++) {
 		_nvramController->select(i);
@@ -993,7 +1016,7 @@ IONVRAMV3Handler::findCurrentBank(void)
 		}
 	}
 
-	DEBUG_ALWAYS("currentBank=%#x, gen=%#x", currentBank, maxGen);
+	DEBUG_ALWAYS("currentBank=%#x, gen=%#x\n", currentBank, maxGen);
 
 	return currentBank;
 }
@@ -1002,6 +1025,8 @@ bool
 IONVRAMV3Handler::setController(IONVRAMController *controller)
 {
 	IOReturn ret = kIOReturnSuccess;
+
+	NVRAMLOCK(_controllerLock);
 
 	if (_nvramController == NULL) {
 		_nvramController = controller;
@@ -1014,19 +1039,18 @@ IONVRAMV3Handler::setController(IONVRAMController *controller)
 	if (_resetData) {
 		_resetData = false;
 		DEBUG_ERROR("_resetData set, issuing reclaim recovery\n");
-		ret = reclaim();
-		require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, invalid controller state!!! ret=%#x\n", ret));
+		goto reclaim;
+	}
+
+	if (reloadInternal() == kIOReturnSuccess) {
 		goto exit;
 	}
 
-	ret = reloadInternal();
-	if (ret != kIOReturnSuccess) {
-		DEBUG_ERROR("Invalid image found, issuing reclaim recovery\n");
-		ret = reclaim();
-		require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, invalid controller state!!! ret=%#x\n", ret));
-	}
-
+reclaim:
+	ret = reclaim();
+	require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, invalid controller state!!! ret=%#x\n", ret));
 exit:
+	NVRAMUNLOCK(_controllerLock);
 	return ret == kIOReturnSuccess;
 }
 
@@ -1044,6 +1068,7 @@ IONVRAMV3Handler::reclaim(void)
 	OSSharedPtr<OSArray> remainingEntries;
 
 	DEBUG_INFO("called\n");
+	NVRAMLOCKASSERTHELD(_controllerLock);
 
 	bankData = (uint8_t *)IOMallocData(_bankSize);
 	require_action(bankData != nullptr, exit, ret = kIOReturnNoMemory);
@@ -1055,6 +1080,8 @@ IONVRAMV3Handler::reclaim(void)
 	verify_noerr_action(ret, DEBUG_INFO("eraseBank failed, ret=%#08x\n", ret));
 
 	_currentBank = next_bank;
+
+	NVRAMREADLOCK(_variableLock);
 
 	remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
 
@@ -1091,16 +1118,17 @@ IONVRAMV3Handler::reclaim(void)
 	memcpy(bankData, (uint8_t *)&newStoreHeader, sizeof(newStoreHeader));
 
 	ret = _nvramController->write(0, bankData, new_bank_offset);
-	require_noerr_action(ret, exit, DEBUG_ERROR("reclaim bank write failed, ret=%08x\n", ret));
+	require_noerr_action(ret, unlock, DEBUG_ERROR("reclaim bank write failed, ret=%08x\n", ret));
 
 	_currentOffset = (uint32_t)new_bank_offset;
 
 	DEBUG_INFO("Reclaim complete, _currentBank=%u _generation=%u, _currentOffset=%#x\n", _currentBank, _generation, _currentOffset);
 
 	_newData = false;
-
 	_varEntries.reset(remainingEntries.get(), OSRetain);
 
+unlock:
+	NVRAMRWUNLOCK(_variableLock);
 exit:
 	IOFreeData(bankData, _bankSize);
 
@@ -1114,6 +1142,8 @@ IONVRAMV3Handler::getAppendSize(void)
 	struct v3_var_header      *varHeader;
 	OSData                    *entryContainer;
 	size_t                    appendSize = 0;
+
+	NVRAMRWLOCKASSERTHELD(_variableLock);
 
 	for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
 		entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
@@ -1147,19 +1177,19 @@ IONVRAMV3Handler::syncRaw(void)
 	require_action(_newData == true, exit, DEBUG_INFO("No _newData to sync\n"));
 	require_action(_bankSize != 0, exit, DEBUG_INFO("No nvram size info\n"));
 
+	NVRAMREADLOCK(_variableLock);
 	DEBUG_INFO("_varEntries->getCount()=%#x\n", _varEntries->getCount());
 
 	if (getAppendSize() + _currentOffset < _bankSize) {
 		// No reclaim, build append and invalidate list
-
 		remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
 
 		appendBuffer = (uint8_t *)IOMallocData(_bankSize);
-		require_action(appendBuffer, exit, ret = kIOReturnNoMemory);
+		require_action(appendBuffer, unlock, ret = kIOReturnNoMemory);
 
 		invalidateOffsetsCount = _varEntries->getCount();
 		invalidateOffsets = (size_t *)IOMallocData(invalidateOffsetsCount * sizeof(size_t));
-		require_action(invalidateOffsets, exit, ret = kIOReturnNoMemory);
+		require_action(invalidateOffsets, unlock, ret = kIOReturnNoMemory);
 
 		for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
 			entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
@@ -1211,7 +1241,7 @@ IONVRAMV3Handler::syncRaw(void)
 			// Write appendBuffer
 			DEBUG_INFO("Appending append buffer size=%#zx at offset=%#x\n", appendBufferOffset, _currentOffset);
 			ret = _nvramController->write(_currentOffset, appendBuffer, appendBufferOffset);
-			require_noerr_action(ret, exit, DEBUG_ERROR("could not re-append, ret=%#x\n", ret));
+			require_noerr_action(ret, unlock, DEBUG_ERROR("could not re-append, ret=%#x\n", ret));
 
 			_currentOffset += appendBufferOffset;
 		} else {
@@ -1224,7 +1254,7 @@ IONVRAMV3Handler::syncRaw(void)
 				uint8_t state = VAR_ADDED & VAR_DELETED & VAR_IN_DELETED_TRANSITION;
 
 				ret = _nvramController->write(invalidateOffsets[i] + offsetof(struct v3_var_header, state), &state, sizeof(state));
-				require_noerr_action(ret, exit, DEBUG_ERROR("unable to invalidate at offset %#zx, ret=%#x\n", invalidateOffsets[i], ret));
+				require_noerr_action(ret, unlock, DEBUG_ERROR("unable to invalidate at offset %#zx, ret=%#x\n", invalidateOffsets[i], ret));
 				DEBUG_INFO("Invalidated entry at offset=%#zx\n", invalidateOffsets[i]);
 			}
 		} else {
@@ -1232,10 +1262,12 @@ IONVRAMV3Handler::syncRaw(void)
 		}
 
 		_newData = false;
-
 		_varEntries.reset(remainingEntries.get(), OSRetain);
+unlock:
+		NVRAMRWUNLOCK(_variableLock);
 	} else {
 		// Will need to reclaim, rebuild store and write everything at once
+		NVRAMRWUNLOCK(_variableLock);
 		ret = reclaim();
 	}
 
@@ -1267,6 +1299,7 @@ IONVRAMV3Handler::syncBlock(void)
 
 	block = (uint8_t *)IOMallocData(_bankSize);
 
+	NVRAMREADLOCK(_variableLock);
 	remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
 
 	ret = _nvramController->select(next_bank);
@@ -1314,6 +1347,7 @@ IONVRAMV3Handler::syncBlock(void)
 	_nvramController->sync();
 
 	_varEntries.reset(remainingEntries.get(), OSRetain);
+	NVRAMRWUNLOCK(_variableLock);
 
 	_newData = false;
 
@@ -1330,10 +1364,15 @@ IONVRAMV3Handler::sync(void)
 {
 	IOReturn ret;
 
+	NVRAMLOCK(_controllerLock);
+
 	if (_reload) {
 		ret = reloadInternal();
-		require_noerr_action(ret, exit, DEBUG_ERROR("Reload failed, ret=%#x", ret));
-
+		if (ret != kIOReturnSuccess) {
+			DEBUG_ERROR("Reload failed, ret=%#x, reclaiming\n", ret);
+			ret = reclaim();
+			require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, ret=%#x\n", ret));
+		}
 		_reload = false;
 	}
 
@@ -1342,13 +1381,14 @@ IONVRAMV3Handler::sync(void)
 
 		if (ret != kIOReturnSuccess) {
 			ret = reclaim();
-			require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, ret=%#x", ret));
+			require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, ret=%#x\n", ret));
 		}
 	} else {
 		ret = syncBlock();
 	}
 
 exit:
+	NVRAMUNLOCK(_controllerLock);
 	return ret;
 }
 
@@ -1542,4 +1582,23 @@ IONVRAMV3Handler::convertPropToObject(const uint8_t *propName, uint32_t propName
 	propObject = tmpObject;
 
 	return true;
+}
+
+IOReturn
+IONVRAMV3Handler::getVarDict(OSSharedPtr<OSDictionary> &varDictCopy)
+{
+	IOReturn ret = kIOReturnNotFound;
+
+	NVRAMREADLOCK(_variableLock);
+	if (_varDict) {
+		varDictCopy = OSDictionary::withDictionary(_varDict.get());
+		if (varDictCopy) {
+			if (OSDictionary::withCapacity(varDictCopy->getCount()) != nullptr) {
+				ret = kIOReturnSuccess;
+			}
+		}
+	}
+	NVRAMRWUNLOCK(_variableLock);
+
+	return ret;
 }

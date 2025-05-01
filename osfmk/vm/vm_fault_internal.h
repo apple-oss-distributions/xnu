@@ -101,12 +101,18 @@ extern kern_return_t vm_fault_enter(
 	vm_prot_t prot,
 	vm_prot_t fault_type,
 	boolean_t wired,
-	boolean_t change_wiring,
 	vm_tag_t  wire_tag,             /* if wiring must pass tag != VM_KERN_MEMORY_NONE */
 	vm_object_fault_info_t fault_info,
 	boolean_t *need_retry,
 	int *type_of_fault,
 	uint8_t *object_lock_type);
+
+extern kern_return_t vm_pre_fault_with_info(
+	vm_map_t                map,
+	vm_map_offset_t         offset,
+	vm_prot_t               prot,
+	vm_object_fault_info_t  fault_info);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -424,7 +424,7 @@ __NKE_API_DEPRECATED;
  *               ENOMEM - Not enough memory available
  */
 extern errno_t mbuf_attachcluster(mbuf_how_t how, mbuf_type_t type,
-    mbuf_t *mbuf, caddr_t extbuf, void (*extfree)(caddr_t, u_int, caddr_t),
+    mbuf_t *mbuf, caddr_t extbuf __sized_by_or_null(extsize), void (*extfree)(caddr_t, u_int, caddr_t),
     size_t extsize, caddr_t extarg)
 __NKE_API_DEPRECATED;
 
@@ -451,7 +451,7 @@ __NKE_API_DEPRECATED;
  *               In this case, the caller is advised to use 4096 bytes or
  *               smaller during subseqent requests.
  */
-extern errno_t mbuf_alloccluster(mbuf_how_t how, size_t *size, caddr_t *addr)
+extern errno_t mbuf_alloccluster(mbuf_how_t how, size_t *size, char * __sized_by_or_null(*size) * addr)
 __NKE_API_DEPRECATED;
 
 /*!
@@ -830,7 +830,7 @@ __NKE_API_DEPRECATED;
  *       @result 0 upon success otherwise the errno error.
  */
 extern errno_t mbuf_copydata(const mbuf_t mbuf, size_t offset, size_t length,
-    void *out_data)
+    void *out_data __sized_by_or_null(length))
 __NKE_API_DEPRECATED;
 
 /*!
@@ -856,7 +856,7 @@ __NKE_API_DEPRECATED;
  *       @result 0 upon success, EINVAL or ENOBUFS upon failure.
  */
 extern errno_t mbuf_copyback(mbuf_t mbuf, size_t offset, size_t length,
-    const void *data, mbuf_how_t how)
+    const void *data __sized_by_or_null(length), mbuf_how_t how)
 __NKE_API_DEPRECATED;
 
 /*!
@@ -1188,7 +1188,7 @@ __NKE_API_DEPRECATED;
  *       @discussion This function is used by the stack to indicate which
  *               checksums should be calculated in hardware. The stack normally
  *               sets these flags as the packet is processed in the outbound
- *               direction. Just before send the packe to the interface, the
+ *               direction. Just before sending the packet to the interface, the
  *               stack will look at these flags and perform any checksums in
  *               software that are not supported by the interface.
  *       @param mbuf The mbuf containing the packet.
@@ -1217,17 +1217,94 @@ __NKE_API_DEPRECATED;
 
 /*!
  *       @function mbuf_get_tso_requested
- *       @discussion This function is used by the driver to determine which
- *               checksum operations should be performed in hardware.
+ *       @discussion This function is used by the driver to determine
+ *               whether TSO should be performed.
  *       @param mbuf The mbuf containing the packet.
- *       @param request Flags indicating which values are being requested
+ *       @param request Flags indicating which TSO offload is requested
  *               for this packet.
- *       @param value The requested value.
+ *       @param mss The returned MSS.
  *       @result 0 upon success otherwise the errno error.
  */
 extern errno_t mbuf_get_tso_requested(mbuf_t mbuf,
-    mbuf_tso_request_flags_t *request, u_int32_t *value)
+    mbuf_tso_request_flags_t *request, u_int32_t *mss)
 __NKE_API_DEPRECATED;
+
+
+#ifdef KERNEL_PRIVATE
+
+enum {
+	MBUF_GSO_TYPE_NONE      = 0,
+	MBUF_GSO_TYPE_IPV4      = 1,
+	MBUF_GSO_TYPE_IPV6      = 2,
+};
+
+#define MBUF_GSO_TYPE_NONE      MBUF_GSO_TYPE_NONE
+
+typedef uint8_t mbuf_gso_type_t;
+
+/*!
+ *       @function mbuf_get_gso_info
+ *       @discussion This function is used by the driver to determine
+ *              whether segmentation offload (GSO) should be performed.
+ *       @param mbuf The packet to get the offload from.
+ *       @param type The type of offload that is requested for this
+ *              packet (see `mbuf_gso_type_t` above). If none is requested,
+ *              `type` is set to MBUF_GSO_TYPE_NONE.
+ *              `type` must not be NULL.
+ *       @param seg_size The returned segment size.
+ *              `seg_size` must not be NULL.
+ *       @param hdr_len The returned protocol (e.g. IP+TCP) header size,
+ *              `hdr_len` must not be NULL.
+ *       @result 0 upon success otherwise the errno error.
+ */
+extern errno_t mbuf_get_gso_info(mbuf_t mbuf, mbuf_gso_type_t *type,
+    uint16_t *seg_size, uint16_t *hdr_len)
+__NKE_API_DEPRECATED;
+
+/*!
+ *       @function mbuf_set_gso_info
+ *       @discussion This function is used to set the segmentation
+ *              offload (GSO/TSO) for a packet.
+ *       @param mbuf The packet to set the offload on.
+ *       @param type The type of offload to perform on this packet
+ *              (see `mbuf_gso_type_t` above). Use `MBUF_GSO_TYPE_NONE`
+ *              to clear segmentation offload.
+ *       @param seg_size The segment size.
+ *       @param hdr_len The protocol (e.g. IP+TCP) header size.
+ *       @result 0 upon success otherwise the errno error.
+ */
+extern errno_t mbuf_set_gso_info(mbuf_t mbuf,
+    mbuf_gso_type_t type, uint16_t seg_size, uint16_t hdr_len)
+__NKE_API_DEPRECATED;
+
+/*!
+ *       @function mbuf_get_lro_info
+ *       @discussion This function is used to retrieve LRO information.
+ *       @param mbuf The mbuf containing the packet.
+ *       @param seg_cnt The number of packets that were coalesced, may be zero.
+ *		If non-zero, will be 2 or greater.
+ *       @param dup_ack_cnt The number of duplicated ACKs (TBD), currently
+ *              always zero.
+ *       @result 0 upon success otherwise the errno error.
+ */
+extern errno_t mbuf_get_lro_info(mbuf_t mbuf, uint8_t *seg_cnt,
+    uint8_t *dup_ack_cnt)
+__NKE_API_DEPRECATED;
+
+/*!
+ *       @function mbuf_set_lro_info
+ *       @discussion This function is used to set the LRO offload values.
+ *       @param mbuf The mbuf containing the packet.
+ *       @param seg_cnt The number of packets that were coalesced, may be zero.
+ *		If non-zero, must be 2 or greater.
+ *       @param dup_ack_cnt The number of duplicated ACKs (TBD). Must be zero.
+ *       @result 0 upon success otherwise the errno error.
+ */
+extern errno_t mbuf_set_lro_info(mbuf_t mbuf, uint8_t seg_cnt,
+    uint8_t dup_ack_cnt)
+__NKE_API_DEPRECATED;
+
+#endif /* KERNEL_PRIVATE */
 
 /*!
  *       @function mbuf_clear_csum_requested

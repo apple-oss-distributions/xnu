@@ -55,6 +55,13 @@ struct skmem_bufctl {
 
 #define SKMEM_CACHE_ALIGN       8               /* min guaranteed alignment */
 
+#define SKMEM_MEMTAG_STRIP_TAG(addr, size)                             \
+	__unsafe_forge_bidi_indexable(void *,                          \
+	    vm_memtag_canonicalize_kernel((vm_offset_t)addr), size)
+
+#define SKMEM_COMPARE_CANONICAL_ADDR(addr1, addr2, size)               \
+	SKMEM_MEMTAG_STRIP_TAG(addr1, size) == SKMEM_MEMTAG_STRIP_TAG(addr2, size)
+
 /*
  * Alternative buffer control if SKM_MODE_AUDIT is set.
  */
@@ -99,7 +106,8 @@ struct skmem_slab {
 	((sl)->sl_refcnt > 0 && (sl)->sl_refcnt < (sl)->sl_chunks)
 
 #define SKMEM_SLAB_MEMBER(sl, buf)      \
-	(((size_t)(buf) - (size_t)(sl)->sl_base) < (sl)->sl_cache->skm_slabsize)
+	(((size_t)(buf) - (size_t)vm_memtag_canonicalize_kernel((vm_offset_t)(sl)->sl_base)) \
+	     < (sl)->sl_cache->skm_slabsize)
 
 /*
  * Magazine type.

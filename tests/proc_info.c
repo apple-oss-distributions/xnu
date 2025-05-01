@@ -933,7 +933,77 @@ T_DECL(proc_info_pidinfo_proc_piduniqidentifierinfo,
 	T_EXPECT_EQ_ULLONG(c_uniqidinfo->p_puniqueid, p_uniqidinfo->p_uniqueid,
 	    "p_puniqueid of child should be same as p_uniqueid for parent");
 
+	// The child's p_orig_ppidversion should be set to the p_idversion of the parent.
+	T_EXPECT_EQ_INT(c_uniqidinfo->p_orig_ppidversion, p_uniqidinfo->p_idversion,
+	    "child->p_pidversion == parent->p_idversion");
+
 	free_proc_info(proc_info, 2);
+}
+
+T_DECL(ensure_ppidversion_is_not_updated,
+    "A process's parent's idversion field should not be updated when the parent re-execs",
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+{
+	// Given a process (the test runner) which forks to create a child
+	pid_t original_pid = getpid();
+	if (!fork()) {
+		// And the child process waits for the parent to re-exec...
+		// (To get rid of this, we could exec something controlled that signals a semaphore.)
+		sleep(1);
+
+		// When the child inspects the parent's current idversion
+		struct proc_uniqidentifierinfo parent_info;
+		int ret = proc_pidinfo(original_pid, PROC_PIDUNIQIDENTIFIERINFO, 0, &parent_info, sizeof(parent_info));
+		T_ASSERT_EQ((unsigned long)ret, sizeof(parent_info), "PROC_PIDUNIQIDENTIFIERINFO - parent");
+
+		// And compares it to the child's stored idversion
+		struct proc_uniqidentifierinfo child_info;
+		ret = proc_pidinfo(getpid(), PROC_PIDUNIQIDENTIFIERINFO, 0, &child_info, sizeof(child_info));
+		T_ASSERT_EQ((unsigned long)ret, sizeof(child_info), "PROC_PIDUNIQIDENTIFIERINFO - child");
+
+		// Then the child can see that the parent's idversion has changed from what was stored.
+		T_EXPECT_NE_INT(child_info.p_orig_ppidversion, parent_info.p_idversion,
+		    "child->p_orig_ppidversion != parent->p_idversion after parent exec");
+	} else {
+		// And we (the parent process) re-exec into something else
+		const char* exec_cmd[] = { "sleep", "2", NULL };
+		execvp(exec_cmd[0], exec_cmd);
+		T_FAIL("execvp() failed");
+	}
+}
+
+T_DECL(ensure_ppidversion_is_not_updated_after_exec,
+    "A child's parent pidversion field should not be updated when the child re-execs",
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+{
+	// Given a child
+	pid_t child_pid = fork();
+	if (!child_pid) {
+		// Give the parent a moment to record our initial p_orig_ppidversion
+		sleep(1);
+
+		// When the child execs into something else
+		const char* exec_cmd[] = { "sleep", "2", NULL };
+		execvp(exec_cmd[0], exec_cmd);
+		T_FAIL("execvp() failed");
+	} else {
+		// And we save the child's original p_orig_ppidversion
+		struct proc_uniqidentifierinfo child_parent_info;
+		int ret = proc_pidinfo(child_pid, PROC_PIDUNIQIDENTIFIERINFO, 0, &child_parent_info, sizeof(child_parent_info));
+		T_ASSERT_EQ((unsigned long)ret, sizeof(child_parent_info), "PROC_PIDUNIQIDENTIFIERINFO - child");
+		int first_ppidversion = child_parent_info.p_orig_ppidversion;
+
+		// And we give the child a moment to re-exec into something else
+		sleep(2);
+
+		// And we inspect the child's p_orig_ppidversion again
+		ret = proc_pidinfo(child_pid, PROC_PIDUNIQIDENTIFIERINFO, 0, &child_parent_info, sizeof(child_parent_info));
+		T_ASSERT_EQ((unsigned long)ret, sizeof(child_parent_info), "PROC_PIDUNIQIDENTIFIERINFO - child");
+		int second_ppidversion = child_parent_info.p_orig_ppidversion;
+
+		// Then the child's p_orig_ppidversion has not changed due to exec()
+		T_ASSERT_EQ(first_ppidversion, second_ppidversion, "p_orig_ppidversion should not change after exec()");
+	}
 }
 
 T_DECL(proc_info_pidinfo_proc_pidtbsdinfo,

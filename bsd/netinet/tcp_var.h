@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -63,6 +63,7 @@
 
 #ifndef _NETINET_TCP_VAR_H_
 #define _NETINET_TCP_VAR_H_
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/appleapiopts.h>
 #include <sys/queue.h>
@@ -370,7 +371,8 @@ struct accecn {
 
 struct pacer {
 	uint64_t rate;
-	uint32_t tso_burst_size;
+	uint32_t tso_burst_size; /* maximum allowed burst size, segments that fit in a burst have the same Tx timestamp */
+	uint32_t current_size; /* track how many bytes have been accumulated in a burst */
 	uint64_t packet_tx_time;
 };
 
@@ -659,6 +661,7 @@ struct tcpcb {
 #define TF_L4S_ENABLED          0x8000000       /* L4S was force enabled */
 #define TF_L4S_DISABLED         0x10000000      /* L4S was force disabled */
 #define TF_RACK_ENABLED         0x20000000      /* RACK is enabled */
+#define TF_TLP_IS_RETRANS       0x40000000      /* Is TLP-probe a retransmission ? (field TLP.is_retrans in RFC 8985) */
 
 #if TRAFFIC_MGT
 	/* Inter-arrival jitter related state */
@@ -683,7 +686,7 @@ struct tcpcb {
 /* Tail loss probe related state */
 	tcp_seq         t_tlphighrxt;           /* snd_nxt after PTO */
 	tcp_seq         t_tlphightrxt_persist;  /* like t_tlphighrxt but persists over ACKs until DSACK (if any) is processed */
-	u_int32_t       t_tlpstart;             /* timestamp at PTO */
+	uint32_t        t_tlpstart;             /* timestamp at PTO */
 /* DSACK data receiver state */
 	tcp_seq         t_dsack_lseq;           /* DSACK left sequence */
 	tcp_seq         t_dsack_rseq;           /* DSACK right sequence */
@@ -813,8 +816,11 @@ struct tcpcb {
 	uint64_t        t_rcvwnd_limited_total_time;
 	uint64_t        t_rcvwnd_limited_start_time;
 
-	uint32_t        t_comp_gencnt; /* Current compression generation-count */
-	uint32_t        t_comp_lastinc; /* Last time the gen-count was changed - should change every TCP_COMP_CHANGE_RATE ms */
+
+	uint32_t        t_comp_rxmt_gencnt; /* Current compression generation-count for segments */
+
+	uint32_t        t_comp_ack_gencnt; /* Current compression generation-count for ACKs */
+	uint32_t        t_comp_ack_lastinc; /* Last time the gen-count was changed - should change every TCP_COMP_CHANGE_RATE ms */
 #define TCP_COMP_CHANGE_RATE    5 /* Intervals at which we change the gencnt. Means that worst-case we send one ACK every TCP_COMP_CHANGE_RATE ms */
 
 	uint32_t        t_ts_offset; /* Randomized timestamp offset to hide on-the-wire timestamp */
@@ -863,10 +869,18 @@ struct tcpcb {
 	uuid_t          t_flow_uuid;
 };
 
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct tcpcb, tcpcb);
+
 #define IN_FASTRECOVERY(tp)     (tp->t_flags & TF_FASTRECOVERY)
 #define SACK_ENABLED(tp)        (tp->t_flagsext & TF_SACK_ENABLE)
 #define TFO_ENABLED(tp)         (tp->t_flagsext & TF_FASTOPEN)
 #define TCP_RACK_ENABLED(tp)    ((tp->t_flagsext & TF_RACK_ENABLED) && SACK_ENABLED(tp) && !TFO_ENABLED(tp))
+
+static inline bool
+tcp_sent_tlp_retrans(const struct tcpcb *tp)
+{
+	return (tp->t_flagsext & (TF_SENT_TLPROBE | TF_TLP_IS_RETRANS)) == (TF_SENT_TLPROBE | TF_TLP_IS_RETRANS);
+}
 
 /*
  * If the connection is in a throttled state due to advisory feedback from
@@ -926,26 +940,37 @@ extern uint8_t tcprexmtthresh;
 #define TCP_ECN_ENABLED(_tp_) \
 	(((_tp_)->ecn_flags & (TE_ECN_ON)) == (TE_ECN_ON))
 
-extern int tcp_acc_ecn;
 extern int tcp_l4s;
-/*
- * Accurate ECN feedback is enabled if
- * 1. It is not disabled explicitly by tcp options
- * 2. It is enabled either by sysctl or L4S toggle or A/B deployment or tcp_options,
- * It supports ACE field as well as AccECN option for ECN feedback
- */
-#define TCP_ACC_ECN_ENABLED(_tp_) \
-   (((_tp_)->t_flagsext & TF_L4S_DISABLED) == 0 && \
-   (tcp_acc_ecn == 1 || ((_tp_)->t_flagsext & TF_L4S_ENABLED)))
+extern int tcp_l4s_developer;
 
-/* Accurate ECN is enabled and negotiated end-to-end */
+/* L4S Developer setting will override system setting */
+typedef enum {
+	tcp_l4s_system = 0,
+	tcp_l4s_developer_enable = 1,
+	tcp_l4s_developer_disable = 2
+} tcp_l4s_t;
+
+/*
+ * TCP L4S is enabled if,
+ * 1. It is not disabled explicitly by developer or tcp options
+ * 2. It is enabled either by developer or A/B deployment or tcp_options,
+ * It implicitly enables Accurate ECN which supports ACE and AccECN option for ECN feedback
+ */
+
+#define TCP_L4S_DISABLED(_tp_)                                  \
+    (tcp_l4s_developer == tcp_l4s_developer_disable ||              \
+	((_tp_)->t_flagsext & TF_L4S_DISABLED) == 1)
+
+#define TCP_L4S_ENABLED(_tp_)                                   \
+    (!TCP_L4S_DISABLED(tp) &&                                   \
+    (tcp_l4s_developer == tcp_l4s_developer_enable ||           \
+	tcp_l4s == 1 || ((_tp_)->t_flagsext & TF_L4S_ENABLED)))
+
+/* L4S is enabled and Accurate ECN has been negotiated end-to-end */
 #define TCP_ACC_ECN_ON(_tp_) \
-    (TCP_ACC_ECN_ENABLED(_tp_) && \
+    (TCP_L4S_ENABLED(_tp_) && \
     (((_tp_)->ecn_flags & (TE_ACC_ECN_ON)) == (TE_ACC_ECN_ON)))
 
-#define TCP_L4S_ENABLED(_tp_) \
-    (((_tp_)->t_flagsext & TF_L4S_DISABLED) == 0 && \
-    (tcp_l4s == 1 || ((_tp_)->t_flagsext & TF_L4S_ENABLED)))
 /*
  * Gives number of bytes acked by this ack
  */
@@ -998,13 +1023,13 @@ extern int tcp_l4s;
  * to tcp_dooptions.
  */
 struct tcpopt {
-	uint32_t        to_flags;               /* which options are present */
-#define TOF_TS          0x0001          /* timestamp */
+	uint32_t        to_flags;   /* which options are present */
+#define TOF_TS          0x0001  /* timestamp */
 #define TOF_MSS         0x0010
 #define TOF_SCALE       0x0020
 #define TOF_SIGNATURE   0x0040  /* signature option present */
 #define TOF_SIGLEN      0x0080  /* signature length valid (RFC2385) */
-#define TOF_SACK        0x0100          /* Peer sent SACK option */
+#define TOF_SACK        0x0100  /* Peer sent SACK option */
 #define TOF_MPTCP       0x0200  /* MPTCP options to be dropped */
 #define TOF_TFO         0x0400  /* TFO cookie option present */
 #define TOF_TFOREQ      0x0800  /* TFO cookie request present */
@@ -1012,12 +1037,15 @@ struct tcpopt {
 	uint32_t        to_tsecr;
 	uint16_t        to_mss;
 	uint8_t         to_requested_s_scale;
-	uint8_t         to_nsacks;       /* number of SACK blocks */
-	u_char          *to_sacks;       /* pointer to the first SACK blocks */
-	u_char          *to_tfo;         /* pointer to the TFO cookie */
-	uint8_t         to_num_accecn;   /* number of Accurate ECN counters */
-	uint8_t         *to_accecn;      /* pointer to the first Accurate ECN counter */
-	uint8_t         to_accecn_order; /* Accurate ECN ordering */
+	uint8_t         to_nsacks;                                                              /* number of SACK blocks */
+	u_char          *to_sacks __sized_by(to_sacks_size);        /* pointer to the first SACK blocks */
+	uint32_t                to_sacks_size;                                                          /* boundary for to_sacks */
+	u_char          *to_tfo  __sized_by(to_tfo_size);                       /* pointer to the TFO cookie */
+	uint32_t                to_tfo_size;                                                            /* boundary for to_tfo */
+	uint8_t         to_num_accecn;                                                          /* number of Accurate ECN counters */
+	uint8_t         *to_accecn __sized_by(to_accecn_size);      /* pointer to the first Accurate ECN counter */
+	uint32_t                to_accecn_size;                                                         /* boundary for to_accecn */
+	uint8_t         to_accecn_order;                                                        /* Accurate ECN ordering */
 };
 
 #define intotcpcb(ip)   ((struct tcpcb *)(ip)->inp_ppcb)
@@ -1462,6 +1490,11 @@ struct tcpstat_local {
 	u_int64_t dospacket;
 	u_int64_t cleanup;
 	u_int64_t synwindow;
+	u_int64_t linkheur_stealthdrop;
+	u_int64_t linkheur_noackpri;
+	u_int64_t linkheur_comprxmt;
+	u_int64_t linkheur_synrxmt;
+	u_int64_t linkheur_rxmtfloor;
 };
 
 #pragma pack(4)
@@ -1727,9 +1760,6 @@ extern struct timeval tcp_uptime;
 extern lck_spin_t tcp_uptime_lock;
 extern int tcp_delack_enabled;
 extern int maxseg_unacked;
-KALLOC_TYPE_DECLARE(tcp_reass_zone);
-KALLOC_TYPE_DECLARE(tcp_rxt_seg_zone);
-KALLOC_TYPE_DECLARE(tcp_seg_sent_zone);
 extern int tcp_ecn_outbound;
 extern int tcp_ecn_inbound;
 extern uint32_t tcp_do_autorcvbuf;
@@ -1740,11 +1770,52 @@ extern int tcp_randomize_timestamps;
 extern int tcp_rledbat;
 extern int tcp_use_min_curr_rtt;
 extern int tcp_do_timestamps;
+
+/*
+ * Feature flags for LQM heuristics
+ * Can be useful for testing
+ */
+#define TCP_LINK_HEUR_RXMT_COMP          0x0001
+#define TCP_LINK_HEUR_NOACKPRI           0x0002
+#define TCP_LINK_HEUR_SYNRMXT            0x0004
+#define TCP_LINK_HEUR_STEALTH            0x0008
+#define TCP_LINK_HEUR_RTOMIN             0x0010
+#define TCP_LINK_HEUR_NOTLP              0x0020
+
+#define TCP_LINK_HEURISTICS_DEFAULT (\
+    TCP_LINK_HEUR_RXMT_COMP | \
+    TCP_LINK_HEUR_NOACKPRI | \
+    TCP_LINK_HEUR_SYNRMXT | \
+    TCP_LINK_HEUR_STEALTH | \
+    TCP_LINK_HEUR_RTOMIN | \
+    TCP_LINK_HEUR_NOTLP)
+
+extern int32_t tcp_link_heuristics_flags;
+extern int32_t tcp_link_heuristics_rto_min;
+
+#define TCP_COMP_RXMT_GENCNT_MASK       0x80000000
+
+/* 3 seconds is conservative value (see RFC 2988 and RFC 6298) */
+#define TCP_DEFAULT_LINK_HEUR_RTOMIN 3000
+
 /*
  * Dummy value used for when there is no flow and we want to ensure that compression
  * can happen.
  */
 #define TCP_ACK_COMPRESSION_DUMMY 1
+
+KALLOC_TYPE_DECLARE(tcp_reass_zone);
+extern struct tseg_qent * tcp_reass_qent_alloc(void);
+extern void tcp_reass_qent_free(struct tseg_qent *te);
+
+KALLOC_TYPE_DECLARE(tcp_rxt_seg_zone);
+extern struct tcp_rxt_seg * tcp_rxt_seg_qent_alloc(void);
+extern void tcp_rxt_seg_qent_free(struct tcp_rxt_seg *te);
+
+KALLOC_TYPE_DECLARE(tcp_seg_sent_zone);
+extern struct tcp_seg_sent * tcp_seg_sent_qent_alloc(void);
+extern void tcp_seg_sent_qent_free(struct tcp_seg_sent *te);
+
 
 extern int tcp_do_better_lr;
 extern int tcp_cubic_minor_fixes;
@@ -1766,7 +1837,8 @@ struct tcp_respond_args {
 	    intcoproc_allowed:1,
 	    keep_alive:1,
 	    noconstrained:1,
-	    management_allowed:1;
+	    management_allowed:1,
+	    ultra_constrained_allowed:1;
 };
 
 void     tcp_canceltimers(struct tcpcb *);
@@ -1784,15 +1856,16 @@ void     tcp_mss(struct tcpcb *, int, unsigned int);
 uint32_t tcp_ceil(double a);
 uint32_t tcp_round_to(uint32_t val, uint32_t round);
 uint32_t tcp_round_up(uint32_t val, uint32_t base);
-uint32_t ntoh24(u_char *p);
+uint32_t ntoh24(u_char * p __sized_by(3));
 uint32_t tcp_packets_this_ack(struct tcpcb *tp, uint32_t acked);
 int      tcp_mssopt(struct tcpcb *);
 void     tcp_drop_syn_sent(struct inpcb *, int);
+uint32_t tcp_get_effective_mtu(struct rtentry *, uint32_t);
 void     tcp_mtudisc(struct inpcb *, int);
 struct tcpcb *
 tcp_newtcpcb(struct inpcb *);
 int      tcp_output(struct tcpcb *);
-void     tcp_respond(struct tcpcb *, void *, struct tcphdr *, struct mbuf *,
+void     tcp_respond(struct tcpcb *, void *ipgen __sized_by(ipgen_size), size_t ipgen_size, struct tcphdr *, struct mbuf *,
     tcp_seq, tcp_seq, uint8_t, struct tcp_respond_args *);
 struct rtentry *
 tcp_rtlookup(struct inpcb *, unsigned int);
@@ -1827,7 +1900,7 @@ void     tcp_set_ecn(struct tcpcb *tp, struct ifnet *ifp);
 uint8_t  tcp_get_ace(struct tcphdr *th);
 uint32_t tcp_flight_size(struct tcpcb *tp);
 void     tcp_reset_stretch_ack(struct tcpcb *tp);
-extern void tcp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *);
+extern void tcp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)));
 uint32_t tcp_count_opportunistic(unsigned int ifindex, u_int32_t flags);
 uint32_t tcp_find_anypcb_byaddr(struct ifaddr *ifa);
 void tcp_set_max_rwinscale(struct tcpcb *tp, struct socket *so);
@@ -1837,7 +1910,7 @@ extern int32_t timer_diff(uint32_t t1, uint32_t toff1, uint32_t t2, uint32_t tof
 
 /* RACK related functions */
 void tcp_rack_transmit_seg(struct tcpcb *tp, struct tcp_seg_sent *seg, tcp_seq start, tcp_seq end, uint32_t xmit_ts, uint8_t flags);
-void tcp_rack_update_reordering_window(struct tcpcb *tp, tcp_seq th_ack);
+void tcp_rack_update_reordering_window(struct tcpcb *tp, tcp_seq highest_acked_sacked);
 void tcp_rack_update_reordering_win_persist(struct tcpcb *tp);
 void tcp_rack_bad_rexmt_restore(struct tcpcb *tp);
 void tcp_rack_reset_segs_retransmitted(struct tcpcb *tp);
@@ -1914,12 +1987,12 @@ extern void tcp_get_connectivity_status(struct tcpcb *,
 
 extern void tcp_clear_keep_alive_offload(struct socket *so);
 extern void tcp_fill_keepalive_offload_frames(struct ifnet *,
-    struct ifnet_keepalive_offload_frame *, u_int32_t, size_t, u_int32_t *);
+    struct ifnet_keepalive_offload_frame * frames_array __counted_by(frames_array_count), u_int32_t frames_array_count, size_t, u_int32_t *);
 extern int tcp_notify_kao_timeout(ifnet_t ifp,
     struct ifnet_keepalive_offload_frame *frame);
 
 extern void tcp_disable_tfo(struct tcpcb *tp);
-extern void tcp_tfo_gen_cookie(struct inpcb *inp, u_char *out, size_t blk_size);
+extern void tcp_tfo_gen_cookie(struct inpcb *inp, u_char *out __sized_by(blk_size), size_t blk_size);
 #define TCP_FASTOPEN_KEYLEN 16
 extern int tcp_freeq(struct tcpcb *tp);
 extern errno_t tcp_notify_ack_id_valid(struct tcpcb *, struct socket *, u_int32_t);
@@ -1941,14 +2014,16 @@ extern uint16_t mptcp_output_csum(struct mbuf *m, uint64_t dss_val,
     uint32_t sseq, uint16_t dlen);
 extern int mptcp_adj_mss(struct tcpcb *, boolean_t);
 extern void mptcp_insert_rmap(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th);
-extern int dump_mptcp_reass_qlen(char *, int);
+extern int dump_mptcp_reass_qlen(char * __sized_by(str_len), int str_len);
 #endif
 
-extern int dump_tcp_reass_qlen(char *, int);
+extern int dump_tcp_reass_qlen(char * str __sized_by(str_len), int str_len);
 extern uint32_t tcp_reass_qlen_space(struct socket *);
 
 __private_extern__ void tcp_update_stats_per_flow(
 	struct ifnet_stats_per_flow *, struct ifnet *);
+
+extern void tcp_set_link_heur_rtomin(struct tcpcb *tp, ifnet_t ifp);
 
 #define TCP_ACK_STRATEGY_LEGACY 0
 #define TCP_ACK_STRATEGY_MODERN 1
@@ -1962,6 +2037,11 @@ void tcp_del_fsw_flow(struct tcpcb *);
 #define tcp_add_fsw_flow(...)
 #define tcp_del_fsw_flow(...)
 #endif /* !SKYWALK */
+
+typedef void *__single lr_ref_t;
+#define TCP_INIT_LR_SAVED(lr) ((lr) == NULL                                             \
+	? __unsafe_forge_single(void *, __builtin_return_address(0))    \
+	: (lr))
 
 #endif /* BSD_KERNEL_PRIVATE */
 

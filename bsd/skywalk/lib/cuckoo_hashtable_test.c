@@ -180,7 +180,7 @@ cht_obj_fini()
 {
 	VERIFY(cht_objs != NULL);
 	for (uint32_t i = 0; i < CHT_OBJ_MAX; i++) {
-		ASSERT(os_ref_release(&cht_objs[i].co_refcnt) == 0);
+		os_ref_release_last(&cht_objs[i].co_refcnt);
 		cht_objs[i].co_state = COS_NOT_ADDED;
 		cht_objs[i].co_seen = 0;
 	}

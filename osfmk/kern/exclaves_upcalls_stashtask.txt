@@ -1,0 +1,2 @@
+Please avoid updating any legacy upcalls (exclaves_upcalls.tightbeam) and their handlers, which are being deprecated in favor of v2 upcalls. If you cannot avoid it, ensure you update the newer v2 upcall handler and exclaves_upcalls_v2.tightbeam as well.
+

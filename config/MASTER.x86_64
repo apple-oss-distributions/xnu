@@ -57,7 +57,7 @@
 #  MACH_RELEASE =   [ MACH_BASE ]
 #  MACH_DEV =       [ MACH_BASE importance_trace config_task_suspend_stats ]
 #  MACH_DEBUG =     [ MACH_BASE importance_trace importance_debug config_task_suspend_stats ]
-#  SCHED_BASE =     [ config_sched_timeshare_core config_sched_sfi ]
+#  SCHED_BASE =     [ config_sched_timeshare_core config_sched_sfi config_sched_smt ]
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
 #  SCHED_DEBUG =    [ SCHED_BASE ]
@@ -91,3 +91,5 @@ options     NO_NESTED_PMAP                  # <no_nested_pmap>
 options		HYPERVISOR				# Apple hypervisor kext support	# <hypervisor>
 
 options     CONFIG_MACH_APPROXIMATE_TIME
+
+options     CONFIG_SCHED_SMT        # SMT-aware scheduler policies # <config_sched_smt>

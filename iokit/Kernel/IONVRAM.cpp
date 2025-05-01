@@ -94,46 +94,58 @@ class IONVRAMV3Handler;
 
 #define SAFE_TO_LOCK() (preemption_enabled() && !panic_active())
 
-#define CONTROLLERLOCK()                     \
-({                                           \
-	if (SAFE_TO_LOCK())                  \
-	        IOLockLock(_controllerLock); \
+#define NVRAMLOCK(lock)       \
+({                            \
+	if (SAFE_TO_LOCK())       \
+	        IOLockLock(lock); \
 })
 
-#define CONTROLLERUNLOCK()                     \
-({                                             \
-	if (SAFE_TO_LOCK())                    \
-	        IOLockUnlock(_controllerLock); \
+#define NVRAMUNLOCK(lock)       \
+({                              \
+	if (SAFE_TO_LOCK())         \
+	        IOLockUnlock(lock); \
 })
 
-#define NVRAMREADLOCK()                       \
-({                                            \
-	if (SAFE_TO_LOCK())                   \
-	        IORWLockRead(_variableLock);  \
+#define NVRAMLOCKASSERTHELD(lock)                   \
+({                                                  \
+	if (SAFE_TO_LOCK())                             \
+	        IOLockAssert(lock, kIOLockAssertOwned); \
 })
 
-#define NVRAMWRITELOCK()                      \
-({                                            \
-	if (SAFE_TO_LOCK())                   \
-	        IORWLockWrite(_variableLock); \
+#define NVRAMREADLOCK(lock)     \
+({                              \
+	if (SAFE_TO_LOCK())         \
+	        IORWLockRead(lock); \
 })
 
-#define NVRAMUNLOCK()                          \
-({                                             \
-	if (SAFE_TO_LOCK())                    \
-	        IORWLockUnlock(_variableLock); \
+#define NVRAMWRITELOCK(lock)     \
+({                               \
+	if (SAFE_TO_LOCK())          \
+	        IORWLockWrite(lock); \
 })
 
-#define NVRAMLOCKASSERTHELD()                                       \
-({                                                                  \
-	if (SAFE_TO_LOCK())                                         \
-	        IORWLockAssert(_variableLock, kIORWLockAssertHeld); \
+#define NVRAMRWUNLOCK(lock)       \
+({                                \
+	if (SAFE_TO_LOCK())           \
+	        IORWLockUnlock(lock); \
 })
 
-#define NVRAMLOCKASSERTEXCLUSIVE()                                   \
-({                                                                   \
-	if (SAFE_TO_LOCK())                                          \
-	        IORWLockAssert(_variableLock, kIORWLockAssertWrite); \
+#define NVRAMRWUNLOCKANDWRITE(lock) \
+({                                  \
+	NVRAMRWUNLOCK(lock);            \
+	NVRAMWRITELOCK(lock);           \
+})
+
+#define NVRAMRWLOCKASSERTHELD(lock)                    \
+({                                                     \
+	if (SAFE_TO_LOCK())                                \
+	        IORWLockAssert(lock, kIORWLockAssertHeld); \
+})
+
+#define NVRAMRWLOCKASSERTEXCLUSIVE(lock)                \
+({                                                      \
+	if (SAFE_TO_LOCK())                                 \
+	        IORWLockAssert(lock, kIORWLockAssertWrite); \
 })
 
 // MOD = Write, Delete
@@ -742,24 +754,20 @@ keyWithGuidAndCString(const uuid_t guid, const char * cstring)
 }
 
 static void
-dumpDict(const OSDictionary *dict)
+dumpDict(OSSharedPtr<OSDictionary> dict)
 {
 	const OSSymbol                    *key;
 	OSSharedPtr<OSCollectionIterator> iter;
 	unsigned int                      count = 0;
 
-	iter = OSCollectionIterator::withCollection(dict);
-	if (iter == nullptr) {
-		DEBUG_ERROR("failed to create iterator\n");
-		goto exit;
-	}
+	iter = OSCollectionIterator::withCollection(dict.get());
+	require_action(iter, exit, DEBUG_ERROR("Failed to create iterator\n"));
 
 	DEBUG_INFO("Dumping dict...\n");
 	while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
 		count++;
 		DEBUG_INFO("%u: %s\n", count, key->getCStringNoCopy());
 	}
-
 exit:
 	return;
 }
@@ -856,7 +864,7 @@ class IODTNVRAMDiags : public IOService
 	OSDeclareDefaultStructors(IODTNVRAMDiags)
 private:
 	IODTNVRAM                 *_provider;
-	IORWLock                  *_variableLock;
+	IORWLock                  *_diagLock;
 	OSSharedPtr<OSDictionary> _stats;
 
 	bool serializeStats(void *, OSSerialize * serializer);
@@ -878,8 +886,8 @@ IODTNVRAMDiags::start(IOService * provider)
 
 	require(super::start(provider), error);
 
-	_variableLock = IORWLockAlloc();
-	require(_variableLock != nullptr, error);
+	_diagLock = IORWLockAlloc();
+	require(_diagLock != nullptr, error);
 
 	_stats = OSDictionary::withCapacity(1);
 	require(_stats != nullptr, error);
@@ -923,7 +931,7 @@ IODTNVRAMDiags::logVariable(NVRAMPartitionType region, IONVRAMOperation op, cons
 
 	snprintf(entryKey, entryKeySize, "%02X:%s", region, name);
 
-	NVRAMWRITELOCK();
+	NVRAMWRITELOCK(_diagLock);
 	existingEntry.reset(OSDynamicCast(OSDictionary, _stats->getObject(entryKey)), OSRetain);
 
 	if (existingEntry == nullptr) {
@@ -974,7 +982,7 @@ IODTNVRAMDiags::logVariable(NVRAMPartitionType region, IONVRAMOperation op, cons
 	_stats->setObject(entryKey, existingEntry);
 
 unlock:
-	NVRAMUNLOCK();
+	NVRAMRWUNLOCK(_diagLock);
 
 exit:
 	IODeleteData(entryKey, char, entryKeySize);
@@ -987,9 +995,9 @@ IODTNVRAMDiags::serializeStats(void *, OSSerialize * serializer)
 {
 	bool ok;
 
-	NVRAMREADLOCK();
+	NVRAMREADLOCK(_diagLock);
 	ok = _stats->serialize(serializer);
-	NVRAMUNLOCK();
+	NVRAMRWUNLOCK(_diagLock);
 
 	return ok;
 }
@@ -1063,20 +1071,18 @@ IODTNVRAMVariables::serializeProperties(OSSerialize *s) const
 	const OSSymbol                    *key;
 	OSSharedPtr<OSDictionary>         dict;
 	OSSharedPtr<OSCollectionIterator> iter;
-	OSSharedPtr<OSDictionary>         localVariables = _provider->_varDict;
+	OSSharedPtr<OSDictionary>         localVariables;
 	bool                              ok = false;
+	IOReturn                          status;
+
+	status = _provider->getVarDict(localVariables);
+	require_noerr_action(status, exit, DEBUG_ERROR("Failed to get variable dictionary\n"));
 
 	dict = OSDictionary::withCapacity(localVariables->getCount());
-	if (dict == nullptr) {
-		DEBUG_ERROR("No dictionary\n");
-		goto exit;
-	}
+	require_action(dict, exit, DEBUG_ERROR("Failed to create dict\n"));
 
 	iter = OSCollectionIterator::withCollection(localVariables.get());
-	if (iter == nullptr) {
-		DEBUG_ERROR("failed to create iterator\n");
-		goto exit;
-	}
+	require_action(iter, exit, DEBUG_ERROR("Failed to create iterator\n"));
 
 	while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
 		if (verifyPermission(kIONVRAMOperationRead, key, _systemActive)) {
@@ -1198,6 +1204,7 @@ public:
 	virtual uint32_t getSystemUsed(void) const = 0;
 	virtual uint32_t getCommonUsed(void) const = 0;
 	virtual bool     getSystemPartitionActive(void) const = 0;
+	virtual IOReturn getVarDict(OSSharedPtr<OSDictionary> &varDictCopy) = 0;
 };
 
 IODTNVRAMFormatHandler::~IODTNVRAMFormatHandler()
@@ -1259,8 +1266,8 @@ IODTNVRAM::init(IORegistryEntry *old, const IORegistryPlane *plane)
 	OSSharedPtr<OSDictionary> dict;
 
 	DEBUG_INFO("...\n");
-
 	require(super::init(old, plane), fail);
+	x86Device = false;
 
 #if CONFIG_CSR && XNU_TARGET_OS_OSX
 	gInternalBuild = (csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0);
@@ -1268,12 +1275,6 @@ IODTNVRAM::init(IORegistryEntry *old, const IORegistryPlane *plane)
 	gInternalBuild = true;
 #endif
 	DEBUG_INFO("gInternalBuild = %d\n", gInternalBuild);
-
-	_variableLock = IORWLockAlloc();
-	require(_variableLock != nullptr, fail);
-
-	_controllerLock = IOLockAlloc();
-	require(_controllerLock != nullptr, fail);
 
 	// Clear the IORegistryEntry property table
 	dict =  OSDictionary::withCapacity(1);
@@ -1293,7 +1294,7 @@ IODTNVRAM::start(IOService *provider)
 {
 	OSSharedPtr<OSNumber> version;
 
-	DEBUG_INFO("...\n");
+	DEBUG_ALWAYS("...\n");
 
 	require(super::start(provider), fail);
 
@@ -1301,7 +1302,7 @@ IODTNVRAM::start(IOService *provider)
 	// If not, skip any additional initialization being done here.
 	// This is not an error we just need to successfully exit this function to allow
 	// AppleEFIRuntime to proceed and take over operation
-	require_action(_controllerLock != nullptr, no_common, DEBUG_INFO("x86 init\n"));
+	require_action(x86Device == false, no_common, DEBUG_INFO("x86 init\n"));
 
 	_diags = new IODTNVRAMDiags;
 	if (!_diags || !_diags->init()) {
@@ -1417,6 +1418,8 @@ IODTNVRAM::initImageFormat(void)
 	OSData                       *data = nullptr;
 	uint32_t                     size = 0;
 	const uint8_t                *image = nullptr;
+	OSSharedPtr<OSDictionary>    localVariables;
+	IOReturn                     status;
 
 	entry = IORegistryEntry::fromPath("/chosen", gIODTPlane);
 
@@ -1442,16 +1445,20 @@ IODTNVRAM::initImageFormat(void)
 
 skip:
 	if (IONVRAMV3Handler::isValidImage(image, size)) {
-		_format = IONVRAMV3Handler::init(this, image, size, _varDict);
+		_format = IONVRAMV3Handler::init(this, image, size);
 		require_action(_format, skip, panic("IONVRAMV3Handler creation failed\n"));
 	} else {
-		_format = IONVRAMCHRPHandler::init(this, image, size, _varDict);
+		_format = IONVRAMCHRPHandler::init(this, image, size);
 		require_action(_format, skip, panic("IONVRAMCHRPHandler creation failed\n"));
 	}
 
-	_format->unserializeVariables();
+	status = _format->unserializeVariables();
+	verify_noerr_action(status, DEBUG_ERROR("Failed to unserialize variables, status=%08x\n", status));
 
-	dumpDict(_varDict.get());
+	status = _format->getVarDict(localVariables);
+	verify_noerr_action(status, DEBUG_ERROR("Failed to get variable dictionary, status=%08x\n", status));
+
+	dumpDict(localVariables);
 
 #if defined(RELEASE)
 	if (entry != nullptr) {
@@ -1468,14 +1475,10 @@ IODTNVRAM::registerNVRAMController(IONVRAMController *controller)
 {
 	DEBUG_INFO("setting controller\n");
 
-	NVRAMWRITELOCK();
-	CONTROLLERLOCK();
-
+	require_action(_format != nullptr, exit, DEBUG_ERROR("Handler not initialized yet\n"));
 	_format->setController(controller);
 
-	CONTROLLERUNLOCK();
-	NVRAMUNLOCK();
-
+exit:
 	return;
 }
 
@@ -1514,6 +1517,8 @@ IODTNVRAM::syncInternal(bool rateLimit)
 		goto exit;
 	}
 
+	require_action(_format != nullptr, exit, (ret = kIOReturnNotReady, DEBUG_ERROR("Handler not initialized yet\n")));
+
 	// Rate limit requests to sync. Drivers that need this rate limiting will
 	// shadow the data and only write to flash when they get a sync call
 	if (rateLimit) {
@@ -1526,13 +1531,7 @@ IODTNVRAM::syncInternal(bool rateLimit)
 	DEBUG_INFO("Calling sync()\n");
 	record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "sync", "triggered");
 
-	NVRAMREADLOCK();
-	CONTROLLERLOCK();
-
 	ret = _format->sync();
-
-	CONTROLLERUNLOCK();
-	NVRAMUNLOCK();
 
 	record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "sync", "completed with ret=%08x", ret);
 
@@ -1557,39 +1556,33 @@ IODTNVRAM::reload(void)
 	_format->reload();
 }
 
+IOReturn
+IODTNVRAM::getVarDict(OSSharedPtr<OSDictionary> &varDictCopy)
+{
+	return _format->getVarDict(varDictCopy);
+}
+
 OSPtr<OSDictionary>
 IODTNVRAM::dictionaryWithProperties(void) const
 {
 	const OSSymbol                    *canonicalKey;
 	OSSharedPtr<OSDictionary>         localVarDict, returnDict;
 	OSSharedPtr<OSCollectionIterator> iter;
-	unsigned int                      totalCapacity = 0;
 	uuid_t                            varGuid;
 	const char *                      varName;
+	IOReturn                          status;
 
-	NVRAMREADLOCK();
-	if (_varDict) {
-		localVarDict = OSDictionary::withDictionary(_varDict.get());
-	}
-	NVRAMUNLOCK();
+	require_action(_format, exit, DEBUG_ERROR("Handler not initialized yet\n"));
 
-	if (localVarDict != nullptr) {
-		totalCapacity =  localVarDict->getCapacity();
-	}
+	status = _format->getVarDict(localVarDict);
+	require_noerr_action(status, exit, DEBUG_ERROR("Failed to get variable dictionary\n"));
 
-	returnDict = OSDictionary::withCapacity(totalCapacity);
-
-	if (returnDict == nullptr) {
-		DEBUG_ERROR("No dictionary\n");
-		goto exit;
-	}
+	returnDict = OSDictionary::withCapacity(localVarDict->getCapacity());
+	require_action(returnDict, exit, DEBUG_ERROR("Failed to create return dict\n"));
 
 	// Copy system entries first if present then copy unique other entries
 	iter = OSCollectionIterator::withCollection(localVarDict.get());
-	if (iter == nullptr) {
-		DEBUG_ERROR("failed to create iterator\n");
-		goto exit;
-	}
+	require_action(iter, exit, DEBUG_ERROR("Failed to create iterator\n"));
 
 	while ((canonicalKey = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
 		parseVariableName(canonicalKey, &varGuid, &varName);
@@ -1604,10 +1597,7 @@ IODTNVRAM::dictionaryWithProperties(void) const
 	iter.reset();
 
 	iter = OSCollectionIterator::withCollection(localVarDict.get());
-	if (iter == nullptr) {
-		DEBUG_ERROR("failed to create iterator\n");
-		goto exit;
-	}
+	require_action(iter, exit, DEBUG_ERROR("Failed to create iterator\n"));
 
 	while ((canonicalKey = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
 		parseVariableName(canonicalKey, &varGuid, &varName);
@@ -1648,6 +1638,8 @@ IODTNVRAM::flushGUID(const uuid_t guid, IONVRAMOperation op)
 {
 	IOReturn ret = kIOReturnSuccess;
 
+	require_action(_format != nullptr, exit, (ret = kIOReturnNotReady, DEBUG_ERROR("Handler not initialized yet\n")));
+
 	if (_format->getSystemPartitionActive() && (uuid_compare(guid, gAppleSystemVariableGuid) == 0)) {
 		ret = _format->flush(guid, op);
 
@@ -1658,6 +1650,7 @@ IODTNVRAM::flushGUID(const uuid_t guid, IONVRAMOperation op)
 		DEBUG_INFO("common variables flushed, ret=%08x\n", ret);
 	}
 
+exit:
 	return ret;
 }
 
@@ -1666,8 +1659,6 @@ IODTNVRAM::handleSpecialVariables(const char *name, const uuid_t guid, const OSO
 {
 	IOReturn ret = kIOReturnSuccess;
 	bool special = false;
-
-	NVRAMLOCKASSERTEXCLUSIVE();
 
 	// ResetNVRam flushes both regions in one call
 	// Obliterate can flush either separately
@@ -1699,11 +1690,13 @@ IODTNVRAM::copyPropertyWithGUIDAndName(const uuid_t guid, const char *name) cons
 	OSSharedPtr<const OSSymbol> canonicalKey;
 	OSSharedPtr<OSObject>       theObject;
 	uuid_t                      newGuid;
+	OSSharedPtr<OSDictionary>   localVarDict;
+	IOReturn                    status;
 
-	if (_varDict == nullptr) {
-		DEBUG_INFO("No dictionary\n");
-		goto exit;
-	}
+	require_action(_format, exit, DEBUG_ERROR("Handler not initialized yet\n"));
+
+	status = _format->getVarDict(localVarDict);
+	require_noerr_action(status, exit, DEBUG_ERROR("Failed to get variable dictionary\n"));
 
 	if (!verifyPermission(kIONVRAMOperationRead, guid, name, _format->getSystemPartitionActive())) {
 		DEBUG_INFO("Not privileged\n");
@@ -1714,9 +1707,7 @@ IODTNVRAM::copyPropertyWithGUIDAndName(const uuid_t guid, const char *name) cons
 
 	canonicalKey = keyWithGuidAndCString(newGuid, name);
 
-	NVRAMREADLOCK();
-	theObject.reset(_varDict->getObject(canonicalKey.get()), OSRetain);
-	NVRAMUNLOCK();
+	theObject.reset(localVarDict->getObject(canonicalKey.get()), OSRetain);
 
 	if (_diags) {
 		_diags->logVariable(getPartitionTypeForGUID(newGuid), kIONVRAMOperationRead, name, NULL);
@@ -1794,6 +1785,8 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 	bool                  ok;
 	size_t                propDataSize = 0;
 	uuid_t                newGuid;
+
+	require_action(_format != nullptr, exit, (ret = kIOReturnNotReady, DEBUG_ERROR("Handler not initialized yet\n")));
 
 	deletePropertyKey = strncmp(name, kIONVRAMDeletePropertyKey, sizeof(kIONVRAMDeletePropertyKey)) == 0;
 	deletePropertyKeyWRet = strncmp(name, kIONVRAMDeletePropertyKeyWRet, sizeof(kIONVRAMDeletePropertyKeyWRet)) == 0;
@@ -1920,9 +1913,7 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 		goto exit;
 	}
 
-	NVRAMWRITELOCK();
 	ok = handleSpecialVariables(name, guid, propObject.get(), &ret);
-	NVRAMUNLOCK();
 
 	if (ok) {
 		goto exit;
@@ -1932,12 +1923,7 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 		DEBUG_INFO("Adding object\n");
 
 		translateGUID(guid, name, newGuid, _format->getSystemPartitionActive());
-
-		NVRAMWRITELOCK();
-
 		ret = _format->setVariable(newGuid, name, propObject.get());
-
-		NVRAMUNLOCK();
 	} else {
 		DEBUG_INFO("Removing object\n");
 		ret = removePropertyWithGUIDAndName(guid, name);
@@ -1991,12 +1977,7 @@ IODTNVRAM::removePropertyWithGUIDAndName(const uuid_t guid, const char *name)
 	uuid_t   newGuid;
 
 	DEBUG_INFO("name=%s\n", name);
-
-	if (_varDict == nullptr) {
-		DEBUG_INFO("No dictionary\n");
-		ret = kIOReturnNotFound;
-		goto exit;
-	}
+	require_action(_format != nullptr, exit, (ret = kIOReturnNotReady, DEBUG_ERROR("Handler not initialized yet\n")));
 
 	if (!verifyPermission(kIONVRAMOperationDelete, guid, name, _format->getSystemPartitionActive())) {
 		DEBUG_INFO("Not privileged\n");
@@ -2005,17 +1986,12 @@ IODTNVRAM::removePropertyWithGUIDAndName(const uuid_t guid, const char *name)
 	}
 
 	translateGUID(guid, name, newGuid, _format->getSystemPartitionActive());
-
-	NVRAMWRITELOCK();
-
 	ret = _format->setVariable(newGuid, name, nullptr);
 
 	if (ret != kIOReturnSuccess) {
 		DEBUG_INFO("%s not found\n", name);
 		ret = kIOReturnNotFound;
 	}
-
-	NVRAMUNLOCK();
 
 	record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "delete", "%s", name);
 

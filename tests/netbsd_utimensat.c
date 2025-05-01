@@ -61,7 +61,7 @@ static void
 chtmpdir(void)
 {
 	T_SETUPBEGIN;
-	T_ASSERT_POSIX_ZERO(chdir(dt_tmpdir()), NULL);
+	T_ASSERT_POSIX_SUCCESS(chdir(dt_tmpdir()), NULL);
 
 	// <rdar://problem/31780295> dt_tmpdir() should guarantee a clean directory for each run
 	unlink(FILEPATH);
@@ -86,15 +86,15 @@ T_DECL(netbsd_utimensat_fd, "See that utimensat works with fd")
 	int fd;
 	struct stat st;
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_POSIX_SUCCESS((fd = open(FILEPATH, O_CREAT | O_RDWR, 0644)), NULL);
-	T_ASSERT_POSIX_ZERO(close(fd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(fd), NULL);
 
 	T_ASSERT_POSIX_SUCCESS((dfd = open(DIRPATH, O_RDONLY, 0)), NULL);
-	T_ASSERT_POSIX_ZERO(utimensat(dfd, BASEFILE, tptr, 0), NULL);
-	T_ASSERT_POSIX_ZERO(close(dfd), NULL);
+	T_ASSERT_POSIX_SUCCESS(utimensat(dfd, BASEFILE, tptr, 0), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(dfd), NULL);
 
-	T_ASSERT_POSIX_ZERO(stat(FILEPATH, &st), NULL);
+	T_ASSERT_POSIX_SUCCESS(stat(FILEPATH, &st), NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_sec, tptr[0].tv_sec, NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_nsec, tptr[0].tv_nsec, NULL);
 	T_ASSERT_EQ(st.st_mtimespec.tv_sec, tptr[1].tv_sec, NULL);
@@ -108,14 +108,14 @@ T_DECL(netbsd_utimensat_fdcwd, "See that utimensat works with fd as AT_FDCWD")
 	int fd;
 	struct stat st;
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_POSIX_SUCCESS((fd = open(FILEPATH, O_CREAT | O_RDWR, 0644)), NULL);
-	T_ASSERT_POSIX_ZERO(close(fd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(fd), NULL);
 
-	T_ASSERT_POSIX_ZERO(chdir(DIRPATH), NULL);
-	T_ASSERT_POSIX_ZERO(utimensat(AT_FDCWD, BASEFILE, tptr, 0), NULL);
+	T_ASSERT_POSIX_SUCCESS(chdir(DIRPATH), NULL);
+	T_ASSERT_POSIX_SUCCESS(utimensat(AT_FDCWD, BASEFILE, tptr, 0), NULL);
 
-	T_ASSERT_POSIX_ZERO(stat(BASEFILE, &st), NULL);
+	T_ASSERT_POSIX_SUCCESS(stat(BASEFILE, &st), NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_sec, tptr[0].tv_sec, NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_nsec, tptr[0].tv_nsec, NULL);
 	T_ASSERT_EQ(st.st_mtimespec.tv_sec, tptr[1].tv_sec, NULL);
@@ -126,7 +126,7 @@ T_DECL(netbsd_utimensat_fdcwderr, "See that utimensat fails with fd as AT_FDCWD 
 {
 	chtmpdir();
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_EQ(utimensat(AT_FDCWD, FILEERR, tptr, 0), -1, NULL);
 }
 
@@ -136,10 +136,10 @@ T_DECL(netbsd_utimensat_fderr1, "See that utimensat fail with bad path")
 
 	int dfd;
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_POSIX_SUCCESS((dfd = open(DIRPATH, O_RDONLY, 0)), NULL);
 	T_ASSERT_EQ(utimensat(dfd, FILEERR, tptr, 0), -1, NULL);
-	T_ASSERT_POSIX_ZERO(close(dfd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(dfd), NULL);
 }
 
 T_DECL(netbsd_utimensat_fderr2, "See that utimensat fails with bad fdat")
@@ -150,13 +150,13 @@ T_DECL(netbsd_utimensat_fderr2, "See that utimensat fails with bad fdat")
 	int fd;
 	char cwd[MAXPATHLEN];
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_POSIX_SUCCESS((fd = open(FILEPATH, O_CREAT | O_RDWR, 0644)), NULL);
-	T_ASSERT_POSIX_ZERO(close(fd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(fd), NULL);
 
 	T_ASSERT_POSIX_SUCCESS((dfd = open(getcwd(cwd, MAXPATHLEN), O_RDONLY, 0)), NULL);
 	T_ASSERT_EQ(utimensat(dfd, BASEFILE, tptr, 0), -1, NULL);
-	T_ASSERT_POSIX_ZERO(close(dfd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(dfd), NULL);
 }
 
 T_DECL(netbsd_utimensat_fderr3, "See that utimensat fails with fd as -1")
@@ -165,9 +165,9 @@ T_DECL(netbsd_utimensat_fderr3, "See that utimensat fails with fd as -1")
 
 	int fd;
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
 	T_ASSERT_POSIX_SUCCESS((fd = open(FILEPATH, O_CREAT | O_RDWR, 0644)), NULL);
-	T_ASSERT_POSIX_ZERO(close(fd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(fd), NULL);
 
 	T_ASSERT_EQ(utimensat(-1, FILEPATH, tptr, 0), -1, NULL);
 }
@@ -179,19 +179,19 @@ T_DECL(netbsd_utimensat_fdlink, "See that utimensat works on symlink")
 	int dfd;
 	struct stat st;
 
-	T_ASSERT_POSIX_ZERO(mkdir(DIRPATH, 0755), NULL);
-	T_ASSERT_POSIX_ZERO(symlink(FILEPATH, LINK), NULL); /* NB: FILE does not exists */
+	T_ASSERT_POSIX_SUCCESS(mkdir(DIRPATH, 0755), NULL);
+	T_ASSERT_POSIX_SUCCESS(symlink(FILEPATH, LINK), NULL); /* NB: FILE does not exists */
 
 	T_ASSERT_POSIX_SUCCESS((dfd = open(DIRPATH, O_RDONLY, 0)), NULL);
 
 	T_ASSERT_EQ(utimensat(dfd, BASELINK, tptr, 0), -1, NULL);
 	T_ASSERT_EQ(errno, ENOENT, NULL);
 
-	T_ASSERT_POSIX_ZERO(utimensat(dfd, BASELINK, tptr, AT_SYMLINK_NOFOLLOW), NULL);
+	T_ASSERT_POSIX_SUCCESS(utimensat(dfd, BASELINK, tptr, AT_SYMLINK_NOFOLLOW), NULL);
 
-	T_ASSERT_POSIX_ZERO(close(dfd), NULL);
+	T_ASSERT_POSIX_SUCCESS(close(dfd), NULL);
 
-	T_ASSERT_POSIX_ZERO(lstat(LINK, &st), NULL);
+	T_ASSERT_POSIX_SUCCESS(lstat(LINK, &st), NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_sec, tptr[0].tv_sec, NULL);
 	T_ASSERT_EQ(st.st_atimespec.tv_nsec, tptr[0].tv_nsec, NULL);
 	T_ASSERT_EQ(st.st_mtimespec.tv_sec, tptr[1].tv_sec, NULL);

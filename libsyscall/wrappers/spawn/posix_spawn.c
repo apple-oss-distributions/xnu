@@ -191,6 +191,8 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	psattrp->psa_dataless_iopolicy = 0;
 
 	psattrp->psa_conclave_id = NULL;
+
+	psattrp->psa_sec_flags = 0;
 }
 
 /*
@@ -927,15 +929,17 @@ int
 posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_t flags)
 {
 	_posix_spawnattr_t psattr;
+	posix_spawn_secflag_options sec_flags;
 
 	if (attr == NULL || *attr == NULL) {
 		return EINVAL;
 	}
 
 	psattr = *(_posix_spawnattr_t *)attr;
+	sec_flags = (posix_spawn_secflag_options)(flags);
+	sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE;
+	psattr->psa_sec_flags = (uint16_t)sec_flags;
 
-	psattr->psa_options |= PSA_OPTION_USE_SEC_TRANSITION_SHIMS;
-	(void)flags;
 	return 0;
 }
 

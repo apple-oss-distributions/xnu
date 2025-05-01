@@ -182,7 +182,7 @@ make_ifmibdata(struct ifnet *ifp, int *__counted_by(2) name, struct sysctl_req *
 		struct ifmibdata_supplemental *ifmd_supp;
 
 		ifmd_supp = kalloc_type(struct ifmibdata_supplemental,
-		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		    Z_WAITOK_ZERO_NOFAIL);
 		if_copy_traffic_class(ifp, &ifmd_supp->ifmd_traffic_class);
 		if_copy_data_extended(ifp, &ifmd_supp->ifmd_data_extended);
 		if_copy_packet_stats(ifp, &ifmd_supp->ifmd_packet_stats);
@@ -203,6 +203,25 @@ make_ifmibdata(struct ifnet *ifp, int *__counted_by(2) name, struct sysctl_req *
 #endif /* DEVELOPMENT || DEBUG */
 
 		kfree_type(struct ifmibdata_supplemental, ifmd_supp);
+		break;
+	}
+
+	case IFDATA_LINKHEURISTICS: {
+		struct if_linkheuristics *ifmd_lh;
+
+		ifmd_lh = kalloc_type(struct if_linkheuristics,
+		    Z_WAITOK_ZERO_NOFAIL);
+
+		if_copy_link_heuristics_stats(ifp, ifmd_lh);
+
+		if (req->oldptr == USER_ADDR_NULL) {
+			req->oldlen = sizeof(struct if_linkheuristics);
+		}
+
+		error = SYSCTL_OUT(req, ifmd_lh, MIN(sizeof(struct if_linkheuristics),
+		    req->oldlen));
+
+		kfree_type(struct if_linkheuristics, ifmd_lh);
 		break;
 	}
 	}

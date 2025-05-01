@@ -6,6 +6,11 @@ export MakeInc_dir=$(SRCROOT)/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
+# proc_reg.h is exported into the userspace internal SDK for usage by SPTM's
+# userspace testing system.
+ARM_PRIVATE_HEADERS = \
+	proc_reg.h
+
 
 EXPINC_SUBDIRS_ARM64 += \
 	sptm
@@ -44,6 +49,8 @@ EXPORT_MD_LIST = \
 	monotonic.h \
 	proc_reg.h \
 	asm.h \
+	speculation.h \
+	static_if.h \
 	tlb.h \
 	pal_hibernate.h
 

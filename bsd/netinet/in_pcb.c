@@ -881,10 +881,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 	struct in_addr laddr;
 	struct ifnet *outif = NULL;
 
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		return EINVAL;
-	}
-	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	ASSERT((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0);
 
 	if (TAILQ_EMPTY(&in_ifaddrhead)) { /* XXX broken! */
 		error = EADDRNOTAVAIL;
@@ -1383,7 +1380,6 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 	in_pcb_check_management_entitled(inp);
 	in_pcb_check_ultra_constrained_entitled(inp);
 done:
-	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
 	return error;
 }
 
@@ -2600,8 +2596,8 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 /*
  * Lookup PCB in hash list.
  */
-struct inpcb *
-in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
+static struct inpcb *
+in_pcblookup_hash_locked(struct inpcbinfo *pcbinfo, struct in_addr faddr,
     u_int fport_arg, struct in_addr laddr, u_int lport_arg, int wildcard,
     struct ifnet *ifp)
 {
@@ -2610,12 +2606,6 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 	u_short fport = (u_short)fport_arg, lport = (u_short)lport_arg;
 	struct inpcb *local_wild = NULL;
 	struct inpcb *local_wild_mapped = NULL;
-
-	/*
-	 * We may have found the pcb in the last lookup - check this first.
-	 */
-
-	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 	/*
 	 * First look for an exact match.
@@ -2645,11 +2635,9 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 			 */
 			if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) !=
 			    WNT_STOPUSING) {
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return inp;
 			} else {
 				/* it's there but dead, say it isn't found */
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return NULL;
 			}
 		}
@@ -2659,7 +2647,6 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		/*
 		 * Not found.
 		 */
-		lck_rw_done(&pcbinfo->ipi_lock);
 		return NULL;
 	}
 
@@ -2684,11 +2671,9 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 			if (inp->inp_laddr.s_addr == laddr.s_addr) {
 				if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) !=
 				    WNT_STOPUSING) {
-					lck_rw_done(&pcbinfo->ipi_lock);
 					return inp;
 				} else {
 					/* it's dead; say it isn't found */
-					lck_rw_done(&pcbinfo->ipi_lock);
 					return NULL;
 				}
 			} else if (inp->inp_laddr.s_addr == INADDR_ANY) {
@@ -2704,26 +2689,58 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		if (local_wild_mapped != NULL) {
 			if (in_pcb_checkstate(local_wild_mapped,
 			    WNT_ACQUIRE, 0) != WNT_STOPUSING) {
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return local_wild_mapped;
 			} else {
 				/* it's dead; say it isn't found */
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return NULL;
 			}
 		}
-		lck_rw_done(&pcbinfo->ipi_lock);
 		return NULL;
 	}
 	if (in_pcb_checkstate(local_wild, WNT_ACQUIRE, 0) != WNT_STOPUSING) {
-		lck_rw_done(&pcbinfo->ipi_lock);
 		return local_wild;
 	}
 	/*
 	 * It's either not found or is already dead.
 	 */
-	lck_rw_done(&pcbinfo->ipi_lock);
 	return NULL;
+}
+
+struct inpcb *
+in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
+    u_int fport_arg, struct in_addr laddr, u_int lport_arg, int wildcard,
+    struct ifnet *ifp)
+{
+	struct inpcb *inp;
+
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
+
+	inp = in_pcblookup_hash_locked(pcbinfo, faddr, fport_arg, laddr,
+	    lport_arg, wildcard, ifp);
+
+	lck_rw_done(&pcbinfo->ipi_lock);
+
+	return inp;
+}
+
+
+struct inpcb *
+in_pcblookup_hash_try(struct inpcbinfo *pcbinfo, struct in_addr faddr,
+    u_int fport_arg, struct in_addr laddr, u_int lport_arg, int wildcard,
+    struct ifnet *ifp)
+{
+	struct inpcb *inp;
+
+	if (!lck_rw_try_lock_shared(&pcbinfo->ipi_lock)) {
+		return NULL;
+	}
+
+	inp = in_pcblookup_hash_locked(pcbinfo, faddr, fport_arg, laddr,
+	    lport_arg, wildcard, ifp);
+
+	lck_rw_done(&pcbinfo->ipi_lock);
+
+	return inp;
 }
 
 /*
@@ -4184,7 +4201,8 @@ inp_restricted_send(struct inpcb *inp, struct ifnet *ifp)
 
 	ret = _inp_restricted_send(inp, ifp);
 	if (ret == TRUE && log_restricted) {
-		printf("pid %d (%s) is unable to transmit packets on %s\n",
+		printf("%s:%d pid %d (%s) is unable to transmit packets on %s\n",
+		    __func__, __LINE__,
 		    proc_getpid(current_proc()), proc_best_name(current_proc()),
 		    ifp->if_xname);
 	}
@@ -4471,4 +4489,53 @@ in_management_interface_check(void)
 	nwk_item->func = in_management_interface_event_callback;
 
 	nwk_wq_enqueue(nwk_item);
+}
+
+void
+inp_enter_bind_in_progress(struct socket *so)
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+#if (DEBUG || DEVELOPMENT)
+	socket_lock_assert_owned(so);
+#endif /* (DEBUG || DEVELOPMENT) */
+
+	VERIFY(inp->inp_bind_in_progress_waiters != UINT16_MAX);
+
+	while ((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0) {
+		lck_mtx_t *mutex_held;
+
+		inp->inp_bind_in_progress_waiters++;
+		inp->inp_bind_in_progress_last_waiter_thread = current_thread();
+
+		if (so->so_proto->pr_getlock != NULL) {
+			mutex_held = (*so->so_proto->pr_getlock)(so, PR_F_WILLUNLOCK);
+		} else {
+			mutex_held = so->so_proto->pr_domain->dom_mtx;
+		}
+		msleep(&inp->inp_bind_in_progress_waiters, mutex_held,
+		    PSOCK | PCATCH, "inp_enter_bind_in_progress", NULL);
+
+		inp->inp_bind_in_progress_last_waiter_thread = NULL;
+
+		inp->inp_bind_in_progress_waiters--;
+	}
+	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	inp->inp_bind_in_progress_thread = current_thread();
+}
+
+void
+inp_exit_bind_in_progress(struct socket *so)
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+#if (DEBUG || DEVELOPMENT)
+	socket_lock_assert_owned(so);
+#endif /* (DEBUG || DEVELOPMENT) */
+
+	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
+	inp->inp_bind_in_progress_thread = NULL;
+	if (__improbable(inp->inp_bind_in_progress_waiters > 0)) {
+		wakeup_one((caddr_t)&inp->inp_bind_in_progress_waiters);
+	}
 }

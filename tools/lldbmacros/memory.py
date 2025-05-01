@@ -28,7 +28,7 @@ def get_vme_object(vme):
     if vme.is_sub_map:
         return kern.CreateTypedPointerFromAddress(vme.vme_submap << 2, 'struct _vm_map')
     if vme.vme_kernel_object:
-        if hasattr(vme, 'vme_is_tagged') and vme.vme_is_tagged:
+        if get_field(vme, 'vme_is_tagged') is not None:
             return kern.globals.kernel_object_tagged
         return kern.globals.kernel_object_default
     kmem   = kmemory.KMem.get_shared()
@@ -49,7 +49,7 @@ def ShowZPerCPU(cmd_args=None, cmd_options={}):
         Usage: showzpcpu [-S] expression [field]
             -S  : sum the values instead of printing them
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
 
     pcpu = LazyTarget.GetTarget().chkCreateValueFromExpression('value', cmd_args[0])
@@ -72,7 +72,7 @@ def ZoneName(zone, zone_security):
         returns:
             the formated name for the zone
     """
-    names = [ "", "shared.", "data.", "" ]
+    names = [ "", "early.", "data.", "data_shared.", "" ]
     return "{:s}{:s}".format(names[int(zone_security.z_kheap_id)], zone.z_name)
 
 def GetZoneByName(name):
@@ -99,6 +99,9 @@ def PrettyPrintDictionary(d):
             print("{:<30s} {: >10s}".format(key, value))
 
 # Macro: memstats
+
+kPolicyClearTheDecks = 0x01
+kPolicyBallastDrain = 0x02
 
 @lldb_command('memstats', 'J')
 def Memstats(cmd_args=None, cmd_options={}):
@@ -135,12 +138,21 @@ def Memstats(cmd_args=None, cmd_options={}):
             memstats["compression_ratio"] = memstats["compressed_count"] / memstats["compressor_count"]
         else:
             memstats["compression_ratio"] = 0
+    memstats["memorystatus_level"] = int(kern.globals.memorystatus_level)
+    memstats["memorystatus_available_pages"] = int(kern.globals.memorystatus_available_pages)
+    memstats["memorystatus_available_pages_critical"] = int(kern.globals.memstat_critical_threshold)
+    memstats["memorystatus_available_pages_idle"] = int(kern.globals.memstat_idle_threshold)
+    memstats["memorystatus_available_pages_soft"] = int(kern.globals.memstat_soft_threshold)
+    if kern.globals.memstat_policy_config & kPolicyClearTheDecks:
+        memstats["memorystatus_clear_the_decks_offset"] = int(kern.globals.memstat_ctd_offset)
+    else:
+        memstats["memorystatus_clear_the_decks_offset"] = 0
+    if kern.globals.memstat_policy_config & kPolicyBallastDrain:
+        memstats["memorystatus_ballast_offset"] = int(kern.globals.memstat_ballast_offset)
+    else:
+        memstats["memorystatus_ballast_offset"] = 0
+
     try:
-        memstats["memorystatus_level"] = int(kern.globals.memorystatus_level)
-        memstats["memorystatus_available_pages"] = int(kern.globals.memorystatus_available_pages)
-        memstats["memorystatus_available_pages_critical"] = int(kern.globals.memorystatus_available_pages_critical_base)
-        memstats["memorystatus_available_pages_idle"] = int(kern.globals.memorystatus_available_pages_critical_idle)
-        memstats["memorystatus_available_pages_hwm"] = int(kern.globals.memorystatus_available_pages_pressure)
         memstats["inuse_ptepages_count"] = int(kern.globals.inuse_ptepages_count)
     except AttributeError:
         pass
@@ -243,7 +255,7 @@ def WhatIsHelper(cmd_args=None):
     """ Routine to show information about a kernel pointer
         Usage: whatis <address>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
 
     address  = kmemory.KMem.get_shared().make_address(ArgumentStringToInt(cmd_args[0]))
@@ -799,7 +811,10 @@ def GetZoneChunk(zone, meta, queue, O=None):
 
         prev_sbv = meta_sbv.xGetSiblingValueAtIndex(-1)
         if prev_sbv.xGetIntegerByName('zm_chunk_len') == GetEnumValue('zm_len_t', 'ZM_PGZ_GUARD'):
-            format_string += " {VT.Green}guarded-before{VT.Default}"
+            if prev_sbv.xGetIntegerByName('zm_guarded'):
+                format_string += " {VT.Green}lead-guard{VT.Default}"
+            else:
+                format_string += " {VT.Green}guarded-before{VT.Default}"
 
         if pgs == chunk and meta_sbv.xGetIntegerByName('zm_guarded'):
             format_string += " {VT.Green}guarded-after{VT.Default}"
@@ -865,7 +880,7 @@ def ShowZChunks(cmd_args=None, cmd_options={}, O=None):
     [address]    can by any address belonging to the zone, or metadata
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing zone argument')
 
     zone = kmemory.Zone(ArgumentStringToInt(cmd_args[0]))
@@ -985,7 +1000,7 @@ def ShowBTLog(cmd_args=None, cmd_options={}, O=None):
         Usage: showbtlog <btlog address>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing btlog address argument')
 
     btlib = kmemory.BTLibrary.get_shared()
@@ -1007,7 +1022,7 @@ def ShowBTLogRecords(cmd_args=None, cmd_options={}, O=None):
             -R              reverse order
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing btlog argument')
 
     btref   = ArgumentStringToInt(cmd_options["-B"]) if "-B" in cmd_options else None
@@ -1065,7 +1080,7 @@ def Zstack(cmd_args=None, cmd_options={}, O=None):
         The stack trace that occurs the most is probably the cause of the leak. Use zstack_findleak for that.
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing btlog argument')
 
     btlib = kmemory.BTLibrary.get_shared()
@@ -1091,7 +1106,7 @@ def zstack_findleak(cmd_args=None, cmd_options={}, O=None):
         the leak.
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing btlog argument')
 
     count = 1
@@ -1149,7 +1164,7 @@ def ShowZstackTop(cmd_args=None, cmd_options={}, O=None):
         Usage: zstack_findtop [-N <n-stacks>] <btlog-addr>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing btlog argument')
 
     count = int(cmd_options.get("-N", 5))
@@ -1171,7 +1186,7 @@ def ShowPCPU(cmd_args=None, cmd_options={}, O=None):
     Use -V       to dump the values of the variables after their addresses
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("No arguments passed")
 
     cpu = int(cmd_options["-N"], 0) if "-N" in cmd_options else None
@@ -1202,7 +1217,7 @@ def ShowIOAllocations(cmd_args=None):
     print("Instance allocation  = {0: <#0x} = {1: d}K".format(kern.globals.debug_ivars_size, kern.globals.debug_ivars_size // 1024))
     print("Container allocation = {0: <#0x} = {1: d}K".format(kern.globals.debug_container_malloc_size, kern.globals.debug_container_malloc_size // 1024))
     print("IOMalloc allocation  = {0: <#0x} = {1: d}K".format(kern.globals.debug_iomalloc_size, kern.globals.debug_iomalloc_size // 1024))
-    print("Container allocation = {0: <#0x} = {1: d}K".format(kern.globals.debug_iomallocpageable_size, kern.globals.debug_iomallocpageable_size // 1024))
+    print("Pageable allocation  = {0: <#0x} = {1: d}K".format(kern.globals.debug_iomallocpageable_size, kern.globals.debug_iomallocpageable_size // 1024))
 
 # EndMacro: showioalloc
 # Macro: showselectmem
@@ -1259,6 +1274,9 @@ def ShowTaskVmeHelper(cmd_args=None, cmd_options={}):
         Use -S flag to show VM object shadow chains
         Use -P flag to show pager info (mapped file, compressed pages, ...)
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     show_pager_info = False
     show_all_shadows = False
     if "-P" in cmd_options:
@@ -1284,6 +1302,86 @@ def ShowAllVME(cmd_args=None, cmd_options={}):
     for task in kern.tasks:
         ShowTaskVMEntries(task, show_pager_info, show_all_shadows)
 
+@lldb_command('showallvmobjects', 'S:PAIEH:')
+def ShowAllVMObjects(cmd_args=None, cmd_options={}):
+    """
+    Show all vm objects.
+    Optional Arguments:
+        -S <virtual,resident,wired,compressed>
+            sort by (default descending) the given field
+            'compressed' implies -I
+        -P
+            show pager information
+        -A
+            sort in ascending order
+        -I
+            show only internal objects
+        -E
+            show only external objects
+        -H <N>
+            show only the first N objects
+    """
+    if '-S' in cmd_options:
+        sort_by = cmd_options['-S'].lower()
+        if sort_by not in {'wired', 'resident', 'virtual', 'compressed'}:
+            print(f'error: Unrecognized sorting field \'{sort_by}\'')
+            return
+    else:
+        sort_by = None
+    show_pager_info = '-P' in cmd_options
+    internal_only = '-I' in cmd_options
+    external_only = '-E' in cmd_options
+    if external_only and internal_only:
+        print('error: Only one of -E and -I may be provided')
+        return
+    if '-H' in cmd_options:
+        head = int(cmd_options['-H'])
+    else:
+        head = None
+
+    all_objects = []
+    i = 0
+    for _vmo in kmemory.Zone("vm objects").iter_allocated(gettype('struct vm_object')):
+        if not sort_by and head and i >= head:
+            break
+        vmo = value(_vmo.AddressOf())
+        if vmo.ref_count == 0:
+            continue
+        if internal_only and vmo.internal == 0:
+            continue
+        if external_only and vmo.internal == 1:
+            continue
+        if sort_by is not None:
+            if sort_by == 'resident':
+                val = vmo.resident_page_count
+            elif sort_by == 'wired':
+                val = vmo.wired_page_count
+            elif sort_by == 'virtual':
+                if vmo.internal:
+                    val = vmo.vo_un1.vou_size
+                else:
+                    val = -1
+            elif sort_by == 'compressed':
+                if vmo.internal == 0:
+                    continue
+                if vmo.pager == 0:
+                    val = 0
+                    continue
+                val = GetCompressedPagesForObject(vmo)
+            all_objects.append((vmo, val))
+        else:
+            showvmobject(vmo, show_pager_info=show_pager_info)
+        i += 1
+
+    if sort_by:
+        descending = '-A' not in cmd_options
+        i = 0
+        for vmo, _ in sorted(all_objects, key=lambda o: o[1], reverse=descending):
+            if head and i >= head:
+                break
+            showvmobject(vmo, show_pager_info=show_pager_info)
+            i += 1
+
 @lldb_command('showallvm')
 def ShowAllVM(cmd_args=None):
     """ Routine to print a summary listing of all the vm maps
@@ -1299,9 +1397,9 @@ def ShowTaskVM(cmd_args=None):
     """ Display info about the specified task's vm_map
         syntax: (lldb) showtaskvm <task_ptr>
     """
-    if not cmd_args:
-        print(ShowTaskVM.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
     if not task:
         print("Unknown arguments.")
@@ -1421,22 +1519,31 @@ def ShowAllVMStats(cmd_args=None, cmd_options={}):
     for task in kern.tasks:
         vmstats = VmStats()
         proc = GetProcFromTask(task)
-        vmmap = Cast(task.map, '_vm_map *')
+        vmmap = cast(task.map, '_vm_map *')
         page_size = 1 << int(vmmap.hdr.page_shift)
         task_ledgerp = task.ledger
+
         def GetLedgerEntryBalancePages(template, ledger, index):
             return GetLedgerEntryBalance(template, ledger, index) // page_size
+
         vmstats.wired_count = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['wired_mem'])
-        vmstats.resident_count = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['phys_mem'])
-        vmstats.resident_max = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['phys_mem'])['lifetime_max'] // page_size
+
+        phys_mem_entry = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['phys_mem'])
+        vmstats.resident_count = phys_mem_entry['balance'] // page_size
+        vmstats.resident_max = phys_mem_entry['lifetime_max'] // page_size
+
         vmstats.internal = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['internal'])
         vmstats.external = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['external'])
         vmstats.reusable = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['reusable'])
-        vmstats.footprint = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['phys_footprint'])
-        vmstats.footprint_peak = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['phys_footprint'])['lifetime_max'] // page_size
-        vmstats.compressed = GetLedgerEntryBalancePages(ledger_template, task_ledgerp, entry_indices['internal_compressed'])
-        vmstats.compressed_peak = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['internal_compressed'])['lifetime_max'] // page_size
-        vmstats.compressed_lifetime = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['internal_compressed'])['credit'] // page_size
+
+        phys_footprint_entry =  GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['phys_footprint'])
+        vmstats.footprint = phys_footprint_entry['balance'] // page_size
+        vmstats.footprint_peak = phys_footprint_entry['lifetime_max'] // page_size
+
+        internal_compressed_entry = GetLedgerEntryWithTemplate(ledger_template, task_ledgerp, entry_indices['internal_compressed'])
+        vmstats.compressed = internal_compressed_entry['balance'] // page_size
+        vmstats.compressed_peak = internal_compressed_entry['lifetime_max'] // page_size
+        vmstats.compressed_lifetime = internal_compressed_entry['credit'] // page_size
         vmstats.new_resident_count = vmstats.internal + vmstats.external
         vmstats.proc = proc
         vmstats.proc_name = GetProcName(proc)
@@ -1468,7 +1575,7 @@ def ShowTaskVMEntries(task, show_pager_info, show_all_shadows):
     print(GetTaskSummary.header)
     print(GetTaskSummary(task))
     if not task.map:
-        print("Task {0: <#020x} has map = 0x0")
+        print(f"Task {0: <#020x} has map = 0x0")
         return None
     print(GetVMMapSummary.header)
     print(GetVMMapSummary(task.map))
@@ -1484,9 +1591,9 @@ def ShowMap(cmd_args=None):
     """ Routine to print out info about the specified vm_map
         usage: showmap <vm_map>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMap.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
     print(GetVMMapSummary.header)
     print(GetVMMapSummary(map_val))
@@ -1496,9 +1603,9 @@ def ShowMapVME(cmd_args=None):
     """Routine to print out info about the specified vm_map and its vm entries
         usage: showmapvme <vm_map>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapVME.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
     print(GetVMMapSummary.header)
     print(GetVMMapSummary(map_val))
@@ -1556,21 +1663,23 @@ def ShowVmTagBtLog(cmd_args=None):
         print(*btlib.get_stack(ref).symbolicated_frames(prefix="    "), sep="\n")
         print('')
 
-    print("btrefs from non-kernel object:\n")
-    btlog = btlib.btlog_from_address(int(kern.globals.vmtaglog_btlog))
-    btidx = sorted(btlog.index(), key=itemgetter(2), reverse=True)
-    for ref, _, count in btidx:
-        print('ref: {:#08x}, count: {}'.format(ref, count))
-        print(*btlib.get_stack(ref).symbolicated_frames(prefix="    "), sep="\n")
+    vmtaglog_btlog_address = int(kern.globals.vmtaglog_btlog)
+    if vmtaglog_btlog_address != 0:
+        print("btrefs from non-kernel object:\n")
+        btlog = btlib.btlog_from_address(vmtaglog_btlog_address)
+        btidx = sorted(btlog.index(), key=itemgetter(2), reverse=True)
+        for ref, _, count in btidx:
+            print('ref: {:#08x}, count: {}'.format(ref, count))
+            print(*btlib.get_stack(ref).symbolicated_frames(prefix="    "), sep="\n")
 
 @lldb_command("showmapranges")
 def ShowMapRanges(cmd_args=None):
     """Routine to print out info about the specified vm_map and its vm entries
         usage: showmapranges <vm_map>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapVME.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
     print(GetVMMapSummary.header)
     print(GetVMMapSummary(map_val))
@@ -1642,9 +1751,9 @@ def GetVMRangeSummary(vmrange, idx=0):
 def ShowMapWired(cmd_args=None):
     """ Routine to print out a summary listing of all the entries with wired pages in a vm_map
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument", ShowMapWired.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
 
 @lldb_type_summary(['mount *'])
@@ -1788,10 +1897,9 @@ def ShowVnodeDev(cmd_args=None):
     """  Routine to display details of all vnodes of block and character device types
          Usage: showvnodedev <address of vnode>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowVnodeDev.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     vnode_val = kern.GetValueFromAddress(cmd_args[0], 'vnode *')
     if not vnode_val:
         print("unknown arguments:", str(cmd_args))
@@ -1870,10 +1978,9 @@ def ShowVnodeLocks(cmd_args=None):
     """  Routine to display list of advisory record locks for the given vnode address
          Usage: showvnodelocks <address of vnode>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowVnodeLocks.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     vnode_val = kern.GetValueFromAddress(cmd_args[0], 'vnode *')
     if not vnode_val:
         print("unknown arguments:", str(cmd_args))
@@ -1890,10 +1997,9 @@ def ShowProcLocks(cmd_args=None):
     """  Routine to display list of advisory record locks for the given process
          Usage: showproclocks <address of proc>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowProcLocks.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
     if not proc:
         print("unknown arguments:", str(cmd_args))
@@ -1928,12 +2034,12 @@ def ShowProcLocks(cmd_args=None):
 # EndMacro: showproclocks
 
 @lldb_type_summary(["cs_blob *"])
-@md_header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<10s} {:<15s} {:<40s} {:>50s}", ["vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "profile?", "team_id", "cdhash", "vnode_name"])
-@header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<10s} {:<15s} {:<40s} {:>50s}".format("vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "profile?", "team_id", "cdhash", "vnode_name"))
+@md_header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<15s} {:<40s} {:>50s}", ["vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "team_id", "cdhash", "vnode_name"])
+@header("{:<20s} {:<20s} {:<8s} {:<8s} {:<15s} {:<15s} {:<15s} {:<20s} {:<15s} {:<40s} {:>50s}".format("vnode", "ro_addr", "base", "start", "end", "mem_size", "mem_offset", "mem_kaddr", "team_id", "cdhash", "vnode_name"))
 def GetCSBlobSummary(cs_blob, markdown=False):
     """ Get a summary of important information out of csblob
     """
-    format_defs = ["{:<#20x}", "{:<#20x}", "{:<8d}", "{:<8d}", "{:<15d}", "{:<15d}", "{:<15d}", "{:<#20x}", "{:<10s}", "{:<15s}", "{:<40s}", "{:>50s}"]
+    format_defs = ["{:<#20x}", "{:<#20x}", "{:<8d}", "{:<8d}", "{:<15d}", "{:<15d}", "{:<15d}", "{:<#20x}", "{:<15s}", "{:<40s}", "{:>50s}"]
     if not markdown:
         format_str = " ".join(format_defs)
     else:
@@ -1946,7 +2052,6 @@ def GetCSBlobSummary(cs_blob, markdown=False):
     mem_size = cs_blob.csb_mem_size
     mem_offset = cs_blob.csb_mem_offset
     mem_kaddr = cs_blob.csb_mem_kaddr
-    hasProfile = int(cs_blob.profile_kaddr) != 0
     team_id_ptr = int(cs_blob.csb_teamid)
     team_id = ""
     if team_id_ptr != 0:
@@ -1965,9 +2070,10 @@ def GetCSBlobSummary(cs_blob, markdown=False):
     if name_ptr != 0:
         name = str(vnode.v_name)
 
-    return format_str.format(vnode, ro_addr, base_offset, start_offset, end_offset, mem_size, mem_offset, mem_kaddr, "Y" if hasProfile else "N", team_id, cdhash, name)
+    return format_str.format(vnode, ro_addr, base_offset, start_offset, end_offset, mem_size, mem_offset, mem_kaddr, team_id, cdhash, name)
 
 def iterate_all_cs_blobs(onlyUmanaged=False):
+    pmap_cs_enabled = LazyTarget.GetTarget().FindFirstGlobalVariable('pmap_cs').IsValid()
     mntlist = kern.globals.mountlist
     for mntval in IterateTAILQ_HEAD(mntlist, 'mnt_list'):
         for vnode in IterateTAILQ_HEAD(mntval.mnt_vnodelist, 'v_mntvnodes'):
@@ -1976,14 +2082,14 @@ def iterate_all_cs_blobs(onlyUmanaged=False):
             if (vtype == 1) and (vnode.v_un.vu_ubcinfo != 0):
                 cs_blob_ptr = int(vnode.v_un.vu_ubcinfo.cs_blobs)
                 while cs_blob_ptr != 0:
-                    cs_blob = kern.GetValueFromAddress(cs_blob_ptr, "cs_blob *")
-                    cs_blob_ptr = int(cs_blob.csb_next)
-                    if onlyUmanaged:
+                    cs_blob = addressof(kern.CreateValueFromAddress(cs_blob_ptr, "cs_blob "))
+                    if onlyUmanaged and pmap_cs_enabled:
                         pmapEntryPtr = int(cs_blob.csb_csm_obj)
                         if pmapEntryPtr != 0:
-                            pmapEntry = kern.GetValueFromAddress(pmapEntryPtr, "struct pmap_cs_code_directory *")
+                            pmapEntry = addressof(kern.CreateValueFromAddress(pmapEntryPtr, "struct pmap_cs_code_directory"))
                             if int(pmapEntry.managed) != 0:
                                 continue
+                    cs_blob_ptr = int(cs_blob.csb_next)
                     yield cs_blob
 
 
@@ -2115,7 +2221,7 @@ def ShowVnode(cmd_args=None):
     """ Display info about one vnode
         usage: showvnode <vnode>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid vnode argument. Type help showvnode for help.")
         return
     vnodeval = kern.GetValueFromAddress(cmd_args[0],'vnode *')
@@ -2126,7 +2232,7 @@ def ShowVnode(cmd_args=None):
 def ShowVolVnodes(cmd_args=None):
     """ Display info about all vnodes of a given mount_t
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide a valide mount_t argument. Try 'help showvolvnodes' for help")
         return
     mntval = kern.GetValueFromAddress(cmd_args[0], 'mount_t')
@@ -2139,10 +2245,12 @@ def ShowVolVnodes(cmd_args=None):
 def ShowVolBusyVnodes(cmd_args=None):
     """ Display info about busy (iocount!=0) vnodes of a given mount_t
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide a valide mount_t argument. Try 'help showvolbusyvnodes' for help")
         return
-    mntval = kern.GetValueFromAddress(cmd_args[0], 'mount_t')
+
+    mount_address = ArgumentStringToInt(cmd_args[0])
+    mntval = addressof(kern.CreateValueFromAddress(mount_address, 'struct mount'))
     print(GetVnodeSummary.header)
     for vnodeval in IterateTAILQ_HEAD(mntval.mnt_vnodelist, 'v_mntvnodes'):
         if int(vnodeval.v_iocount) != 0:
@@ -2161,7 +2269,7 @@ def PrintVnode(cmd_args=None):
     """ Prints out the fields of a vnode struct
         Usage: print_vnode <vnode>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid vnode argument. Type help print_vnode for help.")
         return
     ShowVnode(cmd_args)
@@ -2171,7 +2279,7 @@ def ShowWorkqVnodes(cmd_args=None):
     """ Print the vnode worker list
         Usage: showworkqvnodes <struct mount *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid mount argument. Type help showworkqvnodes for help.")
         return
 
@@ -2187,7 +2295,7 @@ def ShowNewVnodes(cmd_args=None):
     """ Print the new vnode list
         Usage: shownewvnodes <struct mount *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid mount argument. Type help shownewvnodes for help.")
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mount *')
@@ -2203,10 +2311,12 @@ def ShowProcVnodes(cmd_args=None):
     """ Routine to print out all the open fds which are vnodes in a process
         Usage: showprocvnodes <proc *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid proc argument. Type help showprocvnodes for help.")
         return
-    procptr = kern.GetValueFromAddress(cmd_args[0], 'proc *')
+
+    proc_address = ArgumentStringToInt(cmd_args[0])
+    procptr = addressof(kern.CreateValueFromAddress(proc_address, 'proc'))
     fdptr = addressof(procptr.p_fd)
     if int(fdptr.fd_cdir) != 0:
         print('{0: <25s}\n{1: <s}\n{2: <s}'.format('Current Working Directory:', GetVnodeSummary.header, GetVnodeSummary(fdptr.fd_cdir)))
@@ -2243,7 +2353,7 @@ def ShowAllProcVnodes(cmd_args=None):
     while procptr and int(procptr) != 0:
         print('{:<s}'.format("=" * 106))
         print(GetProcInfo(procptr))
-        ShowProcVnodes([int(procptr)])
+        ShowProcVnodes([str(int(procptr))])
         procptr = procptr.p_list.le_next
 
 @xnudebug_test('test_vnode')
@@ -2491,9 +2601,8 @@ def ShowLock(cmd_args=None, cmd_options={}):
         -S : to consider <addr> as lck_spin_t 
         -T : to consider <addr> as lck_ticket_t 
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify the address of the lock whose info you want to view.")
-        return
 
     summary_str = ""
     addr = cmd_args[0]
@@ -2572,8 +2681,10 @@ def getThreadRW(thread, debug, elem_find, force_print):
                 out += "{:>10d} ".format(write)
                 out += "{:>10d} ".format(read)
                 out += "{:>10s} ".format(" ")
-                caller = kmem.rwlde_caller_packing.unpack(unsigned(entry.rwlde_caller_packed))
-                out += "{:<#19x}\n".format(caller)
+                # rwlde_caller_packing not available in release kernel
+                if kmem.rwlde_caller_packing:
+                    caller = kmem.rwlde_caller_packing.unpack(unsigned(entry.rwlde_caller_packed))
+                    out += "{:<#19x}\n".format(caller)
 
     if elem_find != 0:
         if elem_find in found:
@@ -2594,9 +2705,9 @@ def rwLockDebugDisabled():
 def ShowThreadRWLck(cmd_args = None):
     """ Routine to print a best effort summary of rwlocks held
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify the thread pointer")
-        return
+
     thread = kern.GetValueFromAddress(cmd_args[0], 'thread_t')
     if not thread:
         raise ArgumentError("Invalid thread pointer")
@@ -2635,9 +2746,8 @@ def tryFindRwlckHolders(cmd_args = None):
     """ Best effort routing to find the current holders of
         a rwlock
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify a rw_lock_t pointer")
-        return
 
     if rwLockDebugDisabled():
         print("WARNING: Best effort per-thread rwlock tracking is OFF\n")
@@ -2713,7 +2823,7 @@ def getThreadFromCtid(cmd_args = None):
     """ Get the thread pointer associated with the ctid
         Usage: getthreadfromctid <ctid>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify a ctid")
 
     ctid   = ArgumentStringToInt(cmd_args[0])
@@ -2728,7 +2838,7 @@ def getTurnstileFromCtid(cmd_args = None):
     """ Get the turnstile pointer associated with the ctsid
         Usage: getturnstilefromctsid <ctid>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify a ctid")
 
     ctid = ArgumentStringToInt(cmd_args[0])
@@ -2745,9 +2855,9 @@ def showAPFSReflock(cmd_args = None):
     """ Show info about a show_kern_apfs_reflock_t
         Usage: show_kern_apfs_reflock <kern_apfs_reflock_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify a kern_apfs_reflock_t pointer")
-        return
+
     raw_addr = cmd_args[0]
     reflock = kern.GetValueFromAddress(raw_addr, 'kern_apfs_reflock_t')
     summary = "\n"
@@ -3051,7 +3161,7 @@ def ShowTaskVMEntries(task, show_pager_info, show_all_shadows):
     print(GetTaskSummary.header)
     print(GetTaskSummary(task))
     if not task.map:
-        print("Task {0: <#020x} has map = 0x0")
+        print(f"Task {0: <#020x} has map = 0x0")
         return None
     showmapvme(task.map, 0, 0, show_pager_info, show_all_shadows)
 
@@ -3067,9 +3177,9 @@ def ShowMapVME(cmd_args=None, cmd_options={}, entry_filter=None):
         Use -R flag to reverse order
         Use -T to show red-black tree pointers
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapVME.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     show_pager_info = False
     show_all_shadows = False
     show_upl_info = False
@@ -3110,9 +3220,9 @@ def ShowMapCopyVME(cmd_args=None, cmd_options={}):
         Use -T to show red-black tree pointers
         Use -U flag to show UPL info
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapVME.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     show_pager_info = False
     show_all_shadows = False
     show_rb_tree = False
@@ -3149,9 +3259,9 @@ def ShowMapTPRO(cmd_args=None, cmd_options={}):
         Use -R flag to reverse order
         Use -T to show red-black tree pointers
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapTPRO.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
    
     def filter_entries(vme):
         try:
@@ -3226,9 +3336,9 @@ def ShowVMObject(cmd_args=None, cmd_options={}):
         -P: show pager info (mapped file, compressed pages, ...)
         -U: show UPL info
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowVMObject.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     show_pager_info = False
     show_all_shadows = False
     show_upl_info = False
@@ -3272,7 +3382,7 @@ def PrintUPLSummary(upl, spacing=''):
 
 def PrintVMObjUPLs(uplq_head):
     spacing = " "*19
-    for upl in IterateQueue(uplq_head, 'upl_t', 'uplq'):
+    for upl in IterateQueue(addressof(uplq_head), 'upl_t', 'uplq'):
         PrintUPLSummary(upl, spacing)
 
 def showvmobject(object, offset=0, size=0, show_pager_info=False, show_all_shadows=False, show_upl_info=False):
@@ -3337,8 +3447,6 @@ def showmapcopyvme(mapcopy, start_vaddr=0, end_vaddr=0, show_pager_info=True, sh
 
 def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_all_shadows, reverse_order, show_rb_tree, entry_filter, show_upl_info):
     page_size = kern.globals.page_size
-    vnode_pager_ops = kern.globals.vnode_pager_ops
-    vnode_pager_ops_addr = unsigned(addressof(vnode_pager_ops))
     if hasattr(kern.globals, 'compressor_object'):
         compressor_object = kern.globals.compressor_object
     else:
@@ -3349,11 +3457,16 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
     last_end = unsigned(maphdr.links.start)
     skipped_entries = 0
     for vme in IterateQueue(vme_list_head, vme_ptr_type, "links", reverse_order):
+        links = vme.links
+        vme_start = links.start
+        vme_end = links.end
+        vme_start_val = unsigned(vme_start)
+        vme_end_val = unsigned(vme_end)
         if start_vaddr != 0 and end_vaddr != 0:
-            if unsigned(vme.links.start) > end_vaddr:
+            if vme_start_val > end_vaddr:
                 break
-            if unsigned(vme.links.end) <= start_vaddr:
-                last_end = unsigned(vme.links.end)
+            if unsigned(vme_end) <= start_vaddr:
+                last_end = vme_end_val
                 skipped_entries = skipped_entries + 1
                 continue
             if skipped_entries != 0:
@@ -3361,82 +3474,88 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
                 skipped_entries = 0
         if entry_filter and not entry_filter(vme):
             continue
-        if unsigned(vme.links.start) != last_end:
-            print("{:18s} {:#018x}:{:#018x} {:>10d}".format("------------------",last_end,vme.links.start,(unsigned(vme.links.start) - last_end) // page_size))
-        last_end = unsigned(vme.links.end)
-        size = unsigned(vme.links.end) - unsigned(vme.links.start)
+        if vme_start_val != last_end:
+            print("{:18s} {:#018x}:{:#018x} {:>10d}".format("------------------",last_end,vme_start,(vme_start_val - last_end) // page_size))
+        last_end = vme_end_val
+        size = vme_end_val - vme_start_val
         object = get_vme_object(vme)
-        if object == 0:
+        object_val = int(object)
+        if object_val == 0:
             object_str = "{: <#018x}".format(object)
         elif vme.is_sub_map:
             object_str = None
 
-            if object == kern.globals.bufferhdr_map:
+            if object_val == kern.globals.bufferhdr_map:
                 object_str = "BUFFERHDR_MAP"
-            elif object == kern.globals.mb_map:
+            elif object_val == kern.globals.mb_map:
                 object_str = "MB_MAP"
-            elif object == kern.globals.bsd_pageable_map:
+            elif object_val == kern.globals.bsd_pageable_map:
                 object_str = "BSD_PAGEABLE_MAP"
-            elif object == kern.globals.ipc_kernel_map:
+            elif object_val == kern.globals.ipc_kernel_map:
                 object_str = "IPC_KERNEL_MAP"
-            elif object == kern.globals.ipc_kernel_copy_map:
+            elif object_val == kern.globals.ipc_kernel_copy_map:
                 object_str = "IPC_KERNEL_COPY_MAP"
-            elif hasattr(kern.globals, 'io_submap') and object == kern.globals.io_submap:
+            elif hasattr(kern.globals, 'io_submap') and object_val == kern.globals.io_submap:
                 object_str = "IO_SUBMAP"
-            elif hasattr(kern.globals, 'pgz_submap') and object == kern.globals.pgz_submap:
+            elif hasattr(kern.globals, 'pgz_submap') and object_val == kern.globals.pgz_submap:
                 object_str = "ZALLOC:PGZ"
-            elif hasattr(kern.globals, 'compressor_map') and object == kern.globals.compressor_map:
+            elif hasattr(kern.globals, 'compressor_map') and object_val == kern.globals.compressor_map:
                 object_str = "COMPRESSOR_MAP"
-            elif hasattr(kern.globals, 'g_kext_map') and object == kern.globals.g_kext_map:
+            elif hasattr(kern.globals, 'g_kext_map') and object_val == kern.globals.g_kext_map:
                 object_str = "G_KEXT_MAP"
-            elif hasattr(kern.globals, 'vector_upl_submap') and object == kern.globals.vector_upl_submap:
+            elif hasattr(kern.globals, 'vector_upl_submap') and object_val == kern.globals.vector_upl_submap:
                 object_str = "VECTOR_UPL_SUBMAP"
-            elif object == kern.globals.zone_meta_map:
+            elif object_val == kern.globals.zone_meta_map:
                 object_str = "ZALLOC:META"
             else:
                 for i in range(0, int(GetEnumValue('zone_submap_idx_t', 'Z_SUBMAP_IDX_COUNT'))):
-                    if object == kern.globals.zone_submaps[i]:
+                    if object_val == kern.globals.zone_submaps[i]:
                         object_str = "ZALLOC:{:s}".format(GetEnumName('zone_submap_idx_t', i, 'Z_SUBMAP_IDX_'))
                         break
             if object_str is None:
                 object_str = "submap:{: <#018x}".format(object)
         else:
-            if object == kern.globals.kernel_object_default:
+            if object_val == kern.globals.kernel_object_default:
                 object_str = "KERNEL_OBJECT"
-            elif hasattr(kern.globals, 'kernel_object_tagged') and object == kern.globals.kernel_object_tagged:
+            elif hasattr(kern.globals, 'kernel_object_tagged') and object_val == kern.globals.kernel_object_tagged:
                 object_str = "KERNEL_OBJECT_TAGGED"
-            elif object == compressor_object:
+            elif object_val == compressor_object:
                 object_str = "COMPRESSOR_OBJECT"
             else:
                 object_str = "{: <#018x}".format(object)
         offset = get_vme_offset(vme)
         tag = unsigned(vme.vme_alias)
+
+        vme_protection = vme.protection
         protection = ""
-        if vme.protection & 0x1:
+        if vme_protection & 0x1:
             protection +="r"
         else:
             protection += "-"
-        if vme.protection & 0x2:
+        if vme_protection & 0x2:
             protection += "w"
         else:
             protection += "-"
-        if vme.protection & 0x4:
+        if vme_protection & 0x4:
             protection += "x"
         else:
             protection += "-"
+
+        vme_max_protection = vme.max_protection
         max_protection = ""
-        if vme.max_protection & 0x1:
-            max_protection +="r"
+        if vme_max_protection & 0x1:
+            max_protection += "r"
         else:
             max_protection += "-"
-        if vme.max_protection & 0x2:
+        if vme_max_protection & 0x2:
             max_protection += "w"
         else:
             max_protection += "-"
-        if vme.max_protection & 0x4:
+        if vme_max_protection & 0x4:
             max_protection += "x"
         else:
             max_protection += "-"
+
         vme_flags = ""
         if vme.is_sub_map:
             vme_flags += "s"
@@ -3464,9 +3583,9 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
         rb_info = ""
         if show_rb_tree:
             rb_info = "l={: <#018x} r={: <#018x} p={: <#018x}".format(vme.store.entry.rbe_left, vme.store.entry.rbe_right, vme.store.entry.rbe_parent)
-        print("{: <#018x} {:#018x}:{:#018x} {:>10d} {:>3d}{:<4s}  {:3s}/{:3s}/{:<8s} {:<18s} {:<#18x} {:s}".format(vme,vme.links.start,vme.links.end,(unsigned(vme.links.end)-unsigned(vme.links.start)) // page_size,tag,tagstr,protection,max_protection,vme_flags,object_str,offset, rb_info))
-        if (show_pager_info or show_all_shadows) and vme.is_sub_map == 0 and get_vme_object(vme) != 0:
-            object = get_vme_object(vme)
+        print("{: <#018x} {:#018x}:{:#018x} {:>10d} {:>3d}{:<4s}  {:3s}/{:3s}/{:<8s} {:<18s} {:<#18x} {:s}".format(vme,vme_start,vme_end,(vme_end_val-vme_start_val) // page_size,tag,tagstr,protection,max_protection,vme_flags,object_str,offset, rb_info))
+        if (show_pager_info or show_all_shadows) and vme.is_sub_map == 0 and object_val != 0:
+            pass # object is already intialized
         else:
             object = 0
         showvmobject(object, offset, size, show_pager_info, show_all_shadows, show_upl_info)
@@ -3553,6 +3672,7 @@ FixedTags = {
     32: "VM_KERN_MEMORY_TRIAGE",
     33: "VM_KERN_MEMORY_RECOUNT",
     34: "VM_KERN_MEMORY_TAG",
+    35: "VM_KERN_MEMORY_EXCLAVES",
     255:"VM_KERN_MEMORY_ANY",
 }
 
@@ -3725,12 +3845,13 @@ def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
     """ Print the load address and uuid for the process
         Usage: (lldb)showtaskloadinfo <task_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Insufficient arguments")
+
     t = kern.GetValueFromAddress(cmd_args[0], 'struct task *')
     print_format = "0x{0:x} - 0x{1:x} {2: <50s} (??? - ???) <{3: <36s}> {4: <50s}"
     p = GetProcFromTask(t)
-    if not p:
+    if p is None:
         print("Task has no associated BSD process.")
         return
     uuid_out_string = GetUUIDSummary(p.p_uuid)
@@ -3752,8 +3873,9 @@ def VMPageLookup(cmd_args=None):
     """ Print the pages in the page bucket corresponding to the provided object and offset.
         Usage: (lldb)vmpagelookup <vm_object_t> <vm_offset_t>
     """
-    if cmd_args is None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) != 2:
         raise ArgumentError("Please specify an object and offset.")
+
     format_string = "{0: <#020x} {1: <#020x} {2: <#020x}\n"
 
     obj = kern.GetValueFromAddress(cmd_args[0],'unsigned long long')
@@ -3766,25 +3888,10 @@ def VMPageLookup(cmd_args=None):
 
     print(VMPageLookup.header)
     page = _vm_page_unpack_ptr(page_list)
-    while (page != 0) :
+    while page != 0:
         pg_t = kern.GetValueFromAddress(page, 'vm_page_t')
         print(format_string.format(page, pg_t.vmp_offset, _vm_page_unpack_ptr(pg_t.vmp_object)))
         page = _vm_page_unpack_ptr(pg_t.vmp_next_m)
-
-
-
-@lldb_command('vmpage_get_phys_page')
-def VmPageGetPhysPage(cmd_args=None):
-    """ return the physical page for a vm_page_t
-        usage: vm_page_get_phys_page <vm_page_t>
-    """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Please provide valid vm_page_t. Type help vm_page_get_phys_page for help.")
-        return
-
-    page = kern.GetValueFromAddress(cmd_args[0], 'vm_page_t')
-    phys_page = _vm_page_get_phys_page(page)
-    print("phys_page = 0x%x\n" % phys_page)
 
 
 def _vm_page_get_phys_page(page):
@@ -3796,23 +3903,84 @@ def _vm_page_get_phys_page(page):
 
     m = unsigned(page)
 
-    if m >= unsigned(kern.globals.vm_page_array_beginning_addr) and m < unsigned(kern.globals.vm_page_array_ending_addr) :
-        return (m - unsigned(kern.globals.vm_page_array_beginning_addr)) // sizeof('struct vm_page') + unsigned(kern.globals.vm_first_phys_ppnum)
+    if m >= unsigned(kern.globals.vm_pages) and m < unsigned(kern.globals.vm_pages_end) :
+        return (m - unsigned(kern.globals.vm_pages)) // sizeof('struct vm_page') + unsigned(kern.globals.vm_pages_first_pnum)
 
-    page_with_ppnum = Cast(page, 'uint32_t *')
-    ppnum_offset = sizeof('struct vm_page') // sizeof('uint32_t')
-    return page_with_ppnum[ppnum_offset]
+    target = LazyTarget.GetTarget()
+    return target.xReadUInt32(unsigned(page) + sizeof('struct vm_page'))
 
-def _vm_page_get_page_from_phys(ppnum):
+
+@lldb_command('vmpage_get_phys_page')
+def VmPageGetPhysPage(cmd_args=None):
+    """ return the physical page for a vm_page_t
+        usage: vm_page_get_phys_page <vm_page_t>
+    """
+    if cmd_args is None or len(cmd_args) != 1:
+        raise ArgumentError("Missing page argument")
+
+    target = LazyTarget.GetTarget()
+    addr = ArgumentStringToAddress(cmd_args[0])
+    page = target.xCreateValueFromAddress(None, addr, gettype('struct vm_page'))
+    phys_page = _vm_page_get_phys_page(value(page.AddressOf()))
+    print("phys_page = {:#x}".format(phys_page))
+
+
+def _vm_page_get_page_from_phys(pnum):
     """ Attempt to return page struct from physical page address"""
     if kern.arch == 'x86_64':
         return None
-    page_index = ppnum - unsigned(kern.globals.vm_first_phys_ppnum)
-    if page_index >= 0 and page_index < kern.globals.vm_pages_count:
-        page = kern.globals.vm_pages[page_index]
-        return page
-    else:
+
+    pmap_first_pnum     = unsigned(kern.globals.pmap_first_pnum)
+    vm_pages_first_pnum = unsigned(kern.globals.vm_pages_first_pnum)
+    vm_pages_count      = unsigned(kern.globals.vm_pages_count)
+
+    if pmap_first_pnum <= pnum < vm_pages_first_pnum:
+        target = LazyTarget.GetTarget()
+
+        radix  = kern.globals.vm_pages_radix_root
+        level  = unsigned(radix) & 0x7
+        node   = unsigned(radix) - level
+        index  = pnum - pmap_first_pnum
+        unpack = kmemory.KMem.get_shared().vm_page_packing.unpack
+
+        while node:
+            key  = (index >> (8 * level)) & 0xff
+            node = unpack(target.xReadUInt32(node + key * 4))
+            if node and level == 0:
+                name = "page_for_pnum_{:#x}".format(pnum)
+                v = target.xCreateValueFromAddress(name, node, gettype('struct vm_page'))
+                return value(v)
+            level -= 1
+
         return None
+
+    elif vm_pages_first_pnum <= pnum < vm_pages_first_pnum + vm_pages_count:
+        return kern.globals.vm_pages[pnum - vm_pages_first_pnum]
+
+    return None
+
+
+@lldb_command('vmpage_from_phys_page')
+def VmPageFromPhysPage(cmd_args=None):
+    """ return the vm_page_t for a physical page if possible
+        usage: vm_page_from_phys_page <ppnum_t>
+    """
+
+    if cmd_args is None or len(cmd_args) != 1:
+        raise ArgumentError("Missing pnum argument")
+
+    pnum = ArgumentStringToInt(cmd_args[0])
+    page = _vm_page_get_page_from_phys(pnum)
+    if page is None:
+        print("couldn't find page for pnum = {:#x}".format(pnum))
+        return
+
+    print(xnu_format(
+        "page = (vm_page_t){:#x}\n"
+        "\n"
+        "{:s}",
+        addressof(page),
+        str(page)))
 
 
 @lldb_command('vmpage_unpack_ptr')
@@ -3820,7 +3988,7 @@ def VmPageUnpackPtr(cmd_args=None):
     """ unpack a pointer
         usage: vm_page_unpack_ptr <packed_ptr>
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide valid packed pointer argument. Type help vm_page_unpack_ptr for help.")
         return
 
@@ -3829,12 +3997,12 @@ def VmPageUnpackPtr(cmd_args=None):
     print("unpacked pointer = 0x%x\n" % unpacked)
 
 
-def _vm_page_unpack_ptr(page):
+def _vm_page_unpack_ptr(page: value) -> int:
     if kern.ptrsize == 4 :
-        return page
+        return int(page)
 
     if page == 0 :
-        return page
+        return 0
 
     params = kern.globals.vm_page_packing_params
     ptr_shift = params.vmpp_shift
@@ -3842,7 +4010,7 @@ def _vm_page_unpack_ptr(page):
 
     # when no mask and shift on 64bit systems, we're working with real/non-packed pointers
     if ptr_shift == 0 and ptr_mask == 0:
-        return page
+        return int(page)
 
     if unsigned(page) & unsigned(ptr_mask):
         masked_page = (unsigned(page) & ~ptr_mask)
@@ -3859,7 +4027,7 @@ def CalcVMPageHash(cmd_args=None):
     """ Get the page bucket corresponding to the provided object and offset.
         Usage: (lldb)calcvmpagehash <vm_object_t> <vm_offset_t>
     """
-    if cmd_args is None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) != 2:
         raise ArgumentError("Please specify an object and offset.")
 
     obj = kern.GetValueFromAddress(cmd_args[0],'unsigned long long')
@@ -3977,16 +4145,15 @@ def ScanVMPages(cmd_args=None, cmd_options={}):
     if "-B" in cmd_options:
         valid_vmp_bitfields = [
             "vmp_on_specialq",
+            "vmp_canonical",
             "vmp_gobbled",
             "vmp_laundry",
             "vmp_no_cache",
-            "vmp_private",
             "vmp_reference",
             "vmp_busy",
             "vmp_wanted",
             "vmp_tabled",
             "vmp_hashed",
-            "vmp_fictitious",
             "vmp_clustered",
             "vmp_pmapped",
             "vmp_xpmapped",
@@ -4155,15 +4322,19 @@ def VMObjectWalkPages(cmd_args=None, cmd_options={}):
              if (page_count % 1000) == 0:
                 print("traversed %d pages ...\n" % (page_count))
         else:
-                out_string += format_string.format(page_count, res_page_count, vmp, vmp.vmp_offset, _vm_page_unpack_ptr(vmp.vmp_listq.next), _vm_page_get_phys_page(vmp), vmp.vmp_wire_count)
+                phys_page = _vm_page_get_phys_page(vmp)
+                vmp_fictitious = phys_page in (0xfffffffe, 0xffffffff)
+                vmp_private = not vmp.vmp_canonical and not vmp_fictitious
+
+                out_string += format_string.format(page_count, res_page_count, vmp, vmp.vmp_offset, _vm_page_unpack_ptr(vmp.vmp_listq.next), phys_page, vmp.vmp_wire_count)
                 out_string += first_bitfield_format_string.format(vmp.vmp_q_state, vmp.vmp_on_specialq, vmp.vmp_gobbled, vmp.vmp_laundry, vmp.vmp_no_cache,
-                                                                   vmp.vmp_private, vmp.vmp_reference)
+                                                                   vmp_private, vmp.vmp_reference)
 
                 if hasattr(vmp,'slid'):
                     vmp_slid = vmp.slid
                 else:
                     vmp_slid = 0
-                out_string += second_bitfield_format_string.format(vmp.vmp_busy, vmp.vmp_wanted, vmp.vmp_tabled, vmp.vmp_hashed, vmp.vmp_fictitious, vmp.vmp_clustered,
+                out_string += second_bitfield_format_string.format(vmp.vmp_busy, vmp.vmp_wanted, vmp.vmp_tabled, vmp.vmp_hashed, vmp_fictitious, vmp.vmp_clustered,
                                                                     vmp.vmp_pmapped, vmp.vmp_xpmapped, vmp.vmp_wpmapped, vmp.vmp_free_when_done, vmp.vmp_absent,
                                                                     vmp.vmp_error, vmp.vmp_dirty, vmp.vmp_cleaning, vmp.vmp_precious, vmp.vmp_overwriting,
                                                                     vmp.vmp_restart, vmp.vmp_unusual, 0, 0,
@@ -4270,9 +4441,9 @@ def ShowAppleProtectPager(cmd_args=None):
     """Routine to print out info about an apple_protect pager
         usage: show_apple_protect_pager <pager>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowAppleProtectPager.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     pager = kern.GetValueFromAddress(cmd_args[0], 'apple_protect_pager_t')
     show_apple_protect_pager(pager, 1, 1)
 
@@ -4310,9 +4481,9 @@ def ShowSharedRegionPager(cmd_args=None):
     """Routine to print out info about a shared_region pager
         usage: show_shared_region_pager <pager>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowSharedRegionPager.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     pager = kern.GetValueFromAddress(cmd_args[0], 'shared_region_pager_t')
     show_shared_region_pager(pager, 1, 1)
 
@@ -4355,9 +4526,9 @@ def ShowDyldPager(cmd_args=None):
     """Routine to print out info about a dyld pager
         usage: show_dyld_pager <pager>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowDyldPager.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     print(ShowDyldPager.header)
     pager = kern.GetValueFromAddress(cmd_args[0], 'dyld_pager_t')
     show_dyld_pager(pager, 1, 1)
@@ -4407,31 +4578,26 @@ def ShowJetsamZprintSnapshot():
     jzs_names = kern.globals.jzs_names
     jzs_info = kern.globals.jzs_info
 
-    print("Jetsam zprint snapshot jzs_trigger_band: {:2d}\n".format(jzs_trigger_band))
     if (unsigned(jzs_gencount) == ((1 << 64) - 1)):
         print("No jetsam zprint snapshot found\n")
         return
     print("Jetsam zprint snapshot jzs_trigger_band: {:2d}\n".format(jzs_trigger_band))
 
-    info_hdr = "{0: >3s} {1: <30s} {2: >6s} {3: >11s} {4: >11s} {5: >10s} {6: >11s} {7: >11s} {8: >6s}"
-    info_fmt = "{0: >3d} {1: <30s} {2: >6d} {3: >11d} {4: >11d} {5: >10d} {6: >11d} {7: >11d} {8: >6d}"
+    info_hdr = "{0: >3s} {1: <30s} {2: >6s} {3: >11s}"
+    info_fmt = "{0: >3d} {1: <30s} {2: >6d} {3: >11d}"
 
     count = kern.GetGlobalVariable('jzs_zone_cnt')
 
-    print("\nJetsam zprint snapshot: zone info for {:3d} zones when jetsam last hit band: {:2d}, jzs_gencount: {:6d}\n\n".format(count, jzs_trigger_band, jzs_gencount))
-    print(info_hdr.format("",    "",   "elem", "cur",  "max",   "cur",   "max",   "cur", "alloc"))
-    print(info_hdr.format("#", "name", "size", "size", "size", "#elts", "#elts", "inuse", "size"))
+    print("Jetsam zprint snapshot: zone info for {:3d} zones when jetsam last hit band: {:2d}, jzs_gencount: {:6d}\n\n".format(count, jzs_trigger_band, jzs_gencount))
+    print(info_hdr.format("",    "",   "elem", "cur"))
+    print(info_hdr.format("#", "name", "size", "inuse"))
     print("-----------------------------------------------------------------------------------------------------------")
     idx = 0;
     while idx < count:
         info = dereference(Cast(addressof(jzs_info[idx]), 'mach_zone_info_t *'))
         if info.mzi_elem_size > 0:
-            print(info_fmt.format(idx, jzs_names[idx].mzn_name, info.mzi_elem_size, \
-                info.mzi_cur_size, info.mzi_max_size, \
-                info.mzi_cur_size / info.mzi_elem_size, info.mzi_max_size / info.mzi_elem_size, \
-                info.mzi_count, info.mzi_alloc_size))
+            print(info_fmt.format(idx, jzs_names[idx].mzn_name, info.mzi_elem_size, info.mzi_count))
         idx += 1
-
 
     jzs_meminfo = kern.globals.jzs_meminfo
 
@@ -4442,8 +4608,8 @@ def ShowJetsamZprintSnapshot():
     idx = 0;
     while idx < count:
         meminfo = dereference(Cast(addressof(jzs_meminfo[idx]), 'mach_memory_info_t *'))
-        peak = meminfo.peak / 1024
-        size = meminfo.size / 1024
+        peak = unsigned(meminfo.peak / 1024)
+        size = unsigned(meminfo.size / 1024)
         if peak > 0:
             tag = unsigned(meminfo.tag)
             (sitestr, tagstr) = GetVMKernName(tag)
@@ -4542,10 +4708,8 @@ def ShowJetsamBand(cmd_args=[], cmd_options={}):
         Usage: showjetsamband band_number [-J]
             -J      : Output pids as json
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) != 1:
         raise ArgumentError("invalid arguments")
-    if len(cmd_args) != 1:
-        raise ArgumentError("insufficient arguments")
 
     print_json = "-J" in cmd_options
 
@@ -4593,7 +4757,7 @@ def _GetBufSummary(buf):
 def _ShowVnodeBlocks(dirty=True, cmd_args=None):
     """ Display info about all [dirty|clean] blocks in a vnode.
     """
-    if cmd_args is None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) == 0:
         print("Please provide a valid vnode argument.")
         return
 
@@ -4635,8 +4799,8 @@ def VmPageLookupInMap(cmd_args=None):
         usage: vm_page_lookup_in_map <map> <vaddr>
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print("Invalid argument.", VmPageLookupInMap.__doc__)
-        return
+        raise ArgumentError()
+
     map = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
     vaddr = kern.GetValueFromAddress(cmd_args[1], 'vm_map_offset_t')
     print("vaddr {:#018x} in map {: <#018x}".format(vaddr, map))
@@ -4657,9 +4821,9 @@ def vm_page_lookup_in_map(map, vaddr):
         obj_or_submap = get_vme_object(vme)
         if vme.is_sub_map:
             print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, obj_or_submap))
-            vm_page_lookup_in_map(obj_or_submap, offset_in_object)
+            return vm_page_lookup_in_map(obj_or_submap, offset_in_object)
         else:
-            vm_page_lookup_in_object(obj_or_submap, offset_in_object)
+            return vm_page_lookup_in_object(obj_or_submap, offset_in_object)
 
 @lldb_command("vm_page_lookup_in_object")
 def VmPageLookupInObject(cmd_args=None):
@@ -4667,8 +4831,8 @@ def VmPageLookupInObject(cmd_args=None):
         usage: vm_page_lookup_in_object <object> <offset>
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print("Invalid argument.", VmPageLookupInObject.__doc__)
-        return
+        raise ArgumentError()
+
     object = kern.GetValueFromAddress(cmd_args[0], 'vm_object_t')
     offset = kern.GetValueFromAddress(cmd_args[1], 'vm_object_offset_t')
     print("offset {:#018x} in object {: <#018x}".format(offset, object))
@@ -4690,22 +4854,22 @@ def vm_page_lookup_in_object(object, offset):
             page = _vm_page_unpack_ptr(m.vmp_next_m)
             continue
         print("    resident page {: <#018x} phys {:#010x}".format(m, _vm_page_get_phys_page(m)))
-        return
+        return m
     if object.pager and object.pager_ready:
         offset_in_pager = trunc_offset + unsigned(object.paging_offset)
         if not object.internal:
             print("    offset {:#018x} in external '{:s}' {: <#018x}".format(offset_in_pager, object.pager.mo_pager_ops.memory_object_pager_name, object.pager))
-            return
+            return None
         pager = Cast(object.pager, 'compressor_pager *')
         ret = vm_page_lookup_in_compressor_pager(pager, offset_in_pager)
         if ret:
-            return
+            return None
     if object.shadow and not object.phys_contiguous:
         offset_in_shadow = offset + unsigned(object.vo_un2.vou_shadow_offset)
         vm_page_lookup_in_object(object.shadow, offset_in_shadow)
-        return
+        return None
     print("    page is absent and will be zero-filled on demand")
-    return
+    return None
 
 @lldb_command("vm_page_lookup_in_compressor_pager")
 def VmPageLookupInCompressorPager(cmd_args=None):
@@ -4713,8 +4877,8 @@ def VmPageLookupInCompressorPager(cmd_args=None):
         usage: vm_page_lookup_in_compressor_pager <pager> <offset>
     """
     if cmd_args is None or len(cmd_args) < 2:
-        print("Invalid argument.", VmPageLookupInCompressorPager.__doc__)
-        return
+        raise ArgumentError()
+
     pager = kern.GetValueFromAddress(cmd_args[0], 'compressor_pager_t')
     offset = kern.GetValueFromAddress(cmd_args[1], 'memory_object_offset_t')
     print("offset {:#018x} in compressor pager {: <#018x}".format(offset, pager))
@@ -4756,9 +4920,9 @@ def VmPageLookupInCompressor(cmd_args=None):
     """Lookup up a page in a given compressor slot
         usage: vm_page_lookup_in_compressor <slot>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", VmPageLookupInCompressor.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     slot = kern.GetValueFromAddress(cmd_args[0], 'compressor_slot_t *')
     print("compressor slot {: <#018x}".format(slot))
     vm_page_lookup_in_compressor(slot)
@@ -4843,6 +5007,23 @@ def vm_page_lookup_in_compressor(slot_ptr):
     else:
         print("<no compressed data>")
 
+# From vm_page.h
+VM_PAGE_NOT_ON_Q = 0
+VM_PAGE_IS_WIRED = 1
+VM_PAGE_USED_BY_COMPRESSOR = 2
+VM_PAGE_ON_FREE_Q = 3
+VM_PAGE_ON_FREE_LOCAL_Q = 4
+VM_PAGE_ON_FREE_LOPAGE_Q = 5
+VM_PAGE_ON_THROTTLED_Q = 6
+VM_PAGE_ON_PAGEOUT_Q = 7
+VM_PAGE_ON_SPECULATIVE_Q = 8
+VM_PAGE_ON_ACTIVE_LOCAL_Q = 9
+VM_PAGE_ON_ACTIVE_Q = 10
+VM_PAGE_ON_INACTIVE_INTERNAL_Q = 11
+VM_PAGE_ON_INACTIVE_EXTERNAL_Q = 12
+VM_PAGE_ON_INACTIVE_CLEANED_Q = 13
+VM_PAGE_ON_SECLUDED_Q = 14
+
 @lldb_command('vm_scan_all_pages')
 def VMScanAllPages(cmd_args=None):
     """Scans the vm_pages[] array
@@ -4866,55 +5047,51 @@ def VMScanAllPages(cmd_args=None):
     secluded_inuse_count = 0
 
     i = 0
-    while i < vm_pages_count:
-
+    for i in range(vm_pages_count):
         if i % 10000 == 0:
             print("{:d}/{:d}...\n".format(i,vm_pages_count))
 
         m = vm_pages[i]
+        internal = False
 
-        internal = 0
-        external = 0
-        m_object_val = _vm_page_unpack_ptr(m.vmp_object)
+        m_object_addr = _vm_page_unpack_ptr(m.vmp_object)
+        if m_object_addr != 0 and (m_object := kern.CreateValueFromAddress(m_object_addr, "struct vm_object")).GetSBValue().IsValid() and m_object.internal:
+            internal = True
 
-        if m_object:
-            if m_object.internal:
-                internal = 1
-            else:
-                external = 1
-
-        if m.vmp_wire_count != 0 and m.vmp_local == 0:
+        m_vmp_q_state = int(m.vmp_q_state)
+        if m.vmp_wire_count != 0 and m_vmp_q_state != VM_PAGE_ON_ACTIVE_LOCAL_Q:
             wired_count = wired_count + 1
             pageable = 0
-        elif m.vmp_throttled:
+        elif m_vmp_q_state == VM_PAGE_ON_THROTTLED_Q:
             throttled_count = throttled_count + 1
             pageable = 0
-        elif m.vmp_active:
+        elif m_vmp_q_state == VM_PAGE_ON_ACTIVE_Q:
             active_count = active_count + 1
             pageable = 1
-        elif m.vmp_local:
+        elif m_vmp_q_state == VM_PAGE_ON_ACTIVE_LOCAL_Q:
             local_active_count = local_active_count + 1
             pageable = 0
-        elif m.vmp_inactive:
+        elif m_vmp_q_state in (VM_PAGE_ON_INACTIVE_CLEANED_Q, VM_PAGE_ON_INACTIVE_INTERNAL_Q,
+                               VM_PAGE_ON_INACTIVE_EXTERNAL_Q):
             inactive_count = inactive_count + 1
             pageable = 1
-        elif m.vmp_speculative:
+        elif m_vmp_q_state == VM_PAGE_ON_SPECULATIVE_Q:
             speculative_count = speculative_count + 1
             pageable = 0
-        elif m.vmp_free:
+        elif m_vmp_q_state == VM_PAGE_ON_FREE_Q:
             free_count = free_count + 1
             pageable = 0
-        elif m.vmp_secluded:
+        elif m_vmp_q_state == VM_PAGE_ON_SECLUDED_Q:
             secluded_count = secluded_count + 1
-            if m_object == 0:
+            if m_object_addr == 0:
                 secluded_free_count = secluded_free_count + 1
             else:
                 secluded_inuse_count = secluded_inuse_count + 1
             pageable = 0
-        elif m_object == 0 and m.vmp_busy:
+        elif m_object_addr == 0 and m.vmp_busy:
             local_free_count = local_free_count + 1
             pageable = 0
-        elif m.vmp_compressor:
+        elif m_vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR:
             compressor_count = compressor_count + 1
             pageable = 0
         else:
@@ -4926,7 +5103,6 @@ def VMScanAllPages(cmd_args=None):
                 pageable_internal_count = pageable_internal_count + 1
             else:
                 pageable_external_count = pageable_external_count + 1
-        i = i + 1
 
     print("vm_pages_count = {:d}\n".format(vm_pages_count))
 
@@ -4974,9 +5150,9 @@ def ShowAllVMNamedEntries(cmd_args=None):
 def ShowVMNamedEntry(cmd_args=None):
     """ Routine to print a VM named entry
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapVMNamedEntry.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     named_entry = kern.GetValueFromAddress(cmd_args[0], 'vm_named_entry_t')
     showmemoryentry(named_entry)
 
@@ -5027,15 +5203,14 @@ def showmemoryentry(entry, idx=0, port=None):
         print("***** UNKNOWN TYPE *****")
     print()
 
-
 @lldb_command("showmaprb")
 def ShowMapRB(cmd_args=None):
     """Routine to print out a VM map's RB tree
         usage: showmaprb <vm_map>
     """
-    if cmd_args is None or len(cmd_args) < 1:
-        print("Invalid argument.", ShowMapRB.__doc__)
-        return
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
 
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
     print(GetVMMapSummary.header)
@@ -5065,6 +5240,9 @@ def ShowTaskOwnedObjects(cmd_args=None, cmd_options={}):
     """ Routine to print the list of VM objects owned by the specified task
         -T: show only ledger-tagged objects
     """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
+
     showonlytagged = False
     if "-T" in cmd_options:
         showonlytagged = True
@@ -5228,6 +5406,9 @@ def GetDiagThresholdStatusNode(proc_val,interested_pid,show_all,human_readable):
 
     out_str = ''
     task_val = GetTaskFromProc(proc_val)
+    if task_val is None:
+        return out_str
+
     task_ledgerp = task_val.ledger
     ledger_template = kern.globals.task_ledger_template
 
@@ -5320,3 +5501,4 @@ def ShowDiagmemThresholds(cmd_args=None, cmd_options={}):
     print("\n\n")
 
     # EndMacro: showdiagmemthresholds
+

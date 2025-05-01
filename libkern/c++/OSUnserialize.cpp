@@ -192,7 +192,7 @@ __END_DECLS
 #ifndef __clang_analyzer__
 
 #define malloc(size)         malloc_impl(size)
-#define malloc_type(type)    kalloc_type(type, Z_SET_NOTSHARED)
+#define malloc_type(type)    kalloc_type(type, Z_SET_NOTEARLY)
 static inline void *
 malloc_impl(size_t size)
 {

@@ -172,7 +172,7 @@ ipc_entries_hold(
 
 		entry = ipc_entry_table_get(table, next_free);
 
-		assert(entry && entry->ie_object == IO_NULL);
+		assert(entry && entry->ie_object == IPC_OBJECT_NULL);
 	}
 
 #if CONFIG_PROC_RESOURCE_LIMITS
@@ -216,7 +216,7 @@ ipc_entry_claim(
 	entry = ipc_entry_table_get(table, first_free);
 	assert(entry &&
 	    ipc_entry_table_contains(table, entry->ie_next) &&
-	    entry->ie_object == IO_NULL);
+	    entry->ie_object == IPC_OBJECT_NULL);
 	base->ie_next = entry->ie_next;
 	space->is_table_free--;
 
@@ -422,7 +422,7 @@ ipc_entry_alloc_name(
 			entry->ie_request = IE_REQ_NONE;
 			*entryp = entry;
 
-			assert(entry->ie_object == IO_NULL);
+			assert(entry->ie_object == IPC_OBJECT_NULL);
 			return KERN_SUCCESS;
 		} else if (IE_BITS_GEN(entry->ie_bits) == gen) {
 			/* case #3 -- the entry is inuse, for the same name */
@@ -478,7 +478,7 @@ ipc_entry_dealloc(
 	assert(IE_BITS_GEN(entry->ie_bits) == MACH_PORT_GEN(name));
 	entry->ie_bits &= (IE_BITS_GEN_MASK | IE_BITS_ROLL_MASK);
 	entry->ie_next = base->ie_next;
-	entry->ie_object = IO_NULL;
+	entry->ie_object = IPC_OBJECT_NULL;
 	base->ie_next = index;
 	space->is_table_free++;
 
@@ -676,7 +676,7 @@ rescan:
 
 		if (entry->ie_object != osnap_object ||
 		    IE_BITS_TYPE(entry->ie_bits) != IE_BITS_TYPE(osnap_bits)) {
-			if (entry->ie_object != IO_NULL &&
+			if (entry->ie_object != IPC_OBJECT_NULL &&
 			    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_SEND) {
 				ipc_hash_table_delete(ntable, entry->ie_object, i, entry);
 			}
@@ -685,7 +685,7 @@ rescan:
 			entry->ie_bits = osnap_bits;
 			entry->ie_request = osnap_request; /* or ie_next */
 
-			if (osnap_object != IO_NULL &&
+			if (osnap_object != IPC_OBJECT_NULL &&
 			    IE_BITS_TYPE(osnap_bits) == MACH_PORT_TYPE_SEND) {
 				ipc_hash_table_insert(ntable, osnap_object, i, entry);
 			}
@@ -770,7 +770,7 @@ rescan:
 
 	/* link new free entries onto the rest of the freelist */
 	assert(nbase[free_index].ie_next == 0 &&
-	    nbase[free_index].ie_object == IO_NULL);
+	    nbase[free_index].ie_object == IPC_OBJECT_NULL);
 	nbase[free_index].ie_next = ocount;
 
 	assert(smr_serialized_load(&space->is_table) == otable);

@@ -207,7 +207,7 @@ thread_clear_reevaluate_tg_hierarchy_locked(thread_t t)
 #endif
 
 /*
- * Use a spinlock to protect all thread group flag updates.
+ * Use a mutex to protect all thread group flag updates.
  * The lock should not have heavy contention since these flag updates should
  * be infrequent. If this lock has contention issues, it should be changed to
  * a per thread-group lock.

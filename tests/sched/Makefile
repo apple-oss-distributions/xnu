@@ -1,7 +1,11 @@
+# Copyright (c) 2024 Apple Inc.  All rights reserved.
+
 SCHED_UTILS = sched/sched_test_utils.c
-SCHED_UTILS_FLAGS = -ldarwintest_utils -Wno-format-nonliteral -Wno-cast-qual
+SCHED_UTILS_FLAGS = -ldarwintest_utils -Wno-format-nonliteral -Wno-cast-qual -Wno-c++98-compat -Wno-format-security
 EXCLUDED_SOURCES += $(SCHED_UTILS)
-# SCHED_UTILS depends on -ldarwintest_utils to build
+# Note, SCHED_UTILS depends on -ldarwintest_utils to build
+
+include sched/sched_test_harness/Makefile
 
 sched/all_cores_running: OTHER_LDFLAGS += $(SCHED_UTILS_FLAGS)
 sched/all_cores_running: $(SCHED_UTILS)
@@ -12,9 +16,6 @@ sched/cluster_bound_threads: OTHER_LDFLAGS += $(SCHED_UTILS_FLAGS)
 sched/cluster_bound_threads: $(SCHED_UTILS)
 SCHED_TARGETS += sched/cluster_bound_threads
 
-include sched/sched_test_harness/Makefile
-SCHED_TARGETS += sched/clutch_runqueue
-
 sched/contextswitch: OTHER_LDFLAGS += $(SCHED_UTILS_FLAGS)
 sched/contextswitch: $(SCHED_UTILS)
 SCHED_TARGETS += sched/contextswitch
@@ -22,6 +23,12 @@ SCHED_TARGETS += sched/contextswitch
 sched/enabled_policy: OTHER_LDFLAGS += $(SCHED_UTILS_FLAGS)
 sched/enabled_policy: $(SCHED_UTILS)
 SCHED_TARGETS += sched/enabled_policy
+
+sched/headers_compat_cpp: OTHER_CXXFLAGS += -I$(SRCROOT)/../osfmk
+SCHED_TARGETS += sched/headers_compat_cpp
+
+sched/headers_compat_c: OTHER_CFLAGS += -I$(SRCROOT)/../osfmk
+SCHED_TARGETS += sched/headers_compat_c
 
 sched/overloaded_runqueue: CODE_SIGN_ENTITLEMENTS = sched/overloaded_runqueue.entitlements
 sched/overloaded_runqueue: OTHER_CFLAGS += -DENTITLED=1

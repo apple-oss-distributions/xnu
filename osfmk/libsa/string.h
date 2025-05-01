@@ -113,6 +113,7 @@ __BEGIN_DECLS
  *   const char *strbufcpy(char *dst, size_t dstlen, const char *src, size_t srclen);
  *   size_t strlcat(char *dst, const char *src, size_t n);
  *   const char *strbufcat(char *dst, size_t dstlen, const char *src, size_t srclen);
+ *   char * __null_terminated strlcpy_ret(char *dst, const char *src, size_t n);
  */
 
 
@@ -764,6 +765,36 @@ __xnu_member_size_precondition(dst, n, "write overflow")
 #else
 	return __xnu_strlcpy(dst, src, n);
 #endif
+}
+
+/*
+ * Use strlcpy_ret if all you want is the __null_terminated pointer
+ * to the resulting string.
+ * See docs/primitives/string-handling.md for more information.
+ */
+__xnu_string_inline
+char * __null_terminated
+strlcpy_ret(
+	char *const             dst __xnu_pass_member_size __counted_by(n),
+	const char *const       src __null_terminated,
+	size_t                  n)
+__xnu_member_size_precondition(dst, n, "write overflow")
+{
+	size_t cnt = strlcpy(dst, src, n);
+	/*
+	 * Like snprintf(3), the strlcpy() returns the total length of the string they tried to create, i.e. length of `src'.
+	 */
+	if (cnt >= n) {
+		/*
+		 * The output string has been truncated. The terminating NUL is at `dst + (n - 1)'.
+		 */
+		return __unsafe_null_terminated_from_indexable(dst, dst + (n - 1));
+	} else {
+		/*
+		 * The output string hasn't been truncated. The terminating NUL is at `dst + cnt';
+		 */
+		return __unsafe_null_terminated_from_indexable(dst, dst + cnt);
+	}
 }
 
 

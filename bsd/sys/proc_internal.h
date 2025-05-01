@@ -276,7 +276,6 @@ struct proc {
 	struct  proc *  XNU_PTRAUTH_SIGNED_PTR("proc.p_pptr") p_pptr;   /* Pointer to parent process.(LL) */
 	proc_ro_t       p_proc_ro;
 	pid_t           p_ppid;                 /* process's parent pid number */
-	pid_t           p_original_ppid;        /* process's original parent pid number, doesn't change if reparented */
 	pid_t           p_pgrpid;               /* process group id of the process (LL)*/
 	uid_t           p_uid;
 	gid_t           p_gid;
@@ -471,7 +470,7 @@ struct proc {
 	TAILQ_ENTRY(proc) p_memstat_list;               /* priority bucket link */
 	uint64_t          p_memstat_userdata;           /* user state */
 	uint64_t          p_memstat_idledeadline;       /* time at which process became clean */
-	uint64_t          p_memstat_idle_start;         /* abstime process transitions into the idle band */
+	uint64_t          p_memstat_prio_start;         /* abstime process transitioned into the current band */
 	uint64_t          p_memstat_idle_delta;         /* abstime delta spent in idle band */
 	int32_t           p_memstat_memlimit;           /* cached memory limit, toggles between active and inactive limits */
 	int32_t           p_memstat_memlimit_active;    /* memory limit enforced when process is in active jetsam state */
@@ -501,16 +500,6 @@ struct proc {
 #endif /* CONFIG_PROC_UDATA_STORAGE */
 
 	char * p_subsystem_root_path;
-};
-
-/*
- * Identify a process uniquely.
- * proc_ident's fields match 1-1 with those in struct proc.
- */
-struct proc_ident {
-	uint64_t        p_uniqueid;
-	pid_t           p_pid;
-	int             p_idversion;
 };
 
 #define PGRPID_DEAD 0xdeaddead
@@ -597,6 +586,7 @@ struct proc_ident {
 #define P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY        0x0200
 #define P_VFS_IOPOLICY_ALTLINK                          0x0400
 #define P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE         0x0800
+#define P_VFS_IOPOLICY_SUPPORT_LONG_PATHS               0x1000
 
 #define P_VFS_IOPOLICY_INHERITED_MASK                   \
 	(P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | \
@@ -609,7 +599,8 @@ struct proc_ident {
 	P_VFS_IOPOLICY_SKIP_MTIME_UPDATE | \
 	P_VFS_IOPOLICY_DISALLOW_RW_FOR_O_EVTONLY | \
 	P_VFS_IOPOLICY_ALTLINK | \
-	P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE)
+	P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE | \
+	P_VFS_IOPOLICY_SUPPORT_LONG_PATHS)
 
 #define P_VFS_IOPOLICY_VALID_MASK                       \
 	(P_VFS_IOPOLICY_INHERITED_MASK | \
@@ -837,7 +828,8 @@ extern void proc_best_name_for_pid(int pid, char * buf, int size);
 extern int isinferior(struct proc *, struct proc *);
 __private_extern__ struct proc *pzfind(pid_t);  /* Find zombie by id. */
 __private_extern__ struct proc *proc_find_zombref(pid_t);       /* Find zombie by id. */
-__private_extern__ void proc_drop_zombref(struct proc * p);     /* Find zombie by id. */
+__private_extern__ struct proc *proc_find_zombref_locked(pid_t); /* Find zombie by id. */
+__private_extern__ void proc_drop_zombref(struct proc * p);     /* Drop zombie ref. */
 
 extern size_t   chgproccnt(uid_t uid, int diff);
 extern void     pinsertchild(struct proc *parent, struct proc *child, bool in_exec);
@@ -926,7 +918,6 @@ void proc_set_pthread_jit_allowlist(proc_t p, bool late);
 thread_t proc_thread(proc_t);
 extern int proc_pendingsignals(proc_t, sigset_t);
 int proc_getpcontrol(int pid, int * pcontrolp);
-int proc_dopcontrol(proc_t p);
 int proc_resetpcontrol(int pid);
 #if PSYNCH
 void pth_proc_hashinit(proc_t);
@@ -1049,8 +1040,6 @@ KALLOC_TYPE_DECLARE(proc_stats_zone);
 ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, struct proc);
 extern zone_t proc_task_zone;
 
-extern struct proc_ident proc_ident(proc_t p);
-
 #if CONFIG_PROC_RESOURCE_LIMITS
 int proc_set_filedesc_limits(proc_t p, int soft_limit, int hard_limit);
 int proc_set_kqworkloop_limits(proc_t p, int soft_limit, int hard_limit);
@@ -1061,6 +1050,13 @@ int proc_set_kqworkloop_limits(proc_t p, int soft_limit, int hard_limit);
  * file/directory
  */
 bool proc_ignores_node_permissions(proc_t proc);
+
+/*
+ * @func no_paging_space_action
+ * @brief React to compressor/swap exhaustion
+ * @returns true if the low-swap note should be sent
+ */
+extern bool no_paging_space_action(void);
 
 #pragma GCC visibility pop
 #endif  /* !_SYS_PROC_INTERNAL_H_ */

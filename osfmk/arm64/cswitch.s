@@ -131,15 +131,15 @@
 	msr		SSBS, x$1
 1:
 #endif // HAS_ARM_FEAT_SSBS2
-#if __ARM_ARCH_8_4__
-	ldrb	w$1, [$0, SS64_KERNEL_DIT]
-	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
-	msr		DIT, x$1
-#endif //__ARM_ARCH_8_4__
 #if __ARM_ARCH_8_2__
 	ldrb	w$1, [$0, SS64_KERNEL_UAO]
 	lsl     x$1, x$1, #0 + PSR64_UAO_SHIFT
 	msr		UAO, x$1
+#endif //__ARM_ARCH_8_2__
+#if __ARM_ARCH_8_4__
+	ldrb	w$1, [$0, SS64_KERNEL_DIT]
+	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
+	msr		DIT, x$1
 #endif //__ARM_ARCH_8_4__
 
 	ldr		d8,	[$0, NS64_KERNEL_D8]
@@ -211,13 +211,13 @@
 .macro set_process_dependent_keys_and_sync_context	thread, new_key, tmp_key, cpudatap, wsync
 
 
-#if defined(__ARM_ARCH_8_5__) || defined(HAS_APPLE_PAC)
+#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) || defined(HAS_APPLE_PAC)
 	ldr		\cpudatap, [\thread, ACT_CPUDATAP]
-#endif /* defined(__ARM_ARCH_8_5__) || defined(HAS_APPLE_PAC) */
+#endif /* defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) || defined(HAS_APPLE_PAC) */
 
-#if defined(__ARM_ARCH_8_5__)
+#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING)
 	ldrb	\wsync, [\cpudatap, CPU_SYNC_ON_CSWITCH]
-#else /* defined(__ARM_ARCH_8_5__) */
+#else /* defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) */
 	mov		\wsync, #0
 #endif
 
@@ -250,7 +250,7 @@ Lskip_jop_keys_\@:
 #if HAS_PARAVIRTUALIZED_PAC
 1:	/* guests need to clear the sync flag even after skipping the isb, in case they synced via hvc instead */
 #endif
-#if defined(__ARM_ARCH_8_5__)
+#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING)
 	strb	wzr, [\cpudatap, CPU_SYNC_ON_CSWITCH]
 #endif
 1:

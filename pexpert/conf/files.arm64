@@ -7,4 +7,5 @@ pexpert/arm/pe_kprintf.c               standard
 pexpert/arm/pe_serial.c                standard
 
 pexpert/arm/hwtrace/hwtrace.c         standard
+pexpert/arm/hwtrace/apt_msg.c         standard
 

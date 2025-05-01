@@ -55,12 +55,14 @@
 #include <libkern/section_keywords.h>
 #include <libkern/OSDebug.h>
 
+
 #define INT_SIZE        (BYTE_SIZE * sizeof (int))
 
 #define BCOPY_PHYS_SRC_IS_PHYS(flags) (((flags) & cppvPsrc) != 0)
 #define BCOPY_PHYS_DST_IS_PHYS(flags) (((flags) & cppvPsnk) != 0)
 #define BCOPY_PHYS_SRC_IS_USER(flags) (((flags) & (cppvPsrc | cppvKmap)) == 0)
 #define BCOPY_PHYS_DST_IS_USER(flags) (((flags) & (cppvPsnk | cppvKmap)) == 0)
+
 
 static kern_return_t
 bcopy_phys_internal(addr64_t src, addr64_t dst, vm_size_t bytes, int flags)
@@ -75,6 +77,7 @@ bcopy_phys_internal(addr64_t src, addr64_t dst, vm_size_t bytes, int flags)
 	ppnum_t         pn_dst;
 	addr64_t        end __assert_only;
 	kern_return_t   res = KERN_SUCCESS;
+
 
 	if (!BCOPY_PHYS_SRC_IS_USER(flags)) {
 		assert(!__improbable(os_add_overflow(src, bytes, &end)));
@@ -156,15 +159,14 @@ bcopy_phys_internal(addr64_t src, addr64_t dst, vm_size_t bytes, int flags)
 			count = bytes;
 		}
 
-
 		if (BCOPY_PHYS_SRC_IS_USER(flags)) {
 			res = copyin((user_addr_t)src, tmp_dst, count);
 		} else if (BCOPY_PHYS_DST_IS_USER(flags)) {
 			res = copyout(tmp_src, (user_addr_t)dst, count);
 		} else {
 			bcopy(tmp_src, tmp_dst, count);
-		}
 
+		}
 
 		if (use_copy_window_src) {
 			pmap_unmap_cpu_windows_copy(src_index);
@@ -190,16 +192,45 @@ bcopy_phys(addr64_t src, addr64_t dst, vm_size_t bytes)
 }
 
 void
-bzero_phys_nc(addr64_t src64, vm_size_t bytes)
+bcopy_phys_with_options(addr64_t src, addr64_t dst, vm_size_t bytes, int options)
 {
-	bzero_phys(src64, bytes);
+	bcopy_phys_internal(src, dst, bytes, cppvPsrc | cppvPsnk | options);
 }
 
 extern void *secure_memset(void *, int, size_t);
 
+static void
+bzero_phys_page(vm_offset_t buf)
+{
+	assert((buf & PAGE_MASK) == 0);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpass-failed"
+	/*
+	 * The unrolling is chosen so that the `add` operands in the codegen
+	 * are all immediates and avoid a `mov`
+	 */
+	#pragma unroll (4096 / (4 << MMU_CLINE))
+	for (vm_offset_t offset = 0; offset < PAGE_SIZE; offset += (4 << MMU_CLINE)) {
+		asm volatile (
+                        "dc zva, %0\n\t"
+                        "dc zva, %1\n\t"
+                        "dc zva, %2\n\t"
+                        "dc zva, %3"
+                        :
+                        : "r"(buf + offset + (0 << MMU_CLINE))
+                        , "r"(buf + offset + (1 << MMU_CLINE))
+                        , "r"(buf + offset + (2 << MMU_CLINE))
+                        , "r"(buf + offset + (3 << MMU_CLINE))
+                        : "memory");
+	}
+#pragma clang diagnostic pop
+}
+
+
 /* Zero bytes starting at a physical address */
-void
-bzero_phys(addr64_t src, vm_size_t bytes)
+static void
+bzero_phys_internal(addr64_t src, vm_size_t bytes, __unused int options)
 {
 	unsigned int    wimg_bits;
 	unsigned int    cpu_num = cpu_number();
@@ -245,7 +276,7 @@ bzero_phys(addr64_t src, vm_size_t bytes)
 		case VM_WIMG_WCOMB:
 		case VM_WIMG_INNERWBACK:
 		case VM_WIMG_WTHRU:
-#if HAS_UCNORMAL_MEM
+#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
 		case VM_WIMG_RT:
 #endif
 			/**
@@ -263,19 +294,12 @@ bzero_phys(addr64_t src, vm_size_t bytes)
 				 * Thanks to how count is computed above, buf should always be page-size aligned
 				 * when count == PAGE_SIZE.
 				 */
-				assert((((addr64_t) buf) & PAGE_MASK) == 0);
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wpass-failed"
-				#pragma unroll
-				for (addr64_t dczva_offset = 0; dczva_offset < PAGE_SIZE; dczva_offset += (1ULL << MMU_CLINE)) {
-					asm volatile ("dc zva, %0" : : "r"(buf + dczva_offset) : "memory");
-				}
-#pragma clang diagnostic pop
+				bzero_phys_page((vm_offset_t)buf);
 			} else {
 				bzero(buf, count);
 			}
 			break;
+
 		default:
 			/* 'dc zva' performed by bzero is not safe for device memory */
 			secure_memset((void*)buf, 0, count);
@@ -290,6 +314,24 @@ bzero_phys(addr64_t src, vm_size_t bytes)
 		bytes -= count;
 		offset = 0;
 	}
+}
+
+void
+bzero_phys_nc(addr64_t src64, vm_size_t bytes)
+{
+	bzero_phys_internal(src64, bytes, 0);
+}
+
+void
+bzero_phys(addr64_t src, vm_size_t bytes)
+{
+	bzero_phys_internal(src, bytes, 0);
+}
+
+void
+bzero_phys_with_options(addr64_t src, vm_size_t bytes, int options)
+{
+	bzero_phys_internal(src, bytes, options);
 }
 
 /*
@@ -339,7 +381,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	uint32_t const trace_phy_read_delay = os_atomic_load(&trace_phy_read_delay_to, relaxed);
 
 	if (__improbable(report_phy_read_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_get_timebase();
 		timeread = true;
 	}
@@ -412,15 +454,11 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -446,7 +484,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 			    (eabs - sabs), sabs, addr, result);
 		}
 
-		ml_set_interrupts_enabled(istate);
+		ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 
@@ -568,7 +606,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 	uint32_t const trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
 
 	if (__improbable(report_phy_write_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_get_timebase();
 		timewrite = true;
 	}
@@ -635,15 +673,11 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -669,7 +703,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 			    (eabs - sabs), sabs, paddr, data);
 		}
 
-		ml_set_interrupts_enabled(istate);
+		ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 }

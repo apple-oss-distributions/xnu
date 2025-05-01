@@ -538,6 +538,14 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	/* no kstats for nexus */
 	ASSERT(srp[SKMEM_REGION_KSTATS].srp_c_obj_cnt == 0);
 
+	/* these regions have memtag enabled */
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_KMD) & SKMEM_REGION_CR_MEMTAG);
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_RXKMD) & SKMEM_REGION_CR_MEMTAG);
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_TXKMD) & SKMEM_REGION_CR_MEMTAG);
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_KBFT) & SKMEM_REGION_CR_MEMTAG);
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_RXKBFT) & SKMEM_REGION_CR_MEMTAG);
+	ASSERT(SRP_CFLAGS(SKMEM_REGION_TXKBFT) & SKMEM_REGION_CR_MEMTAG);
+
 	AR_LOCK(ar);
 	if (!skmem_arena_pp_setup(ar, srp, name, (rx_pp ? *rx_pp : NULL),
 	    (tx_pp ? *tx_pp : NULL), kernel_only, pp_truncated_buf)) {

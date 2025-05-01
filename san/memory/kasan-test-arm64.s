@@ -19,6 +19,7 @@
 .align 5
 .globl EXT(_setjmp)
 LEXT(_setjmp)
+        ARM64_PROLOG
         add             x1, sp, #0      /* can't STP from sp */
         stp             x19, x20,       [x0, JMP_r19_20]
         stp             x21, x22,       [x0, JMP_r21_22]
@@ -37,6 +38,7 @@ LEXT(_setjmp)
 .align 5
 .globl EXT(_longjmp)
 LEXT(_longjmp)
+        ARM64_PROLOG
         ldp             x19, x20,       [x0, JMP_r19_20]
         ldp             x21, x22,       [x0, JMP_r21_22]
         ldp             x23, x24,       [x0, JMP_r23_24]

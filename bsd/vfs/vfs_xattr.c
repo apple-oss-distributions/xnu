@@ -438,7 +438,7 @@ vnode_setasnamedstream_internal(vnode_t vp, vnode_t svp)
 	 * for checking MNTK_NAMED_STREAMS bit at many places in the
 	 * code.
 	 */
-	vnode_update_identity(svp, vp, NULL, 0, 0, VNODE_UPDATE_NAMEDSTREAM_PARENT);
+	vnode_update_identity(svp, vp, NULL, 0, 0, (VNODE_UPDATE_NAMEDSTREAM_PARENT | VNODE_UPDATE_FORCE_PARENT_REF));
 
 	if (vnode_isdyldsharedcache(vp)) {
 		vnode_lock_spin(svp);
@@ -3246,12 +3246,15 @@ lookup:
 		} else {
 			lf.l_type = F_RDLCK;
 		}
-		if ((error = VNOP_ADVLOCK(xvp, (caddr_t)fg, F_SETLK,
-		    &lf, F_FLOCK | F_WAIT, context, NULL))) {
+		error = VNOP_ADVLOCK(xvp, (caddr_t)fg, F_SETLK, &lf, F_FLOCK | F_WAIT, context, NULL);
+		if (error == ENOTSUP) {
+			error = 0;
+		} else if (error) {
 			error = ENOATTR;
 			goto out;
+		} else { // error == 0
+			fg->fg_flag |= FWASLOCKED;
 		}
-		fg->fg_flag |= FWASLOCKED;
 	}
 
 	if (file_sizep != NULL) {

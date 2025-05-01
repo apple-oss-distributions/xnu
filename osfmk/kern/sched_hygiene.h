@@ -43,7 +43,7 @@
 #endif
 
 #include <mach/mach_types.h>
-
+#include <machine/static_if.h>
 #include <kern/startup.h>
 
 typedef enum sched_hygiene_mode {
@@ -52,7 +52,10 @@ typedef enum sched_hygiene_mode {
 	SCHED_HYGIENE_MODE_PANIC = 2,
 } sched_hygiene_mode_t;
 
-extern boolean_t sched_hygiene_debug_pmc;
+STATIC_IF_KEY_DECLARE_TRUE(sched_debug_pmc);
+STATIC_IF_KEY_DECLARE_TRUE(sched_debug_preemption_disable);
+/* implies sched_debug_preemption_disable */
+STATIC_IF_KEY_DECLARE_TRUE(sched_debug_interrupt_disable);
 
 extern sched_hygiene_mode_t sched_preemption_disable_debug_mode;
 

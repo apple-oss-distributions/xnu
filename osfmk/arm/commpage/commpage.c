@@ -69,6 +69,11 @@
 
 static int commpage_cpus( void );
 
+#if defined (__arm64__)
+#include <arm64/proc_reg.h>
+#include <pexpert/arm64/apt_msg.h>
+#endif
+
 
 static void commpage_init_cpu_capabilities( void );
 
@@ -82,59 +87,10 @@ extern user64_addr_t commpage_text64_location;
 extern user32_addr_t commpage_text32_location;
 
 /* For sysctl access from BSD side */
-extern int gARMv8Crc32;
-extern int gARMv8Gpi;
-extern int gARM_FEAT_FlagM;
-extern int gARM_FEAT_FlagM2;
-extern int gARM_FEAT_FHM;
-extern int gARM_FEAT_DotProd;
-extern int gARM_FEAT_SHA3;
-extern int gARM_FEAT_RDM;
-extern int gARM_FEAT_LSE;
-extern int gARM_FEAT_SHA256;
-extern int gARM_FEAT_SHA512;
-extern int gARM_FEAT_SHA1;
-extern int gARM_FEAT_AES;
-extern int gARM_FEAT_PMULL;
-extern int gARM_FEAT_SPECRES;
-extern int gARM_FEAT_SB;
-extern int gARM_FEAT_FRINTTS;
-extern int gARM_FEAT_LRCPC;
-extern int gARM_FEAT_LRCPC2;
-extern int gARM_FEAT_FCMA;
-extern int gARM_FEAT_JSCVT;
-extern int gARM_FEAT_PAuth;
-extern int gARM_FEAT_PAuth2;
-extern int gARM_FEAT_FPAC;
-extern int gARM_FEAT_FPACCOMBINE;
-extern int gARM_FEAT_DPB;
-extern int gARM_FEAT_DPB2;
-extern int gARM_FEAT_BF16;
-extern int gARM_FEAT_I8MM;
-extern int gARM_FEAT_WFxT;
-extern int gARM_FEAT_RPRES;
-extern int gARM_FEAT_ECV;
-extern int gARM_FEAT_LSE2;
-extern int gARM_FEAT_CSV2;
-extern int gARM_FEAT_CSV3;
-extern int gARM_FEAT_DIT;
-extern int gARM_AdvSIMD;
-extern int gARM_AdvSIMD_HPFPCvt;
-extern int gARM_FEAT_FP16;
-extern int gARM_FEAT_SSBS;
-extern int gARM_FEAT_BTI;
-extern int gARM_FP_SyncExceptions;
-extern int gARM_FEAT_SME;
-extern int gARM_FEAT_SME2;
-extern int gARM_SME_F32F32;
-extern int gARM_SME_BI32I32;
-extern int gARM_SME_B16F32;
-extern int gARM_SME_F16F32;
-extern int gARM_SME_I8I32;
-extern int gARM_SME_I16I32;
-extern int gARM_FEAT_SME_F64F64;
-extern int gARM_FEAT_SME_I16I64;
-extern int gARM_FEAT_AFP;
+#define ARM_FEATURE_FLAG(x) \
+	extern int gARM_ ## x;
+#include <arm/arm_features.inc>
+#undef ARM_FEATURE_FLAG
 
 extern int      gUCNormalMem;
 
@@ -269,6 +225,10 @@ commpage_populate(void)
 	asb_kaddr %= (kernel_max - kernel_min);
 	asb_kaddr += kernel_min;
 	*((uint64_t*)(_COMM_PAGE_ASB_TARGET_KERN_ADDRESS + _COMM_PAGE_RW_OFFSET)) = asb_kaddr;
+
+#if __arm64__
+	*((uint8_t*)(_COMM_PAGE_APT_MSG_POLICY + _COMM_PAGE_RW_OFFSET)) = apt_msg_policy();
+#endif
 }
 
 #define COMMPAGE_TEXT_SEGMENT "__TEXT_EXEC"
@@ -468,7 +428,7 @@ commpage_init_arm_optional_features_isar0(uint64_t *commpage_bits)
 		bits |= kHasFeatSHA512;
 	}
 	if ((isar0 & ID_AA64ISAR0_EL1_CRC32_MASK) == ID_AA64ISAR0_EL1_CRC32_EN) {
-		gARMv8Crc32 = 1;
+		gARM_FEAT_CRC32 = 1;
 		bits |= kHasARMv8Crc32;
 	}
 
@@ -503,6 +463,11 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 	    sctlr & SCTLR_EnRCTX) {
 		gARM_FEAT_SPECRES = 1;
 		bits |= kHasFeatSPECRES;
+#ifdef HAS_SPECRES2
+		if ((isar1 & ID_AA64ISAR1_EL1_SPECRES_MASK) >= ID_AA64ISAR1_EL1_SPECRES2_EN) {
+			gARM_FEAT_SPECRES2 = 1;
+		}
+#endif /* HAS_SPECRES2 */
 	}
 	if ((isar1 & ID_AA64ISAR1_EL1_SB_MASK) >= ID_AA64ISAR1_EL1_SB_EN) {
 		gARM_FEAT_SB = 1;
@@ -513,7 +478,7 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 		bits |= kHasFeatFRINTTS;
 	}
 	if ((isar1 & ID_AA64ISAR1_EL1_GPI_MASK) >= ID_AA64ISAR1_EL1_GPI_EN) {
-		gARMv8Gpi = 1;
+		gARM_FEAT_PACIMP = 1;
 		bits |= kHasArmv8GPI;
 	}
 	if ((isar1 & ID_AA64ISAR1_EL1_LRCPC_MASK) >= ID_AA64ISAR1_EL1_LRCPC_EN) {
@@ -556,6 +521,9 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 	if ((isar1 & ID_AA64ISAR1_EL1_BF16_MASK) >= ID_AA64ISAR1_EL1_BF16_EN) {
 		gARM_FEAT_BF16 = 1;
 	}
+	if ((isar1 & ID_AA64ISAR1_EL1_BF16_MASK) >= ID_AA64ISAR1_EL1_EBF16_EN) {
+		gARM_FEAT_EBF16 = 1;
+	}
 	if ((isar1 & ID_AA64ISAR1_EL1_I8MM_MASK) >= ID_AA64ISAR1_EL1_I8MM_EN) {
 		gARM_FEAT_I8MM = 1;
 	}
@@ -576,6 +544,12 @@ commpage_init_arm_optional_features_isar2(void)
 	}
 	if ((isar2 & ID_AA64ISAR2_EL1_RPRES_MASK) >= ID_AA64ISAR2_EL1_RPRES_EN) {
 		gARM_FEAT_RPRES = 1;
+	}
+	if ((isar2 & ID_AA64ISAR2_EL1_CSSC_MASK) >= ID_AA64ISAR2_EL1_CSSC_EN) {
+		gARM_FEAT_CSSC = 1;
+	}
+	if ((isar2 & ID_AA64ISAR2_EL1_BC_MASK) >= ID_AA64ISAR2_EL1_BC_EN) {
+		gARM_FEAT_HBC = 1;
 	}
 }
 
@@ -666,15 +640,23 @@ commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits)
 	}
 
 	unsigned int sme_version = arm_sme_version();
-	if (sme_version >= 1) {
+	if (sme_version >= ARM_FEAT_SME) {
 		gARM_FEAT_SME = 1;
 		*commpage_bits |= kHasFeatSME;
 	}
-	if (sme_version >= 2) {
+	if (sme_version >= ARM_FEAT_SME2) {
 		gARM_FEAT_SME2 = 1;
 		*commpage_bits |= kHasFeatSME2;
 	}
 
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64PFR2_EL1
+ */
+static void
+commpage_init_arm_optional_features_pfr2(__unused uint64_t *commpage_bits)
+{
 }
 
 /**
@@ -788,6 +770,16 @@ commpage_init_arm_optional_features_fpcr(uint64_t *commpage_bits)
 	}
 }
 
+
+/**
+ * Reports whether stateless FEATs are present or not.
+ * Those only depend on the SoC and on previous variables.
+ */
+static void
+commpage_init_arm_optional_features_misc(__unused uint64_t *commpage_bits)
+{
+}
+
 /**
  * Initializes all commpage entries and sysctls for ARM64 optional features accessible from EL0.
  */
@@ -802,8 +794,14 @@ commpage_init_arm_optional_features(uint64_t *commpage_bits)
 	commpage_init_arm_optional_features_mmfr2(commpage_bits);
 	commpage_init_arm_optional_features_pfr0(commpage_bits);
 	commpage_init_arm_optional_features_pfr1(commpage_bits);
+	commpage_init_arm_optional_features_pfr2(commpage_bits);
 	commpage_init_arm_optional_features_smfr0();
 	commpage_init_arm_optional_features_fpcr(commpage_bits);
+	/*
+	 * commpage_init_arm_optional_features_misc handles features flags
+	 * derived from other feature flags, so it must run last.
+	 */
+	commpage_init_arm_optional_features_misc(commpage_bits);
 }
 #endif /* __arm64__ */
 
@@ -1041,4 +1039,14 @@ commpage_update_dyld_flags(uint64_t value)
 {
 	*((uint64_t*)(_COMM_PAGE_DYLD_FLAGS + _COMM_PAGE_RW_OFFSET)) = value;
 
+}
+
+/*
+ * update the APT active indicator
+ */
+void
+commpage_update_apt_active(bool active)
+{
+	uint8_t *slot = (uint8_t *)(void *)(_COMM_PAGE_APT_ACTIVE + _COMM_PAGE_RW_OFFSET);
+	os_atomic_store(slot, active ? 1 : 0, relaxed);
 }

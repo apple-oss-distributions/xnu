@@ -16,6 +16,7 @@
 #include <libkern/libkern.h>
 #include <pexpert/device_tree.h>
 #include <kern/task.h>
+#include <vm/vm_protos.h>
 
 #if HYPERVISOR
 #include <kern/hv_support.h>
@@ -436,3 +437,32 @@ SYSCTL_PROC(_machdep, OID_AUTO, ptrauth_enabled,
     CTLTYPE_INT | CTLFLAG_KERN | CTLFLAG_RD,
     0, 0,
     machdep_ptrauth_enabled, "I", "");
+
+#if CONFIG_TELEMETRY && (DEBUG || DEVELOPMENT)
+extern unsigned long trap_telemetry_reported_events;
+SYSCTL_ULONG(_debug, OID_AUTO, trap_telemetry_reported_events,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &trap_telemetry_reported_events,
+    "Number of trap telemetry events successfully reported");
+
+extern unsigned long trap_telemetry_capacity_dropped_events;
+SYSCTL_ULONG(_debug, OID_AUTO, trap_telemetry_capacity_dropped_events,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &trap_telemetry_capacity_dropped_events,
+    "Number of trap telemetry events which were dropped due to a full RSB");
+#endif /* CONFIG_TELEMETRY && (DEBUG || DEVELOPMENT) */
+
+
+#if DEBUG || DEVELOPMENT
+/* A sysctl that can be used to check if the platform supports DRAM ECC and error injection. */
+static int
+dram_ecc_error_injection_capable SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, req)
+	int capable = 0;
+
+/* T6041 does not support error injection. */
+
+	return SYSCTL_OUT(req, &capable, sizeof(capable));
+}
+SYSCTL_PROC(_vm, OID_AUTO, dram_ecc_error_injection_capable, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, &dram_ecc_error_injection_capable, "I", "");
+#endif /* DEBUG || DEVELOPMENT */

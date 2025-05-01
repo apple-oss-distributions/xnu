@@ -766,8 +766,9 @@ extern void nx_netif_llink_init(struct nx_netif *);
 extern void nx_netif_llink_fini(struct nx_netif *);
 extern struct netif_qset * nx_netif_find_qset(struct nx_netif *, uint64_t);
 extern struct netif_qset * nx_netif_get_default_qset_noref(struct nx_netif *);
-extern int netif_qset_enqueue(struct netif_qset *, struct __kern_packet *,
-    struct __kern_packet *, uint32_t, uint32_t, uint32_t *, uint32_t *);
+extern int netif_qset_enqueue(struct netif_qset *, bool chain,
+    struct __kern_packet *, struct __kern_packet *, uint32_t, uint32_t,
+    uint32_t *, uint32_t *);
 extern int nx_netif_default_llink_config(struct nx_netif *,
     struct kern_nexus_netif_llink_init *);
 extern void nx_netif_llink_config_free(struct nx_netif *);

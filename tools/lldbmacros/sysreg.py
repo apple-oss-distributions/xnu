@@ -41,7 +41,7 @@ def DecodeSysreg(cmd_args=None):
     """
 
     ## For now, require exactly 2 arguments
-    if not cmd_args or len(cmd_args) != 2:
+    if cmd_args is None or len(cmd_args) != 2:
         raise ArgumentError("Missing arguments.")
 
     reg_name = cmd_args[0].upper()

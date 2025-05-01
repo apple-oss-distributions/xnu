@@ -8,6 +8,7 @@
 #include <kperf/kperf.h>
 #include <kern/debug.h>
 #include <notify.h>
+#include <stdio.h>
 #include <sys/kdebug.h>
 #include <sys/sysctl.h>
 #include <TargetConditionals.h>
@@ -441,4 +442,32 @@ T_DECL(excessive_sampling,
 	});
 
 	dispatch_main();
+}
+
+T_HELPER_DECL(read_kernel_microstackshots,
+    "read kernel thread microstackshots to a file")
+{
+	extern int __microstackshot(char *tracebuf, uint32_t tracebuf_size, uint32_t flags);
+
+	if (argc < 1) {
+		T_ASSERT_FAIL("usage: microstackshot_tests -n read_kernel_microstackshots <file>");
+	}
+
+	const char *path = argv[0];
+
+	char tracebuf[16 * 1024] = {};
+	uint32_t size = (uint32_t)sizeof(tracebuf);
+
+	int ret = __microstackshot(tracebuf, size, 0x08);
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(ret, "microstackshot(2)");
+
+	T_LOG("read %d bytes from microstackshot syscall ", ret);
+
+	if (ret > 0) {
+		FILE *tmp = fopen(path, "w");
+		fwrite(tracebuf, ret, 1, tmp);
+		fclose(tmp);
+	}
+	T_LOG("wrote microstackshot data to %s", path);
 }

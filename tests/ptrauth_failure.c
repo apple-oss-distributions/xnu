@@ -81,6 +81,24 @@ have_fpac(void)
 	return ID_AA64ISAR1_EL1_APA(id_aa64isar1_el1) >= APA_API_HAVE_FPAC ||
 	       ID_AA64ISAR1_EL1_API(id_aa64isar1_el1) >= APA_API_HAVE_FPAC;
 }
+
+static int
+virtual_address_size(void)
+{
+	int ret;
+	size_t ret_size = sizeof(ret);
+
+	int err = sysctlbyname("machdep.virtual_address_size", &ret, &ret_size, NULL, 0);
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_POSIX_SUCCESS(err, "sysctlbyname()");
+	return ret;
+}
+
+static void *
+canonical_address(void *ptr)
+{
+	uint64_t mask = (1ULL << virtual_address_size()) - 1;
+	return (void *)((uintptr_t)ptr & mask);
+}
 #endif // __arm64e__
 
 T_DECL(thread_set_state_corrupted_pc,
@@ -106,6 +124,8 @@ T_DECL(thread_set_state_corrupted_pc,
 	err = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count);
 	T_QUIET; T_ASSERT_EQ(err, KERN_SUCCESS, "Got child's thread state");
 	T_EXPECT_NE(state.__opaque_pc, corrupted_pc, "thread_set_state() with a corrupted PC should poison the PC value");
+	T_EXPECT_EQ(canonical_address(state.__opaque_pc), canonical_address(corrupted_pc),
+	    "thread_set_state() with a corrupted PC should preserve the canonical address bits");
 
 	err = thread_terminate(thread);
 	T_QUIET; T_EXPECT_EQ(err, KERN_SUCCESS, "Terminated thread");

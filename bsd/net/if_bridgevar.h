@@ -196,11 +196,13 @@ struct ifbreq {
 	                                 * drop outbound packets with
 	                                 * bad checksum
 	                                 */
+#define IFBIF_USES_VIRTIO       0x20000 /* uses virtio */
+
 
 #define IFBIFBITS       "\020\001LEARNING\002DISCOVER\003STP\004SPAN" \
 	"\005STICKY\006EDGE\007AUTOEDGE\010PTP"                       \
 	"\011AUTOPTP\014PRIVATE"                                      \
-	"\020MACNAT\021CSUM"
+	"\020MACNAT\021CSUM\022VIRTIO"
 
 #define IFBIFMASK       ~(IFBIF_BSTP_EDGE|IFBIF_BSTP_AUTOEDGE|IFBIF_BSTP_PTP| \
 	                IFBIF_BSTP_AUTOPTP|IFBIF_BSTP_ADMEDGE| \

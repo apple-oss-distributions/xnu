@@ -156,7 +156,8 @@ O_NOFOLLOW	do not follow symlinks
 O_SYMLINK	allow open of symlinks
 O_EVTONLY	descriptor requested for event notifications only
 O_CLOEXEC	mark as close-on-exec
-O_NOFOLLOW_ANY	do not follow symlinks in the entire path.
+O_NOFOLLOW_ANY	do not follow symlinks in the entire path
+O_RESOLVE_BENEATH	path must reside in the hierarchy beneath the starting directory
 .Ed
 .Pp
 Opening a file with
@@ -252,6 +253,14 @@ is used in the mask and any component of the path passed to
 .Fn open
 is a symbolic link then the
 .Fn open
+will fail.
+.Pp
+If
+.Dv O_RESOLVE_BENEATH
+is used in the mask and the specified relative path does not reside in the directory hierarchy beneath the starting directory passed by
+.Fa fd
+then the
+.Fn openat
 will fail.
 .Pp
 If successful,
@@ -478,6 +487,11 @@ nor a file descriptor associated with a directory.
 The filename does not match the encoding rules.
 .It Bq Er EWOULDBLOCK
 O_SHLOCK or O_EXLOCK is specified, but the file is locked and the O_NONBLOCK option was specified.
+.It Bq Er EACCES
+.Fa path
+does not reside in the directory hierarchy beneath the starting directory passed by
+.Fa fd
+and O_RESOLVE_BENEATH option was specified.
 .El
 .Sh COMPATIBILITY
 .Fn open

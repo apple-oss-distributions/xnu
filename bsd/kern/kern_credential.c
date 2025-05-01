@@ -3947,9 +3947,8 @@ kauth_cred_proc_update(
 			kauth_cred_ref(new_cred);
 			kauth_cred_hold(new_cred);
 
-			zalloc_ro_mut(ZONE_ID_PROC_RO, proc_get_ro(p),
-			    offsetof(struct proc_ro, p_ucred),
-			    &new_cred, sizeof(struct ucred *));
+			zalloc_ro_update_field_atomic(ZONE_ID_PROC_RO, proc_get_ro(p),
+			    p_ucred.__smr_ptr, ZRO_ATOMIC_XCHG_LONG, new_cred);
 
 			kauth_cred_drop(cur_cred);
 			ucred_rw_unref_live(cur_cred->cr_rw);

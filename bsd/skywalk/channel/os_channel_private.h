@@ -170,8 +170,8 @@ struct __user_channel_schema {
 	/*
 	 * The number of packet rings available for this channel.
 	 */
-	const uint32_t  csm_tx_rings;   /* # of tx rings */
-	const uint32_t  csm_rx_rings;   /* # of rx rings */
+	uint32_t  csm_tx_rings;   /* # of tx rings */
+	uint32_t  csm_rx_rings;   /* # of rx rings */
 
 	/*
 	 * The number of allocator ring pair available for this channel.
@@ -182,13 +182,13 @@ struct __user_channel_schema {
 	 * of alloc/free ring is used to manage the buffer (buflet) allocation
 	 * from userspace.
 	 */
-	const uint32_t  csm_allocator_ring_pairs;
+	uint32_t  csm_allocator_ring_pairs;
 
 	/*
 	 * number of event rings for this channel.
 	 */
-	const uint32_t  csm_num_event_rings;
-	const uint32_t  csm_large_buf_alloc_rings;
+	uint32_t  csm_num_event_rings;
+	uint32_t  csm_large_buf_alloc_rings;
 
 	/*
 	 * Flow advisory region offset; this field will be 0 if the
@@ -461,7 +461,6 @@ struct __flowadv_entry {
 
 #define FLOWADVF_VALID          0x1     /* flow is valid */
 #define FLOWADVF_SUSPENDED      0x2     /* flow is suspended */
-#define FLOWADV_RESUME_PENDING  0x4     /* flow is resumed before being suspended */
 
 /* channel event threshold */
 struct ch_ev_thresh {

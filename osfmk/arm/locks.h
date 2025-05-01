@@ -91,7 +91,7 @@ typedef struct __lck_mtx_ext_t__        lck_mtx_ext_t;
 extern uint64_t _Atomic lock_panic_timeout;
 
 /* Adaptive spin before blocking */
-extern machine_timeout_t   MutexSpin;
+extern uint64_t            MutexSpin;
 extern uint64_t            low_MutexSpin;
 extern int64_t             high_MutexSpin;
 
@@ -115,8 +115,10 @@ extern bool                has_lock_pv;
 	__dpft_count = *__dpft_countp;                                          \
 	os_atomic_store(__dpft_countp, __dpft_count + 1, compiler_acq_rel);     \
                                                                                 \
-	if (__dpft_count == 0 && sched_preemption_disable_debug_mode) {         \
-	        _prepare_preemption_disable_measurement();                      \
+	if (static_if(sched_debug_preemption_disable)) {                        \
+	       if (__dpft_count == 0 && sched_preemption_disable_debug_mode) {  \
+	               _prepare_preemption_disable_measurement();               \
+	       }                                                                \
 	}                                                                       \
 })
 #else /* SCHED_HYGIENE_DEBUG */

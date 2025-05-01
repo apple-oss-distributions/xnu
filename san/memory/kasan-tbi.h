@@ -67,13 +67,13 @@
  * space amounts to more than 16 bytes, then it's worth to tag it differently,
  * in order to catch off-by-small cases.
  */
-void kasan_tbi_retag_unused_space(vm_offset_t, vm_size_t, vm_size_t);
+void kasan_tbi_retag_unused_space(caddr_t, vm_size_t, vm_size_t);
 
 /*
  * KASAN-TBI tags virtual address ranges. Use this function whenever it's
  * desired to mark a free'd range back with the default (0xFF) tag.
  */
-void kasan_tbi_mark_free_space(vm_offset_t, vm_size_t);
+void kasan_tbi_mark_free_space(caddr_t, vm_size_t);
 
 /*
  * Retrieve the location in the shadow table where the metadata associated
@@ -82,6 +82,6 @@ void kasan_tbi_mark_free_space(vm_offset_t, vm_size_t);
 uint8_t *kasan_tbi_get_tag_address(vm_offset_t);
 
 /* Hanlder for the brk emitted instruction, see ESR definitions above */
-void kasan_handle_brk_failure(void *, uint16_t);
+const char *kasan_handle_brk_failure(void *, uint16_t);
 
 #endif /* _KASAN_TBI_H_ */

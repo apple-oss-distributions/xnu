@@ -429,7 +429,7 @@ struct _vm_map {
 	union {
 		vm_map_entry_t          _first_free;    /* First free space hint */
 		struct vm_map_links*    _holes;         /* links all holes between entries */
-	} f_s;                                          /* Union for free space data structures being used */
+	} f_s;                                      /* Union for free space data structures being used */
 
 #define first_free              f_s._first_free
 #define holes_list              f_s._holes
@@ -459,7 +459,14 @@ struct _vm_map {
 	/* boolean_t */ corpse_source:1,          /* map is being used to create a corpse for diagnostics.*/
 	/* reserved */ res0:1,
 	/* reserved  */pad:9;
-	unsigned int            timestamp;        /* Version number */
+	unsigned int            timestamp;          /* Version number */
+	/*
+	 * Weak reference to the task that owns this map. This will be NULL if the
+	 * map has terminated, so you must have a task reference to be able to safely
+	 * access this. Under the map lock, you can safely acquire a task reference
+	 * if owning_task is not NULL, since vm_map_terminate requires the map lock.
+	 */
+	task_t owning_task;
 };
 
 #define CAST_TO_VM_MAP_ENTRY(x) ((struct vm_map_entry *)(uintptr_t)(x))
@@ -664,17 +671,11 @@ extern vm_map_t         vm_map_fork(
 	ledger_t                ledger,
 	vm_map_t                old_map,
 	int                     options);
+
 #define VM_MAP_FORK_SHARE_IF_INHERIT_NONE       0x00000001
 #define VM_MAP_FORK_PRESERVE_PURGEABLE          0x00000002
 #define VM_MAP_FORK_CORPSE_FOOTPRINT            0x00000004
 #define VM_MAP_FORK_SHARE_IF_OWNED              0x00000008
-
-/* Change inheritance */
-extern kern_return_t    vm_map_inherit(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_inherit_t            new_inheritance);
 
 
 extern kern_return_t vm_map_query_volatile(
@@ -740,16 +741,12 @@ extern  kern_return_t   vm_map_read_user(
 
 extern vm_map_size_t    vm_map_adjusted_size(vm_map_t map);
 
-extern vm_map_t         vm_map_switch(
-	vm_map_t                map);
-
-/* Change protection */
-extern kern_return_t    vm_map_protect(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_prot_t               new_prot,
-	boolean_t               set_max);
+typedef struct {
+	vm_map_t map;
+	task_t task;
+} vm_map_switch_context_t;
+extern vm_map_switch_context_t vm_map_switch_to(vm_map_t map);
+extern void vm_map_switch_back(vm_map_switch_context_t ctx);
 
 extern boolean_t vm_map_cs_enforcement(
 	vm_map_t                map);
@@ -845,6 +842,9 @@ extern kern_return_t    vm_map_enter_mem_object_control(
 	vm_prot_ut              max_protection,
 	vm_inherit_ut           inheritance);
 
+/* Must be executed on a new task's map before the task is enabled for IPC access */
+extern void vm_map_setup(vm_map_t map, task_t task); /* always succeeds */
+
 extern kern_return_t    vm_map_terminate(
 	vm_map_t                map);
 
@@ -907,6 +907,7 @@ extern boolean_t        vm_map_tpro(
 
 extern void             vm_map_set_tpro(
 	vm_map_t                map);
+
 
 extern void             vm_map_set_tpro_enforcement(
 	vm_map_t                map);
@@ -1006,14 +1007,15 @@ extern void vm_map_single_jit(vm_map_t map);
 
 extern kern_return_t vm_map_page_info(
 	vm_map_t                map,
-	vm_map_offset_t         offset,
+	vm_map_offset_ut        offset,
 	vm_page_info_flavor_t   flavor,
 	vm_page_info_t          info,
 	mach_msg_type_number_t  *count);
+
 extern kern_return_t vm_map_page_range_info_internal(
 	vm_map_t                map,
-	vm_map_offset_t         start_offset,
-	vm_map_offset_t         end_offset,
+	vm_map_offset_ut        start_offset,
+	vm_map_offset_ut        end_offset,
 	int                     effective_page_shift,
 	vm_page_info_flavor_t   flavor,
 	vm_page_info_t          info,
@@ -1057,10 +1059,12 @@ extern bool vm_map_is_exotic(vm_map_t map);
 extern bool vm_map_is_alien(vm_map_t map);
 extern pmap_t vm_map_get_pmap(vm_map_t map);
 
+extern void vm_map_guard_exception(vm_map_offset_t gap_start, unsigned reason);
+
+
 extern bool vm_map_is_corpse_source(vm_map_t map);
 extern void vm_map_set_corpse_source(vm_map_t map);
 extern void vm_map_unset_corpse_source(vm_map_t map);
-
 
 #if CONFIG_DYNAMIC_CODE_SIGNING
 
@@ -1104,7 +1108,7 @@ extern kern_return_t vm_map_partial_reap(
  * a fake pointer based on the map's ledger and the index of the ledger being
  * reported.
  */
-#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((int*)((map)->pmap->ledger)+(ledger_id)))
+#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRHASH((int*)((map)->pmap->ledger)+(ledger_id)))
 
 #if DEVELOPMENT || DEBUG
 
@@ -1128,6 +1132,9 @@ boolean_t        vm_map_entry_has_device_pager(vm_map_t, vm_map_offset_t vaddr);
 #ifdef VM_SCAN_FOR_SHADOW_CHAIN
 int vm_map_shadow_max(vm_map_t map);
 #endif
+
+bool vm_map_is_map_size_valid(vm_map_t target_map, vm_size_t size, bool no_soft_limit);
+
 __END_DECLS
 
 #endif /* XNU_KERNEL_PRIVATE */

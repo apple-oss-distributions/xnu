@@ -63,16 +63,18 @@
 
 #include <kern/macro_help.h>
 #include <sys/cdefs.h>
+#include <machine/trap.h>
 
+#ifdef  XNU_KERNEL_PRIVATE
+#include <machine/static_if.h>
+#endif
 #ifdef  MACH_KERNEL_PRIVATE
 #include <mach_assert.h>
 #endif
 
 __BEGIN_DECLS
-/* Assert error */
-#if !CONFIG_NONFATAL_ASSERTS
+
 __abortlike
-#endif
 extern void     Assert(
 	const char      *file,
 	int             line,
@@ -91,12 +93,95 @@ __END_DECLS
 #define APPLE_KEXT_ASSERTIONS   0
 #endif
 
-#if     MACH_ASSERT
+__enum_decl(mach_assert_type_t, unsigned char, {
+	MACH_ASSERT_DEFAULT,
+	MACH_ASSERT_3P,
+	MACH_ASSERT_3S,
+	MACH_ASSERT_3U,
+});
 
-#define assert(ex)  \
-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
-#define assertf(ex, fmt, args...) \
-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
+struct mach_assert_hdr {
+	mach_assert_type_t      type;
+	unsigned                lineno : 24;
+	const char             *filename;
+} __attribute__((packed, aligned(4)));
+
+struct mach_assert_default {
+	struct mach_assert_hdr  hdr;
+	const char             *expr;
+} __attribute__((packed, aligned(4)));
+
+struct mach_assert_3x {
+	struct mach_assert_hdr  hdr;
+	const char             *a;
+	const char             *op;
+	const char             *b;
+} __attribute__((packed, aligned(4)));
+
+#if MACH_ASSERT
+# if XNU_KERNEL_PRIVATE
+STATIC_IF_KEY_DECLARE_TRUE(mach_assert);
+#   define mach_assert_enabled()    improbable_static_if(mach_assert)
+# else
+#   define mach_assert_enabled()    1
+# endif /* !XNU_KERNEL_PRIVATE */
+#elif APPLE_KEXT_ASSERTIONS
+#  define mach_assert_enabled()     __builtin_expect(kext_assertions_enable, 0L)
+#else /* !MACH_ASSERT && !APPLE_KEXT_ASSERTIONS */
+#  define mach_assert_enabled()     0
+#endif /* !MACH_ASSERT && !APPLE_KEXT_ASSERTIONS */
+
+#define MACH_ASSERT_TRAP_CODE       0xbffc /*  XNU_HARD_TRAP_ASSERT_FAILURE  */
+#define MACH_ASSERT_SEGSECT         "__DATA_CONST,__assert"
+
+/*!
+ * @abstract
+ * Wrap any arbitrary expression/code behind a conditional
+ * on whether assertions are enabled.
+ */
+#define MACH_ASSERT_DO(...)  ({ \
+	if (mach_assert_enabled()) { \
+	        __VA_ARGS__; \
+	} \
+})
+
+#define mach_assert_abort(reason)  ({ \
+	__attribute__((used, section(MACH_ASSERT_SEGSECT)))                     \
+	static const struct mach_assert_default __desc = {                      \
+	        { MACH_ASSERT_DEFAULT, __LINE__, __FILE_NAME__, },              \
+	        reason,                                                         \
+	};                                                                      \
+                                                                                \
+	ml_fatal_trap_with_value(MACH_ASSERT_TRAP_CODE, &__desc);               \
+})
+
+/*!
+ * @abstract
+ * assert() that is never elided or removed even in release builds.
+ */
+#define release_assert(ex) ({ \
+	if (__builtin_expect(!(ex), 0L)) {                                      \
+	        mach_assert_abort(#ex);                                         \
+	}                                                                       \
+})
+
+#if MACH_ASSERT || APPLE_KEXT_ASSERTIONS
+
+#define __assert_only
+
+#define mach_assert_enabled_expr(ex) \
+	(mach_assert_enabled() || __builtin_constant_p(!(ex)))
+
+#define assert(ex) \
+	(mach_assert_enabled_expr(ex) && !(ex) \
+	? (void)mach_assert_abort(#ex) : (void)0)
+
+#define assertf(ex, fmt, args...)  ({ \
+	if (mach_assert_enabled_expr(ex) && __builtin_expect(!(ex), 0L)) {      \
+	        __Panic("%s:%d Assertion failed: %s : " fmt,                    \
+	            __FILE_NAME__, __LINE__, # ex, ##args);                     \
+	}                                                                       \
+})
 
 /*
  * Each of the following three macros takes three arguments instead of one for
@@ -107,60 +192,74 @@ __END_DECLS
  * assert3u(a, >, b) -> file.c:124 Assertion failed: a > b (1 >= 10)
  *
  */
-#define assert3u(a, op, b)                                                        \
-	do {                                                                      \
-	        const unsigned long long a_ = (a);                                \
-	        const unsigned long long b_ = (b);                                \
-                                                                                  \
-	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
-	                __Panic("%s:%d Assertion failed: %s (0x%llx %s 0x%llx)",  \
-	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
-	        }                                                                 \
-	} while (0)
+#define assert3u(a, op, b)  ({                                                  \
+	if (mach_assert_enabled_expr((unsigned long long)(a) op                 \
+	    (unsigned long long)(b))) {                                         \
+	        const unsigned long long a_ = (a);                              \
+	        const unsigned long long b_ = (b);                              \
+                                                                                \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                        \
+	                __attribute__((used, section(MACH_ASSERT_SEGSECT)))     \
+	                static const struct mach_assert_3x __desc3u = {         \
+	                        { MACH_ASSERT_3U, __LINE__, __FILE_NAME__, },   \
+	                        #a, #op, #b,                                    \
+	                };                                                      \
+                                                                                \
+	                ml_fatal_trap_with_value3(MACH_ASSERT_TRAP_CODE,        \
+	                    &__desc3u, a_, b_);                                 \
+	        }                                                               \
+	}                                                                       \
+})
 
-#define assert3s(a, op, b)                                                        \
-	do {                                                                      \
-	        const signed long long a_ = (a);                                  \
-	        const signed long long b_ = (b);                                  \
-                                                                                  \
-	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
-	                __Panic("%s:%d Assertion failed: %s (0x%llx %s 0x%llx)",  \
-	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
-	        }                                                                 \
-	} while (0)
+#define assert3s(a, op, b)  ({                                                  \
+	if (mach_assert_enabled_expr((long long)(a) op ((long long)b))) {       \
+	        const signed long long a_ = (a);                                \
+	        const signed long long b_ = (b);                                \
+                                                                                \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                        \
+	                __attribute__((used, section(MACH_ASSERT_SEGSECT)))     \
+	                static const struct mach_assert_3x __desc3s = {         \
+	                        { MACH_ASSERT_3S, __LINE__, __FILE_NAME__, },   \
+	                        #a, #op, #b,                                    \
+	                };                                                      \
+                                                                                \
+	                ml_fatal_trap_with_value3(MACH_ASSERT_TRAP_CODE,        \
+	                    &__desc3s, a_, b_);                                 \
+	        }                                                               \
+	}                                                                       \
+})
 
-#define assert3p(a, op, b)                                                        \
-	do {                                                                      \
-	        const void *a_ = (a);                                             \
-	        const void *b_ = (b);                                             \
-                                                                                  \
-	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
-	                __Panic("%s:%d Assertion failed: %s (0x%p %s 0x%p)",      \
-	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
-	        }                                                                 \
-	} while (0)
+#define assert3p(a, op, b)  ({                                                  \
+	if (mach_assert_enabled_expr((const void *)(a) op (const void *)(b))) { \
+	        const void *a_ = (a);                                           \
+	        const void *b_ = (b);                                           \
+                                                                                \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                        \
+	                __attribute__((used, section(MACH_ASSERT_SEGSECT)))     \
+	                static const struct mach_assert_3x __desc3p = {         \
+	                        { MACH_ASSERT_3P, __LINE__, __FILE_NAME__, },   \
+	                        #a, #op, #b,                                    \
+	                };                                                      \
+                                                                                \
+	                ml_fatal_trap_with_value3(MACH_ASSERT_TRAP_CODE,        \
+	                    &__desc3p, a_, b_);                                 \
+	        }                                                               \
+	}                                                                       \
+})
 
-#define __assert_only
+#else /* !MACH_ASSERT && !XNU_KERNEL_PRIVATE */
 
-#elif APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE      /* MACH_ASSERT */
+#define __assert_only                   __unused
+#define mach_assert_enabled_expr(ex)    0
 
-#define assert(ex)  \
-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
-#define assertf(ex, fmt, args...) \
-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
-#define __assert_only
+#define assert(ex)                      ((void)0)
+#define assertf(ex, fmt, args...)       ((void)0)
 
-#else                           /* APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE */
+#define assert3s(a, op, b)              ((void)0)
+#define assert3u(a, op, b)              ((void)0)
+#define assert3p(a, op, b)              ((void)0)
 
-#define assert(ex) ((void)0)
-#define assertf(ex, fmt, args...) ((void)0)
-#define __assert_only __unused
-
-#define assert3s(a, op, b) ((void)0)
-#define assert3u(a, op, b) ((void)0)
-#define assert3p(a, op, b) ((void)0)
-
-#endif  /* MACH_ASSERT */
+#endif /* !MACH_ASSERT && !XNU_KERNEL_PRIVATE */
 
 /*
  * static_assert is a C11 / C++0x / C++1z feature.

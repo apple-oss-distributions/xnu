@@ -61,11 +61,23 @@ extern memory_object_offset_t vm_compressor_pager_next_compressed(
 	memory_object_t         mem_obj,
 	memory_object_offset_t  offset);
 
+__enum_closed_decl(vm_decompress_result_t, int, {
+	DECOMPRESS_SUCCESS_SWAPPEDIN = 1,
+	DECOMPRESS_SUCCESS = 0,
+	DECOMPRESS_NEED_BLOCK = -2,
+	DECOMPRESS_FIRST_FAIL_CODE = -3,
+	DECOMPRESS_FAILED_BAD_Q = -3,
+	DECOMPRESS_FAILED_BAD_Q_FREEZE = -4,
+	DECOMPRESS_FAILED_ALGO_ERROR = -5,
+	DECOMPRESS_FAILED_WKDMD_POPCNT = -6,
+	DECOMPRESS_FAILED_UNMODIFIED = -7,
+});
+
 extern bool osenvironment_is_diagnostics(void);
 extern void vm_compressor_init(void);
 extern bool vm_compressor_is_slot_compressed(int *slot);
-extern int vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf, vm_compressor_options_t flags);
-extern int vm_compressor_get(ppnum_t pn, int *slot, vm_compressor_options_t flags);
+extern kern_return_t vm_compressor_put(ppnum_t pn, int *slot, void **current_chead, char *scratch_buf, vm_compressor_options_t flags);
+extern vm_decompress_result_t vm_compressor_get(ppnum_t pn, int *slot, vm_compressor_options_t flags);
 extern int vm_compressor_free(int *slot, vm_compressor_options_t flags);
 
 #if CONFIG_TRACK_UNMODIFIED_ANON_PAGES

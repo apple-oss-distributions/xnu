@@ -1223,25 +1223,23 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 {
 	#pragma unused(flags, nam, p)
 
+	errno_t error = 0;
 	struct vsockpcb *pcb = sotovsockpcb(so);
 	if (pcb == NULL || m == NULL) {
-		return EINVAL;
+		error = EINVAL;
+		goto out;
 	}
 
 	if (control != NULL) {
-		m_freem(control);
-		return EOPNOTSUPP;
+		error = EOPNOTSUPP;
+		goto out;
 	}
 
 	// Ensure this socket is connected.
 	if ((so->so_state & SS_ISCONNECTED) == 0) {
-		if (m != NULL) {
-			mbuf_freem_list(m);
-		}
-		return EPERM;
+		error = EPERM;
+		goto out;
 	}
-
-	errno_t error;
 
 	// rdar://84098487 (SEED: Web: Virtio-socket sent data lost after 128KB)
 	// For writes larger than the default `sosendmaxchain` of 65536, vsock_send() is called multiple times per write().
@@ -1253,10 +1251,8 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 			struct mbuf *header = NULL;
 			MGETHDR(header, M_WAITOK, MT_HEADER);
 			if (header == NULL) {
-				if (m != NULL) {
-					mbuf_freem_list(m);
-				}
-				return ENOBUFS;
+				error = ENOBUFS;
+				goto out;
 			}
 			header->m_next = m;
 			m = header;
@@ -1286,10 +1282,7 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 		// Send a credit request.
 		error = vsock_pcb_credit_request(pcb);
 		if (error) {
-			if (m != NULL) {
-				mbuf_freem_list(m);
-			}
-			return error;
+			goto out;
 		}
 
 		// Check again in case free space was automatically updated in loopback case.
@@ -1301,35 +1294,25 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 
 		// Bail if this is a non-blocking socket.
 		if (so->so_state & SS_NBIO) {
-			if (m != NULL) {
-				mbuf_freem_list(m);
-			}
-			return EWOULDBLOCK;
+			error = EWOULDBLOCK;
+			goto out;
 		}
 
 		// Wait until our peer has enough free space in their receive buffer.
 		error = sbwait(&so->so_snd);
 		pcb->waiting_send_size = 0;
 		if (error) {
-			if (m != NULL) {
-				mbuf_freem_list(m);
-			}
-			return error;
+			goto out;
 		}
 
 		// Bail if an error occured or we can't send more.
 		if (so->so_state & SS_CANTSENDMORE) {
-			if (m != NULL) {
-				mbuf_freem_list(m);
-			}
-			return EPIPE;
+			error = EPIPE;
+			goto out;
 		} else if (so->so_error) {
 			error = so->so_error;
 			so->so_error = 0;
-			if (m != NULL) {
-				mbuf_freem_list(m);
-			}
-			return error;
+			goto out;
 		}
 
 		free_space = vsock_get_peer_space(pcb);
@@ -1344,6 +1327,15 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 	pcb->tx_cnt += len;
 
 	return 0;
+
+out:
+	if (control != NULL) {
+		m_freem(control);
+	}
+	if (m != NULL) {
+		mbuf_freem_list(m);
+	}
+	return error;
 }
 
 static int

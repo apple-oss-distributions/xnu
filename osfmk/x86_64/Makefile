@@ -12,7 +12,8 @@ EXPORT_FILES = \
 
 EXPORT_ONLY_FILES = \
 	machine_kpc.h \
-	monotonic.h
+	monotonic.h \
+	static_if.h
 
 INSTALL_KF_MD_LCL_LIST = ${EXPORT_FILES}
 

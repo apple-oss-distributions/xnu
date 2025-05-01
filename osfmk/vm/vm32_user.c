@@ -106,7 +106,7 @@
  */
 
 kern_return_t
-vm32_allocate(
+vm32_vm_allocate(
 	vm_map_t                map,
 	vm32_address_ut        *addr32,
 	vm32_size_ut            size32,
@@ -125,74 +125,105 @@ vm32_allocate(
 }
 
 kern_return_t
-vm32_deallocate(
+vm32_vm_deallocate(
 	vm_map_t                map,
 	vm32_offset_ut          start32,
 	vm32_size_ut            size32)
 {
 	mach_vm_offset_ut start;
 	mach_vm_size_ut   size;
-	kern_return_t     kr;
+	vm32_address_ut   discard;
 
-	kr = vm_sanitize_expand_addr_size_to_64(start32, size32, &start, &size);
-
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (vm_sanitize_add_overflow(start32, size32, &discard)) {
+		return KERN_INVALID_ARGUMENT;
 	}
+
+	start = vm_sanitize_expand_addr_to_64(start32);
+	size = vm_sanitize_expand_size_to_64(size32);
 
 	return mach_vm_deallocate(map, start, size);
 }
 
 kern_return_t
-vm32_inherit(
-	vm_map_t        map,
-	vm32_offset_t           start,
-	vm32_size_t             size,
-	vm_inherit_t            new_inheritance)
-{
-	if ((map == VM_MAP_NULL) || (start + size < start)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	return mach_vm_inherit(map, start, size, new_inheritance);
-}
-
-kern_return_t
-vm32_protect(
+vm32_vm_inherit(
 	vm_map_t                map,
-	vm32_offset_t           start,
-	vm32_size_t             size,
-	boolean_t               set_maximum,
-	vm_prot_t               new_protection)
+	vm32_offset_ut          start32,
+	vm32_size_ut            size32,
+	vm_inherit_ut           new_inheritance)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start)) {
+	mach_vm_offset_ut start;
+	mach_vm_size_ut   size;
+	vm32_address_ut   discard;
+
+	if (map == VM_MAP_NULL ||
+	    vm_sanitize_add_overflow(start32, size32, &discard)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return mach_vm_protect(map, start, size, set_maximum, new_protection);
+	start = vm_sanitize_expand_addr_to_64(start32);
+	size = vm_sanitize_expand_size_to_64(size32);
+
+	return mach_vm_inherit(map,
+	           start,
+	           size,
+	           new_inheritance);
 }
 
 kern_return_t
-vm32_machine_attribute(
-	vm_map_t        map,
-	vm32_address_t  addr,
-	vm32_size_t     size,
-	vm_machine_attribute_t  attribute,
-	vm_machine_attribute_val_t* value)              /* IN/OUT */
+vm32_vm_protect(
+	vm_map_t                map,
+	vm32_offset_ut          start32,
+	vm32_size_ut            size32,
+	boolean_t               set_maximum,
+	vm_prot_ut              new_protection)
 {
-	if ((map == VM_MAP_NULL) || (addr + size < addr)) {
+	mach_vm_offset_ut start;
+	mach_vm_size_ut   size;
+	vm32_address_ut   discard;
+
+	if (map == VM_MAP_NULL ||
+	    vm_sanitize_add_overflow(start32, size32, &discard)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	start = vm_sanitize_expand_addr_to_64(start32);
+	size = vm_sanitize_expand_size_to_64(size32);
+
+	return mach_vm_protect(map, start,
+	           size,
+	           set_maximum,
+	           new_protection);
+}
+
+kern_return_t
+vm32_vm_machine_attribute(
+	vm_map_t                map,
+	vm32_address_ut         addr32,
+	vm32_size_ut            size32,
+	vm_machine_attribute_t  attribute,
+	vm_machine_attribute_val_t *value) /* IN/OUT */
+{
+	mach_vm_offset_ut addr;
+	mach_vm_size_ut   size;
+	vm32_address_ut   discard;
+
+	if (map == VM_MAP_NULL ||
+	    vm_sanitize_add_overflow(addr32, size32, &discard)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	addr = vm_sanitize_expand_addr_to_64(addr32);
+	size = vm_sanitize_expand_size_to_64(size32);
 
 	return mach_vm_machine_attribute(map, addr, size, attribute, value);
 }
 
 kern_return_t
-vm32_read(
+vm32_vm_read(
 	vm_map_t                map,
 	vm32_address_ut         addr32,
 	vm32_size_ut            size32,
-	pointer_t              *data,
+	pointer_ut             *data,
 	mach_msg_type_number_t *data_size)
 {
 	mach_vm_offset_ut addr;
@@ -205,7 +236,7 @@ vm32_read(
 }
 
 kern_return_t
-vm32_read_list(
+vm32_vm_read_list(
 	vm_map_t                map,
 	vm32_read_entry_t       data_list,
 	natural_t               count)
@@ -230,7 +261,7 @@ vm32_read_list(
 }
 
 kern_return_t
-vm32_read_overwrite(
+vm32_vm_read_overwrite(
 	vm_map_t                map,
 	vm32_address_ut         addr32,
 	vm32_size_ut            size32,
@@ -253,10 +284,10 @@ vm32_read_overwrite(
 }
 
 kern_return_t
-vm32_write(
+vm32_vm_write(
 	vm_map_t                map,
 	vm32_address_ut         addr32,
-	pointer_t               data,
+	pointer_ut              data,
 	mach_msg_type_number_t  size)
 {
 	mach_vm_offset_ut addr;
@@ -266,7 +297,7 @@ vm32_write(
 }
 
 kern_return_t
-vm32_copy(
+vm32_vm_copy(
 	vm_map_t                map,
 	vm32_address_ut         src_addr32,
 	vm32_size_ut            size32,
@@ -283,7 +314,7 @@ vm32_copy(
 }
 
 kern_return_t
-vm32_map_64(
+vm32_vm_map_64(
 	vm_map_t                target_map,
 	vm32_offset_ut         *addr32,
 	vm32_size_ut            size32,
@@ -313,7 +344,7 @@ vm32_map_64(
 }
 
 kern_return_t
-vm32_map(
+vm32_vm_map(
 	vm_map_t                target_map,
 	vm32_offset_ut         *address,
 	vm32_size_ut            size,
@@ -329,13 +360,13 @@ vm32_map(
 	memory_object_offset_ut offset;
 
 	offset = vm_sanitize_expand_addr_to_64(offset32);
-	return vm32_map_64(target_map, address, size, mask,
+	return vm32_vm_map_64(target_map, address, size, mask,
 	           flags, port, offset, copy,
 	           cur_protection, max_protection, inheritance);
 }
 
 kern_return_t
-vm32_remap(
+vm32_vm_remap(
 	vm_map_t                target_map,
 	vm32_offset_ut         *addr32,
 	vm32_size_ut            size32,
@@ -367,122 +398,146 @@ vm32_remap(
 }
 
 kern_return_t
-vm32_msync(
-	vm_map_t        map,
-	vm32_address_t  address,
-	vm32_size_t     size,
-	vm_sync_t       sync_flags)
+vm32_vm_msync(
+	vm_map_t                map,
+	vm32_address_ut         addr32,
+	vm32_size_ut            size32,
+	vm_sync_t               sync_flags)
 {
-	return mach_vm_msync(map, address, size, sync_flags);
+	mach_vm_offset_ut addr;
+	mach_vm_size_ut   size;
+
+	addr = vm_sanitize_expand_addr_to_64(addr32);
+	size = vm_sanitize_expand_size_to_64(size32);
+	return mach_vm_msync(map, addr, size, sync_flags);
 }
 
 kern_return_t
-vm32_behavior_set(
+vm32_vm_behavior_set(
 	vm_map_t                map,
-	vm32_offset_t           start,
-	vm32_size_t             size,
-	vm_behavior_t           new_behavior)
+	vm32_offset_ut           start32,
+	vm32_size_ut             size32,
+	vm_behavior_ut           new_behavior)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start)) {
+	vm_address_ut     start;
+	vm_size_ut        size;
+	vm32_address_ut   discard;
+
+	if (vm_sanitize_add_overflow(start32, size32, &discard)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	start = vm_sanitize_expand_addr_to_64(start32);
+	size = vm_sanitize_expand_size_to_64(size32);
 
 	return mach_vm_behavior_set(map, start, size, new_behavior);
 }
 
-kern_return_t
-vm32_region_64(
-	vm_map_t                 map,
-	vm32_offset_t           *address,               /* IN/OUT */
-	vm32_size_t             *size,                  /* OUT */
-	vm_region_flavor_t       flavor,                /* IN */
-	vm_region_info_t         info,                  /* OUT */
-	mach_msg_type_number_t  *count,                 /* IN/OUT */
-	mach_port_t             *object_name)           /* OUT */
+static inline kern_return_t
+vm32_region_get_kern_return(
+	kern_return_t           kr,
+	vm_offset_ut            addr,
+	vm_size_ut              size)
 {
-	mach_vm_offset_t        maddress;
-	mach_vm_size_t          msize;
-	kern_return_t           result;
+	vm_offset_ut end = vm_sanitize_compute_ut_end(addr, size);
 
-	maddress = *address;
-	msize = *size;
-	result = mach_vm_region(map, &maddress, &msize, flavor, info, count, object_name);
-	*size = CAST_DOWN_EXPLICIT(vm32_size_t, msize);
-	*address = CAST_DOWN_EXPLICIT(vm32_offset_t, maddress);
-
-	return result;
-}
-
-kern_return_t
-vm32_region(
-	vm_map_t                        map,
-	vm32_address_t                  *address,       /* IN/OUT */
-	vm32_size_t                     *size,          /* OUT */
-	vm_region_flavor_t              flavor, /* IN */
-	vm_region_info_t                info,           /* OUT */
-	mach_msg_type_number_t  *count, /* IN/OUT */
-	mach_port_t                     *object_name)   /* OUT */
-{
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
-
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
-
-	kr = vm_map_region(map,
-	    &map_addr, &map_size,
-	    flavor, info, count,
-	    object_name);
-
-	*address = CAST_DOWN_EXPLICIT(vm32_address_t, map_addr);
-	*size = CAST_DOWN_EXPLICIT(vm32_size_t, map_size);
-
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM32_MAX_ADDRESS) {
+	if (KERN_SUCCESS == kr && VM_SANITIZE_UNSAFE_UNWRAP(end) > VM32_MAX_ADDRESS) {
 		return KERN_INVALID_ADDRESS;
 	}
 	return kr;
 }
 
 kern_return_t
-vm32_region_recurse_64(
-	vm_map_t                        map,
-	vm32_address_t                  *address,
-	vm32_size_t                     *size,
-	uint32_t                        *depth,
-	vm_region_recurse_info_64_t     info,
-	mach_msg_type_number_t  *infoCnt)
+vm32_vm_region_64(
+	vm_map_t                map,
+	vm32_offset_ut         *addr32,         /* IN/OUT */
+	vm32_size_ut           *size32,         /* OUT */
+	vm_region_flavor_t      flavor,         /* IN */
+	vm_region_info_t        info,           /* OUT */
+	mach_msg_type_number_t *count,          /* IN/OUT */
+	mach_port_t            *object_name)    /* OUT */
 {
-	mach_vm_address_t       maddress;
-	mach_vm_size_t          msize;
-	kern_return_t           result;
+	mach_vm_offset_ut addr;
+	mach_vm_size_ut   size;
+	kern_return_t     kr;
 
-	maddress = *address;
-	msize = *size;
-	result = mach_vm_region_recurse(map, &maddress, &msize, depth, info, infoCnt);
-	*address = CAST_DOWN_EXPLICIT(vm32_address_t, maddress);
-	*size = CAST_DOWN_EXPLICIT(vm32_size_t, msize);
+	addr = vm_sanitize_expand_addr_to_64(*addr32);
+	size = vm_sanitize_expand_size_to_64(*size32);
 
-	return result;
+	kr = mach_vm_region(map, &addr, &size, flavor, info, count, object_name);
+
+	*addr32 = vm_sanitize_trunc_addr_to_32(addr);
+	*size32 = vm_sanitize_trunc_size_to_32(size);
+
+	return kr;
 }
 
 kern_return_t
-vm32_region_recurse(
-	vm_map_t                        map,
-	vm32_offset_t           *address,       /* IN/OUT */
-	vm32_size_t                     *size,          /* OUT */
-	natural_t                       *depth, /* IN/OUT */
-	vm_region_recurse_info_t        info32, /* IN/OUT */
-	mach_msg_type_number_t  *infoCnt)       /* IN/OUT */
+vm32_vm_region(
+	vm_map_t                map,
+	vm32_address_ut        *addr32,         /* IN/OUT */
+	vm32_size_ut           *size32,         /* OUT */
+	vm_region_flavor_t      flavor,         /* IN */
+	vm_region_info_t        info,           /* OUT */
+	mach_msg_type_number_t *count,          /* IN/OUT */
+	mach_port_t            *object_name)    /* OUT */
+{
+	mach_vm_offset_ut addr;
+	mach_vm_size_ut   size;
+	kern_return_t     kr;
+
+	if (VM_MAP_NULL == map) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	addr = vm_sanitize_expand_addr_to_64(*addr32);
+	size = vm_sanitize_expand_size_to_64(*size32);
+
+	kr = vm_map_region(map, &addr, &size, flavor, info, count, object_name);
+
+	*addr32 = vm_sanitize_trunc_addr_to_32(addr);
+	*size32 = vm_sanitize_trunc_size_to_32(size);
+
+	return vm32_region_get_kern_return(kr, addr, size);
+}
+
+kern_return_t
+vm32_vm_region_recurse_64(
+	vm_map_t                map,
+	vm32_address_ut        *addr32,
+	vm32_size_ut           *size32,
+	uint32_t               *depth,
+	vm_region_recurse_info_64_t info,
+	mach_msg_type_number_t *infoCnt)
+{
+	mach_vm_offset_ut addr;
+	mach_vm_size_ut   size;
+	kern_return_t     kr;
+
+	addr = vm_sanitize_expand_addr_to_64(*addr32);
+	size = vm_sanitize_expand_size_to_64(*size32);
+
+	kr = mach_vm_region_recurse(map, &addr, &size, depth, info, infoCnt);
+
+	*addr32 = vm_sanitize_trunc_addr_to_32(addr);
+	*size32 = vm_sanitize_trunc_size_to_32(size);
+
+	return kr;
+}
+
+kern_return_t
+vm32_vm_region_recurse(
+	vm_map_t                map,
+	vm32_offset_ut         *addr32,         /* IN/OUT */
+	vm32_size_ut           *size32,         /* OUT */
+	natural_t              *depth,          /* IN/OUT */
+	vm_region_recurse_info_t info32,        /* IN/OUT */
+	mach_msg_type_number_t *infoCnt)        /* IN/OUT */
 {
 	vm_region_submap_info_data_64_t info64;
 	vm_region_submap_info_t info;
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
+	mach_vm_offset_ut       addr;
+	mach_vm_size_ut         size;
 	kern_return_t           kr;
 
 	if (VM_MAP_NULL == map || *infoCnt < VM_REGION_SUBMAP_INFO_COUNT) {
@@ -490,13 +545,13 @@ vm32_region_recurse(
 	}
 
 
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
+	addr = vm_sanitize_expand_addr_to_64(*addr32);
+	size = vm_sanitize_expand_size_to_64(*size32);
 	info = (vm_region_submap_info_t)info32;
 	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT_64;
 
-	kr = vm_map_region_recurse_64(map, &map_addr, &map_size,
-	    depth, &info64, infoCnt);
+	kr = mach_vm_region_recurse(map, &addr, &size,
+	    depth, (vm_region_recurse_info_t)&info64, infoCnt);
 
 	info->protection = info64.protection;
 	info->max_protection = info64.max_protection;
@@ -516,53 +571,40 @@ vm32_region_recurse(
 	info->object_id = info64.object_id;
 	info->user_wired_count = info64.user_wired_count;
 
-	*address = CAST_DOWN_EXPLICIT(vm32_address_t, map_addr);
-	*size = CAST_DOWN_EXPLICIT(vm32_size_t, map_size);
+	*addr32 = vm_sanitize_trunc_addr_to_32(addr);
+	*size32 = vm_sanitize_trunc_size_to_32(size);
 	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT;
 
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM32_MAX_ADDRESS) {
-		return KERN_INVALID_ADDRESS;
-	}
-	return kr;
+	return vm32_region_get_kern_return(kr, addr, size);
 }
 
 kern_return_t
-vm32_purgable_control(
+vm32_vm_purgable_control(
 	vm_map_t                map,
-	vm32_offset_t           address,
+	vm32_offset_ut          addr32,
 	vm_purgable_t           control,
-	int                     *state)
+	int                    *state)
 {
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
+	mach_vm_offset_ut addr;
 
-	return vm_map_purgable_control(map,
-	           vm_map_trunc_page(address, PAGE_MASK),
-	           control,
-	           state);
+	addr = vm_sanitize_expand_addr_to_64(addr32);
+	return mach_vm_purgable_control(map, addr, control, state);
 }
 
 kern_return_t
-vm32_map_page_query(
+vm32_vm_map_page_query(
 	vm_map_t                map,
-	vm32_offset_t           offset,
+	vm32_offset_t           offset32,
 	int                     *disposition,
 	int                     *ref_count)
 {
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
+	vm_offset_ut offset = vm_sanitize_expand_addr_to_64(offset32);
 
-	return vm_map_page_query_internal(
-		map,
-		vm_map_trunc_page(offset, PAGE_MASK),
-		disposition,
-		ref_count);
+	return mach_vm_page_query(map, offset, disposition, ref_count);
 }
 
 kern_return_t
-vm32_make_memory_entry_64(
+vm32_mach_make_memory_entry_64(
 	vm_map_t                target_map,
 	memory_object_size_ut  *size,
 	memory_object_offset_ut offset,
@@ -575,7 +617,7 @@ vm32_make_memory_entry_64(
 }
 
 kern_return_t
-vm32_make_memory_entry(
+vm32_mach_make_memory_entry(
 	vm_map_t                target_map,
 	vm32_size_ut           *size,
 	vm32_offset_ut          offset,
@@ -594,7 +636,7 @@ vm32_make_memory_entry(
 }
 
 kern_return_t
-vm32__task_wire(
+vm32_task_wire(
 	vm_map_t        map,
 	boolean_t       must_wire __unused)
 {
@@ -606,7 +648,7 @@ vm32__task_wire(
 }
 
 kern_return_t
-vm32__map_exec_lockdown(
+vm32_vm_map_exec_lockdown(
 	vm_map_t        map)
 {
 	if (map == VM_MAP_NULL) {

@@ -26,6 +26,7 @@ KERNELFILES = \
 	pal_hibernate.h		\
 	simple_lock.h		\
 	smp.h                   \
+	static_if.h             \
 	trap.h
 
 EXPORT_FILES = \

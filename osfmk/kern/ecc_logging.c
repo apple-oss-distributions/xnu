@@ -45,6 +45,7 @@
 #include <pexpert/device_tree.h>
 #include <libkern/OSAtomic.h>
 #include <arm/pmap_public.h>
+#include <vm/vm_page.h>
 #include <vm/vm_protos.h>
 
 /* New CoreAnalytics ECC logging mechanism */

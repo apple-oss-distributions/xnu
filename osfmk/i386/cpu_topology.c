@@ -213,7 +213,9 @@ cpu_topology_sort(int ncpus)
 				lprim = cpup->cpu_processor;
 			}
 
+#if CONFIG_SCHED_SMT
 			processor_set_primary(cpup->cpu_processor, lprim);
+#endif /* CONFIG_SCHED_SMT */
 		}
 	}
 

@@ -8,6 +8,7 @@ include $(MakeInc_def)
 
 ARM_HEADER_FILES =	\
 		arch.h \
+		arm_features.inc \
 		atomic.h \
 		cpu_number.h \
 		cpu_capabilities.h	\

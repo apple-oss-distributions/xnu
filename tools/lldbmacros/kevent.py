@@ -12,11 +12,11 @@ def IterateProcKqueues(proc):
             kq - yields each kqueue in the process
     """
     for kqf in IterateProcKqfiles(proc):
-        yield kern.GetValueFromAddress(int(kqf), 'struct kqueue *')
-    if int(proc.p_fd.fd_wqkqueue) != 0:
-        yield kern.GetValueFromAddress(int(proc.p_fd.fd_wqkqueue), 'struct kqueue *')
+        yield cast(kqf, 'struct kqueue *')
+    if int((fd_wqkqueue := proc.p_fd.fd_wqkqueue)) != 0:
+        yield cast(fd_wqkqueue, 'struct kqueue *')
     for kqwl in IterateProcKqworkloops(proc):
-        yield kern.GetValueFromAddress(int(kqwl), 'struct kqueue *')
+        yield cast(kqwl, 'struct kqueue *')
 
 def IterateProcKqfiles(proc):
     """ Iterate through all kqfiles in the given process
@@ -36,9 +36,10 @@ def IterateProcKqfiles(proc):
         return
 
     for fd in range(0, unsigned(proc_filedesc.fd_afterlast)):
-        if unsigned(proc_ofiles[fd]) != 0:
-            proc_fd_flags = proc_ofiles[fd].fp_flags
-            proc_fd_fglob = proc_ofiles[fd].fp_glob
+        fd_fileproc = proc_ofiles[fd]
+        if unsigned(fd_fileproc) != 0:
+            # proc_fd_flags = fd_fileproc.fp_flags
+            proc_fd_fglob = fd_fileproc.fp_glob
             proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
             if proc_fd_ftype == xnudefines.DTYPE_KQUEUE:
                 proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
@@ -53,12 +54,13 @@ def IterateProcKqworkloops(proc):
             kqwl - yields each kqworkloop in the process
     """
     proc_filedesc = addressof(proc.p_fd)
-    if int(proc_filedesc.fd_kqhash) == 0:
+    proc_fd_kqhash = proc_filedesc.fd_kqhash
+    if int(proc_fd_kqhash) == 0:
         return
 
     hash_mask = proc_filedesc.fd_kqhashmask
     for i in range(hash_mask + 1):
-        for kqwl in IterateListEntry(proc_filedesc.fd_kqhash[i], 'kqwl_hashlink'):
+        for kqwl in IterateListEntry(proc_fd_kqhash[i], 'kqwl_hashlink'):
             yield kqwl
 
 def IterateAllKqueues():
@@ -69,9 +71,8 @@ def IterateAllKqueues():
     """
     for t in kern.tasks:
         proc = GetProcFromTask(t)
-        if not proc:
+        if proc is None:
             continue
-        proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
         for kq in IterateProcKqueues(proc):
             yield kq
 
@@ -137,7 +138,7 @@ def ShowKnote(cmd_args=None, cmd_options={}, O=None):
 
         usage: showknote <struct knote *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing struct knote * argument')
 
     kn = kern.GetValueFromAddress(cmd_args[0], 'struct knote *')
@@ -175,16 +176,16 @@ def GetKqueueSummary(kq):
         returns: str - summary of kqueue
     """
     if int(kq.kq_state) & GetEnumValue('kq_state_t', 'KQ_WORKQ'):
-        return GetKqworkqSummary(kern.GetValueFromAddress(int(kq), 'struct kqworkq *'))
+        return GetKqworkqSummary(cast(kq, 'struct kqworkq *'))
     elif int(kq.kq_state) & GetEnumValue('kq_state_t', 'KQ_WORKLOOP'):
-        return GetKqworkloopSummary(kern.GetValueFromAddress(int(kq), 'struct kqworkloop *'))
+        return GetKqworkloopSummary(cast(kq, 'struct kqworkloop *'))
     else:
-        return GetKqfileSummary(kern.GetValueFromAddress(int(kq), 'struct kqfile *'))
+        return GetKqfileSummary(cast(kq, 'struct kqfile *'))
 
 @lldb_type_summary(['struct kqfile *'])
 @header(GetKqueueSummary.header)
 def GetKqfileSummary(kqf):
-    kq = kern.GetValueFromAddress(int(kqf), 'struct kqueue *')
+    kq = cast(kqf, 'struct kqueue *')
     state = int(kq.kq_state)
     return kqueue_summary_fmt.format(
             o=kq,
@@ -219,10 +220,10 @@ def GetKqworkqSummary(kqwq):
     """ Summarize workqueue kqueue information
 
         params:
-            kqwq - the kqworkq object
+            kqwq - the kqworkq object (type 'struct kqworkq')
         returns: str - summary of workqueue kqueue
     """
-    return GetKqfileSummary(kern.GetValueFromAddress(int(kqwq), 'struct kqfile *'))
+    return GetKqfileSummary(kqwq)
 
 @lldb_command('showkqworkq', fancy=True)
 def ShowKqworkq(cmd_args=None, cmd_options={}, O=None):
@@ -255,10 +256,11 @@ def GetKqworkloopSummary(kqwl):
             kqwl - the kqworkloop object
         returns: str - summary of workloop kqueue
     """
-    state = int(kqwl.kqwl_kqueue.kq_state)
+    kqwl_kqueue = kqwl.kqwl_kqueue
+    state = int(kqwl_kqueue.kq_state)
     return kqueue_summary_fmt.format(
             ptr=int(kqwl),
-            o=kqwl.kqwl_kqueue,
+            o=kqwl_kqueue,
             dyn_id=kqwl.kqwl_dynamicid,
             st_str=GetOptionString('kq_state_t', state, 'KQ_'),
             servicer=GetServicer(kqwl.kqwl_request),
@@ -292,7 +294,7 @@ def ShowKqueue(cmd_args=None, cmd_options={}, O=None):
 
         usage: showkqueue <struct kqueue *>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing struct kqueue * argument')
 
     kq = kern.GetValueFromAddress(cmd_args[0], 'struct kqueue *')
@@ -309,7 +311,7 @@ def ShowProcWorkqKqueue(cmd_args=None, cmd_options={}, O=None):
 
         usage: showprocworkqkqueue <proc_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
@@ -321,7 +323,7 @@ def ShowProcKqueues(cmd_args=None, cmd_options={}, O=None):
 
         usage: showprockqueues <proc_t>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
@@ -337,7 +339,7 @@ def ShowProcKnotes(cmd_args=None, cmd_options={}, O=None):
         usage: showprocknotes <proc_t>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error('missing struct proc * argument')
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
@@ -365,7 +367,7 @@ def ShowKqCounts(cmd_args=None, cmd_options={}, O=None):
     print ('{: <20s} {: <35s} {: <10s} {: <6s}'.format('process', 'proc_name', '#kqfiles', '#kqworkloop'))
     for t in kern.tasks:
         proc = GetProcFromTask(t)
-        if not proc:
+        if proc is None:
             continue
         proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
         kqfcount = 0

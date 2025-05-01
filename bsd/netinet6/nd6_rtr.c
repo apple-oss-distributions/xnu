@@ -176,7 +176,7 @@ struct nd_prefix_dbg {
 static unsigned int ndpr_debug;                 /* debug flags */
 ZONE_DECLARE(ndpr_zone, struct nd_prefix);
 #define NDPR_ZONE_NAME  "nd6_prefix"            /* zone name */
-zone_t ndpr_zone = {0};                         /* zone for nd_prefix */
+zone_t ndpr_zone;                               /* zone for nd_prefix */
 
 #define NDDR_TRACE_HIST_SIZE    32              /* size of trace history */
 
@@ -197,7 +197,7 @@ struct nd_defrouter_dbg {
 static unsigned int nddr_debug;                 /* debug flags */
 ZONE_DECLARE(nddr_zone, struct nd_defrouter);
 #define NDDR_ZONE_NAME  "nd6_defrouter"         /* zone name */
-zone_t nddr_zone = {0};                         /* zone for nd_defrouter */
+zone_t nddr_zone;                               /* zone for nd_defrouter */
 
 static KALLOC_TYPE_DEFINE(ndprtr_zone, struct nd_pfxrouter, NET_KT_DEFAULT);
 

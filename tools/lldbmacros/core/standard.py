@@ -4,15 +4,17 @@ import string
 import sys
 import re
 
-from lldb import SBValue
+from lldb import SBValue, SBCommandReturnObject
 from core import value as cvalue
 from .configuration import config
+
+HELP_ARGUMENT_EXCEPTION_SENTINEL = "HELP"
 
 class ArgumentError(Exception):
     """ Exception class for raising errors in command arguments. The lldb_command framework will catch this
         class of exceptions and print suitable error message to user.
     """
-    def __init__(self, msg):
+    def __init__(self, msg="Bad arguments provided"):
         self.error_message = msg
     def __str__(self):
         return str(self.error_message)
@@ -325,7 +327,7 @@ class CommandOutput(object):
     -c <always|never|auto>
        configure color
     """
-    def __init__(self, cmd_name, CommandResult=None, fhandle=None):
+    def __init__(self, cmd_name: str, CommandResult: SBCommandReturnObject=None, fhandle=None):
         """ Create a new instance to handle command output.
         params:
                 CommandResult : SBCommandReturnObject result param from lldb's command invocation.
@@ -438,7 +440,7 @@ class CommandOutput(object):
             if o == "-h":
                 # This is misuse of exception but 'self' has no info on doc string.
                 # The caller may handle exception and display appropriate info
-                raise ArgumentError("HELP")
+                raise ArgumentError(HELP_ARGUMENT_EXCEPTION_SENTINEL)
             if o == "-o" and len(a) > 0:
                 self.fname=os.path.normpath(os.path.expanduser(a.strip()))
                 self.fhandle=open(self.fname,"w")

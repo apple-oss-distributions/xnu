@@ -179,6 +179,14 @@ skmem_slab_destroy(struct skmem_cache *skm, struct skmem_slab *sl)
 	}
 	skmem_cache_free(skmem_slab_cache, sl);
 
+	/*
+	 * Restore original tag before freeing back to system. sl->sl_base should
+	 * have the original tag.
+	 */
+	if (skm->skm_region->skr_bufspec.memtag) {
+		vm_memtag_store_tag(slab, skm->skm_slabsize);
+	}
+
 	/* and finally free the segment back to the backing region */
 	skmem_region_free(skm->skm_region, slab, slabm);
 }
@@ -200,7 +208,7 @@ skmem_slab_alloc_locked(struct skmem_cache *skm, struct skmem_obj_info *oi,
 	size_t bufsize;
 	void *__sized_by(bufsize) buf;
 #if CONFIG_KERNEL_TAGGING
-	vm_offset_t tagged_address;             /* address tagging */
+	vm_map_address_t tagged_address;        /* address tagging */
 	struct skmem_region *region;            /* region source for this slab */
 #endif /* CONFIG_KERNEL_TAGGING */
 
@@ -331,20 +339,8 @@ again:
 #if CONFIG_KERNEL_TAGGING
 	region = sl->sl_cache->skm_region;
 	if (region->skr_mode & SKR_MODE_MEMTAG) {
-		/*
-		 * If this region is configured to be tagged, we generate a
-		 * unique tag for the object address, and return this tagged
-		 * address to the caller. vm_memtag_assign_tag generates a
-		 * unique tag for the given address and size, and
-		 * vm_memtag_set_tag commits the tag to the backing memory
-		 * metadata. This tagged address is returned back to the client,
-		 * and when the client frees the address, we "re-tag" the
-		 * address to prevent against use-after-free attacks (more on
-		 * this in skmem_cache_batch_free).
-		 */
-		tagged_address = vm_memtag_assign_tag((vm_offset_t)bc->bc_addr,
+		tagged_address = (vm_map_address_t)vm_memtag_generate_and_store_tag(bc->bc_addr,
 		    skm->skm_objsize);
-		vm_memtag_set_tag(tagged_address, skm->skm_objsize);
 		/*
 		 * XXX -fbounds-safety: tagged_address's type is vm_offset_t
 		 * which is unsafe, so we have ot use __unsafe_forge here.
@@ -600,13 +596,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	struct skmem_slab *sl = NULL;
 #if CONFIG_KERNEL_TAGGING
 	struct skmem_region *region;
-	vm_offset_t tagged_addr;
-	/*
-	 * If buf is tagged, then addr would have the canonicalized address.
-	 * If buf is untagged, then addr is same as buf.
-	 */
-	void *addr = __unsafe_forge_bidi_indexable(void *,
-	    vm_memtag_canonicalize_address((vm_offset_t)buf), skm->skm_objsize);
+	vm_map_address_t tagged_addr;
 #endif /* CONFIG_KERNEL_TAGGING */
 
 	SKM_SLAB_LOCK_ASSERT_HELD(skm);
@@ -624,30 +614,13 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	skm->skm_sl_free++;
 	bcb = SKMEM_CACHE_HASH(skm, buf);
 
-#if CONFIG_KERNEL_TAGGING
-	/*
-	 * If this region is configured to tag memory addresses, then buf is a
-	 * tagged address. When we search for the buffer control from the hash
-	 * table, we need to use the untagged address, because buffer control
-	 * maintains untagged address (bc_addr). vm_memtag_canonicalize_address
-	 * returns the untagged address.
-	 */
 	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
-		if (bc->bc_addr == addr) {
+		if (SKMEM_COMPARE_CANONICAL_ADDR(bc->bc_addr, buf, skm->skm_objsize)) {
 			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
 			sl = bc->bc_slab;
 			break;
 		}
 	}
-#else /* !CONFIG_KERNEL_TAGGING */
-	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
-		if (bc->bc_addr == buf) {
-			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
-			sl = bc->bc_slab;
-			break;
-		}
-	}
-#endif /* CONFIG_KERNEL_TAGGING */
 
 	if (bc == NULL) {
 		panic("%s: attempt to free invalid or already-freed obj %p "
@@ -656,16 +629,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 		__builtin_unreachable();
 	}
 	ASSERT(sl != NULL && sl->sl_cache == skm);
-
-#if CONFIG_KERNEL_TAGGING
-	/*
-	 * We use untagged address here, because SKMEM_SLAB_MEMBER compares the
-	 * address against sl_base, which is untagged.
-	 */
-	VERIFY(SKMEM_SLAB_MEMBER(sl, addr));
-#else /* !CONFIG_KERNEL_TAGGING */
-	VERIFY(SKMEM_SLAB_MEMBER(sl, buf));
-#endif /* CONFIG_KERNEL_TAGGING */
+	VERIFY(SKMEM_SLAB_MEMBER(sl, SKMEM_MEMTAG_STRIP_TAG(buf, skm->skm_objsize)));
 
 	/* make sure this object is not currently in use by another object */
 	VERIFY(bc->bc_usecnt == 0);
@@ -685,24 +649,9 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	}
 
 #if CONFIG_KERNEL_TAGGING
-	/*
-	 * If this region is configured to tag memory addresses, we re-tag this
-	 * address as the object is freed. We do the re-tagging in the magazine
-	 * layer too, but in case we need to free raw objects to the slab layer
-	 * (either becasue SKM_MODE_NOMAGAZINES is set, or the magazine layer
-	 * was not able to allocate empty magazines), we re-tag the addresses
-	 * here in the slab layer. Freeing to the slab layer is symmetrical to
-	 * allocating from the slab layer - when we allocate from slab layer, we
-	 * tag the address, and then construct the object; when we free to the
-	 * slab layer, we destruct the object, and retag the address.
-	 * We do the re-tagging here, because this is right after the last usage
-	 * of the buf variable (which is tagged).
-	 */
 	region = skm->skm_region;
 	if (region->skr_mode & SKR_MODE_MEMTAG) {
-		tagged_addr = vm_memtag_assign_tag((vm_offset_t)buf,
-		    skm->skm_objsize);
-		vm_memtag_set_tag(tagged_addr, skm->skm_objsize);
+		tagged_addr = (vm_map_address_t)vm_memtag_generate_and_store_tag(buf, skm->skm_objsize);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 

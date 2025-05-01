@@ -814,7 +814,6 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	if (cflags & SKMEM_REGION_CR_THREADSAFE) {
 		skr->skr_mode |= SKR_MODE_THREADSAFE;
 	}
-
 	if (cflags & SKMEM_REGION_CR_MEMTAG) {
 		skr->skr_mode |= SKR_MODE_MEMTAG;
 	}
@@ -837,7 +836,8 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	/* SKR_MODE_UREADONLY only takes effect for user task mapping */
 	skr->skr_bufspec.user_writable = !(skr->skr_mode & SKR_MODE_UREADONLY);
 	skr->skr_bufspec.kernel_writable = !(skr->skr_mode & SKR_MODE_KREADONLY);
-	skr->skr_bufspec.purgeable = TRUE;
+	/* Regions containing pointers are wired (i.e. not pageable nor purgeable) */
+	skr->skr_bufspec.purgeable = !(skr->skr_mode & SKR_MODE_MEMTAG);
 	skr->skr_bufspec.inhibitCache = !!(skr->skr_mode & SKR_MODE_NOCACHE);
 	skr->skr_bufspec.physcontig = (skr->skr_mode & SKR_MODE_SEGPHYSCONTIG);
 	skr->skr_bufspec.iodir_in = !!(skr->skr_mode & SKR_MODE_IODIR_IN);
@@ -845,7 +845,7 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	skr->skr_bufspec.puredata = !!(skr->skr_mode & SKR_MODE_PUREDATA);
 	skr->skr_bufspec.threadSafe = !!(skr->skr_mode & SKR_MODE_THREADSAFE);
 	skr->skr_regspec.noRedirect = !!(skr->skr_mode & SKR_MODE_NOREDIRECT);
-
+	skr->skr_bufspec.memtag = !!(skr->skr_mode & SKR_MODE_MEMTAG);
 	/* allocate segment bitmaps */
 	if (!(skr->skr_mode & SKR_MODE_PSEUDO)) {
 		ASSERT(skr->skr_seg_max_cnt != 0);
@@ -1701,8 +1701,12 @@ sksegment_freelist_insert(struct skmem_region *skr, struct sksegment *sg,
 		IOSKRegionClearBufferDebug(skr->skr_reg, sg->sg_index, &md);
 		VERIFY(sg->sg_md == md);
 
-		/* if persistent, unwire this memory now */
-		if (skr->skr_mode & SKR_MODE_PERSISTENT) {
+		/*
+		 * If persistent, unwire this memory now. But do not unwire
+		 * memtag regions, as they come from zalloc.
+		 */
+		if ((skr->skr_mode & SKR_MODE_PERSISTENT) &&
+		    !(skr->skr_mode & SKR_MODE_MEMTAG)) {
 			err = IOSKMemoryUnwire(md);
 			if (err != kIOReturnSuccess) {
 				panic("Fail to unwire md %p, err %d", md, err);
@@ -1710,9 +1714,11 @@ sksegment_freelist_insert(struct skmem_region *skr, struct sksegment *sg,
 		}
 
 		/* mark memory as empty/discarded for consistency */
-		err = IOSKMemoryDiscard(md);
-		if (err != kIOReturnSuccess) {
-			panic("Fail to discard md %p, err %d", md, err);
+		if (!(skr->skr_mode & SKR_MODE_MEMTAG)) {
+			err = IOSKMemoryDiscard(md);
+			if (err != kIOReturnSuccess) {
+				panic("Fail to discard md %p, err %d", md, err);
+			}
 		}
 
 		IOSKMemoryDestroy(md);
@@ -1826,13 +1832,19 @@ sksegment_freelist_remove(struct skmem_region *skr, struct sksegment *sg,
 	ASSERT(sg->sg_start != 0 && sg->sg_end != 0);
 
 	/* mark memory as non-volatile just to be consistent */
-	err = IOSKMemoryReclaim(sg->sg_md);
-	if (err != kIOReturnSuccess) {
-		panic("Fail to reclaim md %p, err %d", sg->sg_md, err);
+	if (!(skr->skr_mode & SKR_MODE_MEMTAG)) {
+		err = IOSKMemoryReclaim(sg->sg_md);
+		if (err != kIOReturnSuccess) {
+			panic("Fail to reclaim md %p, err %d", sg->sg_md, err);
+		}
 	}
 
-	/* if persistent, wire down its memory now */
-	if (skr->skr_mode & SKR_MODE_PERSISTENT) {
+	/*
+	 * If persistent, wire down its memory now. But do not wire memtag
+	 * regions, as they come from zalloc.
+	 */
+	if ((skr->skr_mode & SKR_MODE_PERSISTENT) &&
+	    !(skr->skr_mode & SKR_MODE_MEMTAG)) {
 		err = IOSKMemoryWire(sg->sg_md);
 		if (err != kIOReturnSuccess) {
 			panic("Fail to wire md %p, err %d", sg->sg_md, err);

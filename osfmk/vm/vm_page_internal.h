@@ -35,6 +35,12 @@
 __BEGIN_DECLS
 #ifdef XNU_KERNEL_PRIVATE
 
+struct vm_page_queue_free_head {
+	vm_page_queue_head_t    qhead;
+} VM_PAGE_PACKED_ALIGNED;
+
+extern struct vm_page_queue_free_head  vm_page_queue_free[MAX_COLORS];
+
 static inline int
 VMP_CS_FOR_OFFSET(
 	vm_map_offset_t fault_phys_offset)
@@ -203,14 +209,13 @@ vm_page_queue_enter_clump(
 	vm_page_queue_entry_t prev = NULL;
 	vm_page_queue_entry_t next;
 	uint_t                n_free = 1;
-	extern unsigned int   vm_pages_count;
-	extern unsigned int   vm_clump_size, vm_clump_mask, vm_clump_shift, vm_clump_promote_threshold;
+	extern unsigned int   vm_clump_size, vm_clump_promote_threshold;
 	extern unsigned long  vm_clump_allocs, vm_clump_inserts, vm_clump_inrange, vm_clump_promotes;
 
 	/*
 	 * If elt is part of the vm_pages[] array, find its neighboring buddies in the array.
 	 */
-	if (vm_page_array_beginning_addr <= elt && elt < &vm_pages[vm_pages_count]) {
+	if (vm_page_in_array(elt)) {
 		vm_page_t p;
 		uint_t    i;
 		uint_t    n;
@@ -223,7 +228,7 @@ vm_page_queue_enter_clump(
 		/*
 		 * Check for preceeding vm_pages[] entries in the same chunk
 		 */
-		for (i = 0, p = elt - 1; i < n && vm_page_array_beginning_addr <= p; i++, p--) {
+		for (i = 0, p = elt - 1; i < n && vm_page_get(0) <= p; i++, p--) {
 			if (p->vmp_q_state == VM_PAGE_ON_FREE_Q && clump_num == VM_PAGE_GET_CLUMP(p)) {
 				if (prev == NULL) {
 					prev = (vm_page_queue_entry_t)p;
@@ -236,7 +241,7 @@ vm_page_queue_enter_clump(
 		/*
 		 * Check the following vm_pages[] entries in the same chunk
 		 */
-		for (i = n + 1, p = elt + 1; i < vm_clump_size && p < &vm_pages[vm_pages_count]; i++, p++) {
+		for (i = n + 1, p = elt + 1; i < vm_clump_size && p < vm_page_get(vm_pages_count); i++, p++) {
 			if (p->vmp_q_state == VM_PAGE_ON_FREE_Q && clump_num == VM_PAGE_GET_CLUMP(p)) {
 				if (last == (vm_page_queue_entry_t)elt) {               /* first one only */
 					__DEBUG_CHECK_BUDDIES(prev, p, vmp_pageq);
@@ -320,12 +325,123 @@ extern vm_page_t        vm_page_lookup(
 	vm_object_t             object,
 	vm_object_offset_t      offset);
 
-extern vm_page_t        vm_page_grab_fictitious(boolean_t canwait);
+/*!
+ * @abstract
+ * Creates a fictitious page.
+ *
+ * @discussion
+ * This function never returns VM_PAGE_NULL;
+ *
+ * Pages made by this function have the @c vm_page_fictitious_addr
+ * fake physical address.
+ */
+extern vm_page_t        vm_page_create_fictitious(void);
 
-extern vm_page_t        vm_page_grab_guard(boolean_t canwait);
+/*!
+ * @abstract
+ * Returns a kernel guard page (used by @c kmem_alloc_guard()).
+ *
+ * @discussion
+ * Pages returned by this function have the @c vm_page_guard_addr
+ * fake physical address.
+ *
+ * @param canwait       Whether the caller can wait, if true,
+ *                      this function never returns VM_PAGE_NULL.
+ */
+extern vm_page_t        vm_page_create_guard(bool canwait);
 
-extern void             vm_page_release_fictitious(
-	vm_page_t page);
+/*!
+ * @abstract
+ * Create a private VM page.
+ *
+ * @discussion
+ * These pages allow for non canonical references to the same physical page.
+ * Its @c VM_PAGE_GET_PHYS_PAGE() will be @c base_page.
+ *
+ * Such pages must not be released back to the free queues directly,
+ * @c vm_page_reset_private() must be called first.
+ *
+ * This function never returns VM_PAGE_NULL
+ *
+ * @param base_page     The physical page this private page represents.
+ */
+extern vm_page_t        vm_page_create_private(ppnum_t base_page);
+
+/*!
+ * @abstract
+ * Returns whether this is the canonical page for a regular managed kernel page.
+ *
+ * @discussion
+ * A kernel page is the canonical @c vm_page_t for a given pmap managed physical
+ * page.  These pages are made at startup, or when @c ml_static_mfree() is
+ * called, and are never freed.
+ *
+ * Its @c VM_PAGE_GET_PHYS_PAGE() will be a valid @c ppnum_t value.
+ *
+ * A page can either be:
+ * - a canonical page (@c vm_page_is_canonical())
+ * - a fictitious page (@c vm_page_is_fictitious()),
+ *   of which guard pages are a special case (@c vm_page_is_guard())
+ * - a private page (@c vm_page_is_private())
+ */
+extern bool             vm_page_is_canonical(const struct vm_page *m) __pure2;
+
+/*!
+ * @abstract
+ * Returns whether this page is fictitious (made by @c vm_page_create_guard()
+ * or by @c vm_page_create_fictitious()).
+ *
+ * @discussion
+ * A page can either be:
+ * - a canonical page (@c vm_page_is_canonical())
+ * - a fictitious page (@c vm_page_is_fictitious()),
+ *   of which guard pages are a special case (@c vm_page_is_guard())
+ * - a private page (@c vm_page_is_private())
+ */
+extern bool             vm_page_is_fictitious(const struct vm_page *m);
+
+/*!
+ * @abstract
+ * Returns whether this is a kernel guard page that was made by
+ * @c vm_page_create_guard().
+ */
+extern bool             vm_page_is_guard(const struct vm_page *m) __pure2;
+
+/*!
+ * @abstract
+ * Returns whether a page is private (made by @c vm_page_create_private(),
+ * or converted from a fictitious page by @c vm_page_make_private()).
+ *
+ * @discussion
+ * A page can either be:
+ * - a canonical page (@c vm_page_is_canonical())
+ * - a fictitious page (@c vm_page_is_fictitious()),
+ *   of which guard pages are a special case (@c vm_page_is_guard())
+ * - a private page (@c vm_page_is_private())
+ */
+extern bool             vm_page_is_private(const struct vm_page *m);
+
+/*!
+ * @abstract
+ * Converts a fictitious page made by @c vm_page_create_fictitious()
+ * into a private page.
+ *
+ * @param m             The fictitious page to convert into a private one.
+ * @param base_page     The physical page that this page will represent
+ *                      (@c vm_page_create_private()).
+ */
+extern void             vm_page_make_private(vm_page_t m, ppnum_t base_page);
+
+/*!
+ * @abstract
+ * Converts a private page into a fictitious page (as if made by
+ * @c vm_page_create_fictitious()).
+ *
+ * @discussion
+ * Private pages can't be released with @c vm_page_release()
+ * without being turned into a fictitious page first using this function.
+ */
+extern void             vm_page_reset_private(vm_page_t m);
 
 extern bool             vm_pool_low(void);
 
@@ -349,8 +465,7 @@ extern boolean_t        vm_page_wait(
 
 extern void             vm_page_init(
 	vm_page_t       page,
-	ppnum_t         phys_page,
-	boolean_t       lopage);
+	ppnum_t         phys_page);
 
 extern void             vm_page_free(
 	vm_page_t       page);
@@ -358,6 +473,51 @@ extern void             vm_page_free(
 extern void             vm_page_free_unlocked(
 	vm_page_t       page,
 	boolean_t       remove_from_hash);
+
+/*
+ * vm_page_get_memory_class:
+ * Given a page, returns the memory class of that page.
+ */
+extern vm_memory_class_t        vm_page_get_memory_class(
+	vm_page_t               page);
+
+/*
+ * vm_page_steal_free_page:
+ * Given a VM_PAGE_ON_FREE_Q page, steals it from its free queue.
+ */
+extern void                     vm_page_steal_free_page(
+	vm_page_t               page,
+	vm_remove_reason_t      remove_reason);
+
+/*!
+ * @typedef vmp_free_list_result_t
+ *
+ * @discussion
+ * This data structure is used by vm_page_put_list_on_free_queue to track
+ * how many pages were freed to which free lists, so that it can then drive
+ * which waiters we are going to wake up.
+ *
+ * uint8_t counters are enough because we never free more than 64 pages at
+ * a time, and this allows for the data structure to be passed by register.
+ */
+typedef struct {
+	uint8_t vmpr_regular;
+	uint8_t vmpr_lopage;
+#if CONFIG_SECLUDED_MEMORY
+	uint8_t vmpr_secluded;
+#endif /* CONFIG_SECLUDED_MEMORY */
+} vmp_free_list_result_t;
+
+/*
+ * vm_page_put_list_on_free_queue:
+ * Given a list of pages, put each page on whichever global free queue is
+ * appropriate.
+ *
+ * Must be called with the VM free page lock held.
+ */
+extern vmp_free_list_result_t vm_page_put_list_on_free_queue(
+	vm_page_t       list,
+	bool            page_queues_locked);
 
 extern void             vm_page_balance_inactive(
 	int             max_to_move);
@@ -495,6 +655,33 @@ extern void             vm_page_wakeup_done(
 	vm_object_t        object,
 	vm_page_t          m);
 
+typedef struct page_worker_token {
+	thread_pri_floor_t pwt_floor_token;
+	bool pwt_did_register_inheritor;
+} page_worker_token_t;
+
+extern void             vm_page_wakeup_done_with_inheritor(
+	vm_object_t        object,
+	vm_page_t          m,
+	page_worker_token_t *token);
+
+extern void             page_worker_register_worker(
+	event_t            event,
+	page_worker_token_t *out_token);
+
+extern boolean_t        vm_page_is_relocatable(
+	vm_page_t            m,
+	vm_relocate_reason_t reloc_reason);
+
+extern kern_return_t    vm_page_relocate(
+	vm_page_t            m1,
+	int *                compressed_pages,
+	vm_relocate_reason_t reason,
+	vm_page_t*           new_page);
+
+extern bool             vm_page_is_restricted(
+	vm_page_t mem);
+
 /*
  * Functions implemented as macros. m->vmp_wanted and m->vmp_busy are
  * protected by the object lock.
@@ -617,13 +804,34 @@ extern lck_grp_t vm_page_lck_grp_local;
 	vm_page_wire_count_initial -= (page_count);             \
 	MACRO_END
 
+kern_return_t
+pmap_enter_object_options_check(
+	pmap_t           pmap,
+	vm_map_address_t virtual_address,
+	vm_map_offset_t  fault_phys_offset,
+	vm_object_t      object,
+	ppnum_t          pn,
+	vm_prot_t        protection,
+	vm_prot_t        fault_type,
+	boolean_t        wired,
+	unsigned int     options);
+
+extern kern_return_t pmap_enter_options_check(
+	pmap_t           pmap,
+	vm_map_address_t virtual_address,
+	vm_map_offset_t  fault_phys_offset,
+	vm_page_t        page,
+	vm_prot_t        protection,
+	vm_prot_t        fault_type,
+	boolean_t        wired,
+	unsigned int     options);
+
 extern kern_return_t pmap_enter_check(
 	pmap_t           pmap,
 	vm_map_address_t virtual_address,
 	vm_page_t        page,
 	vm_prot_t        protection,
 	vm_prot_t        fault_type,
-	unsigned int     flags,
 	boolean_t        wired);
 
 #define DW_vm_page_unwire               0x01
@@ -697,7 +905,6 @@ extern void vm_page_enqueue_active(vm_page_t mem, boolean_t first);
 extern void vm_page_check_pageable_safe(vm_page_t page);
 //end int
 
-
 //todo int
 extern void vm_retire_boot_pages(void);
 
@@ -705,8 +912,6 @@ extern void vm_retire_boot_pages(void);
 
 #define VMP_ERROR_GET(p) ((p)->vmp_error)
 
-
-//todo int
 
 #endif /* XNU_KERNEL_PRIVATE */
 __END_DECLS

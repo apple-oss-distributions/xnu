@@ -345,6 +345,7 @@ apple_protect_pager_data_request(
 	vm_page_t               src_page, top_page;
 	int                     interruptible;
 	struct vm_object_fault_info     fault_info;
+	vm_fault_return_t       vmfr;
 	int                     ret;
 
 	PAGER_DEBUG(PAGER_ALL, ("apple_protect_pager_data_request: %p, %llx, %x, %x\n", mem_obj, offset, length, protection_required));
@@ -428,7 +429,7 @@ retry_src_fault:
 		error_code = 0;
 		prot = VM_PROT_READ;
 		src_page = VM_PAGE_NULL;
-		kr = vm_fault_page(src_top_object,
+		vmfr = vm_fault_page(src_top_object,
 		    pager->backing_offset + offset + cur_offset,
 		    VM_PROT_READ,
 		    FALSE,
@@ -440,7 +441,7 @@ retry_src_fault:
 		    &error_code,
 		    FALSE,
 		    &fault_info);
-		switch (kr) {
+		switch (vmfr) {
 		case VM_FAULT_SUCCESS:
 			break;
 		case VM_FAULT_RETRY:
@@ -449,7 +450,10 @@ retry_src_fault:
 			if (vm_page_wait(interruptible)) {
 				goto retry_src_fault;
 			}
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_APPLE_PROTECT_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_APPLE_PROTECT_PAGER_MEMORY_SHORTAGE), 0 /* arg */);
+			ktriage_record(thread_tid(current_thread()),
+			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_APPLE_PROTECT_PAGER,
+			    KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_APPLE_PROTECT_PAGER_MEMORY_SHORTAGE),
+			    0 /* arg */);
 			OS_FALLTHROUGH;
 		case VM_FAULT_INTERRUPTED:
 			retval = MACH_SEND_INTERRUPTED;
@@ -467,10 +471,13 @@ retry_src_fault:
 				retval = KERN_MEMORY_ERROR;
 			}
 			goto done;
+		case VM_FAULT_BUSY:
+			retval = KERN_ALREADY_WAITING;
+			goto done;
 		default:
-			panic("apple_protect_pager_data_request: "
-			    "vm_fault_page() unexpected error 0x%x\n",
-			    kr);
+			panic("%s: "
+			    "vm_fault_page() return unexpected error 0x%x\n",
+			    __func__, vmfr);
 		}
 		assert(src_page != VM_PAGE_NULL);
 		assert(src_page->vmp_busy);

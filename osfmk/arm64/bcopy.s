@@ -70,6 +70,7 @@
 _bcopy:
 _ovbcopy:
 //  Translate bcopy into memcpy by swapping the first and second arguments.
+	ARM64_PROLOG
 	mov     x3,      x0
 	mov     x0,      x1
 	mov     x1,      x3

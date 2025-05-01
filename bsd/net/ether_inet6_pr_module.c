@@ -159,7 +159,7 @@ ether_inet6_input(ifnet_t ifp, protocol_family_t protocol,
 static errno_t
 ether_inet6_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
     mbuf_t *m0, const struct sockaddr *dst_netaddr, void *route,
-    char *type, char *edst)
+    IFNET_FRAME_TYPE_RW_T frametype, IFNET_LLADDR_RW_T laddr)
 {
 #pragma unused(protocol_family)
 	errno_t result;
@@ -176,10 +176,7 @@ ether_inet6_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 	if (result == 0) {
 		u_int16_t ethertype_ipv6 = htons(ETHERTYPE_IPV6);
 
-		uint8_t *frametype = dlil_frame_type(type);
 		bcopy(&ethertype_ipv6, frametype, sizeof(ethertype_ipv6));
-
-		uint8_t *laddr = dlil_link_addr(edst);
 		bcopy(LLADDR(&sdl), laddr, sdl.sdl_alen);
 	}
 

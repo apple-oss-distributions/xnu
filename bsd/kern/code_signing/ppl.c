@@ -311,9 +311,15 @@ ppl_unregister_code_signature(
 
 kern_return_t
 ppl_verify_code_signature(
-	void *sig_obj)
+	void *sig_obj,
+	uint32_t *trust_level)
 {
-	return pmap_cs_verify_code_signature_blob(sig_obj);
+	kern_return_t ret = pmap_cs_verify_code_signature_blob(sig_obj);
+
+	if ((ret == KERN_SUCCESS) && (trust_level != NULL)) {
+		*trust_level = ((struct pmap_cs_code_directory*)sig_obj)->trust;
+	}
+	return ret;
 }
 
 kern_return_t
@@ -374,6 +380,50 @@ ppl_associate_debug_region(
 	const vm_address_t region_addr,
 	const vm_size_t region_size)
 {
+	volatile bool force_true = true;
+	bool debugger_mapping = false;
+
+	/*
+	 * Check that the debug association is coming from a debugger and not just
+	 * any application. If it isn't a debugger, then the debug association is not
+	 * allowed. This isn't a strong security requirement, so we don't need to
+	 * perform this check within the PPL proper.
+	 *
+	 * When the region_addr is PAGE_SIZE, then we're not actually creating any
+	 * debug mappings, we're just trying to check if the address space can be or
+	 * has been marked as debugged or not.
+	 */
+	if (region_addr != PAGE_SIZE) {
+		if (IOCurrentTaskHasEntitlement("com.apple.private.cs.debugger") == true) {
+			debugger_mapping = true;
+		}
+	} else {
+		debugger_mapping = true;
+	}
+
+#if DEVELOPMENT || DEBUG
+	code_signing_config_t cs_config = 0;
+	code_signing_configuration(NULL, &cs_config);
+	if ((cs_config & CS_CONFIG_UNRESTRICTED_DEBUGGING) != 0) {
+		debugger_mapping = true;
+	}
+#endif
+
+	/*
+	 * For now, we're just going to revert back to our previous policy and continue
+	 * to allow a debugger mapped to be created by a process on its own.
+	 *
+	 * For more information: rdar://145588999.
+	 */
+	if (force_true == true) {
+		debugger_mapping = true;
+	}
+
+	if (debugger_mapping == false) {
+		printf("disallowed non-debugger initiated debug mapping\n");
+		return KERN_DENIED;
+	}
+
 	return pmap_cs_associate(
 		pmap,
 		PMAP_CS_ASSOCIATE_COW,

@@ -179,8 +179,8 @@ mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs)
 	/*
 	 * Keep the MSRs back-to-back to improve throughput.
 	 */
-	uint64_t cur_cycles = __builtin_arm_rsr64("PMC0");
-	uint64_t cur_instrs = __builtin_arm_rsr64("PMC1");
+	uint64_t cur_cycles = __builtin_arm_rsr64("S3_2_C15_C0_0");
+	uint64_t cur_instrs = __builtin_arm_rsr64("S3_2_C15_C1_0");
 
 	uint64_t cycles_sum = mtc->mtc_counts[MT_CORE_CYCLES];
 	uint64_t instrs_sum = mtc->mtc_counts[MT_CORE_INSTRS];

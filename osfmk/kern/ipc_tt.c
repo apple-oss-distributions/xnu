@@ -70,7 +70,7 @@
 
 #include <IOKit/IOBSD.h> // IOTaskHasEntitlement
 
-#include <ipc/port.h>
+#include <ipc/ipc_policy.h>
 #include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
@@ -375,6 +375,7 @@ ipc_task_enable(
 		return;
 	}
 
+	assert(task->map->owning_task == task); /* verify vm_map_setup called */
 	assert(!task->ipc_active || task_is_a_corpse(task));
 	task->ipc_active = true;
 
@@ -1906,6 +1907,10 @@ thread_set_special_port(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * rdar://70585367
+	 * disallow immovable send so other process can't retrieve it through thread_get_special_port()
+	 */
 	if (IP_VALID(port) && port->ip_immovable_send) {
 		return KERN_INVALID_RIGHT;
 	}
@@ -2233,6 +2238,10 @@ task_set_special_port(
 		return KERN_NO_ACCESS;
 	}
 
+	/*
+	 * rdar://70585367
+	 * disallow immovable send so other process can't retrieve it through task_get_special_port()
+	 */
 	if (IP_VALID(port) && port->ip_immovable_send) {
 		return KERN_INVALID_RIGHT;
 	}
@@ -2390,6 +2399,10 @@ _kernelrpc_mach_ports_register3(
 	}
 
 	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
+		/*
+		 * rdar://70585367
+		 * disallow immovable send so other process can't retrieve it through mach_ports_lookup()
+		 */
 		if (IP_VALID(ports[i]) && ports[i]->ip_immovable_send) {
 			return KERN_INVALID_RIGHT;
 		}
@@ -4080,12 +4093,11 @@ send_set_exception_telemetry(const task_t excepting_task, const exception_mask_t
 
 /* Returns whether the violation should be ignored */
 static boolean_t
-set_exception_behavior_violation(const task_t excepting_task,
-    const exception_mask_t mask)
+set_exception_behavior_violation(const task_t excepting_task, const exception_mask_t mask)
 {
 	if (thid_should_crash) {
 		/* create lightweight corpse */
-		mach_port_guard_exception(0, 0, 0, kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE);
+		mach_port_guard_exception(0, 0, kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE);
 	}
 
 	/* always report the proc name to CA */
@@ -4773,6 +4785,13 @@ thread_get_exception_ports_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * Allocate a save area for FP state before taking thread lock,
+	 * if necessary, to ensure that VM_KERNEL_ADDRHASH() doesn't cause
+	 * an FP state allocation while holding thread locks.
+	 */
+	ml_fp_save_area_prealloc();
+
 	tro = get_thread_ro(thread);
 	thread_mtx_lock(thread);
 
@@ -4817,8 +4836,8 @@ thread_get_exception_ports_internal(
 					} else {
 						uintptr_t receiver;
 						(void)ipc_port_get_receiver_task(exc_port, &receiver);
-						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRPERM(exc_port);
-						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRPERM(receiver) : 0;
+						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRHASH(exc_port);
+						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRHASH(receiver) : 0;
 					}
 				} else {
 					ports[j] = exception_port_copy_send(exc_port);
@@ -4928,6 +4947,13 @@ task_get_exception_ports_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * Allocate a save area for FP state before taking task lock,
+	 * if necessary, to ensure that VM_KERNEL_ADDRHASH() doesn't cause
+	 * an FP state allocation while holding task locks.
+	 */
+	ml_fp_save_area_prealloc();
+
 	itk_lock(task);
 
 	if (!task->ipc_active) {
@@ -4966,8 +4992,8 @@ task_get_exception_ports_internal(
 					} else {
 						uintptr_t receiver;
 						(void)ipc_port_get_receiver_task(exc_port, &receiver);
-						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRPERM(exc_port);
-						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRPERM(receiver) : 0;
+						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRHASH(exc_port);
+						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRHASH(receiver) : 0;
 					}
 				} else {
 					ports[j] = exception_port_copy_send(exc_port);

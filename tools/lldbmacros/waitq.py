@@ -202,7 +202,7 @@ def ShowWaitq(cmd_args=None, cmd_options={}, O=None):
         usage: showwaitq <waitq/waitq_set>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         return O.error("Missing waitq argument")
 
     with O.table(GetWaitqSummary.header):

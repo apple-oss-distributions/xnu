@@ -31,7 +31,7 @@
 #include <mach/i386/vm_param.h>
 #include <mach/i386/kern_return.h>
 #include <vm/vm_kern_xnu.h>
-#include <i386/pmap.h>
+#include <vm/pmap.h>
 #include "vmx_shims.h"
 
 void *

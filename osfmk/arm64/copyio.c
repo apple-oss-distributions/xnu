@@ -33,20 +33,23 @@
 #include <sys/errno.h>
 #include <vm/pmap.h>
 #include <vm/vm_map_xnu.h>
+#include <vm/vm_memtag.h>
 #include <san/kasan.h>
 #include <arm/pmap.h>
+#include <arm64/speculation.h>
 
 #undef copyin
 #undef copyout
 
-extern int _bcopyin(const char *src, char *dst, vm_size_t len);
-extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
-extern int _bcopyout(const char *src, char *dst, vm_size_t len);
-extern int _copyin_atomic32(const char *src, uint32_t *dst);
-extern int _copyin_atomic32_wait_if_equals(const char *src, uint32_t dst);
-extern int _copyin_atomic64(const char *src, uint64_t *dst);
-extern int _copyout_atomic32(uint32_t u32, const char *dst);
-extern int _copyout_atomic64(uint64_t u64, const char *dst);
+extern int _bcopyin(const user_addr_t src, char *dst, vm_size_t len);
+extern int _bcopyinstr(const user_addr_t src, char *dst, vm_size_t max, vm_size_t *actual);
+extern int _bcopyout(const char *src, user_addr_t dst, vm_size_t len);
+extern int _copyin_atomic32(const user_addr_t src, uint32_t *dst);
+extern int _copyin_atomic32_wait_if_equals(const user_addr_t src, uint32_t value);
+extern int _copyin_atomic64(const user_addr_t src, uint64_t *dst);
+extern int _copyout_atomic32(uint32_t u32, user_addr_t dst);
+extern int _copyout_atomic64(uint64_t u64, user_addr_t dst);
+
 
 extern int copyoutstr_prevalidate(const void *kaddr, user_addr_t uaddr, size_t len);
 
@@ -106,6 +109,18 @@ user_access_disable(__unused user_access_direction_t user_access_direction, pmap
 
 }
 
+
+#define WRAP_COPYIO_PAN(_dir, _map, _op)                                        \
+	({                                                                      \
+	        int _ret;                                                       \
+	        user_access_enable(_dir, (_map)->pmap);                         \
+	        _ret = _op;                                                     \
+	        user_access_disable(_dir, (_map)->pmap);                        \
+	        _ret;                                                           \
+	})
+
+#define WRAP_COPYIO(_dir, _map, _op) WRAP_COPYIO_PAN(_dir, _map, _op)
+
 /*
  * Copy sizes bigger than this value will cause a kernel panic.
  *
@@ -122,6 +137,54 @@ is_kernel_to_kernel_copy(pmap_t pmap)
 	return pmap == kernel_pmap;
 }
 
+/**
+ * In order to prevent copies from speculatively targeting the wrong address
+ * space, force kernel-to-kernel copies to target the kernel address space
+ * (TTBR1) and non-kernel copies to target the user address space (TTBR0).
+ *
+ * This should have no non-speculative effect as any address which passes
+ * validation should already have bit 55 (the address space select bit) set
+ * appropriately. If the address would change (i.e. addr is invalid for the copy
+ * type), this function panics and so it must only be called after all other
+ * verification has completed.
+ */
+static user_addr_t
+copy_ensure_address_space_spec(vm_map_t map, const user_addr_t addr)
+{
+	user_addr_t new_addr = 0;
+	user_addr_t kaddr = addr | BIT(55);
+	user_addr_t uaddr = addr & (~BIT(55));
+
+	/*
+	 * new_addr = is_kernel_to_kernel_copy(...) ? kaddr : uaddr
+	 *
+	 * The check must be performed explicitly as the compiler lowering of the
+	 * actual call may be subject to prediction.
+	 */
+	SPECULATION_GUARD_SELECT_XXX(
+		/* out */ new_addr,
+		/* cmp_1  */ map->pmap, /* cmp_2 */ kernel_pmap,
+		/* cc   */ "eq", /* sel_1 */ kaddr,
+		/* n_cc */ "ne", /* sel_2 */ uaddr);
+
+	/*
+	 * Since we're modifying the address past the validation point, let's be
+	 * sure we didn't erroneously change address spaces.
+	 *
+	 * We have to be careful to hide this check from the optimizer as if it
+	 * learns that new_addr == addr, then it is free to (and, indeed, does) use
+	 * addr everywhere that new_addr is referenced, which breaks our hardening.
+	 */
+	user_addr_t new_addr_opt_hidden = new_addr;
+	__compiler_materialize_and_prevent_reordering_on(new_addr_opt_hidden);
+	if (new_addr_opt_hidden != addr) {
+		panic("copy_ensure_address_space_spec changed address: 0x%llx->0x%llx",
+		    addr, new_addr);
+	}
+
+	return new_addr;
+}
+
 static int
 copy_validate_user_addr(vm_map_t map, const user_addr_t user_addr, vm_size_t nbytes)
 {
@@ -129,8 +192,6 @@ copy_validate_user_addr(vm_map_t map, const user_addr_t user_addr, vm_size_t nby
 	user_addr_t user_addr_last;
 	bool is_kernel_to_kernel = is_kernel_to_kernel_copy(map->pmap);
 
-	if (!is_kernel_to_kernel) {
-	}
 
 	if (__improbable(canonicalized_user_addr < vm_map_min(map) ||
 	    os_add_overflow(canonicalized_user_addr, nbytes, &user_addr_last) ||
@@ -240,7 +301,7 @@ int
 copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
+	user_addr_t guarded_user_addr;
 	int result;
 
 	if (__improbable(nbytes == 0)) {
@@ -250,16 +311,17 @@ copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes)
 	result = copy_validate(map, user_addr, (uintptr_t)kernel_addr, nbytes,
 	    COPYIO_IN | COPYIO_ALLOW_KERNEL_TO_KERNEL);
 	if (result == EXDEV) {
-		return copyin_kern(user_addr, kernel_addr, nbytes);
+		guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+		return copyin_kern(guarded_user_addr, kernel_addr, nbytes);
 	}
 	if (__improbable(result)) {
 		return result;
 	}
 
-	user_access_enable(USER_ACCESS_READ, pmap);
-	result = _bcopyin((const char *)user_addr, kernel_addr, nbytes);
-	user_access_disable(USER_ACCESS_READ, pmap);
-	return result;
+	guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_READ, map,
+	           _bcopyin(guarded_user_addr, kernel_addr, nbytes));
 }
 
 /*
@@ -271,87 +333,87 @@ int
 copyin_atomic32(const user_addr_t user_addr, uint32_t *kernel_addr)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result = copy_validate(map, user_addr, (uintptr_t)kernel_addr, 4,
 	    COPYIO_IN | COPYIO_ATOMIC);
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_READ, pmap);
-	result = _copyin_atomic32((const char *)user_addr, kernel_addr);
-	user_access_disable(USER_ACCESS_READ, pmap);
-	return result;
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_READ, map,
+	           _copyin_atomic32(guarded_user_addr, kernel_addr));
 }
+
 
 int
 copyin_atomic32_wait_if_equals(const user_addr_t user_addr, uint32_t value)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result = copy_validate(map, user_addr, 0, 4,
 	    COPYIO_OUT | COPYIO_ATOMIC | COPYIO_VALIDATE_USER_ONLY);
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_READ, pmap);
-	result = _copyin_atomic32_wait_if_equals((const char *)user_addr, value);
-	user_access_disable(USER_ACCESS_READ, pmap);
-	return result;
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_READ, map,
+	           _copyin_atomic32_wait_if_equals(guarded_user_addr, value));
 }
 
 int
 copyin_atomic64(const user_addr_t user_addr, uint64_t *kernel_addr)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result = copy_validate(map, user_addr, (uintptr_t)kernel_addr, 8,
 	    COPYIO_IN | COPYIO_ATOMIC);
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_READ, pmap);
-	result = _copyin_atomic64((const char *)user_addr, kernel_addr);
-	user_access_disable(USER_ACCESS_READ, pmap);
-	return result;
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_READ, map,
+	           _copyin_atomic64(guarded_user_addr, kernel_addr));
 }
 
 int
 copyout_atomic32(uint32_t value, user_addr_t user_addr)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result = copy_validate(map, user_addr, 0, 4,
 	    COPYIO_OUT | COPYIO_ATOMIC | COPYIO_VALIDATE_USER_ONLY);
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_WRITE, pmap);
-	result = _copyout_atomic32(value, (const char *)user_addr);
-	user_access_disable(USER_ACCESS_WRITE, pmap);
-	return result;
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+	           _copyout_atomic32(value, guarded_user_addr));
 }
 
 int
 copyout_atomic64(uint64_t value, user_addr_t user_addr)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result = copy_validate(map, user_addr, 0, 8,
 	    COPYIO_OUT | COPYIO_ATOMIC | COPYIO_VALIDATE_USER_ONLY);
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_WRITE, pmap);
-	result = _copyout_atomic64(value, (const char *)user_addr);
-	user_access_disable(USER_ACCESS_WRITE, pmap);
-	return result;
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+	           _copyout_atomic64(value, guarded_user_addr));
 }
 
 int
 copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_size_t *lencopied)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result;
 	vm_size_t bytes_copied = 0;
 
@@ -364,10 +426,12 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_READ, pmap);
-	result = _bcopyinstr((const char *)user_addr, kernel_addr, nbytes,
-	    &bytes_copied);
-	user_access_disable(USER_ACCESS_READ, pmap);
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	result = WRAP_COPYIO(USER_ACCESS_READ, map,
+	    _bcopyinstr(guarded_user_addr, kernel_addr, nbytes, &bytes_copied));
+
 	if (result != EFAULT) {
 		*lencopied = bytes_copied;
 	}
@@ -378,8 +442,8 @@ int
 copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 {
 	vm_map_t map = current_thread()->map;
-	pmap_t pmap = map->pmap;
 	int result;
+	user_addr_t guarded_user_addr;
 
 	if (nbytes == 0) {
 		return 0;
@@ -388,15 +452,17 @@ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 	result = copy_validate(map, user_addr, (uintptr_t)kernel_addr, nbytes,
 	    COPYIO_OUT | COPYIO_ALLOW_KERNEL_TO_KERNEL);
 	if (result == EXDEV) {
-		return copyout_kern(kernel_addr, user_addr, nbytes);
+		guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+		return copyout_kern(kernel_addr, guarded_user_addr, nbytes);
 	}
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable(USER_ACCESS_WRITE, pmap);
-	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
-	user_access_disable(USER_ACCESS_WRITE, pmap);
-	return result;
+
+	guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+	           _bcopyout(kernel_addr, guarded_user_addr, nbytes));
 }
 
 int
@@ -417,7 +483,7 @@ verify_write(const void *source, void *dst, size_t size)
 {
 	int rc;
 	disable_preemption();
-	rc = _bcopyout((const char*)source, (char*)dst, size);
+	rc = _bcopyout((const char*)source, (user_addr_t)dst, size);
 	enable_preemption();
 	return rc;
 }

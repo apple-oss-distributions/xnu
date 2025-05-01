@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <mach/thread_act.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
@@ -101,9 +102,77 @@ sme_zt0_size(void)
 }
 
 static size_t
+sme_tpidr2_size(void)
+{
+	return sizeof(uint64_t);
+}
+
+static inline uint8_t *
+sme_za(void *addr)
+{
+	return addr;
+}
+
+static inline const uint8_t *
+const_sme_za(const void *addr)
+{
+	return addr;
+}
+
+static inline uint8_t *
+sme_z(void *addr)
+{
+	return sme_za(addr) + sme_za_size();
+}
+
+static inline const uint8_t *
+const_sme_z(const void *addr)
+{
+	return const_sme_za(addr) + sme_za_size();
+}
+
+static inline uint8_t *
+sme_p(void *addr)
+{
+	return sme_z(addr) + sme_z_size();
+}
+
+static inline const uint8_t *
+const_sme_p(const void *addr)
+{
+	return const_sme_z(addr) + sme_z_size();
+}
+
+static inline uint8_t *
+sme_zt0(void *addr)
+{
+	return sme_p(addr) + sme_p_size();
+}
+
+static inline const uint8_t *
+const_sme_zt0(const void *addr)
+{
+	return const_sme_p(addr) + sme_p_size();
+}
+
+static size_t
 sme_data_size(void)
 {
-	return sme_za_size() + sme_z_size() + sme_p_size() + sme_zt0_size();
+	return sme_za_size() + sme_z_size() + sme_p_size() + sme_zt0_size() + sme_tpidr2_size();
+}
+
+static inline void
+set_sme_tpidr2_el0(void *addr, uint64_t val)
+{
+	uint64_t *ptr = (uint64_t *)(sme_zt0(addr) + sme_zt0_size());
+	*ptr = val;
+}
+
+static inline uint64_t
+get_sme_tpidr2_el0(const void *addr)
+{
+	const uint64_t *ptr = (const uint64_t *)(const_sme_zt0(addr) + sme_zt0_size());
+	return *ptr;
 }
 
 static void *
@@ -145,9 +214,9 @@ sme_load_one_vector(const void *addr)
 static void
 sme_load_data(const void *addr)
 {
-	const uint8_t *za = addr;
-	const uint8_t *z = za + sme_za_size();
-	const uint8_t *p = z + sme_z_size();
+	const uint8_t *za = const_sme_za(addr);
+	const uint8_t *z = const_sme_z(addr);
+	const uint8_t *p = const_sme_p(addr);
 	uint16_t svl_b = arm_sme_svl_b();
 
 	for (register uint16_t i asm("w12") = 0; i < svl_b; i += 16) {
@@ -233,21 +302,23 @@ sme_load_data(const void *addr)
         );
 
 	if (sme_zt0_size()) {
-		const uint8_t *zt0 = p + sme_p_size();
+		const uint8_t *zt0 = const_sme_zt0(addr);
 		asm volatile (
                         "ldr	zt0, [%[zt0]]"
                         :
                         : [zt0] "r"(zt0)
                 );
 	}
+
+	__builtin_arm_wsr64("TPIDR2_EL0", get_sme_tpidr2_el0(addr));
 }
 
 static void
 sme_store_data(void *addr)
 {
-	uint8_t *za = addr;
-	uint8_t *z = za + sme_za_size();
-	uint8_t *p = z + sme_z_size();
+	uint8_t *za = sme_za(addr);
+	uint8_t *z = sme_z(addr);
+	uint8_t *p = sme_p(addr);
 	uint16_t svl_b = arm_sme_svl_b();
 
 	for (register uint16_t i asm("w12") = 0; i < svl_b; i += 16) {
@@ -333,13 +404,164 @@ sme_store_data(void *addr)
         );
 
 	if (sme_zt0_size()) {
-		uint8_t *zt0 = p + sme_p_size();
+		uint8_t *zt0 = sme_zt0(addr);
 		asm volatile (
                         "str	zt0, [%[zt0]]"
                         :
                         : [zt0] "r"(zt0)
                 );
 	}
+
+	set_sme_tpidr2_el0(addr, __builtin_arm_rsr64("TPIDR2_EL0"));
+}
+
+static kern_return_t
+sme_thread_get_state(thread_act_t thread, void *addr)
+{
+	uint8_t *za = sme_za(addr);
+	uint8_t *z = sme_z(addr);
+	uint8_t *p = sme_p(addr);
+	uint16_t svl_b = arm_sme_svl_b();
+
+	arm_sme_state_t sme_state;
+	mach_msg_type_number_t sme_count = ARM_SME_STATE_COUNT;
+	kern_return_t err = thread_get_state(thread, ARM_SME_STATE, (thread_state_t)&sme_state, &sme_count);
+	if (err) {
+		return err;
+	}
+	set_sme_tpidr2_el0(addr, sme_state.__tpidr2_el0);
+
+	arm_sme_za_state_t za_state;
+	mach_msg_type_number_t za_count = ARM_SME_ZA_STATE_COUNT;
+	err = thread_get_state(thread, ARM_SME_ZA_STATE1, (thread_state_t)&za_state, &za_count);
+	if (err) {
+		return err;
+	}
+
+	arm_sve_z_state_t z_state1, z_state2;
+	mach_msg_type_number_t z_streaming_count = ARM_SVE_Z_STATE_COUNT;
+	err = thread_get_state(thread, ARM_SVE_Z_STATE1, (thread_state_t)&z_state1, &z_streaming_count);
+	if (err) {
+		return err;
+	}
+	err = thread_get_state(thread, ARM_SVE_Z_STATE2, (thread_state_t)&z_state2, &z_streaming_count);
+	if (err) {
+		return err;
+	}
+
+	arm_sve_p_state_t p_state;
+	mach_msg_type_number_t p_streaming_count = ARM_SVE_P_STATE_COUNT;
+	err = thread_get_state(thread, ARM_SVE_P_STATE, (thread_state_t)&p_state, &p_streaming_count);
+	if (err) {
+		return err;
+	}
+
+	memcpy(za, za_state.__za, svl_b * svl_b);
+
+	size_t z_elem_size = svl_b;
+	for (int i = 0; i < 16; i++) {
+		memcpy(z, z_state1.__z[i], z_elem_size);
+		z += z_elem_size;
+	}
+	for (int i = 0; i < 16; i++) {
+		memcpy(z, z_state2.__z[i], z_elem_size);
+		z += z_elem_size;
+	}
+
+	size_t p_elem_size = svl_b / 8;
+	for (int i = 0; i < 16; i++) {
+		memcpy(p, p_state.__p[i], p_elem_size);
+		p += p_elem_size;
+	}
+
+	if (sme_zt0_size()) {
+		uint8_t *zt0 = sme_zt0(addr);
+
+		arm_sme2_state_t sme2_state;
+		mach_msg_type_number_t sme2_count = ARM_SME2_STATE_COUNT;
+		err = thread_get_state(thread, ARM_SME2_STATE, (thread_state_t)&sme2_state, &sme2_count);
+		if (err) {
+			return err;
+		}
+
+		memcpy(zt0, sme2_state.__zt0, sizeof(sme2_state.__zt0));
+	}
+
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+sme_thread_set_state(thread_act_t thread, const void *addr)
+{
+	const uint8_t *za = const_sme_za(addr);
+	const uint8_t *z = const_sme_z(addr);
+	const uint8_t *p = const_sme_p(addr);
+	uint16_t svl_b = arm_sme_svl_b();
+
+	arm_sme_state_t sme_state;
+	sme_state.__svcr = 0x3;
+	sme_state.__svl_b = svl_b;
+	sme_state.__tpidr2_el0 = get_sme_tpidr2_el0(addr);
+
+	arm_sme_za_state_t za_state;
+	memcpy(za_state.__za, za, svl_b * svl_b);
+
+	arm_sve_z_state_t z_state1, z_state2;
+	size_t z_elem_size = svl_b;
+	for (int i = 0; i < 16; i++) {
+		memcpy(z_state1.__z[i], z, z_elem_size);
+		z += z_elem_size;
+	}
+	for (int i = 0; i < 16; i++) {
+		memcpy(z_state2.__z[i], z, z_elem_size);
+		z += z_elem_size;
+	}
+
+	arm_sve_p_state_t p_state;
+	size_t p_elem_size = svl_b / 8;
+	for (int i = 0; i < 16; i++) {
+		memcpy(p_state.__p[i], p, p_elem_size);
+		p += p_elem_size;
+	}
+
+	kern_return_t err = thread_set_state(thread, ARM_SME_STATE, (thread_state_t)&sme_state, ARM_SME_STATE_COUNT);
+	if (err) {
+		return err;
+	}
+
+	err = thread_set_state(thread, ARM_SVE_Z_STATE1, (thread_state_t)&z_state1, ARM_SVE_Z_STATE_COUNT);
+	if (err) {
+		return err;
+	}
+
+	err = thread_set_state(thread, ARM_SVE_Z_STATE2, (thread_state_t)&z_state2, ARM_SVE_Z_STATE_COUNT);
+	if (err) {
+		return err;
+	}
+
+	err = thread_set_state(thread, ARM_SVE_P_STATE, (thread_state_t)&p_state, ARM_SVE_P_STATE_COUNT);
+	if (err) {
+		return err;
+	}
+
+	err = thread_set_state(thread, ARM_SME_ZA_STATE1, (thread_state_t)&za_state, ARM_SME_ZA_STATE_COUNT);
+	if (err) {
+		return err;
+	}
+
+	if (sme_zt0_size()) {
+		const uint8_t *zt0 = const_sme_zt0(addr);
+
+		arm_sme2_state_t sme2_state;
+		memcpy(sme2_state.__zt0, zt0, sizeof(sme2_state.__zt0));
+
+		err = thread_set_state(thread, ARM_SME2_STATE, (thread_state_t)&sme2_state, ARM_SME2_STATE_COUNT);
+		if (err) {
+			return err;
+		}
+	}
+
+	return KERN_SUCCESS;
 }
 
 const struct arm_matrix_operations sme_operations = {
@@ -355,4 +577,7 @@ const struct arm_matrix_operations sme_operations = {
 	.load_one_vector = sme_load_one_vector,
 	.load_data = sme_load_data,
 	.store_data = sme_store_data,
+
+	.thread_get_state = sme_thread_get_state,
+	.thread_set_state = sme_thread_set_state,
 };

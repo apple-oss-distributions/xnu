@@ -168,6 +168,8 @@ inline int O_TRUNC = 0x0400;
 #pragma D binding "1.1" O_TRUNC
 inline int O_EXCL = 0x0800;
 #pragma D binding "1.1" O_EXCL
+inline int O_RESOLVE_BENEATH = 0x1000;
+#pragma D binding "1.1" O_RESOLVE_BENEATH
 inline int O_EVTONLY = 0x8000;
 #pragma D binding "1.1" O_EVTONLY
 inline int O_NOCTTY = 0x20000;

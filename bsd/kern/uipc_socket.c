@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2022, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2192,7 +2192,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	socket_lock(so, 1);
 
 	if (NEED_DGRAM_FLOW_TRACKING(so)) {
-		dgram_flow_entry = soflow_get_flow(so, NULL, addr, control, resid, true, 0);
+		dgram_flow_entry = soflow_get_flow(so, NULL, addr, control, resid, SOFLOW_DIRECTION_OUTBOUND, 0);
 	}
 
 	/*
@@ -2681,7 +2681,7 @@ sosend_reinject(struct socket *so, struct sockaddr *addr, struct mbuf *top, stru
 }
 
 static struct mbuf *
-mbuf_detach_control_from_list(struct mbuf **mp)
+mbuf_detach_control_from_list(struct mbuf **mp, struct mbuf **last_control)
 {
 	struct mbuf *control = NULL;
 	struct mbuf *m = *mp;
@@ -2701,6 +2701,9 @@ mbuf_detach_control_from_list(struct mbuf **mp)
 		}
 		control_end->m_next = NULL;
 		*mp = n;
+		if (last_control != NULL) {
+			*last_control = control_end;
+		}
 	}
 	VERIFY(*mp != NULL);
 
@@ -2714,7 +2717,7 @@ mbuf_detach_control_from_list(struct mbuf **mp)
 int
 sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pktcnt, int flags)
 {
-	mbuf_ref_t m;
+	mbuf_ref_t m, control = NULL;
 	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
 	int error, dontroute;
 	int atomic = sosendallatonce(so);
@@ -2756,7 +2759,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 	so_update_policy(so);
 
 	if (NEED_DGRAM_FLOW_TRACKING(so)) {
-		dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, total_len, true, 0);
+		dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, total_len, SOFLOW_DIRECTION_OUTBOUND, 0);
 	}
 
 #if NECP
@@ -2783,9 +2786,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 		mbuf_ref_ref_t prevnextp = NULL;
 
 		for (m = top; m != NULL; m = m->m_nextpkt) {
-			mbuf_ref_t control = NULL;
-			mbuf_ref_t last_control = NULL;
-			mbuf_ref_t nextpkt;
+			mbuf_ref_t nextpkt, last_control;
 
 			/*
 			 * Remove packet from the list of packets
@@ -2802,7 +2803,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 			 * Break the chain per mbuf type
 			 */
 			if (m->m_type == MT_CONTROL) {
-				control = mbuf_detach_control_from_list(&m);
+				control = mbuf_detach_control_from_list(&m, &last_control);
 			}
 			/*
 			 * Socket filter processing
@@ -2812,6 +2813,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 			if (error != 0 && error != EJUSTRETURN) {
 				os_log(OS_LOG_DEFAULT, "sosend_list: sflt_data_out error %d",
 				    error);
+				m_freem(m);
 				goto release;
 			}
 
@@ -2825,6 +2827,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 				if (error != 0 && error != EJUSTRETURN) {
 					os_log(OS_LOG_DEFAULT, "sosend_list: cfil_sock_data_out error %d",
 					    error);
+					m_freem(m);
 					goto release;
 				}
 			}
@@ -2854,6 +2857,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 				}
 				prevnextp = &m->m_nextpkt;
 			}
+			control = NULL;
 		}
 	}
 
@@ -2868,9 +2872,8 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 			top = NULL;
 		} else {
 			*pktcnt = 0;
+			control = NULL;
 			for (m = top; m != NULL; m = top) {
-				struct mbuf *control = NULL;
-
 				top = m->m_nextpkt;
 				m->m_nextpkt = NULL;
 
@@ -2878,7 +2881,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 				 * Break the chain per mbuf type
 				 */
 				if (m->m_type == MT_CONTROL) {
-					control = mbuf_detach_control_from_list(&m);
+					control = mbuf_detach_control_from_list(&m, NULL);
 				}
 
 				error = (*so->so_proto->pr_usrreqs->pru_send)
@@ -2888,9 +2891,11 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 						os_log(OS_LOG_DEFAULT, "sosend_list: pru_send error %d",
 						    error);
 					}
+					control = NULL;
 					goto release;
 				}
 				*pktcnt += 1;
+				control = NULL;
 			}
 		}
 	}
@@ -2905,6 +2910,9 @@ release:
 		socket_unlock(so, 1);
 	}
 out:
+	if (control != NULL) {
+		m_freem(control);
+	}
 	if (top != NULL) {
 		if (error != ENOBUFS) {
 			os_log(OS_LOG_DEFAULT, "sosend_list: m_freem_list(top) with error %d",

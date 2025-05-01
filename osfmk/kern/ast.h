@@ -119,7 +119,7 @@ __options_decl(ast_t, uint32_t, {
 	AST_MACF                  = 0x200,   /* MACF user ret pending */
 	AST_RESET_PCS             = 0x400,   /* restartable ranges */
 	AST_ARCADE                = 0x800,   /* arcade subsciption support */
-	AST_GUARD                 = 0x1000,
+	AST_MACH_EXCEPTION        = 0x1000,
 	AST_TELEMETRY_USER        = 0x2000,  /* telemetry sample requested on interrupt from userspace */
 	AST_TELEMETRY_KERNEL      = 0x4000,  /* telemetry sample requested on interrupt from kernel */
 	AST_TELEMETRY_PMI         = 0x8000,  /* telemetry sample requested on PMI */
@@ -145,7 +145,7 @@ __options_decl(ast_t, uint32_t, {
 
 /* Per-thread ASTs follow the thread at context-switch time. */
 #define AST_PER_THREAD  (AST_APC | AST_BSD | AST_MACF | AST_RESET_PCS | \
-	AST_ARCADE | AST_LEDGER | AST_GUARD | AST_TELEMETRY_ALL | AST_KEVENT | AST_PROC_RESOURCE | AST_DEBUG_ASSERT)
+	AST_ARCADE | AST_LEDGER | AST_MACH_EXCEPTION | AST_TELEMETRY_ALL | AST_KEVENT | AST_PROC_RESOURCE | AST_DEBUG_ASSERT)
 
 /* Handle AST_URGENT detected while in the kernel */
 extern void ast_taken_kernel(void);

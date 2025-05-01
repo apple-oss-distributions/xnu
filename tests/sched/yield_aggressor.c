@@ -215,8 +215,6 @@ run_yielding_test(yield_type_t yield_type, unsigned int num_iters, unsigned int 
 
 	T_LOG("===== Yield Variety: %s", name_table[yield_type]);
 
-	wait_for_quiescence_default();
-
 	kern_return_t kr;
 
 	num_iterations = num_iters;
@@ -313,6 +311,7 @@ T_DECL(yield_aggressor,
 	unsigned int thread_count = (unsigned int) dt_ncpu() * 3;
 
 	for (yield_type_t yield_type = SCHED_YIELD; yield_type <= THREAD_SWITCH_DEPRESS; yield_type++) {
+		wait_for_quiescence_default(argc, argv);
 		run_yielding_test(yield_type, DEFAULT_NUM_ITERS, thread_count, DEFAULT_THREAD_PRI, writer);
 	}
 

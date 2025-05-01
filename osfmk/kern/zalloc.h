@@ -166,6 +166,9 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	ZC_DESTRUCTIBLE         = 0x80000000,
 
 #ifdef XNU_KERNEL_PRIVATE
+	/** This zone contains pure data meant to be shared */
+	ZC_SHARED_DATA          = 0x0040000000000000,
+
 	/** This zone is a built object cache */
 	ZC_OBJ_CACHE            = 0x0080000000000000,
 
@@ -412,11 +415,11 @@ extern void     zone_require_ro(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
- * @const Z_SET_NOTSHARED
+ * @const Z_SET_NOTEARLY
  * Using this flag from external allocations APIs (kalloc_type/zalloc)
- * allows the callsite to skip the shared zone for that sizeclass and
+ * allows the callsite to skip the early (shared) zone for that sizeclass and
  * directly allocated from the requested zone.
- * Using this flag from internal APIs (zalloc_ext) will skip the shared
+ * Using this flag from internal APIs (zalloc_ext) will skip the early
  * zone only when a given threshold is exceeded. It will also set a flag
  * to indicate that future allocations to the zone should directly go to
  * the zone instead of the shared zone.
@@ -466,7 +469,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
-	Z_SET_NOTSHARED = 0x0040,
+	Z_SET_NOTEARLY = 0x0040,
 	Z_SPRAYQTN      = 0x0080,
 	Z_KALLOC_ARRAY  = 0x0100,
 #if KASAN_CLASSIC
@@ -1217,7 +1220,7 @@ extern void zalloc_iokit_lockdown(void);
  * @returns             the per-CPU slot for @c ptr for the specified CPU.
  */
 #define zpercpu_get_cpu(ptr, cpu) \
-	__zpcpu_cast(ptr, __zpcpu_demangle(ptr) + ptoa((unsigned)(cpu)))
+	__zpcpu_cast(ptr, __zpcpu_addr(ptr) + ptoa((unsigned)(cpu)))
 
 /*!
  * @macro zpercpu_get()
@@ -1988,23 +1991,32 @@ EVENT_DECLARE(ZONE_EXHAUSTED, zone_exhausted_cb_t);
  * @const KHEAP_ID_NONE
  * This value denotes regular zones, not used by kalloc.
  *
- * @const KHEAP_ID_SHARED
- * Indicates zones part of the KHEAP_SHARED heap.
+ * @const KHEAP_ID_EARLY
+ * Indicates zones part of the KHEAP_EARLY heap.
  *
  * @const KHEAP_ID_DATA_BUFFERS
  * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
+ *
+ * @const KHEAP_ID_DATA_SHARED
+ * Indicates zones part of the KHEAP_DATA_SHARED heap.
  *
  * @const KHEAP_ID_KT_VAR
  * Indicates zones part of the KHEAP_KT_VAR heap.
  */
 __enum_decl(zone_kheap_id_t, uint8_t, {
 	KHEAP_ID_NONE,
-	KHEAP_ID_SHARED,
+	KHEAP_ID_EARLY,
 	KHEAP_ID_DATA_BUFFERS,
+	KHEAP_ID_DATA_SHARED,
 	KHEAP_ID_KT_VAR,
-
 #define KHEAP_ID_COUNT (KHEAP_ID_KT_VAR + 1)
 });
+
+static inline bool
+zone_is_data_kheap(zone_kheap_id_t kheap_id)
+{
+	return kheap_id == KHEAP_ID_DATA_BUFFERS || kheap_id == KHEAP_ID_DATA_SHARED;
+}
 
 /*!
  * @macro ZONE_VIEW_DECLARE
@@ -2581,16 +2593,8 @@ __zone_flags_mix_tag(zalloc_flags_t flags, vm_tag_t tag)
 	return (flags & Z_VM_TAG_MASK) ? flags : Z_VM_TAG(flags, (uint32_t)tag);
 }
 
-#if DEBUG || DEVELOPMENT
-#  define ZPCPU_MANGLE_MASK     0xc0c0000000000000ul
-#else /* !(DEBUG || DEVELOPMENT) */
-#  define ZPCPU_MANGLE_MASK     0ul
-#endif /* !(DEBUG || DEVELOPMENT) */
-
-#define __zpcpu_mangle(ptr)     (__zpcpu_addr(ptr) & ~ZPCPU_MANGLE_MASK)
-#define __zpcpu_demangle(ptr)   (__zpcpu_addr(ptr) | ZPCPU_MANGLE_MASK)
-#define __zpcpu_addr(e)         ((vm_address_t)(e))
-#define __zpcpu_cast(ptr, e)    __unsafe_forge_single(typeof(ptr), e)
+#define __zpcpu_addr(e)         ((vm_address_t)__unsafe_forge_single(void *, e))
+#define __zpcpu_cast(ptr, e)    __unsafe_forge_single(typeof(*(ptr)) *, e)
 #define __zpcpu_next(ptr)       __zpcpu_cast(ptr, __zpcpu_addr(ptr) + PAGE_SIZE)
 
 /**
@@ -2610,7 +2614,7 @@ __zone_flags_mix_tag(zalloc_flags_t flags, vm_tag_t tag)
  */
 #define __zpcpu_mangle_for_boot(ptr)  ({ \
 	assert(startup_phase < STARTUP_SUB_ZALLOC); \
-	__zpcpu_cast(ptr, __zpcpu_mangle(__zpcpu_addr(ptr) - ptoa(cpu_number()))); \
+	__zpcpu_cast(ptr, __zpcpu_addr(ptr) - ptoa(cpu_number())); \
 })
 
 extern unsigned zpercpu_count(void) __pure2;

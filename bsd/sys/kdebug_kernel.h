@@ -33,6 +33,7 @@
 #include <mach/clock_types.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <sys/cdefs.h>
 
 __BEGIN_DECLS
@@ -469,10 +470,14 @@ void kdebug_free_early_buf(void);
 struct proc;
 void kdbg_trace_data(struct proc *proc, long *arg_pid, long *arg_uniqueid);
 
+__options_decl(kdebug_vfs_lookup_flags_t, uint32_t, {
+	KDBG_VFSLKUP_LOOKUP = 0x01,
+	KDBG_VFSLKUP_NOPROCFILT = 0x02,
+});
 #define KDBG_VFS_LOOKUP_FLAG_LOOKUP 0x01
 #define KDBG_VFS_LOOKUP_FLAG_NOPROCFILT 0x02
-void kdebug_vfs_lookup(unsigned long *path_words, int path_len, void *vnp,
-    uint32_t flags);
+void kdebug_vfs_lookup(const char *path_words, size_t path_len, void *vnp,
+    kdebug_vfs_lookup_flags_t flags);
 
 void ktriage_extract(uint64_t thread_id, void *buf, uint32_t bufsz);
 

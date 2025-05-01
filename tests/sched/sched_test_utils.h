@@ -1,3 +1,4 @@
+// Copyright (c) 2024 Apple Inc.  All rights reserved.
 #ifndef XNU_SCHED_TEST_UTILS_H
 #define XNU_SCHED_TEST_UTILS_H
 
@@ -13,13 +14,54 @@ void reenable_verbose_sched_utils(void);
 uint64_t nanos_to_abs(uint64_t nanos);
 uint64_t abs_to_nanos(uint64_t abs);
 
-/* -- Thread orchestration -- */
+/* -- 🎻 Thread orchestration -- */
 void spin_for_duration(uint32_t seconds);
+void stop_spinning_threads(void);
+
+/*
+ * Cluster-binding interfaces perform a soft bind on the current
+ * thread and require "enable_skstb=1" boot-arg to be set.
+ */
+
+/* Returns the old bound type ('0' for unbound) */
+char bind_to_cluster_of_type(char type);
+/* Returns the old bound id (-1 for unbound) */
+int bind_to_cluster_id(int cluster_id);
+
+/*
+ * Functions to create pthreads, optionally configured with
+ * a number of pthread attributes:
+ */
+void create_thread_pri(pthread_t *thread_handle, int priority, void *(*func)(void *), void *arg);
+typedef enum {
+	eDetached,
+	eJoinable, // default
+} detach_state_t;
+typedef enum {
+	eSchedFIFO = 4,
+	eSchedRR = 2,
+	eSchedOther = 1,
+	eSchedDefault = 0, // default
+} sched_policy_t;
+#define DEFAULT_STACK_SIZE 0
+// Default qos_class is QOS_CLASS_UNSPECIFIED
+pthread_attr_t *
+create_pthread_attr(int priority,
+    detach_state_t detach_state, qos_class_t qos_class,
+    sched_policy_t sched_policy, size_t stack_size);
+void create_thread(pthread_t *thread_handle, pthread_attr_t *attr, void *(*func)(void *), void *arg);
+pthread_t *create_threads(int num_threads, int priority,
+    detach_state_t detach_state, qos_class_t qos_class,
+    sched_policy_t sched_policy, size_t stack_size,
+    void *(*func)(void *), void *arg_array[]);
 
 /* -- 🛰️ Platform checks -- */
 bool platform_is_amp(void);
 bool platform_is_virtual_machine(void);
 char *platform_sched_policy(void);
+unsigned int platform_num_clusters(void);
+const char *platform_perflevel_name(unsigned int perflevel);
+unsigned int platform_nperflevels(void);
 
 /* -- 📈🕒 Monitor system performance state -- */
 
@@ -27,9 +69,10 @@ char *platform_sched_policy(void);
  * Returns true if the system successfully quiesced below the specified threshold
  * within the specified timeout, and false otherwise.
  * idle_threshold is given as a ratio between [0.0, 1.0], defaulting to 0.9.
+ * Passing argument --no-quiesce disables waiting for quiescence.
  */
-bool wait_for_quiescence(double idle_threshold, int timeout_seconds);
-bool wait_for_quiescence_default(void);
+bool wait_for_quiescence(int argc, char *const argv[], double idle_threshold, int timeout_seconds);
+bool wait_for_quiescence_default(int argc, char *const argv[]);
 
 /* Returns true if all cores on the device are recommended */
 bool check_recommended_core_mask(uint64_t *core_mask);
@@ -58,14 +101,16 @@ typedef void *trace_handle_t;
 
 /*
  * Begins trace collection, using the specified name as a prefix for all
- * generated filenames.
+ * generated filenames. Arguments are parsed to check for --no-trace or
+ * --save-trace options, which disable tracing and enable unconditional
+ * saving of the trace file respectively.
  *
  * NOTE: Since scheduler tracing can generate large trace files when left to
  * run for long durations, take care to begin tracing close to the start of
  * the period of interest.
  */
-trace_handle_t begin_collect_trace(char *filename);
-trace_handle_t begin_collect_trace_fmt(char *filename_fmt, ...);
+trace_handle_t begin_collect_trace(int argc, char *const argv[], char *filename);
+trace_handle_t begin_collect_trace_fmt(int argc, char *const argv[], char *filename_fmt, ...);
 
 /*
  * NOTE: It's possible that tests may induce CPU starvation that can

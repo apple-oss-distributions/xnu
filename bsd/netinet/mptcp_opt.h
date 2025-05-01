@@ -31,14 +31,18 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 
+#include <netinet/tcp.h>
+#include <netinet/tcp_var.h>
+#include <netinet/mptcp.h>
+
 __BEGIN_DECLS
 extern void mptcp_data_ack_rcvd(struct mptcb *mp_tp, struct tcpcb *tp, u_int64_t full_dack);
 extern void mptcp_update_window_wakeup(struct tcpcb *tp);
-extern void tcp_do_mptcp_options(struct tcpcb *, u_char *, struct tcphdr *,
+extern void tcp_do_mptcp_options(struct tcpcb *, u_char * opt __ended_by(optend), u_char *optend, struct tcphdr *,
     struct tcpopt *, uint8_t);
-extern unsigned mptcp_setup_syn_opts(struct socket *, u_char*, unsigned);
-extern unsigned mptcp_setup_join_ack_opts(struct tcpcb *, u_char*, unsigned);
-extern unsigned int mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
+extern unsigned mptcp_setup_syn_opts(struct socket *, u_char* __ended_by(optend), u_char *optend, unsigned);
+extern unsigned mptcp_setup_join_ack_opts(struct tcpcb *, u_char* __ended_by(optend), u_char *optend, unsigned);
+extern unsigned int mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt __ended_by(optend), u_char *optend,
     unsigned int optlen, int flags, int len,
     boolean_t *p_mptcp_acknow, boolean_t *do_not_compress);
 extern void mptcp_update_dss_rcv_state(struct mptcp_dsn_opt *, struct tcpcb *,

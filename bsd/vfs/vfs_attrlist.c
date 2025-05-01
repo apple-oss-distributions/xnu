@@ -91,6 +91,46 @@ struct _attrlist_buf {
 #define _ATTRLIST_BUF_INIT(a)  do {(a)->base = (a)->fixedcursor = (a)->varcursor = NULL; (a)->allocated = (a)->needed = 0l; ATTRIBUTE_SET_INIT(&((a)->actual)); ATTRIBUTE_SET_INIT(&((a)->valid));} while(0)
 
 
+static int
+attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, int flags)
+{
+	proc_t p = vfs_context_proc(vfs_context_current());
+	int retlen = 0;
+	int err;
+	int buflen = MAXPATHLEN;
+	char *buf = NULL;
+
+	do {
+		if (buflen == MAXPATHLEN) {
+			buf = zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_ZERO);
+		} else {
+			assert(proc_support_long_paths(p));
+			int prevlen = buflen / 2;
+			if (prevlen == MAXPATHLEN) {
+				zfree(ZV_NAMEI, buf);
+			} else {
+				kfree_data(buf, prevlen);
+			}
+			buf = kalloc_data(buflen, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		}
+
+		/* call build_path making sure NOT to use the cache-only behavior */
+		err = build_path(vp, buf, buflen, &retlen, flags, vfs_context_current());
+	} while (err == ENOSPC && proc_support_long_paths(p) && (buflen *= 2) && buflen <= MAXLONGPATHLEN);
+	if (err == 0) {
+		if (outbuf) {
+			*outbuf = buf;
+		}
+		if (outbuflen) {
+			*outbuflen = buflen;
+		}
+		if (outpathlen) {
+			*outpathlen = retlen - 1;
+		}
+	}
+	return err;
+}
+
 /*
  * Attempt to pack a fixed width attribute of size (count) bytes from
  * source to our attrlist buffer.
@@ -358,7 +398,8 @@ static struct getvolattrlist_attrtab getvolattrlist_common_tab[] = {
 static struct getvolattrlist_attrtab getvolattrlist_vol_tab[] = {
 	{.attr = ATTR_VOL_FSTYPE, .bits = 0, .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_FSTYPENAME, .bits = 0, .size = sizeof(struct attrreference)},
-	{.attr = ATTR_VOL_FSSUBTYPE, .bits = VFSATTR_BIT(f_fssubtype), .size = sizeof(uint32_t)},
+	{.attr = ATTR_VOL_FSSUBTYPE, .bits = 0, .size = sizeof(uint32_t)},
+	{.attr = ATTR_VOL_OWNER, .bits = 0, .size = sizeof(uid_t)},
 	{.attr = ATTR_VOL_SIGNATURE, .bits = VFSATTR_BIT(f_signature), .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_SIZE, .bits = VFSATTR_BIT(f_blocks)  |  VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_SPACEFREE, .bits = VFSATTR_BIT(f_bfree) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
@@ -377,6 +418,7 @@ static struct getvolattrlist_attrtab getvolattrlist_vol_tab[] = {
 	{.attr = ATTR_VOL_ENCODINGSUSED, .bits = 0, .size = sizeof(uint64_t)},
 	{.attr = ATTR_VOL_CAPABILITIES, .bits = VFSATTR_BIT(f_capabilities), .size = sizeof(vol_capabilities_attr_t)},
 	{.attr = ATTR_VOL_UUID, .bits = VFSATTR_BIT(f_uuid), .size = sizeof(uuid_t)},
+	{.attr = ATTR_VOL_MOUNTEXTFLAGS, .bits = 0, .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_SPACEUSED, .bits = VFSATTR_BIT(f_bused) | VFSATTR_BIT(f_bsize) | VFSATTR_BIT(f_bfree), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_QUOTA_SIZE, .bits = VFSATTR_BIT(f_quota) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_RESERVED_SIZE, .bits = VFSATTR_BIT(f_reserved) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
@@ -616,7 +658,8 @@ static struct getattrlist_attrtab getattrlistbulk_common_extended_tab[] = {
 	                         ATTR_VOL_ALLOCATIONCLUMP |  ATTR_VOL_IOBLOCKSIZE |  \
 	                         ATTR_VOL_MOUNTPOINT | ATTR_VOL_MOUNTFLAGS |  \
 	                         ATTR_VOL_MOUNTEDDEVICE | ATTR_VOL_CAPABILITIES |  \
-	                         ATTR_VOL_ATTRIBUTES | ATTR_VOL_ENCODINGSUSED)
+	                         ATTR_VOL_ATTRIBUTES | ATTR_VOL_ENCODINGSUSED | \
+	                         ATTR_VOL_MOUNTEXTFLAGS)
 
 #define VFS_DFLT_ATTR_CMN       (ATTR_CMN_NAME | ATTR_CMN_DEVID |  \
 	                         ATTR_CMN_FSID | ATTR_CMN_OBJTYPE |  \
@@ -958,13 +1001,15 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	vnode_t         root_vp = NULL;
 	const char      *fstypename = NULL;
 	size_t          fstypenamelen = 0;
+	size_t          attr_max_buffer;
 
 	_ATTRLIST_BUF_INIT(&ab);
 	VATTR_INIT(&va);
 	VFSATTR_INIT(&vs);
 	vs.f_vol_name = NULL;
 	mnt = vp->v_mount;
-
+	attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
+	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
 
 	/* Check for special packing semantics */
 	return_valid = (alp->commonattr & ATTR_CMN_RETURNED_ATTRS);
@@ -1200,9 +1245,9 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	 * we never need to allocate more than they offer.
 	 */
 	ab.allocated = fixedsize + varsize;
-	if (((size_t)ab.allocated) > ATTR_MAX_BUFFER) {
+	if (((size_t)ab.allocated) > attr_max_buffer) {
 		error = ENOMEM;
-		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: buffer size too large (%d limit %d)", ab.allocated, ATTR_MAX_BUFFER);
+		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: buffer size too large (%d limit %d)", ab.allocated, attr_max_buffer);
 		goto out;
 	}
 
@@ -1539,6 +1584,10 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		ATTR_PACK(&ab, vs.f_uuid);
 		ab.actual.volattr |= ATTR_VOL_UUID;
 	}
+	if (alp->volattr & ATTR_VOL_MOUNTEXTFLAGS) {
+		ATTR_PACK_CAST(&ab, uint32_t, vfs_getextflags(mnt));
+		ab.actual.volattr |= ATTR_VOL_MOUNTEXTFLAGS;
+	}
 	if (alp->volattr & ATTR_VOL_QUOTA_SIZE) {
 		ATTR_PACK_CAST(&ab, off_t, vs.f_bsize * vs.f_quota);
 		ab.actual.volattr |= ATTR_VOL_QUOTA_SIZE;
@@ -1582,8 +1631,12 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		}
 	}
 	if (alp->volattr & ATTR_VOL_FSSUBTYPE) {
-		ATTR_PACK(&ab, vs.f_fssubtype);
+		ATTR_PACK(&ab, mnt->mnt_vfsstat.f_fssubtype);
 		ab.actual.volattr |= ATTR_VOL_FSSUBTYPE;
+	}
+	if (alp->volattr & ATTR_VOL_OWNER) {
+		ATTR_PACK(&ab, mnt->mnt_vfsstat.f_owner);
+		ab.actual.volattr |= ATTR_VOL_OWNER;
 	}
 
 	/* diagnostic */
@@ -2599,11 +2652,14 @@ vattr_get_alt_data(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 
 struct _attrlist_paths {
 	char *fullpathptr;
-	ssize_t *fullpathlenp;
+	ssize_t fullpathlen;
+	size_t fullpathbuflen;
 	char *relpathptr;
-	ssize_t *relpathlenp;
+	ssize_t relpathlen;
+	size_t relpathbuflen;
 	char *REALpathptr;
-	ssize_t *REALpathlenp;
+	ssize_t REALpathlen;
+	size_t REALpathbuflen;
 };
 
 static errno_t
@@ -2658,59 +2714,51 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	 * not supported by any filesystem, so build the path to this vnode at this time.
 	 */
 	if (vp && (alp->commonattr & ATTR_CMN_FULLPATH)) {
-		int len = MAXPATHLEN;
-		int err;
-
-		/* call build_path making sure NOT to use the cache-only behavior */
-		err = build_path(vp, pathsp->fullpathptr, len, &len, 0, vfs_context_current());
+		int pathlen;
+		int buflen;
+		int err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, 0);
 		if (err) {
 			error = err;
 			goto out;
 		}
-		if (pathsp->fullpathptr) {
-			*(pathsp->fullpathlenp) = strlen(pathsp->fullpathptr);
-		} else {
-			*(pathsp->fullpathlenp) = 0;
-		}
-		*varsizep += roundup(((*(pathsp->fullpathlenp)) + 1), 4);
+
+		pathsp->fullpathlen = pathlen;
+		pathsp->fullpathbuflen = buflen;
+		*varsizep += roundup(pathlen + 1, 4);
 	}
 
 	/*
 	 * Compute this vnode's volume relative path.
 	 */
 	if (vp && (alp->forkattr & ATTR_CMNEXT_RELPATH)) {
-		int len;
-		int err;
-
-		/* call build_path making sure NOT to use the cache-only behavior */
-		err = build_path(vp, pathsp->relpathptr, MAXPATHLEN, &len, BUILDPATH_VOLUME_RELATIVE, vfs_context_current());
+		int pathlen;
+		int buflen;
+		int err = attrlist_build_path(vp, &(pathsp->relpathptr), &buflen, &pathlen, BUILDPATH_VOLUME_RELATIVE);
 		if (err) {
 			error = err;
 			goto out;
 		}
 
-		//`len' includes trailing null
-		*(pathsp->relpathlenp) = len - 1;
-		*varsizep += roundup(len, 4);
+		pathsp->relpathlen = pathlen;
+		pathsp->relpathbuflen = buflen;
+		*varsizep += roundup(pathlen + 1, 4);
 	}
 
 	/*
 	 * Compute this vnode's real (firmlink free) path.
 	 */
 	if (vp && (alp->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH)) {
-		int len;
-		int err;
-
-		/* call build_path making sure NOT to use the cache-only behavior */
-		err = build_path(vp, pathsp->REALpathptr, MAXPATHLEN, &len, BUILDPATH_NO_FIRMLINK, vfs_context_current());
+		int pathlen;
+		int buflen;
+		int err = attrlist_build_path(vp, &(pathsp->REALpathptr), &buflen, &pathlen, BUILDPATH_NO_FIRMLINK);
 		if (err) {
 			error = err;
 			goto out;
 		}
 
-		//`len' includes trailing null
-		*(pathsp->REALpathlenp) = len - 1;
-		*varsizep += roundup(len, 4);
+		pathsp->REALpathlen = pathlen;
+		pathsp->REALpathbuflen = buflen;
+		*varsizep += roundup(pathlen + 1, 4);
 	}
 
 	/*
@@ -2743,9 +2791,9 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
     vfs_context_t ctx, int is_bulk, enum vtype vtype, ssize_t fixedsize)
 {
 	struct _attrlist_buf ab;
-	struct _attrlist_paths apaths = {.fullpathptr = NULL, .fullpathlenp = NULL,
-		                         .relpathptr = NULL, .relpathlenp = NULL,
-		                         .REALpathptr = NULL, .REALpathlenp = NULL};
+	struct _attrlist_paths apaths = {.fullpathptr = NULL, .fullpathlen = 0, .fullpathbuflen = 0,
+		                         .relpathptr = NULL, .relpathlen = 0, .relpathbuflen = 0,
+		                         .REALpathptr = NULL, .REALpathlen = 0, .REALpathbuflen = 0};
 	ssize_t buf_size;
 	size_t copy_size;
 	ssize_t varsize;
@@ -2765,6 +2813,8 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	int is_realdev;
 	int alloc_local_buf;
 	const int use_fork = options & FSOPT_ATTR_CMN_EXTENDED;
+	size_t attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
+	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
 
 	proc_is64 = proc_is64bit(vfs_context_proc(ctx));
 	ab.base = NULL;
@@ -2832,34 +2882,31 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 		}
 	}
 
-	//if a path is requested, allocate a temporary buffer to build it
-	if (vp && (alp->commonattr & (ATTR_CMN_FULLPATH))) {
-		fullpathptr = (char*) zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_ZERO);
-		apaths.fullpathptr = fullpathptr;
-		apaths.fullpathlenp = &fullpathlen;
-	}
-
-	// only interpret fork attributes if they're used as new common attributes
-	if (vp && use_fork) {
-		if (alp->forkattr & (ATTR_CMNEXT_RELPATH)) {
-			relpathptr = (char*) zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_ZERO);
-			apaths.relpathptr = relpathptr;
-			apaths.relpathlenp = &relpathlen;
-		}
-
-		if (alp->forkattr & (ATTR_CMNEXT_NOFIRMLINKPATH)) {
-			REALpathptr = (char*) zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_ZERO);
-			apaths.REALpathptr = REALpathptr;
-			apaths.REALpathlenp = &REALpathlen;
-		}
-	}
-
 	/*
 	 * Compute variable-space requirements.
 	 */
 	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl);
 	if (error) {
 		goto out;
+	}
+
+	if (vp && (alp->commonattr & (ATTR_CMN_FULLPATH))) {
+		if (apaths.fullpathptr) {
+			fullpathptr = apaths.fullpathptr;
+			fullpathlen = apaths.fullpathlen;
+		}
+	}
+
+	// only interpret fork attributes if they're used as new common attributes
+	if (vp && use_fork) {
+		if (alp->forkattr & (ATTR_CMNEXT_RELPATH)) {
+			relpathptr = apaths.relpathptr;
+			relpathlen = apaths.relpathlen;
+		}
+		if (alp->forkattr & (ATTR_CMNEXT_NOFIRMLINKPATH)) {
+			REALpathptr = apaths.REALpathptr;
+			REALpathlen = apaths.REALpathlen;
+		}
 	}
 
 	/*
@@ -2871,9 +2918,9 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	 */
 	ab.allocated = fixedsize + varsize;
 	/* Cast 'allocated' to an unsigned to verify allocation size */
-	if (((size_t)ab.allocated) > ATTR_MAX_BUFFER) {
+	if (((size_t)ab.allocated) > attr_max_buffer) {
 		error = ENOMEM;
-		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: buffer size too large (%d limit %d)", ab.allocated, ATTR_MAX_BUFFER);
+		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: buffer size too large (%d limit %d)", ab.allocated, attr_max_buffer);
 		goto out;
 	}
 
@@ -3058,13 +3105,25 @@ out:
 		vnode_putname(vname);
 	}
 	if (fullpathptr) {
-		zfree(ZV_NAMEI, fullpathptr);
+		if (apaths.fullpathbuflen == MAXPATHLEN) {
+			zfree(ZV_NAMEI, fullpathptr);
+		} else {
+			kfree_data(fullpathptr, apaths.fullpathbuflen);
+		}
 	}
 	if (relpathptr) {
-		zfree(ZV_NAMEI, relpathptr);
+		if (apaths.relpathbuflen == MAXPATHLEN) {
+			zfree(ZV_NAMEI, relpathptr);
+		} else {
+			kfree_data(relpathptr, apaths.relpathbuflen);
+		}
 	}
 	if (REALpathptr) {
-		zfree(ZV_NAMEI, REALpathptr);
+		if (apaths.REALpathbuflen == MAXPATHLEN) {
+			zfree(ZV_NAMEI, REALpathptr);
+		} else {
+			kfree_data(REALpathptr, apaths.REALpathbuflen);
+		}
 	}
 	if (alloc_local_buf) {
 		kfree_data(ab.base, ab.allocated);
@@ -3846,6 +3905,8 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 	size_t kern_attr_buf_siz;
 	caddr_t max_path_name_buf = NULL;
 	int error = 0;
+	size_t attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
+	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
 
 	*count = 0;
 	*eofflagp = 0;
@@ -3859,8 +3920,8 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 	 * entry's attributes (as returned by getattrlist_internal)
 	 */
 	kern_attr_buf_siz = uio_resid(auio);
-	if (kern_attr_buf_siz > ATTR_MAX_BUFFER) {
-		kern_attr_buf_siz = ATTR_MAX_BUFFER;
+	if (kern_attr_buf_siz > attr_max_buffer) {
+		kern_attr_buf_siz = attr_max_buffer;
 	} else if (kern_attr_buf_siz == 0) {
 		/* Nothing to do */
 		return error;
@@ -3993,7 +4054,7 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 		new_resid = 0;
 		if (pad_bytes && (entlen + pad_bytes <= bytes_left)) {
 			/*
-			 * While entlen can never be > ATTR_MAX_BUFFER,
+			 * While entlen can never be > attr_max_buffer,
 			 * (entlen + pad_bytes) can be, handle that and
 			 * zero out the pad bytes. N.B. - Only zero
 			 * out information in the kernel buffer that is
@@ -4351,6 +4412,8 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	char            *user_buf, *cursor, *bufend, *fndrinfo, *cp, *volname;
 	int             proc_is64, error;
 	kauth_filesec_t rfsec;
+	size_t attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
+	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
 
 	user_buf = NULL;
 	fndrinfo = NULL;
@@ -4433,7 +4496,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	 *
 	 * We could also map the user buffer if it is larger than some sensible mimimum.
 	 */
-	if (uap->bufferSize > ATTR_MAX_BUFFER) {
+	if (uap->bufferSize > attr_max_buffer) {
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: buffer size %d too large", uap->bufferSize);
 		error = ENOMEM;
 		goto out;

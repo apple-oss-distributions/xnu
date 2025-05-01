@@ -1296,7 +1296,7 @@ IOSKMemoryBuffer::initWithSpec(
 	const IOSKMemoryBufferSpec * spec )
 {
 	bool ok = true;
-	IOOptionBits options = kIOMemoryKernelUserShared;
+	IOOptionBits options = 0;
 
 	if (spec) {
 		fSpec = *spec;
@@ -1460,6 +1460,7 @@ IOSKMemoryBufferCreate(
 {
 	IOSKMemoryBuffer * mb;
 	void * addr = NULL;
+	mach_vm_address_t alignment;
 
 	mach_vm_size_t rounded_capacity = round_page(capacity);
 	if (capacity != rounded_capacity) {
@@ -1467,7 +1468,12 @@ IOSKMemoryBufferCreate(
 	}
 
 	mb = new IOSKMemoryBuffer;
-	if (mb && !mb->initWithSpec(kernel_task, capacity, PAGE_SIZE, spec)) {
+	/*
+	 * For memory we get from IOBMD for memtag, we need to pass 0 for
+	 * alignment in order to allocate from zalloc.
+	 */
+	alignment = (spec->memtag) ? 0 : PAGE_SIZE;
+	if (mb && !mb->initWithSpec(kernel_task, capacity, alignment, spec)) {
 		mb->release();
 		mb = NULL;
 	}

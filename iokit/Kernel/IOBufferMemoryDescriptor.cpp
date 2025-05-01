@@ -91,8 +91,8 @@ IOBMDPageProc(kalloc_heap_t kheap, iopa_t * a)
 	vm_address_t  vmaddr  = 0;
 	kma_flags_t kma_flags = KMA_ZERO;
 
-	if (kheap == KHEAP_DATA_BUFFERS) {
-		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
+	if (kheap == KHEAP_DATA_SHARED) {
+		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA_SHARED);
 	}
 	kr = kmem_alloc(kernel_map, &vmaddr, page_size,
 	    kma_flags, VM_KERN_MEMORY_IOKIT);
@@ -183,7 +183,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	mach_vm_address_t physicalMask)
 {
 	task_t                mapTask = NULL;
-	kalloc_heap_t         kheap = KHEAP_DATA_BUFFERS;
+	kalloc_heap_t         kheap = KHEAP_DATA_SHARED;
 	mach_vm_address_t     highestMask = 0;
 	IOOptionBits          iomdOptions = kIOMemoryTypeVirtual64 | kIOMemoryAsReference;
 	IODMAMapSpecification mapSpec;
@@ -337,8 +337,8 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 			if (((uint32_t) alignment) != alignment) {
 				return false;
 			}
-			if (kheap == KHEAP_DATA_BUFFERS) {
-				kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
+			if (kheap == KHEAP_DATA_SHARED) {
+				kma_flags = (kma_flags_t) (kma_flags | KMA_DATA_SHARED);
 			}
 
 			alignMask = (1UL << log2up((uint32_t) alignment)) - 1;
@@ -683,7 +683,7 @@ IOBufferMemoryDescriptor::free()
 	IOMemoryMap *    map       = NULL;
 	IOAddressRange * range     = _ranges.v64;
 	vm_offset_t      alignment = _alignment;
-	kalloc_heap_t    kheap     = KHEAP_DATA_BUFFERS;
+	kalloc_heap_t    kheap     = KHEAP_DATA_SHARED;
 	vm_size_t        rsize;
 
 	if (alignment >= page_size) {
@@ -746,7 +746,8 @@ IOBufferMemoryDescriptor::free()
 #endif /* defined(__x86_64__) */
 		} else if (kInternalFlagGuardPages & internalFlags) {
 			vm_offset_t allocation = (vm_offset_t)buffer - page_size;
-			kmem_free(kernel_map, allocation, size + page_size * 2);
+			kmem_free(kernel_map, allocation, size + page_size * 2,
+			    (kmf_flags_t)(KMF_GUARD_FIRST | KMF_GUARD_LAST));
 #if IOALLOCDEBUG
 			OSAddAtomicLong(-size, &debug_iomalloc_size);
 #endif

@@ -123,7 +123,9 @@
 	X(int32_t, tso, 1)                                              \
 	X(int32_t, awdl_rtobase, 100)                                   \
 	X(int32_t, rack, 1)                                             \
-	X(int32_t, l4s, 0)
+	X(int32_t, l4s, 0)                                              \
+	X(int32_t, link_heuristics_flags, 0)                            \
+	X(int32_t, link_heuristics_rto_min, 0)
 
 #define SKMEM_SYSCTL_KERN_IPC_LIST                                      \
 	X(uint32_t, throttle_best_effort, 0)
@@ -138,6 +140,7 @@
 #define SKMEM_SYSCTL_TCP_HAS_AWDL_RTOBASE 1
 #define SKMEM_SYSCTL_TCP_HAS_RACK 1
 #define SKMEM_SYSCTL_TCP_HAS_L4S 1
+#define SKMEM_SYSCTL_TCP_HAS_LINK_HEURISTICS 1
 /*
  * When adding a new type above, be sure to add a corresponding
  * printf format below. Clients use NW_SYSCTL_PRI_##type

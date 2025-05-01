@@ -101,6 +101,7 @@ extern void bsd_log_unlock(void);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+lck_grp_t        io_lck_grp;
 lck_grp_t       *IOLockGroup;
 
 /*
@@ -126,15 +127,11 @@ static queue_head_t gIOMallocContiguousEntries;
 static lck_mtx_t *  gIOMallocContiguousEntriesLock;
 
 #if __x86_64__
-enum { kIOMaxPageableMaps    = 8 };
-enum { kIOMaxFixedRanges     = 4 };
-enum { kIOPageableMapSize    = 512 * 1024 * 1024 };
-enum { kIOPageableMaxMapSize = 512 * 1024 * 1024 };
+enum { kIOPageableMaxAllocSize = 512ULL * 1024 * 1024 };
+enum { kIOPageableMapSize      = 8ULL * kIOPageableMaxAllocSize  };
 #else
-enum { kIOMaxPageableMaps    = 16 };
-enum { kIOMaxFixedRanges     = 4 };
-enum { kIOPageableMapSize    = 96 * 1024 * 1024 };
-enum { kIOPageableMaxMapSize = 96 * 1024 * 1024 };
+enum { kIOPageableMaxAllocSize = 96ULL * 1024 * 1024 };
+enum { kIOPageableMapSize      = 16ULL * kIOPageableMaxAllocSize  };
 #endif
 
 typedef struct {
@@ -143,15 +140,12 @@ typedef struct {
 	vm_offset_t end;
 } IOMapData;
 
-static SECURITY_READ_ONLY_LATE(struct mach_vm_range)
-gIOKitPageableFixedRanges[kIOMaxFixedRanges];
-
-static struct {
-	UInt32      count;
-	UInt32      hint;
-	IOMapData   maps[kIOMaxPageableMaps];
-	lck_mtx_t * lock;
-} gIOKitPageableSpace;
+#ifndef __BUILDING_XNU_LIBRARY__
+/* this makes clang emit a C and C++ symbol which confuses lldb rdar://135688747 */
+static
+#endif /* __BUILDING_XNU_LIBRARY__ */
+SECURITY_READ_ONLY_LATE(struct mach_vm_range) gIOKitPageableFixedRange;
+IOMapData gIOKitPageableMap;
 
 #if defined(__x86_64__)
 static iopa_t gIOPageablePageAllocator;
@@ -167,14 +161,8 @@ IOTrackingQueue * gIOMapTracking;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-KMEM_RANGE_REGISTER_STATIC(gIOKitPageableFixed0,
-    &gIOKitPageableFixedRanges[0], kIOPageableMapSize);
-KMEM_RANGE_REGISTER_STATIC(gIOKitPageableFixed1,
-    &gIOKitPageableFixedRanges[1], kIOPageableMapSize);
-KMEM_RANGE_REGISTER_STATIC(gIOKitPageableFixed2,
-    &gIOKitPageableFixedRanges[2], kIOPageableMapSize);
-KMEM_RANGE_REGISTER_STATIC(gIOKitPageableFixed3,
-    &gIOKitPageableFixedRanges[3], kIOPageableMapSize);
+KMEM_RANGE_REGISTER_STATIC(gIOKitPageableFixed,
+    &gIOKitPageableFixedRange, kIOPageableMapSize);
 void
 IOLibInit(void)
 {
@@ -184,7 +172,8 @@ IOLibInit(void)
 		return;
 	}
 
-	IOLockGroup = lck_grp_alloc_init("IOKit", LCK_GRP_ATTR_NULL);
+	lck_grp_init(&io_lck_grp, "IOKit", LCK_GRP_ATTR_NULL);
+	IOLockGroup = &io_lck_grp;
 
 #if IOTRACKING
 	IOTrackingInit();
@@ -201,19 +190,16 @@ IOLibInit(void)
 	    0);
 #endif
 
-	gIOKitPageableSpace.maps[0].map = kmem_suballoc(kernel_map,
-	    &gIOKitPageableFixedRanges[0].min_address,
+	gIOKitPageableMap.map = kmem_suballoc(kernel_map,
+	    &gIOKitPageableFixedRange.min_address,
 	    kIOPageableMapSize,
 	    VM_MAP_CREATE_PAGEABLE,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    (kms_flags_t)(KMS_PERMANENT | KMS_DATA | KMS_NOFAIL),
 	    VM_KERN_MEMORY_IOKIT).kmr_submap;
 
-	gIOKitPageableSpace.maps[0].address = gIOKitPageableFixedRanges[0].min_address;
-	gIOKitPageableSpace.maps[0].end     = gIOKitPageableFixedRanges[0].max_address;
-	gIOKitPageableSpace.lock            = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
-	gIOKitPageableSpace.hint            = 0;
-	gIOKitPageableSpace.count           = 1;
+	gIOKitPageableMap.address = gIOKitPageableFixedRange.min_address;
+	gIOKitPageableMap.end     = gIOKitPageableFixedRange.max_address;
 
 	gIOMallocContiguousEntriesLock      = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
 	queue_init( &gIOMallocContiguousEntries );
@@ -534,6 +520,8 @@ vm_size_t alignment, zalloc_flags_t flags)
 
 	if (kheap == KHEAP_DATA_BUFFERS) {
 		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
+	} else if (kheap == KHEAP_DATA_SHARED) {
+		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA_SHARED);
 	}
 
 	alignment = (1UL << log2up((uint32_t) alignment));
@@ -753,6 +741,8 @@ IOKernelAllocateWithPhysicalRestrict(
 
 		if (kheap == KHEAP_DATA_BUFFERS) {
 			options = (kma_flags_t) (options | KMA_DATA);
+		} else if (kheap == KHEAP_DATA_SHARED) {
+			options = (kma_flags_t) (options | KMA_DATA_SHARED);
 		}
 
 		adjustedSize = size;
@@ -939,84 +929,10 @@ kern_return_t
 IOIteratePageableMaps(vm_size_t size,
     IOIteratePageableMapsCallback callback, void * ref)
 {
-	kern_return_t       kr = kIOReturnNotReady;
-	kmem_return_t       kmr;
-	vm_size_t           segSize;
-	UInt32              attempts;
-	UInt32              index;
-	mach_vm_offset_t    min;
-	int                 flags;
-
-	if (size > kIOPageableMaxMapSize) {
+	if (size > kIOPageableMaxAllocSize) {
 		return kIOReturnBadArgument;
 	}
-
-	do {
-		index = gIOKitPageableSpace.hint;
-		attempts = gIOKitPageableSpace.count;
-		while (attempts--) {
-			kr = (*callback)(gIOKitPageableSpace.maps[index].map, ref);
-			if (KERN_SUCCESS == kr) {
-				gIOKitPageableSpace.hint = index;
-				break;
-			}
-			if (index) {
-				index--;
-			} else {
-				index = gIOKitPageableSpace.count - 1;
-			}
-		}
-		if (KERN_NO_SPACE != kr) {
-			break;
-		}
-
-		lck_mtx_lock( gIOKitPageableSpace.lock );
-
-		index = gIOKitPageableSpace.count;
-		if (index >= kIOMaxPageableMaps) {
-			lck_mtx_unlock( gIOKitPageableSpace.lock );
-			break;
-		}
-
-		if (size < kIOPageableMapSize) {
-			segSize = kIOPageableMapSize;
-		} else {
-			segSize = size;
-		}
-
-		/*
-		 * Use the predefine ranges if available, else default to data
-		 */
-		if (index < kIOMaxFixedRanges) {
-			min = gIOKitPageableFixedRanges[index].min_address;
-			flags = VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE;
-		} else {
-			min = 0;
-			flags = VM_FLAGS_ANYWHERE;
-		}
-		kmr = kmem_suballoc(kernel_map,
-		    &min,
-		    segSize,
-		    VM_MAP_CREATE_PAGEABLE,
-		    flags,
-		    (kms_flags_t)(KMS_PERMANENT | KMS_DATA),
-		    VM_KERN_MEMORY_IOKIT);
-		if (kmr.kmr_return != KERN_SUCCESS) {
-			kr = kmr.kmr_return;
-			lck_mtx_unlock( gIOKitPageableSpace.lock );
-			break;
-		}
-
-		gIOKitPageableSpace.maps[index].map     = kmr.kmr_submap;
-		gIOKitPageableSpace.maps[index].address = min;
-		gIOKitPageableSpace.maps[index].end     = min + segSize;
-		gIOKitPageableSpace.hint                = index;
-		gIOKitPageableSpace.count               = index + 1;
-
-		lck_mtx_unlock( gIOKitPageableSpace.lock );
-	} while (true);
-
-	return kr;
+	return (*callback)(gIOKitPageableMap.map, ref);
 }
 
 struct IOMallocPageableRef {
@@ -1043,7 +959,7 @@ IOMallocPageablePages(vm_size_t size, vm_size_t alignment, vm_tag_t tag)
 	if (alignment > page_size) {
 		return NULL;
 	}
-	if (size > kIOPageableMaxMapSize) {
+	if (size > kIOPageableMaxAllocSize) {
 		return NULL;
 	}
 
@@ -1058,23 +974,12 @@ IOMallocPageablePages(vm_size_t size, vm_size_t alignment, vm_tag_t tag)
 }
 
 vm_map_t
-IOPageableMapForAddress( uintptr_t address )
+IOPageableMapForAddress(uintptr_t address)
 {
-	vm_map_t    map = NULL;
-	UInt32      index;
-
-	for (index = 0; index < gIOKitPageableSpace.count; index++) {
-		if ((address >= gIOKitPageableSpace.maps[index].address)
-		    && (address < gIOKitPageableSpace.maps[index].end)) {
-			map = gIOKitPageableSpace.maps[index].map;
-			break;
-		}
+	if (address < gIOKitPageableMap.address || address >= gIOKitPageableMap.end) {
+		panic("IOPageableMapForAddress: address out of range");
 	}
-	if (!map) {
-		panic("IOPageableMapForAddress: null");
-	}
-
-	return map;
+	return gIOKitPageableMap.map;
 }
 
 static void

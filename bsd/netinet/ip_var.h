@@ -339,6 +339,7 @@ struct ip_out_args {
 #define IPOAF_REDO_QOSMARKING_POLICY    0x00002000      /* Re-evaluate QOS marking policy */
 #define IPOAF_R_IFDENIED                0x00004000      /* denied access to interface */
 #define IPOAF_MANAGEMENT_ALLOWED        0x00008000      /* access to management interfaces */
+#define IPOAF_ULTRA_CONSTRAINED_ALLOWED 0x00010000      /* access to ultra constrained interfaces */
 	int             ipoa_sotc;      /* traffic class for Fastlane DSCP mapping */
 	int             ipoa_netsvctype; /* network service type */
 	int32_t         qos_marking_gencount;

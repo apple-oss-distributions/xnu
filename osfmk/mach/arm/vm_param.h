@@ -170,8 +170,6 @@ extern int PAGE_SHIFT_CONST;
 
 #ifdef  KERNEL
 
-#include <vm/vm_memtag.h>
-
 #if defined (__arm__)
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0x80000000)
@@ -206,14 +204,14 @@ extern int PAGE_SHIFT_CONST;
 #if defined(ARM_LARGE_MEMORY)
 /*
  * +-----------------------+--------+--------+------------------------+
- * | 0xffff_fe90_0000_0000 |-1472GB |  576GB | KASAN_SHADOW_MIN       |
- * |                       |        |        | VM_MAX_KERNEL_ADDRESS  |
+ * | 0xffff_fed0_0000_0000 |-1216GB |  832GB | KASAN_SHADOW_MIN       |
+ * | 0xffff_fecf_ffff_ffff |        |        | VM_MAX_KERNEL_ADDRESS  |
  * +-----------------------+--------+--------+------------------------+
  * | 0xffff_fe10_0000_0000 |-1984GB |   64GB | PMAP_HEAP_RANGE_START  |
  * +-----------------------+--------+--------+------------------------+
  * | 0xffff_fe00_0700_4000 |        |        | VM_KERNEL_LINK_ADDRESS |
  * +-----------------------+--------+--------+------------------------+
- * | 0xffff_fe00_0000_0000 |   -2TB |    0GB | VM_MIN_KERNEL_ADDRESS  |
+ * | 0xffff_fe00_0000_0000 |-2048GB |    0GB | VM_MIN_KERNEL_ADDRESS  |
  * |                       |        |        | LOW_GLOBALS            |
  * +-----------------------+--------+--------+------------------------+
  */
@@ -222,8 +220,16 @@ extern int PAGE_SHIFT_CONST;
 // Kernel VA space starts at -2TB
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) (0ULL - TiB(2)))
 
-// 1.25TB for static_memory_region, 512GB for kernel heap, 256GB for KASAN
-#define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) (VM_MIN_KERNEL_ADDRESS + GiB(64) + GiB(512) - 1))
+//   64 GB for kernel cache and globals
+//  768 GB for heap/general kernel use
+// 1216 GB left over at the top of the range for KASAN
+//     Assuming KASAN TBI, this lets us cover down to:
+//     0 - (1216GB<<KASAN_SCALE) = 0xffff_ed00_0000_0000, or ~19.5TB of VA
+//     Since we place the DRAM PAPT below VM_MIN_KERNEL_ADDRESS on large
+//     memory configurations, this configuration works until systems have
+//     ~17.5TB of DRAM.
+#define VM_MAX_KERNEL_ADDRESS \
+	((vm_address_t) (VM_MIN_KERNEL_ADDRESS + GiB(64) + GiB(768) - 1))
 
 #else // ARM_LARGE_MEMORY
 /*
@@ -280,7 +286,7 @@ extern int PAGE_SHIFT_CONST;
  * the sign bit. In kernel space the sign bit is 1, so 0xFF is a valid mask
  * here.
  */
-#define VM_KERNEL_STRIP_TAG(_v)         (vm_memtag_canonicalize_address((vm_offset_t)_v))
+#define VM_KERNEL_STRIP_TAG(_v)         (vm_memtag_canonicalize_kernel((vm_offset_t)_v))
 #else /* CONFIG_KERNEL_TAGGING */
 #define VM_KERNEL_STRIP_TAG(_v)         (_v)
 #endif /* CONFIG_KERNEL_TAGGING */

@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>Name</key>
+        <string>Task/Thread Suspend</string>
+        <key>Children</key>
+        <array>
+            <dict>
+                <key>Name</key>
+                <string>Task Suspend</string>
+                <key>Type</key>
+                <string>Interval</string>
+                <key>KTraceCodeBegin</key>
+                <string>0x1210000</string>
+                <key>KTraceCodeEnd</key>
+                <string>0x1210004</string>
+                <key>EventsMatchedBy</key>
+                <string>Arg1</string>
+                <key>ArgNamesBegin</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>pid</string>
+                    <key>Arg2</key>
+                    <string>user_stop_count</string>
+                    <key>Arg3</key>
+                    <string>pidsuspended</string>
+                </dict>
+                <key>ArgNamesEnd</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>pid</string>
+                </dict>
+                <key>ArgValueTypesBegin</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ProcessName</string>
+                </dict>
+                <key>ArgValueTypesEnd</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ProcessName</string>
+                </dict>
+            </dict>
+
+            <dict>
+                <key>Name</key>
+                <string>Task Suspend Begin</string>
+                <key>Type</key>
+                <string>Impulse</string>
+                <key>KTraceCode</key>
+                <string>0x1210000</string>
+                <key>EventsMatchedBy</key>
+                <string>Arg1</string>
+                <key>ArgNames</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>pid</string>
+                    <key>Arg2</key>
+                    <string>user_stop_count</string>
+                    <key>Arg3</key>
+                    <string>pidsuspended</string>
+                </dict>
+                <key>ArgValueTypes</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ProcessName</string>
+                </dict>
+            </dict>
+
+			<dict>
+                <key>Name</key>
+                <string>Thread Suspend</string>
+                <key>Type</key>
+                <string>Interval</string>
+                <key>KTraceCodeBegin</key>
+                <string>0x1210008</string>
+                <key>KTraceCodeEnd</key>
+                <string>0x121000c</string>
+                <key>EventsMatchedBy</key>
+                <string>Arg1</string>
+                <key>ArgNamesBegin</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>suspended thread tid</string>
+                    <key>Arg2</key>
+                    <string>user stop count</string>
+                    <key>Arg3</key>
+                    <string>pidsuspended</string>
+                </dict>
+                <key>ArgNamesEnd</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>suspended thread tid</string>
+                </dict>
+                <key>ArgValueTypesBegin</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ThreadName</string>
+                </dict>
+                <key>ArgValueTypesEnd</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ThreadName</string>
+                </dict>
+            </dict>
+
+            <dict>
+                <key>Name</key>
+                <string>Thread Suspend Begin</string>
+                <key>Type</key>
+                <string>Impulse</string>
+                <key>KTraceCode</key>
+                <string>0x1210008</string>
+                <key>EventsMatchedBy</key>
+                <string>Arg1</string>
+                <key>ArgNames</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>suspended thread tid</string>
+                    <key>Arg2</key>
+                    <string>user stop count</string>
+                    <key>Arg3</key>
+                    <string>pidsuspended</string>
+                </dict>
+                <key>ArgValueTypes</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ThreadName</string>
+                </dict>
+            </dict>
+
+            <dict>
+                <key>Name</key>
+                <string>Thread Resume</string>
+                <key>Type</key>
+                <string>Impulse</string>
+                <key>KTraceCode</key>
+                <string>0x121000c</string>
+                <key>EventsMatchedBy</key>
+                <string>Arg1</string>
+                <key>ArgNames</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>suspended thread tid</string>
+                </dict>
+                <key>ArgValueTypes</key>
+                <dict>
+                    <key>Arg1</key>
+                    <string>ThreadName</string>
+                </dict>
+            </dict>
+
+        </array>
+    </dict>
+</array>
+</plist>

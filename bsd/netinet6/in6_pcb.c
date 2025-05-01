@@ -199,10 +199,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 	kauth_cred_t __single cred;
 #endif /* XNU_TARGET_OS_OSX */
 
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		return EINVAL;
-	}
-	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	ASSERT((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0);
 
 	if (TAILQ_EMPTY(&in6_ifaddrhead)) { /* XXX broken! */
 		error = EADDRNOTAVAIL;
@@ -608,7 +605,6 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 	lck_rw_done(&pcbinfo->ipi_lock);
 	sflt_notify(so, sock_evt_bound, NULL);
 done:
-	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
 	return error;
 }
 
@@ -1489,16 +1485,14 @@ in6_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 /*
  * Lookup PCB in hash list.
  */
-struct inpcb *
-in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
-    u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg, uint32_t lifscope, int wildcard,
-    struct ifnet *ifp)
+static struct inpcb *
+in6_pcblookup_hash_locked(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
+    u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg,
+    uint32_t lifscope, int wildcard, struct ifnet *ifp)
 {
 	struct inpcbhead *__single head;
 	struct inpcb *__single inp;
 	uint16_t fport = (uint16_t)fport_arg, lport = (uint16_t)lport_arg;
-
-	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 	/*
 	 * First look for an exact match.
@@ -1529,11 +1523,9 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 			 */
 			if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) !=
 			    WNT_STOPUSING) {
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return inp;
 			} else {
 				/* it's there but dead, say it isn't found */
-				lck_rw_done(&pcbinfo->ipi_lock);
 				return NULL;
 			}
 		}
@@ -1564,11 +1556,9 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 				    laddr, inp->inp_lifscope, lifscope)) {
 					if (in_pcb_checkstate(inp, WNT_ACQUIRE,
 					    0) != WNT_STOPUSING) {
-						lck_rw_done(&pcbinfo->ipi_lock);
 						return inp;
 					} else {
 						/* dead; say it isn't found */
-						lck_rw_done(&pcbinfo->ipi_lock);
 						return NULL;
 					}
 				} else if (IN6_IS_ADDR_UNSPECIFIED(
@@ -1579,10 +1569,8 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 		}
 		if (local_wild && in_pcb_checkstate(local_wild,
 		    WNT_ACQUIRE, 0) != WNT_STOPUSING) {
-			lck_rw_done(&pcbinfo->ipi_lock);
 			return local_wild;
 		} else {
-			lck_rw_done(&pcbinfo->ipi_lock);
 			return NULL;
 		}
 	}
@@ -1590,8 +1578,43 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 	/*
 	 * Not found.
 	 */
-	lck_rw_done(&pcbinfo->ipi_lock);
 	return NULL;
+}
+
+struct inpcb *
+in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
+    u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg,
+    uint32_t lifscope, int wildcard, struct ifnet *ifp)
+{
+	struct inpcb *inp;
+
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
+
+	inp = in6_pcblookup_hash_locked(pcbinfo, faddr, fport_arg, fifscope,
+	    laddr, lport_arg, lifscope, wildcard, ifp);
+
+	lck_rw_done(&pcbinfo->ipi_lock);
+
+	return inp;
+}
+
+struct inpcb *
+in6_pcblookup_hash_try(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
+    u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg,
+    uint32_t lifscope, int wildcard, struct ifnet *ifp)
+{
+	struct inpcb *inp;
+
+	if (!lck_rw_try_lock_shared(&pcbinfo->ipi_lock)) {
+		return NULL;
+	}
+
+	inp = in6_pcblookup_hash_locked(pcbinfo, faddr, fport_arg, fifscope,
+	    laddr, lport_arg, lifscope, wildcard, ifp);
+
+	lck_rw_done(&pcbinfo->ipi_lock);
+
+	return inp;
 }
 
 void

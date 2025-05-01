@@ -931,9 +931,9 @@ pmap_init(void)
 	 * - very low pages that were identity mapped.
 	 * - vm_pages[] entries that might be unused and reclaimed.
 	 */
-	assert((uintptr_t)VM_MIN_KERNEL_ADDRESS + avail_start <= (uintptr_t)vm_page_array_beginning_addr);
+	assert((uintptr_t)VM_MIN_KERNEL_ADDRESS + avail_start <= (uintptr_t)vm_page_get(0));
 	pmap_pv_fixup((uintptr_t)VM_MIN_KERNEL_ADDRESS, (uintptr_t)VM_MIN_KERNEL_ADDRESS + avail_start);
-	pmap_pv_fixup((uintptr_t)vm_page_array_beginning_addr, (uintptr_t)vm_page_array_ending_addr);
+	pmap_pv_fixup((uintptr_t)vm_page_get(0), (uintptr_t)vm_pages_end);
 
 	pmap_initialized = TRUE;
 
@@ -1436,6 +1436,19 @@ pmap_verify_free(
 	pv_h = pai_to_pvh(pn);
 	result = (pv_h->pmap == PMAP_NULL);
 	return result;
+}
+
+/**
+ * Helper function to check wheter the given physical
+ * page number is a restricted page.
+ *
+ * @param pn the physical page number to query.
+ */
+bool
+pmap_is_page_restricted(
+	__unused ppnum_t pn)
+{
+	return false;
 }
 
 #if MACH_ASSERT
@@ -2564,7 +2577,7 @@ pmap_sync_page_attributes_phys(ppnum_t pa)
 }
 
 void
-pmap_copy_page(ppnum_t src, ppnum_t dst)
+pmap_copy_page(ppnum_t src, ppnum_t dst, int options __unused)
 {
 	bcopy_phys((addr64_t)i386_ptob(src),
 	    (addr64_t)i386_ptob(dst),
@@ -2704,7 +2717,7 @@ phys_page_exists(ppnum_t pn)
 
 
 void
-pmap_switch(pmap_t tpmap)
+pmap_switch(pmap_t tpmap, thread_t thread __unused)
 {
 	PMAP_TRACE_CONSTANT(PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(tpmap));
 	assert(ml_get_interrupts_enabled() == FALSE);

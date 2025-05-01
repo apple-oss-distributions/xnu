@@ -22,7 +22,8 @@
 T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("scheduler"),
-    T_META_TAG_VM_NOT_ELIGIBLE);
+    T_META_TAG_VM_NOT_ELIGIBLE,
+    T_META_REQUIRES_SYSCTL_NE("debug.sched_hygiene_debug_available", 0));
 
 static int BACKGROUND_PRI;
 static int NUM_THREADS;
@@ -164,11 +165,11 @@ save_collected_ktrace(char *trace_path)
 	char *tar_args[] = {"/usr/bin/tar", "-czvf", compressed_path, trace_path, NULL};
 	pid_t tar_pid = dt_launch_tool_pipe(tar_args, false, NULL,
 	    ^bool (__unused char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
-		return true;
+		return false;
 	},
 	    ^bool (char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
 		T_LOG("[tar] Error msg: %s", data);
-		return true;
+		return false;
 	},
 	    BUFFER_PATTERN_LINE, NULL);
 
@@ -224,8 +225,14 @@ search_for_interrupt_disable_timeout_tracepoint(char *trace_path)
 T_DECL(overload_runqueue_with_thread_groups,
     "Overload the runqueue with distinct thread groups to verify that the scheduler"
     "does not trip an interrupts-disabled timeout whenever it scans the runqueue",
-    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_ENABLED(TARGET_OS_IOS))
+    T_META_ASROOT(true),
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_ENABLED(TARGET_OS_IOS))
 {
+	if (platform_is_virtual_machine()) {
+		T_SKIP("Test not supposed to run on virtual machine. rdar://132930927");
+	}
+
 	BACKGROUND_PRI = 4;
 	NUM_THREADS = 1000;
 	SLEEP_SECONDS = 20;

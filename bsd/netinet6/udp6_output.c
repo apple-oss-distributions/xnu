@@ -123,6 +123,7 @@
 #include <netinet/ip_var.h>
 #include <netinet/in_pcb.h>
 #include <netinet/udp.h>
+#include <netinet/udp_log.h>
 #include <netinet/udp_var.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
@@ -193,6 +194,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	if (flowadv && INP_WAIT_FOR_IF_FEEDBACK(in6p)) {
 		error = ENOBUFS;
 		drop_reason = DROP_REASON_IP_ENOBUFS;
+		UDP_LOG(in6p, "flow controlled error ENOBUFS");
 		goto release;
 	}
 
@@ -220,6 +222,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	}
 	if (INP_MANAGEMENT_ALLOWED(in6p)) {
 		ip6oa.ip6oa_flags |= IP6OAF_MANAGEMENT_ALLOWED;
+	}
+	if (INP_ULTRA_CONSTRAINED_ALLOWED(in6p)) {
+		ip6oa.ip6oa_flags |= IP6OAF_ULTRA_CONSTRAINED_ALLOWED;
 	}
 
 #if CONTENT_FILTER
@@ -249,6 +254,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		if ((error = ip6_setpktopts(control, &opt,
 		    in6p->in6p_outputopts, IPPROTO_UDP)) != 0) {
 			drop_reason = DROP_REASON_IP6_BAD_OPTION;
+			UDP_LOG(in6p, "bad option error %d", error);
 			goto release;
 		}
 		optp = &opt;
@@ -281,6 +287,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		if (sin6->sin6_port == 0) {
 			error = EADDRNOTAVAIL;
 			drop_reason = DROP_REASON_IP_DST_ADDR_NO_AVAIL;
+			UDP_LOG(in6p, "sin6_port 0 error EADDRNOTAVAIL");
 			goto release;
 		}
 
@@ -288,6 +295,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			/* how about ::ffff:0.0.0.0 case? */
 			error = EISCONN;
 			drop_reason = DROP_REASON_IP_EISCONN;
+			UDP_LOG(in6p, "already connected error EISCONN");
 			goto release;
 		}
 
@@ -312,6 +320,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				 */
 				error = EINVAL;
 				drop_reason = DROP_REASON_IP6_ONLY;
+				UDP_LOG(in6p, "IPv6 only with IPv4 mapped error EINVAL");
 				goto release;
 			} else {
 				af = AF_INET;
@@ -323,6 +332,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		    optp, IN6_NULL_IF_EMBEDDED_SCOPE(&sin6->sin6_scope_id)) != 0) {
 			error = EINVAL;
 			drop_reason = DROP_REASON_IP6_BAD_SCOPE;
+			UDP_LOG(in6p, "bad scope error EINVAL");
 			goto release;
 		}
 		fifscope = sin6->sin6_scope_id;
@@ -345,15 +355,29 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				error = EADDRNOTAVAIL;
 			}
 			drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
+			UDP_LOG(in6p, "source address not available error EADDRNOTAVAIL");
 			goto release;
 		}
-		if (in6p->in6p_lport == 0 &&
-		    (error = in6_pcbsetport(laddr, addr6, in6p, p, 0)) != 0) {
-			goto release;
+		if (in6p->in6p_lport == 0) {
+			inp_enter_bind_in_progress(so);
+
+			error = in6_pcbsetport(laddr, addr6, in6p, p, 0);
+
+			if (error == 0) {
+				ASSERT(in6p->in6p_lport != 0);
+			}
+
+			inp_exit_bind_in_progress(so);
+
+			if (error != 0) {
+				UDP_LOG(in6p, "in6_pcbsetport error %d", error);
+				goto release;
+			}
 		}
 	} else {
 		if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr)) {
 			error = ENOTCONN;
+			UDP_LOG(in6p, "not connected error ENOTCONN");
 			drop_reason = DROP_REASON_IP6_ADDR_UNSPECIFIED;
 			goto release;
 		}
@@ -381,9 +405,8 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				 * Such applications should be fixed,
 				 * so we bark here.
 				 */
-				log(LOG_INFO, "udp6_output: IPV6_V6ONLY "
-				    "option was set for a connected socket\n");
 				error = EINVAL;
+				UDP_LOG(in6p, "IPv6 only with IPv4 mapped error EINVAL");
 				goto release;
 			} else {
 				af = AF_INET;
@@ -418,6 +441,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	M_PREPEND(m, hlen + sizeof(struct udphdr), M_DONTWAIT, 1);
 	if (m == 0) {
 		error = ENOBUFS;
+		UDP_LOG(in6p, "M_PREPEND error ENOBUFS");
 		drop_reason = DROP_REASON_IP_ENOBUFS;
 		goto release;
 	}
@@ -508,6 +532,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			if (!necp_socket_is_allowed_to_send_recv_v6(in6p, in6p->in6p_lport, fport, laddr, faddr, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 				error = EHOSTUNREACH;
 				drop_reason = DROP_REASON_IP_NECP_POLICY_DROP;
+				UDP_LOG_DROP_NECP(ip6, udp6, in6p, true);
 				goto release;
 			}
 
@@ -529,6 +554,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 #if IPSEC
 		if (in6p->in6p_sp != NULL && ipsec_setsocket(m, so) != 0) {
 			error = ENOBUFS;
+			UDP_LOG_DROP_PCB(ip6, udp6, in6p, true, "ipsec_setsocket error ENOBUFS");
 			drop_reason = DROP_REASON_IP_ENOBUFS;
 			goto release;
 		}
@@ -718,6 +744,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		break;
 	case AF_INET:
 		error = EAFNOSUPPORT;
+		UDP_LOG(in6p, "bad address family error EAFNOSUPPORT");
 		drop_reason = DROP_REASON_IP_EAFNOSUPPORT;
 		goto release;
 	}

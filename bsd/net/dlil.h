@@ -178,8 +178,8 @@ struct dlil_threading_info {
 	struct thread   *dlth_poller_thread;    /* poll thread */
 
 	lck_grp_t       *dlth_lock_grp; /* lock group (for lock stats) */
-	char            dlth_name[DLIL_THREADNAME_LEN]; /* name storage */
-
+	char            dlth_name_storage[DLIL_THREADNAME_LEN]; /* name storage */
+	const char * __null_terminated dlth_name;
 	/* Accounting for trimming of input queues that exceed their limits */
 	uint32_t        dlth_trim_cnt;          /* # of trim events */
 	uint32_t        dlth_trim_pkts_dropped; /* # of packets dropped
@@ -191,6 +191,7 @@ struct dlil_threading_info {
 	uint64_t        dlth_pkts_cnt;          /* total # of packets */
 #endif
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct dlil_threading_info, dlil_threading_info);
 
 /*
  * DLIL input thread info (for main/loopback input thread)
@@ -199,6 +200,7 @@ struct dlil_main_threading_info {
 	struct dlil_threading_info      inp;
 	class_queue_t                   lo_rcvq_pkts; /* queue of lo0 pkts */
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct dlil_main_threading_info, dlil_main_threading_info);
 
 /*
  * Valid values for dlth_flags.
@@ -385,7 +387,7 @@ extern void      ifnet_get_detach_notify(ifnet_t ifp,
 /*
  * dlil_if_acquire is obsolete. Use ifnet_allocate.
  */
-extern int dlil_if_acquire(u_int32_t, const void *, size_t, const char *, struct ifnet **);
+extern int dlil_if_acquire(u_int32_t, const void * __sized_by(uniqueid_len), size_t uniqueid_len, const char * __null_terminated, struct ifnet **);
 /*
  * dlil_if_release is obsolete. The equivalent is called automatically when
  * an interface is detached.
@@ -523,55 +525,11 @@ extern void ifnet_ioctl_async(struct ifnet *, u_long);
 extern int bridge_enable_early_input;
 extern mbuf_t bridge_early_input(struct ifnet *ifp, mbuf_t m, u_int32_t cnt);
 
-#define DLIL_MAX_FRAME_TYPE_SIZE 4 /* LONGWORDS */
-#define DLIL_MAX_FRAME_TYPE_BUFFER_SIZE (DLIL_MAX_FRAME_TYPE_SIZE * 4)
 
-/*
- * Helper function to safely expand the frame type
- * parameter to indexable pointer.
- */
-static inline uint8_t * __header_indexable
-__dlil_frame_type_buffer(char *frame_type)
-{
-	return __unsafe_forge_bidi_indexable(uint8_t *,
-	           frame_type, DLIL_MAX_FRAME_TYPE_BUFFER_SIZE);
-}
-
-static inline const uint8_t * __header_indexable
-__dlil_frame_type_cbuffer(const char *frame_type)
-{
-	return __unsafe_forge_bidi_indexable(const uint8_t *,
-	           frame_type, DLIL_MAX_FRAME_TYPE_BUFFER_SIZE);
-}
-
-#define dlil_frame_type(x) (_Generic((x),           \
-	char       * : __dlil_frame_type_buffer,        \
-	const char * : __dlil_frame_type_cbuffer)((x)))
-
-#define DLIL_MAX_LINKADDR        4 /* LONGWORDS */
-#define DLIL_MAX_LINKADDR_BUFFER_SIZE (DLIL_MAX_LINKADDR * 4)
-
-/*
- * Helper function to safely expand the link address
- * parameter to indexable pointer.
- */
-static inline uint8_t * __header_indexable
-__dlil_link_addr_buffer(char *link_addr)
-{
-	return __unsafe_forge_bidi_indexable(uint8_t *,
-	           link_addr, DLIL_MAX_LINKADDR_BUFFER_SIZE);
-}
-
-static inline const uint8_t * __header_indexable
-__dlil_link_addr_cbuffer(const char *link_addr)
-{
-	return __unsafe_forge_bidi_indexable(const uint8_t *,
-	           link_addr, DLIL_MAX_LINKADDR_BUFFER_SIZE);
-}
-
-#define dlil_link_addr(x) (_Generic((x),           \
-	char       * : __dlil_link_addr_buffer,        \
-	const char * : __dlil_link_addr_cbuffer)((x)))
+__private_extern__ int ifnet_set_nat64prefix(struct ifnet *,
+    struct ipv6_prefix *__counted_by(NAT64_MAX_NUM_PREFIXES));
+__private_extern__ int ifnet_get_nat64prefix(struct ifnet *,
+    struct ipv6_prefix *__counted_by(NAT64_MAX_NUM_PREFIXES));
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */

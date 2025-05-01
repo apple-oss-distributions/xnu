@@ -41,8 +41,11 @@
 #define LQ_MIN_LOG_SZ_ORDER 5
 #define LQ_MAX_LOG_SZ_ORDER 11
 #define LQ_BATCH_SIZE 24
-#define LQ_MAX_LM_SLOTS 8
+#define LQ_MAX_LM_SLOTS 9
 #define LQ_LOW_MEM_SCALE 3
+#define LQ_MIN_ALLOCATED_LM_SLOTS 2
+#define LQ_METADATA_START_SLOT 0
+#define LQ_OTHER_START_SLOT (LQ_MIN_ALLOCATED_LM_SLOTS - 1)
 
 #define LQ_MEM_ENABLE(q, i) ((q)->lq_mem_set |= (1 << (i)))
 #define LQ_MEM_ENABLED(q, i) ((q)->lq_mem_set & (1 << (i)))
@@ -90,6 +93,7 @@ typedef struct {
 	thread_call_t           lq_mem_handler;
 	size_t                  lq_cnt_mem_active;
 	size_t                  lq_cnt_mem_avail;
+	size_t                  lq_cnt_mem_meta_avail;
 	_Atomic lq_req_state_t  lq_req_state;
 	void                    *lq_req_mem;
 	uint32_t                lq_ready : 1;
@@ -149,6 +153,24 @@ log_queue_buffer_free(void *addr, size_t amount)
 	kfree_data(addr, amount);
 }
 
+static void
+log_queue_increment_mem_avail(const log_queue_t lq, size_t idx, size_t size)
+{
+	lq->lq_cnt_mem_avail += size;
+	if (idx < LQ_OTHER_START_SLOT) {
+		lq->lq_cnt_mem_meta_avail += size;
+	}
+}
+
+static void
+log_queue_decrement_mem_avail(const log_queue_t lq, size_t idx, size_t size)
+{
+	lq->lq_cnt_mem_avail -= size;
+	if (idx < LQ_OTHER_START_SLOT) {
+		lq->lq_cnt_mem_meta_avail -= size;
+	}
+}
+
 #define log_queue_entry_size(p) (sizeof(log_queue_entry_s) + (p)->lp_data_size)
 
 #define publish(a, v) os_atomic_store((a), (v), release)
@@ -168,17 +190,23 @@ log_queue_entry_state(const log_queue_entry_t lqe)
 }
 
 static log_queue_entry_t
-log_queue_entry_alloc(log_queue_t lq, size_t lqe_size)
+log_queue_entry_alloc(log_queue_t lq, size_t lqe_size, firehose_stream_t stream_type)
 {
-	for (short i = 0; i < LQ_MAX_LM_SLOTS; i++) {
+	// some slots are exclusively reserved for metadata stream
+	short start = LQ_METADATA_START_SLOT;
+	if (stream_type != firehose_stream_metadata) {
+		start = LQ_OTHER_START_SLOT;
+	}
+
+	for (short i = start; i < LQ_MAX_LM_SLOTS; i++) {
 		if (!LQ_MEM_ENABLED(lq, i)) {
 			continue;
 		}
 		log_queue_entry_t lqe = logmem_alloc(&lq->lq_mem[i], &lqe_size);
 		if (lqe) {
 			assert(lqe_size <= lq->lq_cnt_mem_avail);
-			lq->lq_cnt_mem_avail -= lqe_size;
 			assert(lqe_size <= UINT16_MAX);
+			log_queue_decrement_mem_avail(lq, i, lqe_size);
 			lqe->lqe_size = (uint16_t)lqe_size;
 			lqe->lqe_lm_id = i;
 			return lqe;
@@ -196,13 +224,13 @@ log_queue_entry_free(log_queue_t lq, log_queue_entry_t lqe)
 
 	bzero(lqe, lqe_size);
 	logmem_free(&lq->lq_mem[lqe_lm_id], lqe, lqe_size);
-	lq->lq_cnt_mem_avail += lqe_size;
+	log_queue_increment_mem_avail(lq, lqe_lm_id, lqe_size);
 }
 
 static bool
 log_queue_add_entry(log_queue_t lq, log_payload_t lp, const uint8_t *lp_data)
 {
-	log_queue_entry_t lqe = log_queue_entry_alloc(lq, log_queue_entry_size(lp));
+	log_queue_entry_t lqe = log_queue_entry_alloc(lq, log_queue_entry_size(lp), lp->lp_stream);
 	if (!lqe) {
 		counter_inc_preemption_disabled(&log_queue_cnt_dropped_nomem);
 		return false;
@@ -335,7 +363,9 @@ log_queue_empty(const log_queue_t lq)
 static boolean_t
 log_queue_low_mem(const log_queue_t lq)
 {
-	return lq->lq_cnt_mem_avail < (lq->lq_cnt_mem_active * lq_low_mem_limit);
+	size_t mem_avail = lq->lq_cnt_mem_avail - lq->lq_cnt_mem_meta_avail;
+	size_t low_mem_threshold = (lq->lq_cnt_mem_active - LQ_OTHER_START_SLOT) * lq_low_mem_limit;
+	return mem_avail < low_mem_threshold;
 }
 
 static lq_req_state_t
@@ -362,7 +392,7 @@ log_queue_mem_free_slot(log_queue_t lq)
 {
 	assert(LQ_MEM_ENABLED(lq, 0));
 
-	for (int i = 1; i < LQ_MAX_LM_SLOTS; i++) {
+	for (int i = LQ_MIN_ALLOCATED_LM_SLOTS; i < LQ_MAX_LM_SLOTS; i++) {
 		if (!LQ_MEM_ENABLED(lq, i)) {
 			return i;
 		}
@@ -431,7 +461,7 @@ log_queue_mem_enable(log_queue_t lq, size_t i)
 
 	LQ_MEM_ENABLE(lq, i);
 	lq->lq_cnt_mem_active++;
-	lq->lq_cnt_mem_avail += lm->lm_cnt_free;
+	log_queue_increment_mem_avail(lq, i, lm->lm_cnt_free);
 }
 
 static void
@@ -442,13 +472,13 @@ log_queue_mem_disable(log_queue_t lq, size_t i)
 
 	LQ_MEM_DISABLE(lq, i);
 	lq->lq_cnt_mem_active--;
-	lq->lq_cnt_mem_avail -= lm->lm_cnt_free;
+	log_queue_decrement_mem_avail(lq, i, lm->lm_cnt_free);
 }
 
 static void *
 log_queue_mem_reclaim(log_queue_t lq)
 {
-	for (int i = 1; i < LQ_MAX_LM_SLOTS; i++) {
+	for (int i = LQ_MIN_ALLOCATED_LM_SLOTS; i < LQ_MAX_LM_SLOTS; i++) {
 		logmem_t *lm = &lq->lq_mem[i];
 		if (LQ_MEM_ENABLED(lq, i) && logmem_empty(lm)) {
 			assert(lm->lm_mem_size == lq->lq_mem_size);
@@ -499,7 +529,8 @@ log_queue_can_release_memory(log_queue_t lq)
 {
 	assert(lq->lq_mem_state == LQ_MEM_STATE_READY);
 
-	if (lq->lq_cnt_mem_active > 1 && log_queue_empty(lq) && !lq->lq_suspend) {
+	if (lq->lq_cnt_mem_active > LQ_MIN_ALLOCATED_LM_SLOTS
+	    && log_queue_empty(lq) && !lq->lq_suspend) {
 		const uint64_t total_log_cnt = counter_load(&log_queue_cnt_received);
 		return total_log_cnt > LQ_DEFAULT_FREE_AFTER_CNT;
 	}
@@ -646,7 +677,7 @@ oslog_init_log_queues(void)
 	lq_bootarg_size_order = MAX(lq_bootarg_size_order, PAGE_SHIFT);
 	lq_bootarg_size_order = MIN(lq_bootarg_size_order, LQ_MAX_SZ_ORDER);
 
-	lq_bootarg_nslots = MAX(lq_bootarg_nslots, 1);
+	lq_bootarg_nslots = MAX(lq_bootarg_nslots, LQ_MIN_ALLOCATED_LM_SLOTS);
 	lq_bootarg_nslots = MIN(lq_bootarg_nslots, LQ_MAX_LM_SLOTS);
 
 	lq_low_mem_limit = MAX(1 << (lq_bootarg_size_order - LQ_LOW_MEM_SCALE), 1024);

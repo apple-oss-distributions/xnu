@@ -69,9 +69,10 @@ int secure_hmac_update_and_compress_page(
 	secure_hmac_hib_state_t state,
 	ppnum_t page_number,
 	const void **uncompressed,
+	const void **encrypted,
 	void *compressed);
 void secure_hmac_final(secure_hmac_hib_state_t state, uint8_t *output, size_t output_len);
-void secure_hmac_fetch_hibseg_and_info(
+uint64_t secure_hmac_fetch_hibseg_and_info(
 	/* out */ void *buffer,
 	/* in */ uint64_t buffer_len,
 	/* out */ IOHibernateHibSegInfo *info);

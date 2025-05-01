@@ -216,6 +216,12 @@ cpuid_get_cpufamily(void)
 		case CPU_PART_PCORE_DONAN:
 			cpufamily = CPUFAMILY_ARM_DONAN;
 			break;
+		case CPU_PART_ECORE_BRAVA_S:
+		case CPU_PART_PCORE_BRAVA_S:
+		case CPU_PART_ECORE_BRAVA_C:
+		case CPU_PART_PCORE_BRAVA_C:
+			cpufamily = CPUFAMILY_ARM_BRAVA;
+			break;
 		default:
 			cpufamily = CPUFAMILY_UNKNOWN;
 			break;
@@ -309,6 +315,14 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_PCORE_DONAN:
 		cpusubfamily = CPUSUBFAMILY_ARM_HG;
 		break;
+	case CPU_PART_ECORE_BRAVA_S:
+	case CPU_PART_PCORE_BRAVA_S:
+		cpusubfamily = CPUSUBFAMILY_ARM_HS;
+		break;
+	case CPU_PART_ECORE_BRAVA_C:
+	case CPU_PART_PCORE_BRAVA_C:
+		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
+		break;
 	default:
 		cpusubfamily = CPUSUBFAMILY_UNKNOWN;
 		break;
@@ -342,6 +356,7 @@ arm_mvfp_info(void)
 	return machine_arm_mvfp_info();
 }
 
+
 void
 do_cacheid(void)
 {
@@ -362,6 +377,7 @@ do_cacheid(void)
 	cache_info_t *cpuid_cache_info_p = &cpuid_cache_info[cluster_type];
 
 	arm_cache_clidr_info.value = machine_read_clidr();
+
 
 	/*
 	 * For compatibility purposes with existing callers, let's cache the boot CPU

@@ -259,11 +259,11 @@ static void knote_reset_priority(kqueue_t kqu, struct knote *kn, pthread_priorit
 static ZONE_DEFINE(knote_zone, "knote zone",
     sizeof(struct knote), ZC_CACHING | ZC_ZFREE_CLEARMEM);
 static ZONE_DEFINE(kqfile_zone, "kqueue file zone",
-    sizeof(struct kqfile), ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
+    sizeof(struct kqfile), ZC_ZFREE_CLEARMEM);
 static ZONE_DEFINE(kqworkq_zone, "kqueue workq zone",
-    sizeof(struct kqworkq), ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
+    sizeof(struct kqworkq), ZC_ZFREE_CLEARMEM);
 static ZONE_DEFINE(kqworkloop_zone, "kqueue workloop zone",
-    sizeof(struct kqworkloop), ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
+    sizeof(struct kqworkloop), ZC_CACHING | ZC_ZFREE_CLEARMEM);
 
 #define KN_HASH(val, mask)      (((val) ^ (val >> 8)) & (mask))
 
@@ -9107,10 +9107,7 @@ kevt_pcblist SYSCTL_HANDLER_ARGS
 	    ROUNDUP64(sizeof(struct xsockstat_n));
 	struct kern_event_pcb  *ev_pcb;
 
-	buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO);
-	if (buf == NULL) {
-		return ENOMEM;
-	}
+	buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
 
 	lck_rw_lock_shared(&kev_rwlock);
 

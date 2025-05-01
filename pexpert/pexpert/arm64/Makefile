@@ -6,7 +6,19 @@ export MakeInc_dir=$(SRCROOT)/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-PRIVATE_DATAFILES = boot.h
+# The board_config files are exported into the userspace internal SDK for usage
+# by SPTM's userspace testing system (which only needs support for the
+# architecture(s) that it's mocking out).
+PRIVATE_DATAFILES = \
+	AIC.h \
+	apple_arm64_common.h \
+	apple_arm64_cpu.h \
+	apple_arm64_regs.h \
+	vhe_disable.h \
+	board_config.h \
+	boot.h \
+	H14.h \
+
 
 PRIVATE_KERNELFILES = \
 	AIC.h \
@@ -36,7 +48,8 @@ INSTALL_KF_MD_LIST = $(EMPTY)
 INSTALL_KF_MD_LCL_LIST = $(PRIVATE_KERNELFILES)
 
 EXPORT_ONLY_FILES =	\
-			platform.h
+			platform.h \
+			apt_msg.h
 
 # Headers used to compile xnu
 EXPORT_MD_LIST = $(PRIVATE_KERNELFILES) $(EXPORT_ONLY_FILES)

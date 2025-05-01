@@ -103,6 +103,7 @@ extern unsigned int     vm_pageout_scan_event_counter;
 extern unsigned int     vm_page_anonymous_count;
 extern thread_t         vm_pageout_scan_thread;
 extern thread_t         vm_pageout_gc_thread;
+extern sched_cond_atomic_t vm_pageout_gc_cond;
 
 /*
  * must hold the page queues lock to
@@ -264,6 +265,7 @@ struct upl {
 #define UPL_DECMP_REQ           0x80000
 #define UPL_DECMP_REAL_IO       0x100000
 #define UPL_MAP_EXCLUSIVE_WAIT  0x200000
+#define UPL_HAS_WIRED           0x400000
 
 /* flags for upl_create flags parameter */
 #define UPL_CREATE_EXTERNAL     0
@@ -279,31 +281,6 @@ extern void vector_upl_get_iostate(upl_t, upl_t, upl_offset_t*, upl_size_t*);
 extern void vector_upl_get_iostate_byindex(upl_t, uint32_t, upl_offset_t*, upl_size_t*);
 extern upl_t vector_upl_subupl_byindex(upl_t, uint32_t);
 extern upl_t vector_upl_subupl_byoffset(upl_t, upl_offset_t*, upl_size_t*);
-
-
-extern kern_return_t vm_object_iopl_request(
-	vm_object_t             object,
-	vm_object_offset_t      offset,
-	upl_size_t              size,
-	upl_t                   *upl_ptr,
-	upl_page_info_array_t   user_page_list,
-	unsigned int            *page_list_count,
-	upl_control_flags_t     cntrl_flags,
-	vm_tag_t            tag);
-
-extern kern_return_t vm_object_super_upl_request(
-	vm_object_t             object,
-	vm_object_offset_t      offset,
-	upl_size_t              size,
-	upl_size_t              super_cluster,
-	upl_t                   *upl,
-	upl_page_info_t         *user_page_list,
-	unsigned int            *page_list_count,
-	upl_control_flags_t     cntrl_flags,
-	vm_tag_t            tag);
-
-
-
 
 
 extern void vm_page_free_reserve(int pages);
@@ -391,6 +368,7 @@ struct vm_pageout_vminfo {
 	unsigned long vm_pageout_forcereclaimed_sharedcache;
 	unsigned long vm_pageout_protected_realtime;
 	unsigned long vm_pageout_forcereclaimed_realtime;
+
 };
 
 extern struct vm_pageout_vminfo vm_pageout_vminfo;

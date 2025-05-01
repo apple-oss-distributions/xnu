@@ -1510,13 +1510,11 @@ __attribute__((noreturn))
 static void
 aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 {
-	aio_workq_entry *entryp;
-	int              error;
-	vm_map_t         currentmap;
-	vm_map_t         oldmap = VM_MAP_NULL;
-	task_t           oldaiotask = TASK_NULL;
-	struct uthread  *uthreadp = NULL;
-	proc_t           p = NULL;
+	aio_workq_entry         *entryp;
+	int                     error;
+	vm_map_switch_context_t switch_ctx;
+	struct uthread          *uthreadp = NULL;
+	proc_t                  p = NULL;
 
 	for (;;) {
 		/*
@@ -1535,19 +1533,18 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 		 * of the IO.  Note: don't need to have the entryp locked,
 		 * because the proc and map don't change until it's freed.
 		 */
-		currentmap = get_task_map(proc_task(current_proc()));
-		if (currentmap != entryp->aio_map) {
-			uthreadp = (struct uthread *) current_uthread();
-			oldaiotask = uthreadp->uu_aio_task;
-			/*
-			 * workq entries at this stage cause _aio_exec() and _aio_exit() to
-			 * block until we hit `do_aio_completion_and_unlock()` below,
-			 * which means that it is safe to dereference p->task without
-			 * holding a lock or taking references.
-			 */
-			uthreadp->uu_aio_task = proc_task(p);
-			oldmap = vm_map_switch(entryp->aio_map);
-		}
+		uthreadp = (struct uthread *) current_uthread();
+		assert(get_task_map(proc_task(current_proc())) != entryp->aio_map);
+		assert(uthreadp->uu_aio_task == NULL);
+
+		/*
+		 * workq entries at this stage cause _aio_exec() and _aio_exit() to
+		 * block until we hit `do_aio_completion_and_unlock()` below,
+		 * which means that it is safe to dereference p->task without
+		 * holding a lock or taking references.
+		 */
+		uthreadp->uu_aio_task = proc_task(p);
+		switch_ctx = vm_map_switch_to(entryp->aio_map);
 
 		if ((entryp->flags & AIO_READ) != 0) {
 			error = do_aio_read(entryp);
@@ -1560,10 +1557,8 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 
 		/* Restore old map */
-		if (currentmap != entryp->aio_map) {
-			vm_map_switch(oldmap);
-			uthreadp->uu_aio_task = oldaiotask;
-		}
+		vm_map_switch_back(switch_ctx);
+		uthreadp->uu_aio_task = NULL;
 
 		/* liberate unused map */
 		vm_map_deallocate(entryp->aio_map);

@@ -144,7 +144,7 @@ tp_pid_handler(int64_t pid, int64_t *out)
 	}
 	lck_mtx_unlock(&tp_mtx);
 
-	printf("tp_pid=%u\n", tp_pid);
+	printf("tp_pid=%d\n", tp_pid);
 	*out = 0;
 	return 0;
 }

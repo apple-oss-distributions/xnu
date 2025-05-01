@@ -1453,6 +1453,9 @@ parse_page_table_asid_stackshot(void **ssbuf, size_t sslen)
 {
 	bool seen_asid = false;
 	bool seen_page_table_snapshot = false;
+	bool seen_task = false;
+	int container = 0;
+	int task_container = -1;
 	kcdata_iter_t iter = kcdata_iter(ssbuf, sslen);
 	T_ASSERT_EQ(kcdata_iter_type(iter), KCDATA_BUFFER_BEGIN_STACKSHOT,
 			"buffer provided is a stackshot");
@@ -1460,6 +1463,26 @@ parse_page_table_asid_stackshot(void **ssbuf, size_t sslen)
 	iter = kcdata_iter_next(iter);
 	KCDATA_ITER_FOREACH(iter) {
 		switch (kcdata_iter_type(iter)) {
+		/* There's a slight chance that we see a transit version of this task
+		 * in the stackshot, so we want to make sure to check both */
+		case KCDATA_TYPE_CONTAINER_BEGIN: {
+			container++;
+			if (kcdata_iter_container_type(iter) == STACKSHOT_KCCONTAINER_TASK) {
+				seen_asid = seen_page_table_snapshot = false;
+				task_container = container;
+			}
+			break;
+		}
+		case KCDATA_TYPE_CONTAINER_END: {
+			if (container == task_container) {
+				task_container = -1;
+				seen_task = true;
+				T_ASSERT_TRUE(seen_page_table_snapshot, "check that we have seen a page table snapshot");
+				T_ASSERT_TRUE(seen_asid, "check that we have seen an ASID");
+			}
+			container--;
+			break;
+		}
 		case KCDATA_TYPE_ARRAY: {
 			T_QUIET;
 			T_ASSERT_TRUE(kcdata_iter_array_valid(iter),
@@ -1519,8 +1542,8 @@ parse_page_table_asid_stackshot(void **ssbuf, size_t sslen)
 		}
 		}
 	}
-	T_ASSERT_TRUE(seen_page_table_snapshot, "check that we have seen a page table snapshot");
-	T_ASSERT_TRUE(seen_asid, "check that we have seen an ASID");
+
+	T_QUIET; T_ASSERT_TRUE(seen_task, "check that we have seen a complete task container");
 }
 
 T_DECL(dump_page_tables, "test stackshot page table dumping support", T_META_TAG_VM_PREFERRED)
@@ -1576,7 +1599,10 @@ static void stackshot_verify_current_proc_uuid_info(void **ssbuf, size_t sslen, 
 	T_FAIL("failed to find matching UUID in stackshot data");
 }
 
-T_DECL(translated, "tests translated bit is set correctly", T_META_TAG_VM_PREFERRED)
+T_DECL(translated,
+    "tests translated bit is set correctly",
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133956022 */))
 {
 #if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 	T_SKIP("Only valid on Apple silicon Macs")

@@ -392,6 +392,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	inp = tp->t_inpcb;
 	so = inp->inp_socket;
 
+	inp->inp_flags2 |= INP2_LOGGING_ENABLED;
+
 	local_port = inp->inp_lport;
 	foreign_port = inp->inp_fport;
 
@@ -473,6 +475,8 @@ tcp_log_listen(struct tcpcb *tp, int error)
 	}
 	inp = tp->t_inpcb;
 	so = inp->inp_socket;
+
+	inp->inp_flags2 |= INP2_LOGGING_ENABLED;
 
 	local_port = inp->inp_lport;
 	foreign_port = inp->inp_fport;
@@ -556,7 +560,7 @@ tcp_connection_server_accurate_ecn_state_to_string(tcp_connection_server_accurat
 
 __attribute__((noinline))
 void
-tcp_log_connection_summary(struct tcpcb *tp)
+tcp_log_connection_summary(const char *func_name, int line_no, struct tcpcb *tp)
 {
 	struct inpcb *inp;
 	struct socket *so;
@@ -587,6 +591,7 @@ tcp_log_connection_summary(struct tcpcb *tp)
 		return;
 	}
 	inp->inp_flags2 |= INP2_LOGGED_SUMMARY;
+	inp->inp_flags2 &= ~INP2_LOGGING_ENABLED;
 
 	/*
 	 * t_connect_time is the time when the connection started on
@@ -612,7 +617,7 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	 */
 
 #define TCP_LOG_CONNECTION_SUMMARY_FMT \
-	    "tcp_connection_summary " \
+	    "tcp_connection_summary (%s:%d)" \
 	    TCP_LOG_COMMON_PCB_FMT \
 	    "Duration: %u.%03u sec " \
 	    "Conn_Time: %u.%03u sec " \
@@ -628,7 +633,8 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    "flow: 0x%x"
 
 #define TCP_LOG_CONNECTION_SUMMARY_ARGS \
-	    TCP_LOG_COMMON_PCB_ARGS, \
+	    func_name, line_no, \
+	    TCP_LOG_COMMON_PCB_ARGS,  \
 	    duration / TCP_RETRANSHZ, duration % TCP_RETRANSHZ, \
 	    conntime / TCP_RETRANSHZ, conntime % TCP_RETRANSHZ,  \
 	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
@@ -1102,13 +1108,11 @@ tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const cha
 #endif /* SKYWALK */
 
 void
-tcp_log_state_change(struct tcpcb *tp, int new_state)
+tcp_log_state_change(const char *func_name, int line_no, struct tcpcb *tp, int new_state)
 {
 	struct inpcb *inp;
 	struct socket *so;
 	struct ifnet *ifp;
-	uint32_t conntime = 0;
-	uint32_t duration = 0;
 	char laddr_buf[ADDRESS_STR_LEN];
 	char faddr_buf[ADDRESS_STR_LEN];
 	in_port_t local_port;
@@ -1132,34 +1136,20 @@ tcp_log_state_change(struct tcpcb *tp, int new_state)
 	local_port = inp->inp_lport;
 	foreign_port = inp->inp_fport;
 
-	/*
-	 * t_connect_time is the time when the connection started on
-	 * the first SYN.
-	 *
-	 * t_starttime is when the three way handshake was completed.
-	 */
-	if (tp->t_connect_time > 0) {
-		duration = tcp_now - tp->t_connect_time;
-
-		if (tp->t_starttime > 0) {
-			conntime = tp->t_starttime - tp->t_connect_time;
-		}
-	}
-
 	ifp = inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
 	    inp->inp_boundifp != NULL ? inp->inp_boundifp : NULL;
 
 	tcp_log_inp_addresses(inp, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
 
 #define TCP_LOG_STATE_FMT \
-	    "tcp_state_changed " \
-	    TCP_LOG_COMMON_PCB_FMT
+	    "tcp_state_changed (%s:%d) " \
+	    TCP_LOG_COMMON_PCB_FMT \
+	    "%s "
 
 #define TCP_LOG_STATE_ARGS \
-	TCP_LOG_COMMON_ARGS, \
-	so != NULL ? so->so_gencnt : 0, \
-	tcpstates[new_state], \
-	inp->inp_last_proc_name, so->last_pid
+	func_name, line_no, \
+	TCP_LOG_COMMON_PCB_ARGS, \
+	tcpstates[new_state] \
 
 	os_log(OS_LOG_DEFAULT, TCP_LOG_STATE_FMT,
 	    TCP_LOG_STATE_ARGS);

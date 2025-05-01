@@ -120,7 +120,9 @@
 #include <sys/reason.h>
 #include <sys/proc_require.h>
 #include <sys/kern_debug.h>
+#include <sys/kern_memorystatus_xnu.h>
 #include <IOKit/IOBSD.h>        /* IOTaskHasEntitlement() */
+#include <kern/kern_memorystatus_internal.h>
 #include <kern/ipc_kobject.h>   /* ipc_kobject_set_kobjidx() */
 #include <kern/ast.h>           /* proc_filedesc_ast */
 #include <libkern/amfi/amfi.h>
@@ -130,8 +132,6 @@
 #if CONFIG_CSR
 #include <sys/csr.h>
 #endif
-
-#include <sys/kern_memorystatus.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -150,6 +150,9 @@
 #include <net/necp.h>
 #include <bsm/audit_kevents.h>
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <corpses/task_corpse.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 #if SKYWALK
 #include <skywalk/core/skywalk_var.h>
@@ -245,6 +248,9 @@ static boolean_t proc_parent_is_currentproc(proc_t p);
 extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
 extern void task_kqworkloop_ast(task_t task, int current_size, int soft_limit, int hard_limit);
 #endif
+
+/* defined in bsd/kern/kern_prot.c */
+extern int get_audit_token_pid(const audit_token_t *audit_token);
 
 struct fixjob_iterargs {
 	struct pgrp * pg;
@@ -424,6 +430,30 @@ proc_ident(proc_t p)
 	};
 
 	return ident;
+}
+
+proc_t
+proc_find_audit_token(const audit_token_t token)
+{
+	proc_t proc = PROC_NULL;
+
+	pid_t pid = get_audit_token_pid(&token);
+	if (pid <= 0) {
+		return PROC_NULL;
+	}
+
+	if ((proc = proc_find(pid)) == PROC_NULL) {
+		return PROC_NULL;
+	}
+
+	/* Check the target proc pidversion */
+	int pidversion = proc_pidversion(proc);
+	if (pidversion != token.val[7]) {
+		proc_rele(proc);
+		return PROC_NULL;
+	}
+
+	return proc;
 }
 
 proc_t
@@ -798,13 +828,24 @@ proc_find_zombref(int pid)
 	proc_t p;
 
 	proc_list_lock();
+	p = proc_find_zombref_locked(pid);
+	proc_list_unlock();
+
+	return p;
+}
+
+proc_t
+proc_find_zombref_locked(int pid)
+{
+	proc_t p;
+
+	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
 again:
 	p = phash_find_locked(pid);
 
 	/* should we bail? */
 	if ((p == PROC_NULL) || !proc_list_exited(p)) {
-		proc_list_unlock();
 		return PROC_NULL;
 	}
 
@@ -814,8 +855,6 @@ again:
 		goto again;
 	}
 	p->p_listflag |=  P_LIST_WAITING;
-
-	proc_list_unlock();
 
 	return p;
 }
@@ -1107,7 +1146,17 @@ proc_original_ppid(proc_t p)
 {
 	if (p != NULL) {
 		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
-		return p->p_original_ppid;
+		return proc_get_ro(p)->p_orig_ppid;
+	}
+	return -1;
+}
+
+int
+proc_orig_ppidversion(proc_t p)
+{
+	if (p != NULL) {
+		proc_require(p, PROC_REQUIRE_ALLOW_ALL);
+		return proc_get_ro(p)->p_orig_ppidversion;
 	}
 	return -1;
 }
@@ -2473,15 +2522,14 @@ pinsertchild(proc_t parent, proc_t child, bool in_exec)
 
 	child->p_pptr = parent;
 	child->p_ppid = proc_getpid(parent);
-	child->p_original_ppid = in_exec ? sibling->p_original_ppid : proc_getpid(parent);
 	child->p_puniqueid = proc_uniqueid(parent);
 	child->p_xhighbits = 0;
 #if CONFIG_MEMORYSTATUS
 	memorystatus_add(child, TRUE);
 #endif
 
-	/* If the parent is initproc and p_original pid is not 1, then set reparent flag */
-	if (in_exec && parent == initproc && child->p_original_ppid != 1) {
+	/* If the parent is initproc and p_orig_ppid is not 1, then set reparent flag */
+	if (in_exec && parent == initproc && proc_original_ppid(child) != 1) {
 		child->p_listflag |= P_LIST_DEADPARENT;
 	}
 
@@ -2949,7 +2997,6 @@ proc_is_translated(proc_t p)
 }
 
 
-
 int
 proc_is_classic(proc_t p __unused)
 {
@@ -3052,7 +3099,40 @@ proc_skip_mtime_update(proc_t p)
 		return true;
 	}
 
+	/*
+	 * If the 'UT_SKIP_MTIME_UPDATE_IGNORE' policy is set for this thread then
+	 * we override the default behavior and ignore the process's mtime update
+	 * policy.
+	 */
+	if (ut && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE_IGNORE)) {
+		return false;
+	}
+
 	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE)) {
+		return true;
+	}
+
+	return false;
+}
+
+bool
+proc_support_long_paths(proc_t p)
+{
+	struct uthread *ut = NULL;
+
+	/*
+	 * We only check the thread's policy if the current proc matches the given
+	 * proc.
+	 */
+	if (current_proc() == p) {
+		ut = get_bsdthread_info(current_thread());
+	}
+
+	if (ut != NULL && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SUPPORT_LONG_PATHS)) {
+		return true;
+	}
+
+	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SUPPORT_LONG_PATHS)) {
 		return true;
 	}
 
@@ -4376,8 +4456,8 @@ proc_getpcontrol(int pid, int * pcontrolp)
 	return 0;
 }
 
-int
-proc_dopcontrol(proc_t p)
+static int
+proc_dopcontrol(proc_t p, memorystatus_kill_cause_t cause)
 {
 	int pcontrol;
 	os_reason_t kill_reason;
@@ -4391,25 +4471,30 @@ proc_dopcontrol(proc_t p)
 		case P_PCTHROTTLE:
 			PROC_SETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: throttling pid %d (%s)\n", proc_getpid(p), p->p_comm);
+			memorystatus_log("memorystatus: throttling %s [%d] due to swap exhaustion\n",
+			    proc_best_name(p), proc_getpid(p));
 			break;
 
 		case P_PCSUSP:
 			PROC_SETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: suspending pid %d (%s)\n", proc_getpid(p), p->p_comm);
+			memorystatus_log("memorystatus: suspending %s [%d] due to swap exhaustion\n",
+			    proc_best_name(p), proc_getpid(p));
 			task_suspend(proc_task(p));
 			break;
 
 		case P_PCKILL:
 			PROC_SETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: killing pid %d (%s)\n", proc_getpid(p), p->p_comm);
-			kill_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_LOWSWAP);
+			memorystatus_log("memorystatus: killing %s [%d] due to swap exhaustion\n",
+			    proc_best_name(p), proc_getpid(p));
+			kill_reason = os_reason_create(OS_REASON_JETSAM, cause);
 			psignal_with_reason(p, SIGKILL, kill_reason);
 			break;
 
 		default:
+			memorystatus_log("memorystatus: skipping %s [%d] without pcontrol\n",
+			    proc_best_name(p), proc_getpid(p));
 			proc_unlock(p);
 		}
 	} else {
@@ -4453,13 +4538,15 @@ proc_resetpcontrol(int pid)
 		case P_PCTHROTTLE:
 			PROC_RESETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: unthrottling pid %d (%s)\n", proc_getpid(p), p->p_comm);
+			memorystatus_log("memorystatus: unthrottling %s [%d]\n",
+			    proc_best_name(p), proc_getpid(p));
 			break;
 
 		case P_PCSUSP:
 			PROC_RESETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: resuming pid %d (%s)\n", proc_getpid(p), p->p_comm);
+			memorystatus_log("memorystatus: resuming %s [%d]\n",
+			    proc_best_name(p), proc_getpid(p));
 			task_resume(proc_task(p));
 			break;
 
@@ -4467,7 +4554,8 @@ proc_resetpcontrol(int pid)
 			/* Huh? */
 			PROC_SETACTION_STATE(p);
 			proc_unlock(p);
-			printf("low swap: attempt to unkill pid %d (%s) ignored\n", proc_getpid(p), p->p_comm);
+			memorystatus_log_error("memorystatus: attempt to unkill pid %s [%d] ignored\n",
+			    proc_best_name(p), proc_getpid(p));
 			break;
 
 		default:
@@ -4480,8 +4568,6 @@ proc_resetpcontrol(int pid)
 	proc_rele(p);
 	return 0;
 }
-
-
 
 struct no_paging_space {
 	uint64_t        pcs_max_size;
@@ -4499,7 +4585,6 @@ struct no_paging_space {
 	int             apcs_proc_count;
 	uint64_t        apcs_total_size;
 };
-
 
 static int
 proc_pcontrol_filter(proc_t p, void *arg)
@@ -4543,7 +4628,6 @@ proc_pcontrol_null(__unused proc_t p, __unused void *arg)
 	return PROC_RETURNED;
 }
 
-
 /*
  * Deal with the low on compressor pool space condition... this function
  * gets called when we are approaching the limits of the compressor pool or
@@ -4559,36 +4643,18 @@ proc_pcontrol_null(__unused proc_t p, __unused void *arg)
  * that only by killing them can we hope to put the system back into a usable state.
  */
 
-#define NO_PAGING_SPACE_DEBUG   0
-
-uint64_t last_no_space_action_ts = 0;
-TUNABLE(uint64_t, no_paging_space_action_throttle_delay_ns, "no_paging_space_action_throttle_delay_ns", 5 * NSEC_PER_SEC);
-
 #define MB_SIZE (1024 * 1024ULL)
-boolean_t       memorystatus_kill_on_VM_compressor_space_shortage(boolean_t);
 
 extern int32_t  max_kill_priority;
 
-
-int
-no_paging_space_action()
+bool
+no_paging_space_action(void)
 {
 	proc_t          p;
 	struct no_paging_space nps;
-	uint64_t now;
 	os_reason_t kill_reason;
 
-	/*
-	 * Throttle how often we come through here.  Once every 5 seconds should be plenty.
-	 */
-	now = mach_absolute_time();
-	uint64_t delta_since_last_no_space_ns;
-	absolutetime_to_nanoseconds(now - last_no_space_action_ts, &delta_since_last_no_space_ns);
-	if (delta_since_last_no_space_ns <= no_paging_space_action_throttle_delay_ns) {
-		return 0;
-	}
-
-	printf("low swap: triggering no paging space action\n");
+	memorystatus_log("memorystatus: triggering no paging space action\n");
 
 	/*
 	 * Examine all processes and find the biggest (biggest is based on the number of pages this
@@ -4604,15 +4670,13 @@ no_paging_space_action()
 
 	proc_iterate(PROC_ALLPROCLIST, proc_pcontrol_null, (void *)NULL, proc_pcontrol_filter, (void *)&nps);
 
-#if NO_PAGING_SPACE_DEBUG
-	printf("low swap: npcs_proc_count = %d, npcs_total_size = %qd, npcs_max_size = %qd\n",
+	memorystatus_log_debug("memorystatus: npcs_proc_count = %d, npcs_total_size = %qd, npcs_max_size = %qd\n",
 	    nps.npcs_proc_count, nps.npcs_total_size, nps.npcs_max_size);
-	printf("low swap: pcs_proc_count = %d, pcs_total_size = %qd, pcs_max_size = %qd\n",
+	memorystatus_log_debug("memorystatus: pcs_proc_count = %d, pcs_total_size = %qd, pcs_max_size = %qd\n",
 	    nps.pcs_proc_count, nps.pcs_total_size, nps.pcs_max_size);
-	printf("low swap: apcs_proc_count = %d, apcs_total_size = %qd\n",
+	memorystatus_log_debug("memorystatus: apcs_proc_count = %d, apcs_total_size = %qd\n",
 	    nps.apcs_proc_count, nps.apcs_total_size);
-#endif
-	if (nps.npcs_max_size > (vm_compressor_pages_compressed() * 50) / 100) {
+	if (nps.npcs_max_size > (vm_compressor_pages_compressed() * PAGE_SIZE_64 * 50ull) / 100ull) {
 		/*
 		 * for now we'll knock out any task that has more then 50% of the pages
 		 * held by the compressor
@@ -4624,41 +4688,31 @@ no_paging_space_action()
 				 * in case the proc exited and the pid got reused while
 				 * we were finishing the proc_iterate and getting to this point
 				 */
-				last_no_space_action_ts = now;
-
-				printf("low swap: killing largest compressed process with pid %d (%s) and size %llu MB\n", proc_getpid(p), p->p_comm, (nps.npcs_max_size / MB_SIZE));
+				memorystatus_log("memorystatus: killing largest compressed process %s [%d] "
+				    "%llu MB\n",
+				    proc_best_name(p), proc_getpid(p), (nps.npcs_max_size / MB_SIZE));
 				kill_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_LOWSWAP);
 				psignal_with_reason(p, SIGKILL, kill_reason);
 
 				proc_rele(p);
 
-				return 0;
+				return false;
 			}
 
 			proc_rele(p);
 		}
 	}
 
-	/*
-	 * We have some processes within our jetsam bands of consideration and hence can be killed.
-	 * So we will invoke the memorystatus thread to go ahead and kill something.
-	 */
-	if (memorystatus_get_proccnt_upto_priority(max_kill_priority) > 0) {
-		last_no_space_action_ts = now;
+	if (memstat_get_idle_proccnt() > 0) {
 		/*
-		 * TODO(jason): This is only mac OS right now, but we'll need
-		 * something like this on iPad...
+		 * There are still idle processes to kill.
 		 */
-		memorystatus_kill_on_VM_compressor_space_shortage(TRUE);
-		return 1;
+		return false;
 	}
 
-	/*
-	 * No eligible processes to kill. So let's suspend/kill the largest
-	 * process depending on its policy control specifications.
-	 */
-
 	if (nps.pcs_max_size > 0) {
+		memorystatus_log("memorystatus: attempting pcontrol on "
+		    "[%d]\n", nps.pcs_pid);
 		if ((p = proc_find(nps.pcs_pid)) != PROC_NULL) {
 			if (nps.pcs_uniqueid == proc_uniqueid(p)) {
 				/*
@@ -4666,23 +4720,26 @@ no_paging_space_action()
 				 * in case the proc exited and the pid got reused while
 				 * we were finishing the proc_iterate and getting to this point
 				 */
-				last_no_space_action_ts = now;
-
-				proc_dopcontrol(p);
+				memorystatus_log("memorystatus: doing "
+				    "pcontrol on %s [%d]\n",
+				    proc_best_name(p), proc_getpid(p));
+				proc_dopcontrol(p, JETSAM_REASON_LOWSWAP);
 
 				proc_rele(p);
 
-				return 1;
+				return true;
+			} else {
+				memorystatus_log("memorystatus: cannot "
+				    "find process for [%d] -- may have exited\n",
+				    nps.pcs_pid);
 			}
 
 			proc_rele(p);
 		}
 	}
-	last_no_space_action_ts = now;
 
-	printf("low swap: unable to find any eligible processes to take action on\n");
-
-	return 0;
+	memorystatus_log("memorystatus: unable to find any eligible processes to take action on\n");
+	return false;
 }
 
 int
@@ -6427,3 +6484,14 @@ out:
 }
 
 #endif /* SOCKETS */
+
+#if DEVELOPMENT || DEBUG
+/*
+ * PT: Sadly this needs to be in bsd/ as SYSCTL_ macros aren't easily usable from
+ * osfmk/. Ideally this sysctl would live in corpse_info.c
+ */
+extern uint32_t total_corpses_allowed;
+SYSCTL_UINT(_kern, OID_AUTO, total_corpses_allowed,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &total_corpses_allowed, DEFAULT_TOTAL_CORPSES_ALLOWED,
+    "Maximum in-flight corpse count");
+#endif /* DEVELOPMENT || DEBUG */

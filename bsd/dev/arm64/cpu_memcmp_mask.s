@@ -38,11 +38,13 @@
  * the vector registers, since it's done by the exception handler code.
  */
 
-#ifndef KERNEL
+#ifdef KERNEL
+#include <arm64/asm.h>
+#else
 #ifndef LIBSYSCALL_INTERFACE
 #error "LIBSYSCALL_INTERFACE not defined"
 #endif /* !LIBSYSCALL_INTERFACE */
-#endif /* !KERNEL */
+#endif /* KERNEL */
 
 #define	src1		x0	/* 1st arg */
 #define	src2		x1	/* 2nd arg */
@@ -64,7 +66,9 @@
 	.text
 	.align	4
 _os_memcmp_mask_16B:
-
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	ld1.16b  {v0}, [src1]
 	ld1.16b  {v1}, [src2]
 	ld1.16b  {v2}, [mask]
@@ -91,7 +95,9 @@ _os_memcmp_mask_16B:
 	.text
 	.align	4
 _os_memcmp_mask_32B:
-
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	ld1.16b  {v0, v1}, [src1]
 	ld1.16b  {v2, v3}, [src2]
 	ld1.16b  {v4, v5}, [mask]
@@ -121,7 +127,9 @@ _os_memcmp_mask_32B:
 	.text
 	.align	4
 _os_memcmp_mask_48B:
-
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	ld1.16b  {v0, v1, v2}, [src1]
 	ld1.16b  {v3, v4, v5}, [src2]
 	ld1.16b  {v16, v17, v18}, [mask]
@@ -154,7 +162,9 @@ _os_memcmp_mask_48B:
 	.text
 	.align	4
 _os_memcmp_mask_64B:
-
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	ld1.16b  {v0, v1, v2, v3}, [src1]
 	ld1.16b  {v4, v5, v6, v7}, [src2]
 	ld1.16b  {v16, v17, v18, v19}, [mask]
@@ -190,7 +200,9 @@ _os_memcmp_mask_64B:
 	.text
 	.align	4
 _os_memcmp_mask_80B:
-
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	ld1.16b  {v0, v1, v2, v3}, [src1], #64
 	ld1.16b  {v4}, [src1]
 	ld1.16b  {v16, v17, v18, v19}, [src2], #64

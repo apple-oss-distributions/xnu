@@ -3503,14 +3503,18 @@ T_DECL(net_if_bridge_mac_nat_ipv4,
 
 T_DECL(net_if_bridge_mac_nat_ipv6,
     "bridge mac nat ipv6",
-    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133955717 */))
 {
 	bridge_test_mac_nat_ipv6(5, 10, 0);
 }
 
 T_DECL(net_if_bridge_mac_nat_ipv6_trailers,
     "bridge mac nat ipv6 trailers",
-    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133955717 */))
 {
 	bridge_test_mac_nat_ipv6(5, 10, SETUP_FLAGS_TRAILERS);
 }

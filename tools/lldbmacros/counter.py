@@ -4,6 +4,7 @@ from xnu import (
     lldb_command, lldb_type_summary, header
 )
 
+
 @lldb_type_summary(['scalable_counter_t'])
 @header("Counter Value\n-------------")
 def GetSimpleCounter(counter):
@@ -21,7 +22,7 @@ def ShowSimpleCounter(cmd_args=None):
     """ Show the value of a percpu counter.
         Usage: showcounter <address of counter>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please specify the address of the "
                             "counter you want to read.")
 

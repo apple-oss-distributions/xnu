@@ -29,9 +29,7 @@
 #include <skywalk/os_skywalk_private.h>
 #include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
 #include <sys/codesign.h>       /* for csproc_get_platform_binary */
-#include <sys/signalvar.h>      /* for psignal_with_reason */
 #include <sys/reason.h>
-#include <sys/kern_memorystatus.h>
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif /* CONFIG_MACF */
@@ -195,6 +193,7 @@ uint32_t sk_netif_rx_mit = SK_NETIF_MIT_AUTO;
 char sk_ll_prefix[IFNAMSIZ] = "llw";
 uint32_t sk_rx_sync_packets = 1;
 uint32_t sk_channel_buflet_alloc = 0;
+uint32_t sk_netif_queue_stat_enable = 0;
 
 SYSCTL_NODE(_kern, OID_AUTO, skywalk, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "Skywalk parameters");
@@ -412,6 +411,8 @@ skywalk_init(void)
 	    &sk_netif_rx_mit, sizeof(sk_netif_rx_mit));
 	(void) PE_parse_boot_arg_str("sk_ll_prefix", sk_ll_prefix,
 	    sizeof(sk_ll_prefix));
+	(void) PE_parse_boot_argn("sk_netif_q_stats", &sk_netif_queue_stat_enable,
+	    sizeof(sk_netif_queue_stat_enable));
 	parse_netif_direct();
 	(void) PE_parse_boot_argn("sk_fsw_rx_agg_tcp", &sk_fsw_rx_agg_tcp,
 	    sizeof(sk_fsw_rx_agg_tcp));
@@ -827,72 +828,6 @@ sk_sa_ntop(struct sockaddr *sa, char *__counted_by(addr_strlen)addr_str,
 
 	default:
 		str = __unsafe_null_terminated_from_indexable(addr_str);
-		break;
-	}
-
-	return str;
-}
-
-const char *
-sk_memstatus2str(uint32_t status)
-{
-	const char *__null_terminated str = NULL;
-
-	switch (status) {
-	case kMemorystatusInvalid:
-		str = "kMemorystatusInvalid";
-		break;
-
-	case kMemorystatusKilled:
-		str = "kMemorystatusKilled";
-		break;
-
-	case kMemorystatusKilledHiwat:
-		str = "kMemorystatusKilledHiwat";
-		break;
-
-	case kMemorystatusKilledVnodes:
-		str = "kMemorystatusKilledVnodes";
-		break;
-
-	case kMemorystatusKilledVMPageShortage:
-		str = "kMemorystatusKilledVMPageShortage";
-		break;
-
-	case kMemorystatusKilledProcThrashing:
-		str = "kMemorystatusKilledProcThrashing";
-		break;
-
-	case kMemorystatusKilledVMCompressorThrashing:
-		str = "kMemorystatusKilledVMCompressorThrashing";
-		break;
-
-	case kMemorystatusKilledVMCompressorSpaceShortage:
-		str = "kMemorystatusKilledVMCompressorSpaceShortage";
-		break;
-
-	case kMemorystatusKilledFCThrashing:
-		str = "kMemorystatusKilledFCThrashing";
-		break;
-
-	case kMemorystatusKilledPerProcessLimit:
-		str = "kMemorystatusKilledPerProcessLimit";
-		break;
-
-	case kMemorystatusKilledDiskSpaceShortage:
-		str = "kMemorystatusKilledDiskSpaceShortage";
-		break;
-
-	case kMemorystatusKilledIdleExit:
-		str = "kMemorystatusKilledIdleExit";
-		break;
-
-	case kMemorystatusKilledZoneMapExhaustion:
-		str = "kMemorystatusKilledZoneMapExhaustion";
-		break;
-
-	default:
-		str = "unknown";
 		break;
 	}
 

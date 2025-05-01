@@ -97,7 +97,7 @@
 #define KEV_NETPOLICY_NETDENIED 3       /* denied access to some network */
 
 #define NETPOLICY_NETWORKTYPE_LOCAL     1   /* local network */
-
+#define NETPOLICY_NETWORKTYPE_ULTRA_CONSTRAINED     2   /* ultra-constrained */
 
 #define KEV_SOCKET_SUBCLASS     4       /* Socket subclass */
 /* KEV_SOCKET_SUBCLASS event codes */

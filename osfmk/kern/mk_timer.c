@@ -210,7 +210,6 @@ mk_timer_destroy_trap(
 {
 	mach_port_name_t        name = args->name;
 	ipc_space_t             myspace = current_space();
-	ipc_port_t              port;
 	kern_return_t           kr;
 	ipc_entry_t             entry;
 
@@ -226,8 +225,7 @@ mk_timer_destroy_trap(
 		return KERN_INVALID_RIGHT;
 	}
 
-	port = ip_object_to_port(entry->ie_object);
-	if (ip_kotype(port) != IKOT_TIMER) {
+	if (ip_kotype(entry->ie_port) != IKOT_TIMER) {
 		is_write_unlock(myspace);
 		return KERN_INVALID_ARGUMENT;
 	}

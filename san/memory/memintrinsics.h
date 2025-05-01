@@ -41,15 +41,15 @@ __nosan_memcpy(void *dst __sized_by(sz), const void *src __sized_by(sz), size_t 
 }
 static inline void *
 __sized_by(sz)
-__nosan_memset(void *src __sized_by(sz), int c, size_t sz)
+__nosan_memset(void *dst __sized_by(sz), int c, size_t sz)
 {
-	return memset(src, c, sz);
+	return memset(dst, c, sz);
 }
 static inline void *
 __sized_by(sz)
-__nosan_memmove(void *src __sized_by(sz), const void *dst __sized_by(sz), size_t sz)
+__nosan_memmove(void *dst __sized_by(sz), const void *src __sized_by(sz), size_t sz)
 {
-	return memmove(src, dst, sz);
+	return memmove(dst, src, sz);
 }
 static inline int
 __nosan_bcmp(const void *a __sized_by(sz), const void *b __sized_by(sz), size_t sz)
@@ -120,9 +120,9 @@ __nosan_strncat(char *dst, const char *src, size_t sz)
 #endif /* !__has_ptrcheck && !__has_include(<__xnu_libcxx_sentinel.h>) */
 
 #if KASAN
-void *__sized_by(sz) __asan_memcpy(void *src __sized_by(sz), const void *dst __sized_by(sz), size_t sz);
-void *__sized_by(sz) __asan_memset(void *src __sized_by(sz), int c, size_t sz);
-void *__sized_by(sz) __asan_memmove(void *src __sized_by(sz), const void *dst __sized_by(sz), size_t sz);
+void *__sized_by(sz) __asan_memcpy(void *dst __sized_by(sz), const void *src __sized_by(sz), size_t sz);
+void *__sized_by(sz) __asan_memset(void * __sized_by(sz), int c, size_t sz);
+void *__sized_by(sz) __asan_memmove(void *dst __sized_by(sz), const void *src __sized_by(sz), size_t sz);
 void  __asan_bcopy(const void *src __sized_by(sz), void *dst __sized_by(sz), size_t sz);
 void  __asan_bzero(void *dst __sized_by(sz), size_t sz);
 int   __asan_bcmp(const void *a __sized_by(sz), const void *b __sized_by(sz), size_t sz);

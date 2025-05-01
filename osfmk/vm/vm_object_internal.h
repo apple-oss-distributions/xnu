@@ -283,25 +283,19 @@ __private_extern__ void vm_object_set_size(
 	vm_object_size_t        outer_size,
 	vm_object_size_t        inner_size);
 
-#define vm_object_reference_locked(object)              \
-	MACRO_BEGIN                                     \
-	vm_object_t RLObject = (object);                \
-	vm_object_lock_assert_exclusive(object);        \
-	assert((RLObject)->ref_count > 0);              \
-	(RLObject)->ref_count++;                        \
-	assert((RLObject)->ref_count > 1);              \
-	MACRO_END
+static inline void
+vm_object_reference_locked(vm_object_t object)
+{
+	vm_object_lock_assert_exclusive(object);
+	os_ref_retain_locked_raw(&object->ref_count, &vm_object_refgrp);
+}
 
-
-#define vm_object_reference_shared(object)              \
-	MACRO_BEGIN                                     \
-	vm_object_t RLObject = (object);                \
-	vm_object_lock_assert_shared(object);           \
-	assert((RLObject)->ref_count > 0);              \
-	OSAddAtomic(1, &(RLObject)->ref_count);         \
-	assert((RLObject)->ref_count > 0);              \
-	MACRO_END
-
+static inline void
+vm_object_reference_shared(vm_object_t object)
+{
+	vm_object_lock_assert_shared(object);
+	os_ref_retain_raw(&object->ref_count, &vm_object_refgrp);
+}
 
 __private_extern__ void         vm_object_reference(
 	vm_object_t     object);
@@ -353,7 +347,7 @@ __private_extern__ void         vm_object_deactivate_pages(
 	vm_object_size_t        size,
 	boolean_t               kill_page,
 	boolean_t               reusable_page,
-	boolean_t               reusable_no_write,
+	boolean_t               kill_no_write,
 	struct pmap             *pmap,
 /* XXX TODO4K: need pmap_page_size here too? */
 	vm_map_offset_t         pmap_offset);

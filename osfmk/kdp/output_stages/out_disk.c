@@ -281,12 +281,12 @@ disk_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 	case KDP_EOF:
 		err = IOPolledFileWrite(gIOPolledCoreFileVars, 0, 0, NULL);
 		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileWrite (during EOF) returned 0x%x\n", err);
+			kern_coredump_log(NULL, "IOPolledFileWrite (during EOF) returned 0x%x\n", (uint32_t)err);
 			break;
 		}
 		err = IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledBeforeSleepState);
 		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFilePollersClose (during EOF) returned 0x%x\n", err);
+			kern_coredump_log(NULL, "IOPolledFilePollersClose (during EOF) returned 0x%x\n", (uint32_t)err);
 			break;
 		}
 		break;

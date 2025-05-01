@@ -65,6 +65,7 @@ LOG_AS = $(call _LOG_COMP,AS)
 LOG_LTO = $(call _LOG_COMP,LTO)
 LOG_SYMBOLSET = $(call _LOG_COMP,SYMSET)
 LOG_SYMBOLSETPLIST = $(call _LOG_COMP,SYMSETPLIST)
+LOG_VERIFIER = $(call _LOG_COMP,VERIFIER)
 
 # Host-side operations.
 LOG_TIGHTBEAMC = $(call _LOG_HOST,TIGHTBEAMC)
@@ -283,6 +284,9 @@ endif
 ifeq ($(origin PYTHON),undefined)
 	export PYTHON := $(shell $(XCRUN) -sdk $(SDKROOT) -find python3 2> /dev/null)
 endif
+ifeq ($(origin OBJDUMP),undefined)
+	export OBJDUMP := $(shell $(XCRUN) -sdk $(SDKROOT) -find objdump 2> /dev/null)
+endif
 
 #
 # Platform options
@@ -304,7 +308,9 @@ EDM_DBPATH ?= $(PLATFORMPATH)/usr/local/standalone/firmware/device_map.db
 # installfile - Atomically copy files, esp. when multiple architectures
 #               are trying to install the same target header
 # replacecontents - Write contents to a file and update modtime *only* if
-#               contents differ
+#                   contents differ
+# vm_sanitize_enforcement - Reject MIG files that use types that do not enforce
+#                           sanitization for VM inputs
 #
 SEG_HACK = $(OBJROOT)/SETUP/setsegname/setsegname
 KEXT_CREATE_SYMBOL_SET = $(OBJROOT)/SETUP/kextsymboltool/kextsymboltool
@@ -312,6 +318,7 @@ DECOMMENT = $(OBJROOT)/SETUP/decomment/decomment
 NEWVERS = $(SRCROOT)/config/newvers.pl
 INSTALL = $(OBJROOT)/SETUP/installfile/installfile
 REPLACECONTENTS = $(OBJROOT)/SETUP/replacecontents/replacecontents
+VM_SANITIZE_ADOPTION_CHECK = $(SRCROOT)/tools/vm_sanitize_enforcement.py
 
 # Standard BSD tools
 RM = /bin/rm -f

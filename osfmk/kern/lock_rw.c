@@ -105,10 +105,12 @@ KALLOC_TYPE_DEFINE(KT_LCK_RW, lck_rw_t, KT_PRIV_ACCT);
 #define ordered_store_rw_owner(lock, value)     os_atomic_store(&(lock)->lck_rw_owner, (value), compiler_acq_rel)
 
 #ifdef DEBUG_RW
+
+STATIC_IF_KEY_DEFINE_TRUE(lck_rw_assert);
+
 static TUNABLE(bool, lck_rw_recursive_shared_assert_74048094, "lck_rw_recursive_shared_assert", false);
 SECURITY_READ_ONLY_EARLY(vm_packing_params_t) rwlde_caller_packing_params =
     VM_PACKING_PARAMS(LCK_RW_CALLER_PACKED);
-#define rw_lock_debug_disabled()                (lck_opts_get() & LCK_OPTION_DISABLE_RW_DEBUG)
 
 #define set_rwlde_caller_packed(entry, caller)          ((entry)->rwlde_caller_packed = VM_PACK_POINTER((vm_offset_t)caller, LCK_RW_CALLER_PACKED))
 #define get_rwlde_caller(entry)                         ((void*)VM_UNPACK_POINTER(entry->rwlde_caller_packed, LCK_RW_CALLER_PACKED))
@@ -266,15 +268,29 @@ lck_rw_destroy(
  * possible return to userspace without unlocking and to find possible readers
  * holding the lock.
  */
-__startup_func
-static void
-rw_lock_init(void)
+#if DEBUG_RW
+
+__static_if_init_func
+void
+lck_rw_assert_init(const char *args, uint64_t kf_ovrd)
 {
-	if (kern_feature_override(KF_RW_LOCK_DEBUG_OVRD)) {
-		LcksOpts |= LCK_OPTION_DISABLE_RW_DEBUG;
+	bool lck_rw_assert_disable = false;
+
+	if (kf_ovrd & KF_MACH_ASSERT_OVRD) {
+		lck_rw_assert_disable = true;
+	}
+
+	if (static_if_boot_arg_uint64(args, "lcks", 0) &
+	    LCK_OPTION_DISABLE_RW_DEBUG) {
+		lck_rw_assert_disable = true;
+	}
+
+	if (lck_rw_assert_disable) {
+		static_if_key_disable(lck_rw_assert);
 	}
 }
-STARTUP(LOCKS, STARTUP_RANK_FIRST, rw_lock_init);
+
+#endif /* DEBUG_RW */
 
 static inline struct rw_lock_debug_entry *
 find_lock_in_savedlocks(lck_rw_t* lock, rw_lock_debug_t *rw_locks_held)
@@ -351,7 +367,7 @@ assert_canlock_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 static inline void
 assert_canlock_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 {
-	if (__improbable(!rw_lock_debug_disabled())) {
+	if (lck_rw_assert_enabled()) {
 		assert_canlock_rwlock_slow(lock, thread, type);
 	}
 }
@@ -410,7 +426,7 @@ assert_held_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 static inline void
 assert_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 {
-	if (__improbable(!rw_lock_debug_disabled())) {
+	if (lck_rw_assert_enabled()) {
 		assert_held_rwlock_slow(lock, thread, type);
 	}
 }
@@ -474,7 +490,7 @@ change_held_rwlock_slow(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom,
 static inline void
 change_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t typeFrom, void* caller)
 {
-	if (__improbable(!rw_lock_debug_disabled())) {
+	if (lck_rw_assert_enabled()) {
 		change_held_rwlock_slow(lock, thread, typeFrom, caller);
 	}
 }
@@ -555,7 +571,7 @@ add_shared:
 static inline void
 add_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type, void* caller)
 {
-	if (__improbable(!rw_lock_debug_disabled())) {
+	if (lck_rw_assert_enabled()) {
 		add_held_rwlock_slow(lock, thread, type, caller);
 	}
 }
@@ -603,7 +619,7 @@ out:
 static inline void
 remove_held_rwlock(lck_rw_t* lock, thread_t thread, lck_rw_type_t type)
 {
-	if (__improbable(!rw_lock_debug_disabled())) {
+	if (lck_rw_assert_enabled()) {
 		remove_held_rwlock_slow(lock, thread, type);
 	}
 }

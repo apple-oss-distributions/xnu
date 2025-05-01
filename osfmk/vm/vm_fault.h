@@ -71,17 +71,22 @@
 #include <mach/vm_param.h>
 #include <mach/vm_behavior.h>
 
-#ifdef  KERNEL_PRIVATE
+#if XNU_KERNEL_PRIVATE
 
-typedef kern_return_t   vm_fault_return_t;
+__enum_closed_decl(vm_fault_return_t, int, {
+	VM_FAULT_SUCCESS            = 0,
+	VM_FAULT_RETRY              = 1,
+	VM_FAULT_INTERRUPTED        = 2,
+	VM_FAULT_MEMORY_SHORTAGE    = 3,
+	VM_FAULT_MEMORY_ERROR       = 5,
+	/* success but no VM page */
+	VM_FAULT_SUCCESS_NO_VM_PAGE = 6,
+	VM_FAULT_BUSY               = 7,
+});
 
-#define VM_FAULT_SUCCESS                0
-#define VM_FAULT_RETRY                  1
-#define VM_FAULT_INTERRUPTED            2
-#define VM_FAULT_MEMORY_SHORTAGE        3
-#define VM_FAULT_MEMORY_ERROR           5
-#define VM_FAULT_SUCCESS_NO_VM_PAGE     6       /* success but no VM page */
+#endif /* XNU_KERNEL_PRIVATE */
 
+#if KERNEL_PRIVATE
 /*
  *	Page fault handling based on vm_map (or entries therein)
  */
@@ -102,7 +107,9 @@ __XNU_INTERNAL(vm_fault)
 #endif
 ;
 
-extern void vm_pre_fault(vm_map_offset_t, vm_prot_t);
+extern kern_return_t vm_pre_fault(
+	vm_map_offset_t offset,
+	vm_prot_t       prot);
 
 #endif  /* KERNEL_PRIVATE */
 

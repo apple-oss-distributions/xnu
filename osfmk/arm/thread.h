@@ -161,15 +161,16 @@ struct machine_thread {
 	unsigned int              preemption_count;       /* preemption count */
 	uint16_t                  exception_trace_code;
 	bool                      reserved7;
+	bool                      reserved8;
 #if defined(HAS_APPLE_PAC)
 	uint64_t                  rop_pid;
 	uint64_t                  jop_pid;
 #else
-	uint64_t                  reserved8;
 	uint64_t                  reserved9;
+	uint64_t                  reserved10;
 #endif
 
-	uint64_t                  reserved10;
+	uint64_t                  reserved11;
 
 #if HAS_ARM_FEAT_SME
 	uint64_t                  tpidr2_el0;
@@ -193,7 +194,7 @@ extern arm_debug_state32_t *       find_debug_state32(thread_t);
 extern arm_debug_state32_t *       find_or_allocate_debug_state32(thread_t);
 extern arm_debug_state64_t *       find_debug_state64(thread_t);
 extern arm_debug_state64_t *       find_or_allocate_debug_state64(thread_t);
-extern arm_neon_saved_state_t *    get_user_neon_regs(thread_t);
+extern void                        set_user_neon_reg(thread_t, unsigned int, uint128_t);
 
 #define FIND_PERFCONTROL_STATE(th) (&th->machine.perfctrl_state)
 
@@ -228,6 +229,8 @@ extern void machine_thread_matrix_state_dup(thread_t target);
 #if HAS_APPLE_GENERIC_TIMER
 extern void agt_thread_bootstrap(void);
 #endif /* HAS_MACHINE_GENERIC_TIMER */
+
+
 /*
  * Return address of the function that called current function, given
  * address of the first parameter of current function.

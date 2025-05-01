@@ -247,11 +247,11 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_HASHED (1ULL << 58)
 
-#define PVH_FLAG_RETIRED 0
-
-
-#define PVH_FLAG_TAGGED 0
-
+/**
+ * Marking a pv_head_table entry with this flag denotes that this page is
+ * retired without any mappings and never should be mapped again.
+ */
+#define PVH_FLAG_RETIRED (1ULL << 55)
 
 /**
  * This flag is used to mark that a PV head entry has been placed into
@@ -269,7 +269,7 @@ pai_to_pvh(unsigned int pai)
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
-#define PVH_MUTABLE_FLAGS (PVH_FLAG_CPU | PVH_FLAG_EXEC | PVH_FLAG_HASHED | PVH_FLAG_RETIRED | PVH_FLAG_TAGGED)
+#define PVH_MUTABLE_FLAGS (PVH_FLAG_CPU | PVH_FLAG_EXEC | PVH_FLAG_HASHED | PVH_FLAG_RETIRED)
 
 #define PVH_LOCK_FLAGS (PVH_FLAG_LOCK | PVH_FLAG_SLEEP)
 
@@ -1164,14 +1164,22 @@ typedef struct {
 	/* Accumulator for batched disjoint SPTM ops, to avoid excessive stack usage. */
 	sptm_disjoint_op_t sptm_ops[SPTM_MAPPING_LIMIT];
 
-	/* Accumulator for batched VA-contiguous SPTM ops, to avoid excessive stack usage. */
-	sptm_pte_t sptm_templates[SPTM_MAPPING_LIMIT];
+	union {
+		/* Accumulator for batched VA-contiguous SPTM ops, to avoid excessive stack usage. */
+		sptm_pte_t sptm_templates[SPTM_MAPPING_LIMIT];
+
+		/* Accumulator for PA arrays to be passed to the SPTM, to avoid excessive stack usage. */
+		sptm_paddr_t sptm_paddrs[SPTM_MAPPING_LIMIT];
+	};
 
 	/* Base PA of ops array, for passing the ops into the SPTM. */
 	pmap_paddr_t sptm_ops_pa;
 
 	/* Base PA of templates array, for passing templates into the SPTM. */
 	pmap_paddr_t sptm_templates_pa;
+
+	/* Base PA of physical address array, for passing physical address lists into the SPTM. */
+	pmap_paddr_t sptm_paddrs_pa;
 
 	/* PMAP pagetable descriptors associated with each element of sptm_ops. */
 	pt_desc_t *sptm_ptds[SPTM_MAPPING_LIMIT];
@@ -1198,6 +1206,9 @@ typedef struct {
 
 	/* Read index associated with this CPU's SPTM trace buffer  */
 	uint64_t sptm_trace_buffer_read_index;
+
+	/* Previous SPTM state for use with sptm_trace_num_new_traces */
+	uint64_t sptm_trace_prev_state;
 } __attribute__((aligned(PMAP_SPTM_PCPU_ALIGN))) pmap_sptm_percpu_data_t;
 
 _Static_assert((PAGE_SIZE % PMAP_SPTM_PCPU_ALIGN) == 0,
@@ -2044,6 +2055,17 @@ pmap_retype_epoch_exit(void)
 	 */
 	os_atomic_store(&retype_epoch->local_seq, 0, release);
 	mp_enable_preemption();
+}
+
+/**
+ * Helper for determining whether the current CPU is within an epoch.
+ *
+ * @return true if the current CPU holds the epoch, false otherwise.
+ */
+static inline bool
+pmap_in_epoch(void)
+{
+	return !preemption_enabled() && (PERCPU_GET(pmap_sptm_percpu)->retype_epoch.local_seq != 0);
 }
 
 /**

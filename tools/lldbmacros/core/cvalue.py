@@ -10,10 +10,11 @@ wrapper to extract information from C based constructs.
 
 Use the member function GetSBValue() to access the base Scripting Bridge value.
 """
-
+import contextlib
 # The value class is designed to be Python 2/3 compatible. Pulling in more
 # builtins classes may break it.
 import numbers
+from typing import Optional
 
 import lldb
 import re
@@ -77,8 +78,8 @@ class value(object):
     #
 
     def __eq__(self, other):
-        self_val = self._GetValueAsUnsigned()
         if isinstance(other, value):
+            self_val = self._GetValueAsUnsigned()
             other_val = other._GetValueAsUnsigned()
             return self_val == other_val
         if isinstance(other, numbers.Integral):
@@ -89,8 +90,8 @@ class value(object):
         return not self == other
 
     def __lt__(self, other):
-        self_val = self._GetValueAsUnsigned()
         if isinstance(other, value):
+            self_val = self._GetValueAsUnsigned()
             other_val = other._GetValueAsUnsigned()
             return self_val < other_val
         if isinstance(other, numbers.Integral):
@@ -379,9 +380,7 @@ class value(object):
     def _GetValueAsCast(self, dest_type):
         if not isinstance(dest_type, lldb.SBType):
             raise ValueError("Invalid type for dest_type: {}".format(type(dest_type)))
-        addr = self._GetValueAsUnsigned()
-        sbval = self.__sbval.target.CreateValueFromExpression("newname", "(void *)"+str(addr))
-        val = value(sbval.Cast(dest_type))
+        val = value(self.__sbval.Cast(dest_type))
         return val
 
     def _GetValueAsUnsigned(self):
@@ -539,7 +538,6 @@ def cast(obj, target_type):
         print("ERROR: You cannot cast an 'int' to %s, please use kern.GetValueFromAddress() for such purposes." % str(target_type))
     raise TypeError("object of type %s cannot be casted to %s" % (str(type(obj)), str(target_type)))
 
-
 def containerof(obj, target_type, field_name):
     """ Type cast an object to another C type from a pointer to a field.
         params:
@@ -679,3 +677,13 @@ def getOSPtr(cpp_obj):
     if 'intrusive_shared_ptr' in str(child):
         return value(child.GetChildMemberWithName('ptr_'))
     return cpp_obj
+
+
+def get_field(val: value, field: str) -> Optional[value]:
+    """
+    Attempts getting a value's field.
+    Returns None (suppressing the exception) in case of failure
+    """
+    with contextlib.suppress(AttributeError):
+        return val.__getattr__(field)
+    return None

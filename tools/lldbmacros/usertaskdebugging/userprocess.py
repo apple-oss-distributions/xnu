@@ -98,7 +98,7 @@ class UserProcess(target.Process):
         self.task = task
         self.proc = GetProcFromTask(task)
         self.cache = {}
-        if not self.proc:
+        if self.proc is None:
             raise ValueError("Task has no associated BSD process.")
         dataregisters64bit = False
         ptrsize = 4

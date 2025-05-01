@@ -183,7 +183,8 @@ kern_return_t CSM_PREFIX(unregister_code_signature)(
 	void *sig_obj);
 
 kern_return_t CSM_PREFIX(verify_code_signature)(
-	void *sig_obj);
+	void *sig_obj,
+	uint32_t *trust_level);
 
 kern_return_t CSM_PREFIX(reconstitute_code_signature)(
 	void *sig,

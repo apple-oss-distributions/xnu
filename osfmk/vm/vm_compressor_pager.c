@@ -588,7 +588,7 @@ compressor_pager_slots_chunk_free(
 	int                     *failures)
 {
 	int i;
-	int retval;
+	vm_decompress_result_t retval;
 	unsigned int num_slots_freed;
 
 	if (failures) {
@@ -599,10 +599,11 @@ compressor_pager_slots_chunk_free(
 		if (chunk[i] != 0) {
 			retval = vm_compressor_free(&chunk[i], flags);
 
-			if (retval == 0) {
+			if (retval == DECOMPRESS_SUCCESS) {
 				num_slots_freed++;
 			} else {
-				if (retval == -2) {
+				assert3s(retval, <, 0); /* it's not DECOMPRESS_SUCCESS_* */
+				if (retval == DECOMPRESS_NEED_BLOCK) {
 					assert(flags & C_DONT_BLOCK);
 				}
 
@@ -754,8 +755,9 @@ vm_compressor_pager_put(
 	int                             *compressed_count_delta_p, /* OUT */
 	vm_compressor_options_t         flags)
 {
-	compressor_pager_t      pager;
-	compressor_slot_t       *slot_p;
+	compressor_pager_t pager;
+	compressor_slot_t *slot_p;
+	kern_return_t kr;
 
 	compressor_pager_stats.put++;
 
@@ -804,12 +806,11 @@ vm_compressor_pager_put(
 	 * disconnected.
 	 */
 
-	if (vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf, flags)) {
-		return KERN_RESOURCE_SHORTAGE;
+	kr = vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf, flags);
+	if (kr == KERN_SUCCESS) {
+		*compressed_count_delta_p += 1;
 	}
-	*compressed_count_delta_p += 1;
-
-	return KERN_SUCCESS;
+	return kr;
 }
 
 
@@ -860,12 +861,12 @@ vm_compressor_pager_get(
 		bool unmodified = (vm_compressor_is_slot_compressed(slot_p) == false);
 		/* get the page from the compressor */
 		retval = vm_compressor_get(ppnum, slot_p, (unmodified ? (flags | C_PAGE_UNMODIFIED) : flags));
-		if (retval == -1) {
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_DECOMPRESS_FAILED), 0 /* arg */);
+		if (retval <= DECOMPRESS_FIRST_FAIL_CODE) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_DECOMPRESS_FAILED), (uintptr_t)retval /* arg */);
 			kr = KERN_MEMORY_FAILURE;
-		} else if (retval == 1) {
+		} else if (retval == DECOMPRESS_SUCCESS_SWAPPEDIN) {
 			*my_fault_type = DBG_COMPRESSOR_SWAPIN_FAULT;
-		} else if (retval == -2) {
+		} else if (retval == DECOMPRESS_NEED_BLOCK) {
 			assert((flags & C_DONT_BLOCK));
 			/*
 			 * Not a fatal failure because we just retry with a blocking get later. So we skip ktriage to avoid noise.
@@ -1052,8 +1053,8 @@ vm_compressor_pager_transfer(
 
 	/* transfer the slot from source to destination */
 	vm_compressor_transfer(dst_slot_p, src_slot_p);
-	OSAddAtomic(-1, &src_pager->cpgr_num_slots_occupied);
-	OSAddAtomic(+1, &dst_pager->cpgr_num_slots_occupied);
+	os_atomic_dec(&src_pager->cpgr_num_slots_occupied, relaxed);
+	os_atomic_inc(&dst_pager->cpgr_num_slots_occupied, relaxed);
 }
 
 memory_object_offset_t
@@ -1185,8 +1186,8 @@ vm_compressor_pager_count(
 	 */
 	if (shared_lock) {
 		vm_object_lock_assert_shared(object);
-		OSAddAtomic(compressed_count_delta,
-		    &pager->cpgr_num_slots_occupied);
+		os_atomic_add(&pager->cpgr_num_slots_occupied, compressed_count_delta,
+		    relaxed);
 	} else {
 		vm_object_lock_assert_exclusive(object);
 		pager->cpgr_num_slots_occupied += compressed_count_delta;

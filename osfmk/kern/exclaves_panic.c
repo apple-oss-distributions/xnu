@@ -38,14 +38,14 @@
 
 #include <xnuproxy/panic.h>
 
-#include "exclaves_debug.h"
-#include "exclaves_panic.h"
 #include "exclaves_boot.h"
-#include "exclaves_xnuproxy.h"
+#include "exclaves_debug.h"
 #include "exclaves_internal.h"
+#include "exclaves_panic.h"
+#include "exclaves_resource.h"
+#include "exclaves_xnuproxy.h"
 
-/* Use the new version of xnuproxy_msg_t. */
-#define xnuproxy_msg_t xnuproxy_msg_new_t
+#include "kern/exclaves.tightbeam.h"
 
 #define EXCLAVES_PANIC_FOUR_CC_FORMAT   "%c%c%c%c"
 #define EXCLAVES_PANIC_FOUR_CC_CHARS(c) \
@@ -88,30 +88,48 @@ copy_panic_buffer_pages(pmap_paddr_t addr)
 static void
 exclaves_xnuproxy_panic_thread(void *arg __unused, wait_result_t wr __unused)
 {
-	kern_return_t kr = KERN_SUCCESS;
+	assert3u(current_thread()->th_exclaves_ipc_ctx.scid, ==, 0);
 
-	uint64_t phys;
-	uint64_t scid;
-	kr = exclaves_xnuproxy_panic_setup(&phys, &scid);
-	if (kr != KERN_SUCCESS) {
+	kern_return_t kr = KERN_SUCCESS;
+	thread_t thread = current_thread();
+
+	uint64_t endpoint = exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL,
+	    "com.apple.service.PanicInit");
+	if (endpoint == EXCLAVES_INVALID_ID) {
 		exclaves_debug_printf(show_errors,
-		    "exclaves: panic thread init: xnu proxy send failed.");
+		    "exclaves: panic thread init: "
+		    "failed to find stackshot service");
 		return;
 	}
 
-	/* Dont copy if the panic buffer initialisation already happended */
-	if (exclaves_panic_buffer_pages[0] == 0) {
-		copy_panic_buffer_pages(phys);
+	tb_endpoint_t setup_ep = tb_endpoint_create_with_value(
+		TB_TRANSPORT_TYPE_XNU, endpoint, TB_ENDPOINT_OPTIONS_NONE);
+	stackshotpanicsetup_panicinit_s client;
+	tb_error_t ret = stackshotpanicsetup_panicinit__init(&client, setup_ep);
+	if (ret != TB_ERROR_SUCCESS) {
+		exclaves_debug_printf(show_errors,
+		    "exclaves: panic thread init: "
+		    "failed to initialize connection");
+		return;
 	}
 
-	thread_t thread = current_thread();
-	thread->th_exclaves_ipc_ctx.scid = scid;
+	thread->th_exclaves_state |= TH_EXCLAVES_SPAWN_EXPECTED;
+
+	__block uint64_t panic_scid = 0;
+	stackshotpanicsetup_panicinit_panic_init(&client, ^void (uint64_t scid) {
+		panic_scid = scid;
+	});
+
+	assert3u(panic_scid, !=, 0);
+	thread->th_exclaves_ipc_ctx.scid = panic_scid;
+
+	thread->th_exclaves_state &= ~TH_EXCLAVES_SPAWN_EXPECTED;
 
 	assert3u(thread->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
-	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
+	thread->th_exclaves_state |= TH_EXCLAVES_RESUME_PANIC_THREAD;
 
 	while (1) {
-		kr = exclaves_scheduler_resume_scheduling_context(&thread->th_exclaves_ipc_ctx, false);
+		kr = exclaves_run(thread, false);
 		assert3u(kr, ==, KERN_SUCCESS);
 	}
 }

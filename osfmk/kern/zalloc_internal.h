@@ -64,6 +64,7 @@
 #include <kern/simple_lock.h>
 
 #include <os/atomic_private.h>
+#include <os/base.h> /* OS_PTRAUTH_SIGNED_PTR */
 #include <sys/queue.h>
 #include <vm/vm_map_internal.h>
 
@@ -141,7 +142,7 @@ struct zone_stats {
 	uint64_t            zs_mem_freed;
 	uint64_t            zs_alloc_fail;
 	uint32_t            zs_alloc_rr;     /* allocation rr bias */
-	uint32_t _Atomic    zs_alloc_not_shared;
+	uint32_t _Atomic    zs_alloc_not_early;
 };
 
 typedef struct zone_magazine *zone_magazine_t;
@@ -306,7 +307,8 @@ struct zone {
 	 * z_elems_free_{min,wma} (overloaded on z_recirc_empty*):
 	 *   tracks the history of the minimum values of z_elems_free over time
 	 *   with "min" being the minimum it hit for the current period,
-	 *   and "wma" the weighted moving average of those value.
+	 *   and "wma" the weighted moving average of those value
+	 *   (in Z_WMA_UNIT units).
 	 *
 	 *   This field is used if z_pcpu_cache is NULL,
 	 *   otherwise it aliases with z_recirc_empty_{min,wma}
@@ -315,9 +317,9 @@ struct zone {
 	 *   tracks the history of the the minimum number of full/empty
 	 *   magazines in the depot over time, with "min" being the minimum
 	 *   it hit for the current period, and "wma" the weighted moving
-	 *   average of those value.
+	 *   average of those value (in Z_WMA_UNIT units).
 	 */
-	struct zone_cache  *__zpercpu z_pcpu_cache;
+	struct zone_cache  *__zpercpu OS_PTRAUTH_SIGNED_PTR("zone.z_pcpu_cache") z_pcpu_cache;
 	struct zone_depot   z_recirc;
 
 	hw_lck_ticket_t     z_recirc_lock;
@@ -411,18 +413,19 @@ struct zone {
  * modified after lockdown.
  */
 typedef struct zone_security_flags {
-	uint16_t
+	uint32_t
 	/*
 	 * Security sensitive configuration bits
 	 */
 	    z_submap_idx       :8,  /* a Z_SUBMAP_IDX_* value */
-	    z_kheap_id         :2,  /* zone_kheap_id_t when part of a kalloc heap */
+	    z_kheap_id         :3,  /* zone_kheap_id_t when part of a kalloc heap */
 	    z_kalloc_type      :1,  /* zones that does types based seggregation */
 	    z_lifo             :1,  /* depot and recirculation layer are LIFO */
 	    z_pgz_use_guards   :1,  /* this zone uses guards with PGZ */
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
-	    z_tag              :1;  /* zone supports TBI tagging */
+	    z_tag              :1,  /* zone supports TBI tagging */
+	    z_unused           :15;
 	/*
 	 * Signature equivalance zone
 	 */

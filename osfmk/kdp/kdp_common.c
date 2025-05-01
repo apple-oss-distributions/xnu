@@ -39,7 +39,7 @@
 
 extern unsigned int not_in_kdp;
 extern void bcopy_phys(addr64_t, addr64_t, vm_size_t);
-extern addr64_t kdp_vtophys(pmap_t pmap, addr64_t va);
+extern pmap_paddr_t kdp_vtophys(pmap_t pmap, addr64_t va);
 
 /*
  * Sets the appropriate page mask and size to use for dealing with pages --

@@ -194,15 +194,24 @@ extern void             lck_rw_startup_init(
 #define LCK_RW_DECLARE(var, grp) \
 	LCK_RW_DECLARE_ATTR(var, grp, LCK_ATTR_NULL)
 
-#if MACH_ASSERT
-#define LCK_RW_ASSERT(lck, type) do { \
-	        if (__improbable(!(lck_opts_get() & LCK_OPTION_DISABLE_RW_DEBUG))) { \
-	                lck_rw_assert((lck),(type)); \
-	        } \
-	} while (0)
-#else /* MACH_ASSERT */
+#if DEBUG_RW
+STATIC_IF_KEY_DECLARE_TRUE(lck_rw_assert);
+
+#define lck_rw_assert_enabled()    improbable_static_if(lck_rw_assert)
+
+extern void lck_rw_assert_init(
+	const char             *args,
+	uint64_t                kf_ovrd);
+
+#define LCK_RW_ASSERT(lck, type)  do { \
+	if (lck_rw_assert_enabled()) { \
+	        lck_rw_assert(lck, type); \
+	} \
+} while (0)
+#else /* DEBUG_RW */
 #define LCK_RW_ASSERT(lck, type)
-#endif /* MACH_ASSERT */
+#define lck_rw_assert_enabled()    0
+#endif /* DEBUG_RW */
 
 #endif /* XNU_KERNEL_PRIVATE */
 

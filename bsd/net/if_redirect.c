@@ -1444,6 +1444,7 @@ redirect_set_delegate(if_redirect_t rd, ifnet_t delegate_ifp)
 	}
 	ASSERT(!rd->rd_delegate_set);
 	rd->rd_delegate_set = TRUE;
+	RDLOG_INFO("%s set delegate to %s", if_name(ifp), if_name(delegate_ifp));
 
 	if (rd->rd_ftype == IFRTYPE_FAMILY_ETHERNET) {
 		uint8_t mac_addr[ETHER_ADDR_LEN];

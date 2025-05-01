@@ -169,11 +169,31 @@ os_ref_panic_live(void *rc)
 }
 #endif
 
+#if XNU_KERNEL_PRIVATE
+void os_ref_panic_last(void *rc) __abortlike;
+#else
+__abortlike
+static inline void
+os_ref_panic_last(void *rc)
+{
+	panic("os_refcnt: expected release of final reference but rc %p!=0\n", rc);
+	__builtin_unreachable();
+}
+#endif
+
 static inline os_ref_count_t OS_WARN_RESULT
 os_ref_release(struct os_refcnt *rc)
 {
 	return os_ref_release_barrier_internal(&rc->ref_count,
 	           os_ref_if_debug(rc->ref_group, NULL));
+}
+
+static inline void
+os_ref_release_last(struct os_refcnt *rc)
+{
+	if (__improbable(os_ref_release(rc) != 0)) {
+		os_ref_panic_last(rc);
+	}
 }
 
 static inline os_ref_count_t OS_WARN_RESULT
@@ -296,6 +316,14 @@ os_ref_release_locked_raw(os_ref_atomic_t *rc, struct os_refgrp *grp)
 	return os_ref_release_locked_internal(rc, grp);
 }
 
+static inline void
+os_ref_release_live_locked_raw(os_ref_atomic_t *rc, struct os_refgrp *grp)
+{
+	if (__improbable(os_ref_release_locked_internal(rc, grp) == 0)) {
+		os_ref_panic_live(rc);
+	}
+}
+
 static inline os_ref_count_t
 os_ref_get_count_raw(os_ref_atomic_t *rc)
 {
@@ -315,6 +343,7 @@ os_ref_get_count_raw(os_ref_atomic_t *rc)
 #define os_ref_retain_locked_raw(rc, grp) (os_ref_retain_locked_raw)((rc), NULL)
 #define os_ref_retain_floor_locked_raw(rc, f, grp) (os_ref_retain_floor_locked_raw)((rc), f, NULL)
 #define os_ref_release_locked_raw(rc, grp) (os_ref_release_locked_raw)((rc), NULL)
+#define os_ref_release_live_locked_raw(rc, grp) (os_ref_release_live_locked_raw)((rc), NULL)
 #endif
 
 extern void

@@ -503,6 +503,68 @@ pager_test(const_page_t *state)
 	os_thread_self_restrict_tpro_to_ro();
 }
 
+static void
+mmap_test(const_page_t *state)
+{
+	void *mapping;
+
+	/*
+	 * Validate our initial status quo. TPRO permissions should be RO,
+	 * so we should be able to read from our pager backed mapping but
+	 * should fault when trying to write to it.
+	 */
+	T_EXPECT_EQ(os_thread_self_restrict_tpro_is_writable(), false, "TPRO region starts read-only");
+
+	/*
+	 * Attempt to mmap a fixed allocation over our TPRO region.
+	 * TPRO region should be permanent and should disallow being
+	 * overwritten.
+	 */
+	mapping = mmap(state, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	T_ASSERT_EQ(mapping, MAP_FAILED, "Map over TPRO range should fail");
+	os_thread_self_restrict_tpro_to_ro();
+}
+
+static void
+vm_allocate_test(const_page_t *state)
+{
+	kern_return_t kr;
+	mach_vm_address_t addr = (mach_vm_address_t)state;
+	vm_region_basic_info_data_64_t info;
+	mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_vm_size_t size = PAGE_SIZE;
+	mach_port_t unused = MACH_PORT_NULL;
+
+	/*
+	 * Validate our initial status quo. TPRO permissions should be RO,
+	 * so we should be able to read from our pager backed mapping but
+	 * should fault when trying to write to it.
+	 */
+	T_EXPECT_EQ(os_thread_self_restrict_tpro_is_writable(), false, "TPRO region starts read-only");
+
+	/*
+	 * Deallocate the TPRO region. This should succeed but leave the region
+	 * intact with no permissions. Further allocations should not be able to
+	 * obtain the same address.
+	 */
+	kr = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)state, PAGE_SIZE);
+	T_EXPECT_POSIX_ERROR(kr, KERN_SUCCESS, "vm_deallocate should succeed");
+
+	kr = mach_vm_allocate(mach_task_self(), (mach_vm_address_t *)&addr, PAGE_SIZE, VM_FLAGS_FIXED);
+	T_EXPECT_POSIX_ERROR(kr, KERN_NO_SPACE, "vm_allocate should fail with KERN_NO_SPACE");
+
+	/*
+	 * Lookup the target region and confirm that all permissions have been
+	 * removed.
+	 */
+	kr = mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &unused);
+	T_QUIET; T_EXPECT_POSIX_ERROR(kr, KERN_SUCCESS, "mach_vm_region should succeed");
+
+	T_ASSERT_EQ(info.protection, VM_PROT_NONE, "Entry should have no permissions");
+	T_ASSERT_EQ(info.max_protection, VM_PROT_NONE, "Entry should have no permissions");
+	os_thread_self_restrict_tpro_to_ro();
+}
+
 T_DECL(thread_self_restrict_pagers,
     "Verify that the TPRO pager interfaces work correctly", T_META_TAG_VM_PREFERRED)
 {
@@ -534,5 +596,23 @@ T_DECL(thread_self_restrict_pagers,
 	});
 #else
 	T_SKIP("thread_self_restrict_pagers not supported on this system");
+#endif /* __arm64__ */
+}
+
+T_DECL(thread_self_restrict_tpro_permanent,
+    "Verify that TPRO VM entries are permanent")
+{
+#if __arm64__
+	/* Check to see that we support the necessary hardware features. */
+	if (!os_thread_self_restrict_tpro_is_supported() || !has_pager_support()) {
+		T_SKIP("no hardware TPRO support enabled on this system");
+	}
+
+	thread_self_restrict_test(^{
+		mmap_test(&pager_state.one);
+		vm_allocate_test(&pager_state.two);
+	});
+#else
+	T_SKIP("thread_self_restrict_tpro_permanent not supported on this system");
 #endif /* __arm64__ */
 }

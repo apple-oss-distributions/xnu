@@ -111,9 +111,9 @@
  */
 
 kern_return_t
-vm32_region_info(
+vm32_mach_vm_region_info(
 	__DEBUG_ONLY vm_map_t                   map,
-	__DEBUG_ONLY vm32_offset_t              address,
+	__DEBUG_ONLY vm32_offset_ut             address_u,
 	__DEBUG_ONLY vm_info_region_t           *regionp,
 	__DEBUG_ONLY vm_info_object_array_t     *objectsp,
 	__DEBUG_ONLY mach_msg_type_number_t     *objectsCntp)
@@ -121,6 +121,8 @@ vm32_region_info(
 #if !MACH_VM_DEBUG
 	return KERN_FAILURE;
 #else
+	/* This unwrap is safe as this function is DEBUG only. */
+	vm32_offset_t address = VM_SANITIZE_UNSAFE_UNWRAP(address_u);
 	vm_map_copy_t copy;
 	vm_offset_t addr = 0;   /* memory for OOL data */
 	vm_size_t size;         /* size of the memory */
@@ -323,9 +325,9 @@ vm32_region_info(
  */
 
 kern_return_t
-vm32_region_info_64(
+vm32_mach_vm_region_info_64(
 	__DEBUG_ONLY vm_map_t                   map,
-	__DEBUG_ONLY vm32_offset_t              address,
+	__DEBUG_ONLY vm32_offset_ut             address_u,
 	__DEBUG_ONLY vm_info_region_64_t        *regionp,
 	__DEBUG_ONLY vm_info_object_array_t     *objectsp,
 	__DEBUG_ONLY mach_msg_type_number_t     *objectsCntp)
@@ -333,6 +335,8 @@ vm32_region_info_64(
 #if !MACH_VM_DEBUG
 	return KERN_FAILURE;
 #else
+	/* This unwrap is safe as this function is DEBUG only. */
+	vm32_offset_t address = VM_SANITIZE_UNSAFE_UNWRAP(address_u);
 	vm_map_copy_t copy;
 	vm_offset_t addr = 0;   /* memory for OOL data */
 	vm_size_t size;         /* size of the memory */
@@ -532,7 +536,7 @@ vm32_region_info_64(
  * Return an array of virtual pages that are mapped to a task.
  */
 kern_return_t
-vm32_mapped_pages_info(
+vm32_vm_mapped_pages_info(
 	__DEBUG_ONLY vm_map_t                   map,
 	__DEBUG_ONLY page_address_array_t       *pages,
 	__DEBUG_ONLY mach_msg_type_number_t     *pages_count)

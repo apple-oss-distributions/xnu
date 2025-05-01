@@ -81,7 +81,7 @@
 struct  timezone tz = { .tz_minuteswest = 0, .tz_dsttime = 0 };
 
 #if !defined(__x86_64__)
-#define NPROC 1000          /* Account for TOTAL_CORPSES_ALLOWED by making this slightly lower than we can. */
+#define NPROC 1000          /* Account for DEFAULT_TOTAL_CORPSES_ALLOWED by making this slightly lower than we can. */
 #define NPROC_PER_UID 950
 #else
 #define NPROC (20 + 32 * 32)

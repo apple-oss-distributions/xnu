@@ -116,16 +116,12 @@ tcp_bad_rexmt_fix_sndbuf(struct tcpcb *tp)
 void
 tcp_cc_cwnd_init_or_reset(struct tcpcb *tp)
 {
-	if (tp->t_flags & TF_LOCAL) {
-		tp->snd_cwnd = tp->t_maxseg * ss_fltsz_local;
+	if (tcp_cubic_minor_fixes) {
+		tp->snd_cwnd = tcp_initial_cwnd(tp);
 	} else {
-		if (tcp_cubic_minor_fixes) {
-			tp->snd_cwnd = tcp_initial_cwnd(tp);
-		} else {
-			/* initial congestion window according to RFC 3390 */
-			tp->snd_cwnd = min(4 * tp->t_maxseg,
-			    max(2 * tp->t_maxseg, TCP_CC_CWND_INIT_BYTES));
-		}
+		/* initial congestion window according to RFC 3390 */
+		tp->snd_cwnd = min(4 * tp->t_maxseg,
+		    max(2 * tp->t_maxseg, TCP_CC_CWND_INIT_BYTES));
 	}
 }
 

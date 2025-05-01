@@ -1,7 +1,7 @@
 #
 # Mach Operating System
 # Copyright (c) 1986 Carnegie-Mellon University
-# Copyright 2001-2018 Apple Inc.
+# Copyright 2001-2024 Apple Inc.
 #
 # All rights reserved.  The CMU software License Agreement
 # specifies the terms and conditions for use and redistribution.
@@ -16,6 +16,7 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
+#  ARM_EXTRAS_BASE = [ config_pmap_ppl ]
 #  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_enforce_signed_code config_code_signature_reconstitution config_requires_u32_munging config_darkboot ARM_EXTRAS_BASE ]
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits config_ext_paniclog ]
@@ -67,10 +68,17 @@
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE config_sched_rt_allow ]
 #  SCHED_DEBUG =    [ SCHED_BASE config_sched_rt_allow ]
-#  VM_BASE =        [ vm_pressure_events jetsam memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap config_deferred_reclaim config_map_ranges freeze ]
+#if   MASTER_CONFIG_ENABLE_SPTM
+#  VM_EXTRA =       [ ]
+#  VM_EXTRA_DEV =   [ ]
+#else
+#  VM_EXTRA =       [ ]
+#  VM_EXTRA_DEV =   [ pgzalloc ]
+#endif /* MASTER_CONFIG_ENABLE_KERNEL_TAG && MASTER_CONFIG_ENABLE_SPTM */
+#  VM_BASE =        [ vm_pressure_events jetsam memorystatus config_code_decryption phantom_cache config_secluded_memory config_cs_validation_bitmap config_deferred_reclaim config_map_ranges freeze VM_EXTRA ]
 #  VM_RELEASE =     [ VM_BASE ]
-#  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc]
-#  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc]
+#  VM_DEV =         [ VM_BASE dynamic_codesigning VM_EXTRA_DEV ]
+#  VM_DEBUG =       [ VM_BASE dynamic_codesigning VM_EXTRA_DEV ]
 #  VM_KASAN =       [ VM_BASE dynamic_codesigning kernel_tagging kernel_tbi config_kasan config_ubsan config_kcov config_ksancov ]
 #  SECURITY_BASE =    [ config_macf kernel_integrity config_secure_bsd_root ]
 #  SECURITY_RELEASE = [ SECURITY_BASE ]

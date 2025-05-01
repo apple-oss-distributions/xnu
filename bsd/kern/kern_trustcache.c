@@ -20,6 +20,7 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <os/atomic_private.h>
 #include <os/overflow.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
@@ -36,16 +37,46 @@
 #include <libkern/img4/interface.h>
 #include <libkern/amfi/amfi.h>
 #include <sys/vm.h>
+#include <sys/ubc.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #include <sys/codesign.h>
 #include <sys/trust_caches.h>
 #include <sys/code_signing.h>
+#include <IOKit/IOLib.h>
 #include <IOKit/IOBSD.h>
 #include <img4/firmware.h>
 #include <TrustCache/API.h>
 
 static bool boot_os_tc_loaded = false;
 static bool boot_app_tc_loaded = false;
+
+SECURITY_READ_ONLY_LATE(uint32_t) num_static_trust_caches = 0;
+SECURITY_READ_ONLY_LATE(uint32_t) num_engineering_trust_caches = 0;
+uint32_t num_loadable_trust_caches = 0;
+
+SYSCTL_DECL(_security);
+SYSCTL_DECL(_security_codesigning);
+SYSCTL_DECL(_security_codesigning_trustcaches);
+SYSCTL_NODE(_security_codesigning, OID_AUTO, trustcaches, CTLFLAG_RD, 0, "XNU Trust Caches");
+
+SYSCTL_UINT(
+	_security_codesigning_trustcaches, OID_AUTO,
+	num_static, CTLFLAG_RD, &num_static_trust_caches,
+	0, "number of static trust caches loaded"
+	);
+
+SYSCTL_UINT(
+	_security_codesigning_trustcaches, OID_AUTO,
+	num_engineering, CTLFLAG_RD, &num_engineering_trust_caches,
+	0, "number of engineering trust caches loaded"
+	);
+
+SYSCTL_UINT(
+	_security_codesigning_trustcaches, OID_AUTO,
+	num_loadable, CTLFLAG_RD, &num_loadable_trust_caches,
+	0, "number of loadable trust caches loaded"
+	);
 
 #if CONFIG_SPTM
 /*
@@ -58,9 +89,6 @@ static bool boot_app_tc_loaded = false;
  */
 #include <sys/trusted_execution_monitor.h>
 
-LCK_GRP_DECLARE(txm_trust_cache_lck_grp, "txm_trust_cache_lck_grp");
-decl_lck_rw_data(, txm_trust_cache_lck);
-
 /* Immutable part of the runtime */
 SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t*) trust_cache_rt = NULL;
 
@@ -68,7 +96,7 @@ SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t*) trust_cache_rt = NULL;
 SECURITY_READ_ONLY_LATE(TrustCacheMutableRuntime_t*) trust_cache_mut_rt = NULL;
 
 /* Static trust cache information collected from TXM */
-SECURITY_READ_ONLY_LATE(uint32_t) num_static_trust_caches = 0;
+SECURITY_READ_ONLY_LATE(uint32_t) txm_static_trust_caches = 0;
 SECURITY_READ_ONLY_LATE(TCCapabilities_t) static_trust_cache_capabilities0 = 0;
 SECURITY_READ_ONLY_LATE(TCCapabilities_t) static_trust_cache_capabilities1 = 0;
 
@@ -88,8 +116,7 @@ get_trust_cache_info(void)
 	 * we don't use it. But we continue to return this value from the monitor
 	 * in case it ever comes in use later down the line.
 	 */
-
-	num_static_trust_caches = (uint32_t)txm_call.return_words[1];
+	txm_static_trust_caches = (uint32_t)txm_call.return_words[1];
 	static_trust_cache_capabilities0 = (TCCapabilities_t)txm_call.return_words[2];
 	static_trust_cache_capabilities1 = (TCCapabilities_t)txm_call.return_words[3];
 }
@@ -109,11 +136,27 @@ trust_cache_runtime_init(void)
 		panic("amfi interface is stale: %u", amfi->TrustCache.version);
 	}
 
-	/* Initialize the TXM trust cache read-write lock */
-	lck_rw_init(&txm_trust_cache_lck, &txm_trust_cache_lck_grp, 0);
-
 	/* Acquire trust cache information from the monitor */
 	get_trust_cache_info();
+}
+
+static kern_return_t
+txm_unload_trust_cache(uuid_t uuid)
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorUnloadTrustCache,
+		.num_input_args = 1
+	};
+	kern_return_t ret = txm_kernel_call(&txm_call, uuid);
+
+	/* Check for not found trust cache error */
+	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
+		if (txm_call.txm_ret.tcRet.error == kTCReturnNotFound) {
+			ret = KERN_NOT_FOUND;
+		}
+	}
+
+	return ret;
 }
 
 static kern_return_t
@@ -125,11 +168,13 @@ txm_load_trust_cache(
 {
 	txm_call_t txm_call = {
 		.selector = kTXMKernelSelectorLoadTrustCache,
-		.num_input_args = 7
+		.num_input_args = 7,
+		.num_output_args = 1,
 	};
 	vm_address_t payload_addr = 0;
 	vm_address_t manifest_addr = 0;
 	kern_return_t ret = KERN_DENIED;
+	bool reclaim_payload = false;
 
 	/* We don't support the auxiliary manifest for now */
 	(void)img4_aux_manifest;
@@ -155,9 +200,6 @@ txm_load_trust_cache(
 	txm_transfer_region(payload_addr, img4_payload_len);
 	txm_transfer_region(manifest_addr, img4_manifest_len);
 
-	/* Take the trust cache lock exclusively */
-	lck_rw_lock_exclusive(&txm_trust_cache_lck);
-
 	/* TXM will round-up to page length itself */
 	ret = txm_kernel_call(
 		&txm_call,
@@ -166,14 +208,21 @@ txm_load_trust_cache(
 		manifest_addr, img4_manifest_len,
 		0, 0);
 
-	/* Release the trust cache lock */
-	lck_rw_unlock_exclusive(&txm_trust_cache_lck);
-
 	/* Check for duplicate trust cache error */
 	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
 		if (txm_call.txm_ret.tcRet.error == kTCReturnDuplicate) {
 			ret = KERN_ALREADY_IN_SET;
 		}
+	}
+
+	/*
+	 * Most trust cache payloads are small. In order to conserve memory, TXM will
+	 * prefer creating its own allocation, and copying the contents of the payload
+	 * into that allocation. When this happens, the payload is returned back to be
+	 * reclaimed by the kernel.
+	 */
+	if (ret == KERN_SUCCESS) {
+		reclaim_payload = txm_call.return_words[0] != 0;
 	}
 
 out:
@@ -186,7 +235,7 @@ out:
 		manifest_addr = 0;
 	}
 
-	if ((ret != KERN_SUCCESS) && (payload_addr != 0)) {
+	if (((ret != KERN_SUCCESS) || (reclaim_payload == true)) && (payload_addr != 0)) {
 		/* Reclaim the payload region */
 		txm_reclaim_region(payload_addr, img4_payload_len);
 
@@ -217,11 +266,7 @@ txm_query_trust_cache(
 		.num_input_args = 2,
 		.num_output_args = 2,
 	};
-	kern_return_t ret = KERN_NOT_FOUND;
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, query_type, cdhash);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
+	kern_return_t ret = txm_kernel_call(&txm_call, query_type, cdhash);
 
 	if (ret == KERN_SUCCESS) {
 		if (query_token) {
@@ -242,6 +287,31 @@ txm_query_trust_cache(
 }
 
 static kern_return_t
+txm_query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	uint8_t *rem_perms)
+{
+#if XNU_HAS_TRUST_CACHE_QUERY_FOR_REM
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorQueryTrustCacheForREM,
+		.num_input_args = 1,
+		.num_output_args = 1
+	};
+	kern_return_t ret = txm_kernel_call(&txm_call, cdhash);
+
+	if ((ret == KERN_SUCCESS) && (rem_perms != NULL)) {
+		*rem_perms = (uint8_t)txm_call.return_words[0];
+	}
+
+	return ret;
+#else
+	(void)cdhash;
+	(void)rem_perms;
+	return KERN_NOT_SUPPORTED;
+#endif /* XNU_HAS_TRUST_CACHE_QUERY_FOR_REM */
+}
+
+static kern_return_t
 txm_check_trust_cache_runtime_for_uuid(
 	const uint8_t check_uuid[kUUIDSize])
 {
@@ -250,11 +320,7 @@ txm_check_trust_cache_runtime_for_uuid(
 		.failure_silent = true,
 		.num_input_args = 1
 	};
-	kern_return_t ret = KERN_DENIED;
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, check_uuid);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
+	kern_return_t ret = txm_kernel_call(&txm_call, check_uuid);
 
 	/* Check for not-found trust cache error */
 	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
@@ -283,6 +349,37 @@ SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t*) trust_cache_rt = &ppl_trust_cache_
 /* Mutable part of the runtime */
 SECURITY_READ_ONLY_LATE(TrustCacheMutableRuntime_t*) trust_cache_mut_rt = &ppl_trust_cache_mut_rt;
 
+static bool
+is_internal_iBoot(void)
+{
+	DTEntry node = {0};
+	const char *variant = NULL;
+	uint32_t size = 0;
+
+	int err = SecureDTLookupEntry(NULL, "/chosen/iBoot", &node);
+	if (err != kSuccess) {
+		printf("unable to find /chosen/iBoot in the device tree: %d\n", err);
+		return false;
+	}
+
+	err = SecureDTGetProperty(node, "iboot-build-variant", (const void **)&variant, &size);
+	if (err != kSuccess) {
+		printf("unable to find iboot-build-variant in /chosen/iBoot: %d\n", err);
+		return false;
+	} else if ((variant == NULL) || (size == 0)) {
+		printf("missing data for iboot-build-variant property\n");
+		return false;
+	}
+	printf("resolved iBoot build variant: %s\n", variant);
+
+	if (strcmp(variant, "development") == 0) {
+		return true;
+	} else if (strcmp(variant, "debug") == 0) {
+		return true;
+	}
+	return false;
+}
+
 void
 trust_cache_runtime_init(void)
 {
@@ -296,6 +393,14 @@ trust_cache_runtime_init(void)
 #if PMAP_CS_INCLUDE_INTERNAL_CODE
 	allow_engineering_caches = true;
 #endif
+
+	/*
+	 * Allow engineering trust caches when the system is booting using a development
+	 * or debug variant of iBoot.
+	 */
+	if (is_internal_iBoot() == true) {
+		allow_engineering_caches = true;
+	}
 
 	/* Image4 interface needs to be available */
 	if (img4if == NULL) {
@@ -318,6 +423,12 @@ trust_cache_runtime_init(void)
 		IMG4_RUNTIME_PMAP_CS);
 
 	/* Locks are initialized in "pmap_bootstrap()" */
+}
+
+static kern_return_t
+ppl_unload_trust_cache(__unused uuid_t uuid)
+{
+	return KERN_NOT_SUPPORTED;
 }
 
 static kern_return_t
@@ -493,6 +604,12 @@ trust_cache_runtime_init(void)
 }
 
 static kern_return_t
+xnu_unload_trust_cache(__unused uuid_t uuid)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+static kern_return_t
 xnu_load_trust_cache(
 	TCType_t type,
 	const uint8_t *img4_payload, const size_t img4_payload_len,
@@ -656,12 +773,6 @@ xnu_check_trust_cache_runtime_for_uuid(
 {
 	kern_return_t ret = KERN_DENIED;
 
-	if (amfi->TrustCache.version < 3) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to check for loaded trust cache: interface not supported\n");
-		return KERN_NOT_SUPPORTED;
-	}
-
 	/* Lock the runtime as shared */
 	lck_rw_lock_shared(&trust_cache_rt_lock);
 
@@ -705,6 +816,42 @@ check_trust_cache_runtime_for_uuid(
 #else
 	ret = xnu_check_trust_cache_runtime_for_uuid(check_uuid);
 #endif
+
+	return ret;
+}
+
+kern_return_t
+unload_trust_cache(uuid_t uuid)
+{
+	kern_return_t ret = KERN_DENIED;
+	uuid_string_t uuid_string = {0};
+
+	/* Parse the UUID into a string */
+	uuid_unparse_lower(uuid, uuid_string);
+
+	/* We want to capture this log even on release kernels */
+	IOLog("attempting to unload trust cache with UUID: %s\n", uuid_string);
+
+	/* Check the entitlement on the calling process */
+	if (IOCurrentTaskHasEntitlement("com.apple.private.unload-trust-cache") == false) {
+		printf("calling task not permitted to unload trust caches\n");
+		return KERN_DENIED;
+	}
+
+#if CONFIG_SPTM
+	ret = txm_unload_trust_cache(uuid);
+#elif PMAP_CS_PPL_MONITOR
+	ret = ppl_unload_trust_cache(uuid);
+#else
+	ret = xnu_unload_trust_cache(uuid);
+#endif
+
+	if (ret == KERN_SUCCESS) {
+		IOLog("successfully unloaded trust cache with UUID: %s\n", uuid_string);
+		cs_blob_reset_cache();
+	} else {
+		IOLog("unable to unload trust cache with UUID: %s | %d\n", uuid_string, ret);
+	}
 
 	return ret;
 }
@@ -880,6 +1027,7 @@ load_trust_cache_with_type(
 		} else if (type == kTCTypeCryptex1BootApp) {
 			boot_app_tc_loaded = true;
 		}
+		os_atomic_add(&num_loadable_trust_caches, 1, relaxed);
 		printf("successfully loaded trust cache of type: %u\n", type);
 	}
 
@@ -937,6 +1085,30 @@ query_trust_cache(
 	ret = ppl_query_trust_cache(query_type, cdhash, query_token);
 #else
 	ret = xnu_query_trust_cache(query_type, cdhash, query_token);
+#endif
+
+	return ret;
+}
+
+kern_return_t
+query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	__unused uint8_t *rem_perms)
+{
+	kern_return_t ret = KERN_NOT_SUPPORTED;
+
+	if (cdhash == NULL) {
+		printf("unable to query trust caches: no cdhash provided\n");
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * Only when the system is using the Trusted Execution Monitor environment does
+	 * it support restricted execution mode. For all other monitor environments, or
+	 * when we don't have a monitor, the return defaults to a not supported.
+	 */
+#if CONFIG_SPTM
+	ret = txm_query_trust_cache_for_rem(cdhash, rem_perms);
 #endif
 
 	return ret;
@@ -1005,12 +1177,6 @@ load_static_trust_cache(void)
 
 	/* Nothing to do when the runtime isn't set */
 	if (trust_cache_rt == NULL) {
-		return;
-	}
-
-	if (amfi->TrustCache.version < 1) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to load static trust cache: interface not supported\n");
 		return;
 	}
 
@@ -1124,6 +1290,13 @@ load_static_trust_cache(void)
 		 * static trust cache on the system.
 		 */
 		trust_cache_static_loaded = true;
+
+		/* Increment the number of boot trust caches */
+		if (tc_type == kTCTypeStatic) {
+			num_static_trust_caches += 1;
+		} else {
+			num_engineering_trust_caches += 1;
+		}
 	}
 
 	printf("completed loading external trust cache modules\n");
@@ -1147,9 +1320,9 @@ static_trust_cache_capabilities(
 	}
 
 #if CONFIG_SPTM
-	if (num_static_trust_caches > 0) {
+	if (txm_static_trust_caches > 0) {
 		/* Copy in the data received from TrustedExecutionMonitor */
-		*num_static_trust_caches_ret = num_static_trust_caches;
+		*num_static_trust_caches_ret = txm_static_trust_caches;
 		*capabilities0_ret = static_trust_cache_capabilities0;
 		*capabilities1_ret = static_trust_cache_capabilities1;
 
@@ -1158,11 +1331,7 @@ static_trust_cache_capabilities(
 	}
 #endif
 
-	if (amfi->TrustCache.version < 2) {
-		/* AMFI change hasn't landed in the build */
-		printf("unable to get static trust cache capabilities: interface not supported\n");
-		return KERN_NOT_SUPPORTED;
-	} else if (trust_cache_static_loaded == false) {
+	if (trust_cache_static_loaded == false) {
 		/* Return arguments already set */
 		return KERN_SUCCESS;
 	}

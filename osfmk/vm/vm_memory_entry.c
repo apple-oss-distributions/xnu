@@ -63,17 +63,11 @@ mach_make_memory_entry_64(
 	ipc_port_t              *object_handle,
 	ipc_port_t              parent_handle)
 {
-	vm_named_entry_kernel_flags_t   vmne_kflags;
-
-	vmne_kflags = VM_NAMED_ENTRY_KERNEL_FLAGS_NONE;
-	if (VM_SANITIZE_UNSAFE_UNWRAP(permission_u) & MAP_MEM_LEDGER_TAGGED) {
-		vmne_kflags.vmnekf_ledger_tag = VM_LEDGER_TAG_DEFAULT;
-	}
 	return mach_make_memory_entry_internal(target_map,
 	           size_u,
 	           offset_u,
 	           permission_u,
-	           vmne_kflags,
+	           VM_NAMED_ENTRY_KERNEL_FLAGS_NONE,
 	           object_handle,
 	           parent_handle);
 }
@@ -122,20 +116,23 @@ mach_make_memory_entry_cleanup(
 	memory_object_size_ut  *size_u,
 	vm_map_offset_ut        offset_u __unused,
 	vm_prot_t               permission __unused,
-	vm_named_entry_t        user_entry __unused)
+	vm_named_entry_t        user_entry __unused,
+	ipc_port_t             *object_handle)
 {
 	DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry "
 	    "%p kr 0x%x\n", target_map, VM_SANITIZE_UNSAFE_UNWRAP(offset_u),
 	    VM_SANITIZE_UNSAFE_UNWRAP(*size_u), permission, user_entry,
 	    vm_sanitize_get_kr(kr));
 	/*
-	 * Set safe size value on failed return
+	 * Set safe size and object_handle value on failed return
 	 */
 	*size_u = vm_sanitize_wrap_size(0);
+	*object_handle = IPC_PORT_NULL;
 	return vm_sanitize_get_kr(kr);
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_make_memory_entry_mem_only_sanitize(
 	vm_map_t                target_map,
 	memory_object_size_ut   size_u,
@@ -189,7 +186,7 @@ mach_make_memory_entry_mem_only(
 	    &map_size);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	vm_memory_entry_decode_perm(permission, &access, &protections,
@@ -197,19 +194,19 @@ mach_make_memory_entry_mem_only(
 
 	if (use_data_addr || use_4K_compat || parent_entry == NULL) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	parent_is_object = parent_entry->is_object;
 	if (!parent_is_object) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	if ((access != parent_entry->access) &&
 	    !(parent_entry->protection & VM_PROT_WRITE)) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_RIGHT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	object = vm_named_entry_to_vm_object(parent_entry);
@@ -219,9 +216,6 @@ mach_make_memory_entry_mem_only(
 		wimg_mode = VM_WIMG_USE_DEFAULT;
 	}
 	vm_prot_to_wimg(access, &wimg_mode);
-	if (access != MAP_MEM_NOOP) {
-		parent_entry->access = access;
-	}
 	if (parent_is_object && object &&
 	    (access != MAP_MEM_NOOP) &&
 	    (!(object->nophyscache))) {
@@ -230,6 +224,9 @@ mach_make_memory_entry_mem_only(
 			vm_object_change_wimg_mode(object, wimg_mode);
 			vm_object_unlock(object);
 		}
+	}
+	if (access != MAP_MEM_NOOP) {
+		parent_entry->access = access;
 	}
 	if (object_handle) {
 		*object_handle = IP_NULL;
@@ -253,6 +250,10 @@ vm_memory_entry_pgz_decode_offset(
 	if (target_map == NULL || target_map->pmap == kernel_pmap) {
 		vm_map_offset_t pgz_offset;
 
+		/*
+		 * It's ok to unsafe unwrap because PGZ does not ship to
+		 * customers.
+		 */
 		pgz_offset = pgz_decode(VM_SANITIZE_UNSAFE_UNWRAP(offset_u),
 		    VM_SANITIZE_UNSAFE_UNWRAP(*size_u));
 		return vm_sanitize_wrap_addr(pgz_offset);
@@ -261,7 +262,8 @@ vm_memory_entry_pgz_decode_offset(
 }
 #endif /* CONFIG_PROB_GZALLOC */
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_make_memory_entry_generic_sanitize(
 	vm_map_t                target_map,
 	memory_object_size_ut   size_u,
@@ -320,9 +322,8 @@ mach_make_memory_entry_named_create(
 	vm_map_offset_t         map_start, map_end, offset;
 
 	if (VM_SANITIZE_UNSAFE_IS_ZERO(*size_u)) {
-		*object_handle = IPC_PORT_NULL;
 		return mach_make_memory_entry_cleanup(KERN_SUCCESS, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 #if CONFIG_PROB_GZALLOC
@@ -346,7 +347,7 @@ mach_make_memory_entry_named_create(
 	    &offset);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	assert(map_size != 0);
@@ -356,7 +357,7 @@ mach_make_memory_entry_named_create(
 
 	if (use_data_addr || use_4K_compat) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	/*
@@ -365,7 +366,7 @@ mach_make_memory_entry_named_create(
 #if __LP64__
 	if (map_size > ANON_MAX_SIZE) {
 		return mach_make_memory_entry_cleanup(KERN_FAILURE, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 #endif /* __LP64__ */
 
@@ -402,7 +403,8 @@ mach_make_memory_entry_named_create(
 				vm_object_unlock(object);
 				vm_object_deallocate(object);
 				return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT,
-				           target_map, size_u, offset_u, permission, user_entry);
+				           target_map, size_u, offset_u, permission, user_entry,
+				           object_handle);
 			}
 			VM_OBJECT_SET_PURGABLE(object, VM_PURGABLE_NONVOLATILE);
 			if (permission & MAP_MEM_PURGABLE_KERNEL_ONLY) {
@@ -443,7 +445,7 @@ mach_make_memory_entry_named_create(
 			vm_object_unlock(object);
 			vm_object_deallocate(object);
 			return mach_make_memory_entry_cleanup(kr, target_map,
-			           size_u, offset_u, permission, user_entry);
+			           size_u, offset_u, permission, user_entry, object_handle);
 		}
 		/* all memory in this named entry is "owned" */
 		fully_owned = true;
@@ -500,11 +502,12 @@ mach_make_memory_entry_named_create(
 
 static kern_return_t
 mach_make_memory_entry_copy(
-	vm_map_t                target_map,
-	memory_object_size_ut  *size_u,
-	vm_map_offset_ut        offset_u,
-	vm_prot_t               permission,
-	ipc_port_t             *object_handle)
+	vm_map_t                      target_map,
+	memory_object_size_ut         *size_u,
+	vm_map_offset_ut              offset_u,
+	vm_prot_t                     permission,
+	__unused vm_named_entry_kernel_flags_t vmne_kflags,
+	ipc_port_t                    *object_handle)
 {
 	unsigned int            access;
 	vm_prot_t               protections;
@@ -524,7 +527,7 @@ mach_make_memory_entry_copy(
 
 	if (VM_SANITIZE_UNSAFE_IS_ZERO(*size_u)) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 #if CONFIG_PROB_GZALLOC
@@ -548,7 +551,7 @@ mach_make_memory_entry_copy(
 	    &offset);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	assert(map_size != 0);
@@ -558,20 +561,21 @@ mach_make_memory_entry_copy(
 
 	if (target_map == VM_MAP_NULL) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_TASK, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	offset_in_page = vm_memory_entry_get_offset_in_page(offset, map_start,
 	    use_data_addr, use_4K_compat);
 
+	int copyin_flags = VM_MAP_COPYIN_ENTRY_LIST;
 	kr = vm_map_copyin_internal(target_map,
 	    map_start,
 	    map_size,
-	    VM_MAP_COPYIN_ENTRY_LIST,
+	    copyin_flags,
 	    &copy);
 	if (kr != KERN_SUCCESS) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 	assert(copy != VM_MAP_COPY_NULL);
 
@@ -609,13 +613,14 @@ mach_make_memory_entry_copy(
 
 static kern_return_t
 mach_make_memory_entry_share(
-	vm_map_t                target_map,
-	memory_object_size_ut  *size_u,
-	vm_map_offset_ut        offset_u,
-	vm_prot_t               permission,
-	ipc_port_t             *object_handle,
-	ipc_port_t              parent_handle,
-	vm_named_entry_t        parent_entry)
+	vm_map_t                      target_map,
+	memory_object_size_ut        *size_u,
+	vm_map_offset_ut              offset_u,
+	vm_prot_t                     permission,
+	__unused vm_named_entry_kernel_flags_t vmne_kflags,
+	ipc_port_t                    *object_handle,
+	ipc_port_t                    parent_handle,
+	vm_named_entry_t              parent_entry)
 {
 	vm_object_t             object;
 	unsigned int            access;
@@ -640,7 +645,7 @@ mach_make_memory_entry_share(
 
 	if (VM_SANITIZE_UNSAFE_IS_ZERO(*size_u)) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 #if CONFIG_PROB_GZALLOC
@@ -664,7 +669,7 @@ mach_make_memory_entry_share(
 	    &offset);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	assert(map_size != 0);
@@ -674,7 +679,7 @@ mach_make_memory_entry_share(
 
 	if (target_map == VM_MAP_NULL) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_TASK, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
@@ -745,6 +750,7 @@ mach_make_memory_entry_share(
 		 */
 		cur_prot = VM_PROT_NONE;
 		max_prot = VM_PROT_NONE;
+		vmk_flags.vmkf_remap_legacy_mode = true;
 	} else {
 		/*
 		 * Caller wants a memory entry with "protections".
@@ -777,7 +783,7 @@ mach_make_memory_entry_share(
 	    vmk_flags);
 	if (kr != KERN_SUCCESS) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 	assert(copy != VM_MAP_COPY_NULL);
 
@@ -791,7 +797,8 @@ mach_make_memory_entry_share(
 			/* no access at all: fail */
 			vm_map_copy_discard(copy);
 			return mach_make_memory_entry_cleanup(KERN_PROTECTION_FAILURE,
-			           target_map, size_u, offset_u, permission, user_entry);
+			           target_map, size_u, offset_u, permission, user_entry,
+			           object_handle);
 		}
 	} else {
 		/*
@@ -804,7 +811,8 @@ mach_make_memory_entry_share(
 		if ((cur_prot & protections) != protections) {
 			vm_map_copy_discard(copy);
 			return mach_make_memory_entry_cleanup(KERN_PROTECTION_FAILURE,
-			           target_map, size_u, offset_u, permission, user_entry);
+			           target_map, size_u, offset_u, permission, user_entry,
+			           object_handle);
 		}
 	}
 
@@ -913,7 +921,8 @@ mach_make_memory_entry_share(
 	return KERN_SUCCESS;
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_make_memory_entry_from_parent_entry_sanitize(
 	vm_map_t                target_map,
 	memory_object_size_ut   size_u,
@@ -1037,7 +1046,7 @@ mach_make_memory_entry_from_parent_entry(
 	    &user_entry_offset);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	if (use_data_addr || use_4K_compat) {
@@ -1060,7 +1069,7 @@ mach_make_memory_entry_from_parent_entry(
 	}
 	if ((protections & parent_entry->protection) != protections) {
 		return mach_make_memory_entry_cleanup(KERN_PROTECTION_FAILURE, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	offset_in_page = vm_memory_entry_get_offset_in_page(offset, map_start,
@@ -1155,13 +1164,17 @@ mach_make_memory_entry_internal(
 	kr = mach_make_memory_entry_sanitize_perm(permission_u, &permission);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return mach_make_memory_entry_cleanup(kr, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
+	}
+
+	if (permission & MAP_MEM_LEDGER_TAGGED) {
+		vmne_kflags.vmnekf_ledger_tag = VM_LEDGER_TAG_DEFAULT;
 	}
 
 	parent_entry = mach_memory_entry_from_port(parent_handle);
 	if (parent_entry && parent_entry->is_copy) {
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
-		           size_u, offset_u, permission, user_entry);
+		           size_u, offset_u, permission, user_entry, object_handle);
 	}
 
 	if (permission & MAP_MEM_ONLY) {
@@ -1176,14 +1189,15 @@ mach_make_memory_entry_internal(
 
 	if (permission & MAP_MEM_VM_COPY) {
 		return mach_make_memory_entry_copy(target_map, size_u, offset_u,
-		           permission, object_handle);
+		           permission, vmne_kflags, object_handle);
 	}
 
 	if ((permission & MAP_MEM_VM_SHARE)
 	    || parent_entry == NULL
 	    || (permission & MAP_MEM_NAMED_REUSE)) {
 		return mach_make_memory_entry_share(target_map, size_u, offset_u,
-		           permission, object_handle, parent_handle, parent_entry);
+		           permission, vmne_kflags, object_handle, parent_handle,
+		           parent_entry);
 	}
 
 	/*
@@ -1243,7 +1257,8 @@ mach_memory_entry_allocate(ipc_port_t *user_handle_p)
 	return user_entry;
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_memory_object_memory_entry_64_sanitize(
 	vm_object_size_ut       size_u,
 	vm_prot_ut              permission_u,
@@ -1893,6 +1908,8 @@ mach_memory_entry_map_size(
 	memory_object_offset_t  end;
 	mach_vm_size_t          map_size;
 
+	*map_size_out = 0;
+
 	mem_entry = mach_memory_entry_from_port(entry_port);
 	if (mem_entry == NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -2192,4 +2209,23 @@ memory_entry_check_for_adjustment(
 	named_entry_unlock(named_entry);
 
 	return kr;
+}
+
+vm_object_t
+vm_convert_port_to_copy_object(
+	ipc_port_t      port)
+{
+	/* Invalid / wrong port type? */
+	if (!IP_VALID(port) || ip_kotype(port) != IKOT_NAMED_ENTRY) {
+		return NULL;
+	}
+
+	/* We expect the named entry to point to an object. */
+	vm_named_entry_t named_entry = mach_memory_entry_from_port(port);
+	if (!named_entry || !named_entry->is_object) {
+		return NULL;
+	}
+
+	/* Pull out the copy map object... */
+	return vm_named_entry_to_vm_object(named_entry);
 }

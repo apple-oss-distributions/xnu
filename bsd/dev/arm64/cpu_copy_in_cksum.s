@@ -26,6 +26,10 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#ifdef KERNEL
+#include <arm64/asm.h>
+#endif /* KERNEL */
+
 /*
  *  extern uint32_t os_cpu_copy_in_cksum(const void *src, void *dst,
  *      uint32_t len, uint32_t sum0);
@@ -71,6 +75,9 @@ _os_cpu_copy_in_cksum:
 #define partial		x7
 #define wpartial	w7
 
+#ifdef KERNEL
+	ARM64_PROLOG
+#endif /* KERNEL */
 	mov	partial, #0		// partial = 0;
 	mov	need_swap, #0		// needs_swap = 0;
 

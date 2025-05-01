@@ -154,6 +154,8 @@ vm_map_get_upl(
 	return kr;
 }
 
+uint64_t upl_pages_wired_busy = 0;
+
 kern_return_t
 upl_abort_range(
 	upl_t                   upl,
@@ -411,9 +413,7 @@ process_upl_to_abort:
 					dwp->dw_mask |= DW_clear_busy;
 				}
 				if (m->vmp_overwriting) {
-					if (m->vmp_busy) {
-						dwp->dw_mask |= DW_clear_busy;
-					} else {
+					if (VM_PAGE_WIRED(m)) {
 						/*
 						 * deal with the 'alternate' method
 						 * of stabilizing the page...
@@ -423,7 +423,14 @@ process_upl_to_abort:
 						 * take care of the primary stabilzation
 						 * method (i.e. setting 'busy' to TRUE)
 						 */
+						if (m->vmp_busy) {
+//							printf("*******   FBDP %s:%d page %p object %p ofsfet 0x%llx wired and busy\n", __FUNCTION__, __LINE__, m, VM_PAGE_OBJECT(m), m->vmp_offset);
+							upl_pages_wired_busy++;
+						}
 						dwp->dw_mask |= DW_vm_page_unwire;
+					} else {
+						assert(m->vmp_busy);
+						dwp->dw_mask |= DW_clear_busy;
 					}
 					m->vmp_overwriting = FALSE;
 				}
@@ -898,6 +905,7 @@ process_upl_to_commit:
 					if (m->vmp_wire_count == 0) {
 						m->vmp_q_state = VM_PAGE_NOT_ON_Q;
 						unwired_count++;
+
 					}
 				}
 				if (m->vmp_wire_count == 0) {
@@ -999,7 +1007,20 @@ process_upl_to_commit:
 			/*
 			 * the (COPY_OUT_FROM == FALSE) request_page_list case
 			 */
-			if (m->vmp_busy) {
+			if (VM_PAGE_WIRED(m)) {
+				/*
+				 * alternate (COPY_OUT_FROM == FALSE) page_list case
+				 * Occurs when the original page was wired
+				 * at the time of the list request
+				 */
+				if (m->vmp_busy) {
+//					printf("*******   FBDP %s:%d page %p object %p ofsfet 0x%llx wired and busy\n", __FUNCTION__, __LINE__, m, VM_PAGE_OBJECT(m), m->vmp_offset);
+					upl_pages_wired_busy++;
+				}
+				assert(!m->vmp_absent);
+				dwp->dw_mask |= DW_vm_page_unwire; /* reactivates */
+			} else {
+				assert(m->vmp_busy);
 #if CONFIG_PHANTOM_CACHE
 				if (m->vmp_absent && !m_object->internal) {
 					dwp->dw_mask |= DW_vm_phantom_cache_update;
@@ -1008,15 +1029,6 @@ process_upl_to_commit:
 				m->vmp_absent = FALSE;
 
 				dwp->dw_mask |= DW_clear_busy;
-			} else {
-				/*
-				 * alternate (COPY_OUT_FROM == FALSE) page_list case
-				 * Occurs when the original page was wired
-				 * at the time of the list request
-				 */
-				assert(VM_PAGE_WIRED(m));
-
-				dwp->dw_mask |= DW_vm_page_unwire; /* reactivates */
 			}
 			m->vmp_overwriting = FALSE;
 		}

@@ -104,6 +104,8 @@ __options_closed_decl(ipc_object_copyin_flags_t, uint16_t, {
 	IPC_OBJECT_COPYIN_FLAGS_ALLOW_REPLY_MOVE_SEND_ONCE    = 0x10, /* Port is a reply port. */
 	IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_RECEIVE       = 0x20,
 	IPC_OBJECT_COPYIN_FLAGS_ALLOW_CONN_IMMOVABLE_RECEIVE  = 0x40, /* Port is a libxpc connection port. */
+	IPC_OBJECT_COPYIN_FLAGS_DEST_EXTRA_COPY               = 0x80,
+	IPC_OBJECT_COPYIN_FLAGS_DEST_EXTRA_MOVE               = 0x100,
 });
 
 /*
@@ -121,13 +123,6 @@ struct ipc_object {
 	ipc_object_bits_t _Atomic io_bits;
 	ipc_object_refs_t _Atomic io_references;
 } __attribute__((aligned(8)));
-
-/*
- * Legacy defines.  Should use IPC_OBJECT_NULL, etc...
- */
-#define IO_NULL                 ((ipc_object_t) 0)
-#define IO_DEAD                 ((ipc_object_t) ~0UL)
-#define IO_VALID(io)            (((io) != IO_NULL) && ((io) != IO_DEAD))
 
 /*
  *	IPC steals the high-order bits from the kotype to use
@@ -199,11 +194,7 @@ extern zone_t __single ipc_object_zones[IOT_NUMBER];
 #define io_from_waitq(waitq) \
 	(&__container_of(waitq, struct ipc_object_waitq, iowq_waitq)->iowq_object)
 
-#define io_lock(io) ({ \
-	ipc_object_t __io = (io); \
-	ipc_object_lock(__io, io_otype(__io)); \
-})
-#define io_unlock(io)        ipc_object_unlock(io)
+#define io_unlock(io)        waitq_unlock(io_waitq(io))
 #define io_lock_held(io)     assert(waitq_held(io_waitq(io)))
 #define io_lock_held_kdp(io) waitq_held(io_waitq(io))
 #define io_lock_allow_invalid(io) ipc_object_lock_allow_invalid(io)
@@ -214,36 +205,11 @@ extern zone_t __single ipc_object_zones[IOT_NUMBER];
 #define io_release_live(io)  ipc_object_release_live(io)
 
 /*
- * Retrieve a label for use in a kernel call that takes a security
- * label as a parameter. If necessary, io_getlabel acquires internal
- * (not io_lock) locks, and io_unlocklabel releases them.
- */
-
-struct label;
-extern struct label *io_getlabel(ipc_object_t obj);
-#define io_unlocklabel(obj)
-
-/*
  * Exported interfaces
  */
 
-extern void ipc_object_lock(
-	ipc_object_t            object,
-	ipc_object_type_t       type);
-
-extern void ipc_object_lock_check_aligned(
-	ipc_object_t            object,
-	ipc_object_type_t       type);
-
 extern bool ipc_object_lock_allow_invalid(
 	ipc_object_t            object) __result_use_check;
-
-extern bool ipc_object_lock_try(
-	ipc_object_t            object,
-	ipc_object_type_t       type);
-
-extern void ipc_object_unlock(
-	ipc_object_t            object);
 
 extern void ipc_object_deallocate_register_queue(void);
 
@@ -267,30 +233,23 @@ extern kern_return_t ipc_object_translate(
 	ipc_space_t             space,
 	mach_port_name_t        name,
 	mach_port_right_t       right,
-	ipc_object_t            *objectp);
+	ipc_object_t           *objectp);
 
 /* Look up two objects in a space, locking them in the order described */
-extern kern_return_t ipc_object_translate_two(
+extern kern_return_t ipc_object_translate_port_pset(
 	ipc_space_t             space,
-	mach_port_name_t        name1,
-	mach_port_right_t       right1,
-	ipc_object_t            *objectp1,
-	mach_port_name_t        name2,
-	mach_port_right_t       right2,
-	ipc_object_t            *objectp2);
+	mach_port_name_t        port_name,
+	ipc_port_t             *port,
+	mach_port_name_t        pset_name,
+	ipc_pset_t             *pset);
 
 /* Validate an object as belonging to the correct zone */
 extern void ipc_object_validate(
 	ipc_object_t            object,
 	ipc_object_type_t       type);
 
-extern void ipc_object_validate_aligned(
-	ipc_object_t            object,
-	ipc_object_type_t       type);
-
 /* Allocate a dead-name entry */
-extern kern_return_t
-ipc_object_alloc_dead(
+extern kern_return_t ipc_object_alloc_dead(
 	ipc_space_t             space,
 	mach_port_name_t        *namep);
 
@@ -322,24 +281,23 @@ extern kern_return_t ipc_object_copyin(
 	ipc_space_t             space,
 	mach_port_name_t        name,
 	mach_msg_type_name_t    msgt_name,
-	ipc_object_t            *objectp,
-	mach_port_context_t     context,
-	mach_msg_guard_flags_t  *guard_flags,
-	ipc_object_copyin_flags_t copyin_flags);
+	ipc_object_copyin_flags_t copyin_flags,
+	mach_msg_guarded_port_descriptor_t *gdesc,
+	ipc_port_t             *portp);
 
 /* Copyin a naked capability from the kernel */
 extern void ipc_object_copyin_from_kernel(
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name);
 
 /* Destroy a naked capability */
 extern void ipc_object_destroy(
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name);
 
 /* Destroy a naked destination capability */
 extern void ipc_object_destroy_dest(
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name);
 
 /* Insert a send right into an object already in the current space */
@@ -351,24 +309,23 @@ extern kern_return_t ipc_object_insert_send_right(
 /* Copyout a capability, placing it into a space */
 extern kern_return_t ipc_object_copyout(
 	ipc_space_t             space,
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name,
 	ipc_object_copyout_flags_t flags,
-	mach_port_context_t     *context,
-	mach_msg_guard_flags_t  *guard_flags,
+	mach_msg_guarded_port_descriptor_t *gdesc,
 	mach_port_name_t        *namep);
 
 /* Copyout a capability with a name, placing it into a space */
 extern kern_return_t ipc_object_copyout_name(
 	ipc_space_t             space,
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name,
 	mach_port_name_t        name);
 
 /* Translate/consume the destination right of a message */
 extern void ipc_object_copyout_dest(
 	ipc_space_t             space,
-	ipc_object_t            object,
+	ipc_port_t              port,
 	mach_msg_type_name_t    msgt_name,
 	mach_port_name_t        *namep);
 

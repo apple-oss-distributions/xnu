@@ -460,6 +460,7 @@ struct ip6_out_args {
 #define IP6OAF_REDO_QOSMARKING_POLICY   0x00002000      /* Re-evaluate QOS marking policy */
 #define IP6OAF_R_IFDENIED               0x00004000      /* return flag: denied access to interface */
 #define IP6OAF_MANAGEMENT_ALLOWED       0x00008000      /* access to management interfaces */
+#define IP6OAF_ULTRA_CONSTRAINED_ALLOWED 0x00010000     /* access to ultra constrained interfaces */
 	int             ip6oa_sotc;             /* traffic class for Fastlane DSCP mapping */
 	int             ip6oa_netsvctype;
 	int32_t         qos_marking_gencount;
@@ -605,7 +606,7 @@ extern int dest6_input(struct mbuf **, int *, int);
  */
 #define IPV6_SRCSEL_HINT_PREFER_TMPADDR         0x00000001
 
-extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *, int);
+extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *);
 extern struct in6_addr * in6_selectsrc_core(struct sockaddr_in6 *,
     uint32_t, struct ifnet *, int, struct in6_addr *,
     struct ifnet **, int *, struct ifaddr **, struct route_in6 *, boolean_t);

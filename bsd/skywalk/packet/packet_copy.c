@@ -972,9 +972,8 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		}
 
 		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
-		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
-			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
-			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		if (ts_tag != NULL) {
+			__packet_set_tx_timestamp(ph, *(uint64_t *)(ts_tag->m_tag_data));
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
@@ -1362,9 +1361,8 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		}
 
 		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
-		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
-			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
-			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		if (ts_tag != NULL) {
+			__packet_set_tx_timestamp(ph, *(uint64_t *)(ts_tag->m_tag_data));
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
@@ -1418,6 +1416,12 @@ _convert_pkt_csum_flags(uint32_t pkt_flags)
 	}
 	if (pkt_flags & PACKET_CSUM_ZERO_INVERT) {
 		mbuf_flags |= CSUM_ZERO_INVERT;
+	}
+	if (pkt_flags & PACKET_CSUM_TSO_IPV4) {
+		mbuf_flags |= CSUM_TSO_IPV4;
+	}
+	if (pkt_flags & PACKET_CSUM_TSO_IPV6) {
+		mbuf_flags |= CSUM_TSO_IPV6;
 	}
 
 	return mbuf_flags;
@@ -1520,6 +1524,8 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		/* translate packet metadata */
 		mbuf_set_timestamp(m, pkt->pkt_timestamp,
 		    ((pkt->pkt_pflags & PKT_F_TS_VALID) != 0));
+
+		m->m_pkthdr.rx_seg_cnt = pkt->pkt_seg_cnt;
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",
@@ -1674,8 +1680,6 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 	MD_BUFLET_ADDR_ABS(pkt, baddr);
 	ASSERT(baddr != NULL);
 	baddr += poff;
-	VERIFY((poff + len) <= (PP_BUF_SIZE_DEF(pkt->pkt_qum.qum_pp) *
-	    __packet_get_buflet_count(ph)));
 
 	ASSERT((m->m_flags & M_PKTHDR));
 	m->m_data += moff;
@@ -1740,6 +1744,8 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		mbuf_set_timestamp(m, pkt->pkt_timestamp,
 		    ((pkt->pkt_pflags & PKT_F_TS_VALID) != 0));
 
+		m->m_pkthdr.rx_seg_cnt = pkt->pkt_seg_cnt;
+
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",
 		    sk_proc_name_address(current_proc()),
@@ -1757,6 +1763,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		    (uint32_t)pkt->pkt_csum_rx_value);
 		break;
 	case NR_TX:
+		ASSERT(len <= M16KCLBYTES);
 		dp = (uint8_t *)m_mtod_current(m);
 		ASSERT(m->m_next == NULL);
 		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=

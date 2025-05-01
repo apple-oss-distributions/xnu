@@ -121,7 +121,7 @@ common_hook(void)
 	return rv;
 }
 
-#if (MAC_POLICY_OPS_VERSION != 86)
+#if (MAC_POLICY_OPS_VERSION != 87)
 # error "struct mac_policy_ops doesn't match definition in mac_policy.h"
 #endif
 /*
@@ -182,7 +182,6 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(proc_notify_service_port_derive)
 	CHECK_SET_HOOK(proc_check_set_task_exception_port)
 	CHECK_SET_HOOK(proc_check_set_thread_exception_port)
-	CHECK_SET_HOOK(proc_check_delegated_signal)
 
 	.mpo_reserved08 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved09 = (mpo_reserved_hook_t *)common_hook,
@@ -198,6 +197,7 @@ const static struct mac_policy_ops policy_ops = {
 	.mpo_reserved19 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved20 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved21 = (mpo_reserved_hook_t *)common_hook,
+	.mpo_reserved22 = (mpo_reserved_hook_t *)common_hook,
 
 	CHECK_SET_HOOK(necp_check_open)
 	CHECK_SET_HOOK(necp_check_client_action)
@@ -223,7 +223,7 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(vnode_check_swap)
 	.mpo_reserved33 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved34 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved35 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(mount_notify_mount)
 	CHECK_SET_HOOK(vnode_check_copyfile)
 
 	CHECK_SET_HOOK(mount_check_quotactl)

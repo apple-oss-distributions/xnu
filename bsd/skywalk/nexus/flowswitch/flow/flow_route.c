@@ -800,15 +800,15 @@ flow_route_retain(struct flow_route *fr)
 	lck_spin_unlock(&fr->fr_reflock);
 }
 
-void
-flow_route_release(struct flow_route *fr)
+static void
+__flow_route_release(struct flow_route *fr, boolean_t renew)
 {
 	bool should_free = false;
 
 	lck_spin_lock(&fr->fr_reflock);
 	VERIFY(fr->fr_usecnt > 0);
 	if (fr->fr_flags & FLOWRTF_ATTACHED) {
-		if (fr->fr_usecnt-- == (FLOW_ROUTE_MINREF + 1)) {
+		if (fr->fr_usecnt-- == (FLOW_ROUTE_MINREF + 1) && renew) {
 			fr->fr_expire = _net_uptime + flow_route_expire;
 		}
 	} else {
@@ -826,6 +826,12 @@ flow_route_release(struct flow_route *fr)
 	if (should_free) {
 		fr_free(fr);
 	}
+}
+
+void
+flow_route_release(struct flow_route *fr)
+{
+	__flow_route_release(fr, true);
 }
 
 static uint32_t
@@ -1008,6 +1014,7 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 	struct flow_route_id_bucket *frib = NULL;
 	struct flow_route *fr = NULL;
 	struct flow_mgr *fm;
+	boolean_t renew_fr = true;
 
 	VERIFY(!uuid_is_null(ee_arg.ee_fm_uuid));
 	VERIFY(!uuid_is_null(ee_arg.ee_fr_uuid));
@@ -1095,6 +1102,7 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			SK_DF(SK_VERB_FLOW_ROUTE, "%s: dst %s llentry stale",
 			    fm->fm_name, sk_sa_ntop(dst, dst_s,
 			    sizeof(dst_s)));
+			renew_fr = false;
 			break;
 
 		case ROUTE_LLENTRY_CHANGED:
@@ -1198,7 +1206,7 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 	} while (0);
 
 	if (fr != NULL) {
-		flow_route_release(fr);
+		__flow_route_release(fr, renew_fr);
 		FR_UNLOCK(fr);
 	}
 

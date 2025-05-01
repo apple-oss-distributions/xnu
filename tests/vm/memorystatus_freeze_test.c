@@ -12,6 +12,8 @@
 #include <mach/mach.h>
 #include <os/reason_private.h>
 #include <TargetConditionals.h>
+#include <sys/coalition.h>
+#include <spawn_private.h>
 
 #ifdef T_NAMESPACE
 #undef T_NAMESPACE
@@ -34,6 +36,8 @@ T_GLOBAL_META(
 #define MEM_SIZE_MB                     10
 #define NUM_ITERATIONS          5
 #define FREEZE_PAGES_MAX 256
+
+#define HAS_FREEZER ((TARGET_OS_IOS && !TARGET_OS_XR) || TARGET_OS_WATCH)
 
 #define CREATE_LIST(X) \
 	X(SUCCESS) \
@@ -134,6 +138,34 @@ in_shared_region(mach_vm_address_t addr, cpu_type_t type)
 	}
 
 	return addr >= base && addr < (base + size);
+}
+
+static int orig_freezer;
+
+static void
+restore_freezer() {
+	int ret;
+	T_LOG("Restoring original vm.freeze_enabled value (%d)...", orig_freezer);
+	ret = sysctlbyname("vm.freeze_enabled", NULL, NULL, &orig_freezer, sizeof(orig_freezer));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "Enabling freezer via sysctl");
+}
+
+static void
+check_for_and_enable_freezer() {
+	int ret, freeze_enabled;
+	size_t size = sizeof(freeze_enabled);
+
+	ret = sysctlbyname("vm.freeze_enabled", &freeze_enabled, &size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "Could not find vm.freeze_enabled");
+
+	if (!freeze_enabled) {
+		T_LOG("Freezer not enabled, enabling...");
+		orig_freezer = freeze_enabled;
+		freeze_enabled = 1;
+		ret = sysctlbyname("vm.freeze_enabled", NULL, NULL, &freeze_enabled, sizeof(freeze_enabled));
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "Enabling freezer via sysctl");
+		T_ATEND(restore_freezer);
+	}
 }
 
 /* Get the resident private memory of the given pid */
@@ -512,10 +544,10 @@ T_DECL(memorystatus_freeze_default_state, "Test that the freezer is enabled or d
 }
 
 T_DECL(freeze, "VM freezer test",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_ASROOT(true),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	run_freezer_test(
 		(MEM_SIZE_MB << 20) / get_vmpage_size());
 }
@@ -547,20 +579,20 @@ sysctl_freeze_pages_max(int* new_value)
 }
 
 T_DECL(freeze_over_max_threshold, "Max Freeze Threshold is Enforced",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_ASROOT(true),
 	T_META_TAG_VM_NOT_PREFERRED) {
 	int freeze_pages_max = FREEZE_PAGES_MAX;
+	check_for_and_enable_freezer();
 	sysctl_freeze_pages_max(&freeze_pages_max);
 	run_freezer_test(FREEZE_PAGES_MAX * 2);
 }
 
 T_HELPER_DECL(frozen_background, "Frozen background process",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_ASROOT(true)) {
 	kern_return_t kern_ret;
+	check_for_and_enable_freezer();
 	/* Set the process to freezable */
 	kern_ret = memorystatus_control(MEMORYSTATUS_CMD_SET_PROCESS_IS_FREEZABLE, getpid(), 1, NULL, 0);
 	T_QUIET; T_ASSERT_EQ(kern_ret, KERN_SUCCESS, "set process is freezable");
@@ -658,7 +690,7 @@ memorystatus_assertion_test_demote_frozen(void)
 	child_pid = launch_background_helper("frozen_background", false, true);
 	set_memlimits(child_pid, active_limit_mb, inactive_limit_mb, false, false);
 	set_assertion_priority(child_pid, requestedpriority, 0x0);
-	(void)check_properties(child_pid, requestedpriority, inactive_limit_mb, 0x0, ASSERTION_STATE_IS_SET, "Priority was set");
+	(void)check_properties(child_pid, requestedpriority, active_limit_mb, 0x0, ASSERTION_STATE_IS_SET, "Priority was set");
 	/* Listen for exit. */
 	ds_exit = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)child_pid, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
 	dispatch_source_set_event_handler(ds_exit, ^{
@@ -676,10 +708,12 @@ memorystatus_assertion_test_demote_frozen(void)
 }
 
 T_DECL(assertion_test_demote_frozen, "demoted frozen process goes to asserted priority.",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	/* T_META_ENABLED(HAS_FREEZER), */
 	T_META_ASROOT(true),
-	T_META_TAG_VM_NOT_PREFERRED) {
+	T_META_TAG_VM_NOT_PREFERRED,
+	T_META_ENABLED(false) /* rdar://133461319 */)
+{
+	check_for_and_enable_freezer();
 	memorystatus_assertion_test_demote_frozen();
 }
 
@@ -727,8 +761,7 @@ get_memorystatus_swap_all_apps(void)
 }
 
 T_DECL(budget_replenishment, "budget replenishes properly",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_REQUIRES_SYSCTL_NE("kern.memorystatus_freeze_daily_mb_max", UINT32_MAX),
 	T_META_TAG_VM_NOT_PREFERRED) {
 	size_t length;
@@ -740,6 +773,8 @@ T_DECL(budget_replenishment, "budget replenishes properly",
 	unsigned int new_budget, expected_new_budget_pages;
 	size_t new_budget_ln;
 	vm_size_t page_size = vm_kernel_page_size;
+
+	check_for_and_enable_freezer();
 
 	original_budget_multiplier = get_budget_multiplier();
 	T_ATEND(reset_budget_multiplier);
@@ -778,18 +813,23 @@ T_DECL(budget_replenishment, "budget replenishes properly",
 	T_QUIET; T_ASSERT_EQ(new_budget, expected_new_budget_pages, "Calculate new budget behaves correctly.");
 }
 
+static void
+get_frozen_list(global_frozen_procs_t *frozen_procs)
+{
+	int bytes_written;
+	bytes_written = memorystatus_control(MEMORYSTATUS_CMD_FREEZER_CONTROL, 0, FREEZER_CONTROL_GET_PROCS, frozen_procs, sizeof(global_frozen_procs_t));
+	T_QUIET; T_ASSERT_LE((size_t) bytes_written, sizeof(global_frozen_procs_t), "Didn't overflow buffer");
+	T_QUIET; T_ASSERT_GT(bytes_written, 0, "Wrote someting");
+}
 
 static bool
 is_proc_in_frozen_list(pid_t pid, char* name, size_t name_len)
 {
-	int bytes_written;
 	bool found = false;
 	global_frozen_procs_t *frozen_procs = malloc(sizeof(global_frozen_procs_t));
 	T_QUIET; T_ASSERT_NOTNULL(frozen_procs, "malloc");
 
-	bytes_written = memorystatus_control(MEMORYSTATUS_CMD_FREEZER_CONTROL, 0, FREEZER_CONTROL_GET_PROCS, frozen_procs, sizeof(global_frozen_procs_t));
-	T_QUIET; T_ASSERT_LE((size_t) bytes_written, sizeof(global_frozen_procs_t), "Didn't overflow buffer");
-	T_QUIET; T_ASSERT_GT(bytes_written, 0, "Wrote someting");
+	get_frozen_list(frozen_procs);
 
 	for (size_t i = 0; i < frozen_procs->gfp_num_frozen; i++) {
 		if (frozen_procs->gfp_procs[i].fp_pid == pid) {
@@ -942,10 +982,10 @@ test_after_background_helper_launches(bool exit_with_child, const char* variant,
 }
 
 T_DECL(get_frozen_procs, "List processes in the freezer",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
 
+	check_for_and_enable_freezer();
 	test_after_background_helper_launches(true, "frozen_background", ^{
 		proc_name_t name;
 		/* Place the child in the idle band so that it gets elevated like a typical app. */
@@ -963,13 +1003,13 @@ T_DECL(get_frozen_procs, "List processes in the freezer",
 }
 
 T_DECL(frozen_to_swap_accounting, "jetsam snapshot has frozen_to_swap accounting",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
 	static const size_t kSnapshotSleepDelay = 5;
 	static const size_t kFreezeToDiskMaxDelay = 60;
 
 
+	check_for_and_enable_freezer();
 	test_after_background_helper_launches(true, "frozen_background", ^{
 		memorystatus_jetsam_snapshot_t *snapshot = NULL;
 		memorystatus_jetsam_snapshot_entry_t *child_entry = NULL;
@@ -1001,9 +1041,10 @@ T_DECL(frozen_to_swap_accounting, "jetsam snapshot has frozen_to_swap accounting
 }
 
 T_DECL(freezer_snapshot, "App kills are recorded in the freezer snapshot",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
+
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1028,9 +1069,10 @@ T_DECL(freezer_snapshot, "App kills are recorded in the freezer snapshot",
 }
 
 T_DECL(freezer_snapshot_consume, "Freezer snapshot is consumed on read",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
+
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1060,9 +1102,10 @@ T_DECL(freezer_snapshot_consume, "Freezer snapshot is consumed on read",
 }
 
 T_DECL(freezer_snapshot_frozen_state, "Frozen state is recorded in freezer snapshot",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
+
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1090,9 +1133,10 @@ T_DECL(freezer_snapshot_frozen_state, "Frozen state is recorded in freezer snaps
 }
 
 T_DECL(freezer_snapshot_thaw_state, "Thaw count is recorded in freezer snapshot",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
+
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1175,10 +1219,10 @@ T_HELPER_DECL(check_frozen, "Check frozen state", T_META_ASROOT(true)) {
 }
 
 T_DECL(memorystatus_get_process_is_frozen, "MEMORYSTATUS_CMD_GET_PROCESS_IS_FROZEN returns correct state",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_TAG_VM_NOT_PREFERRED) {
 
+	check_for_and_enable_freezer();
 	test_after_background_helper_launches(true, "check_frozen", ^{
 		int ret;
 		/* Freeze the child, resume it, and signal it to check its state */
@@ -1263,8 +1307,7 @@ verify_proc_not_frozen(pid_t pid)
 }
 
 T_DECL(memorystatus_freeze_top_process, "memorystatus_freeze_top_process chooses the correct process",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
@@ -1275,6 +1318,7 @@ T_DECL(memorystatus_freeze_top_process, "memorystatus_freeze_top_process chooses
 	__block int maxproc;
 	size_t maxproc_size = sizeof(maxproc);
 
+	check_for_and_enable_freezer();
 	ret = sysctlbyname("kern.maxproc", &maxproc, &maxproc_size, NULL, 0);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.maxproc");
 	ret = sysctlbyname("kern.memorystatus_freeze_jetsam_band", &memorystatus_freeze_band, &memorystatus_freeze_band_size, NULL, 0);
@@ -1383,11 +1427,11 @@ construct_child_freeze_entry(memorystatus_properties_freeze_entry_v1 *entry)
 }
 
 T_DECL(memorystatus_freeze_top_process_ordered, "memorystatus_freeze_top_process chooses the correct process when using an ordered list",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	test_after_background_helper_launches(true, "frozen_background", ^{
@@ -1446,33 +1490,33 @@ memorystatus_freeze_top_process_ordered_wrong_pid(pid_t (^pid_for_entry)(pid_t))
  * In both cases the child should still get frozen.
  */
 T_DECL(memorystatus_freeze_top_process_ordered_reused_pid, "memorystatus_freeze_top_process is resilient to pid changes",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
 	T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
     T_META_ASROOT(true),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	memorystatus_freeze_top_process_ordered_wrong_pid(^(__unused pid_t child) {
 		return 1;
 	});
 }
 
 T_DECL(memorystatus_freeze_top_process_ordered_wrong_pid, "memorystatus_freeze_top_process is resilient to pid changes",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	memorystatus_freeze_top_process_ordered_wrong_pid(^(__unused pid_t child) {
 		return child + 1000;
 	});
 }
 
 T_DECL(memorystatus_freeze_demote_ordered, "memorystatus_demote_frozen_processes_using_demote_list chooses the correct process",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	enable_ordered_demote_mode();
@@ -1561,12 +1605,12 @@ cleanup_memorystatus_freezer_thaw_percentage(void)
 }
 
 T_DECL(memorystatus_freezer_thaw_percentage, "memorystatus_freezer_thaw_percentage updates correctly",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
 	__block dispatch_source_t first_signal_block;
+	check_for_and_enable_freezer();
 	/* Take ownership of the freezer probabilities for the duration of the test so that nothing new gets frozen by dasd. */
 	set_testing_pid();
 	reset_interval();
@@ -1636,26 +1680,31 @@ set_budget_pages_remaining(uint64_t pages_remaining)
 }
 
 static void
-enable_freeze(void)
+set_freeze_enabled(int freeze_enabled)
 {
-	int freeze_enabled = 1;
 	size_t length = sizeof(freeze_enabled);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("vm.freeze_enabled", NULL, NULL, &freeze_enabled, length),
 	    "enable vm.freeze_enabled");
 }
 
+static void
+enable_freeze(void)
+{
+	set_freeze_enabled(1);
+}
+
 T_DECL(memorystatus_freeze_budget_multiplier, "memorystatus_budget_multiplier multiplies budget",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_NE("kern.memorystatus_freeze_daily_mb_max", UINT32_MAX),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_ENABLED(false) /* rdar://87165483 */,
+	T_META_ENABLED(HAS_FREEZER),
+    T_META_ENABLED(false && HAS_FREEZER) /* rdar://87165483 */,
 	T_META_TAG_VM_NOT_PREFERRED) {
 	/* Disable freezer so that the budget doesn't change out from underneath us. */
 	int freeze_enabled = 0;
 	size_t length = sizeof(freeze_enabled);
 	uint64_t freeze_daily_pages_max;
+	check_for_and_enable_freezer();
 	T_ATEND(enable_freeze);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("vm.freeze_enabled", NULL, NULL, &freeze_enabled, length),
 	    "disable vm.freeze_enabled");
@@ -1671,13 +1720,13 @@ T_DECL(memorystatus_freeze_budget_multiplier, "memorystatus_budget_multiplier mu
 }
 
 T_DECL(memorystatus_freeze_set_dasd_trial_identifiers, "set dasd trial identifiers",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
 	T_META_TAG_VM_NOT_PREFERRED) {
 #define TEST_STR "freezer-das-trial"
 	memorystatus_freezer_trial_identifiers_v1 identifiers = {0};
 	identifiers.version = 1;
+	check_for_and_enable_freezer();
 	strncpy(identifiers.treatment_id, TEST_STR, sizeof(identifiers.treatment_id));
 	strncpy(identifiers.experiment_id, TEST_STR, sizeof(identifiers.treatment_id));
 	identifiers.deployment_id = 2;
@@ -1686,11 +1735,11 @@ T_DECL(memorystatus_freeze_set_dasd_trial_identifiers, "set dasd trial identifie
 }
 
 T_DECL(memorystatus_reset_freezer_state, "FREEZER_CONTROL_RESET_STATE kills frozen proccesses",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	/* Take ownership of the freezer probabilities for the duration of the test so that nothing new gets frozen by dasd. */
 	set_testing_pid();
 	reset_interval();
@@ -1750,12 +1799,11 @@ dock_proc(pid_t pid)
 }
 
 T_DECL(memorystatus_freeze_skip_docked, "memorystatus_freeze_top_process does not freeze docked processes",
-	T_META_ENABLED(!TARGET_OS_WATCH),
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER && !TARGET_OS_WATCH),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
+	check_for_and_enable_freezer();
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	test_after_background_helper_launches(true, "frozen_background", ^{
@@ -1829,8 +1877,7 @@ T_HELPER_DECL(corpse_generation, "Generate a large corpse", T_META_ASROOT(false)
 }
 
 T_DECL(memorystatus_disable_freeze_corpse, "memorystatus_disable_freeze with parallel corpse creation",
-	T_META_BOOTARGS_SET("freeze_enabled=1"),
-	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ENABLED(HAS_FREEZER),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
 	T_META_TAG_VM_NOT_PREFERRED) {
@@ -1842,6 +1889,7 @@ T_DECL(memorystatus_disable_freeze_corpse, "memorystatus_disable_freeze with par
 	 * while the test process triggers disk space kills.
 	 * We should see that the test process is jetsammed successfully.
 	 */
+	check_for_and_enable_freezer();
 	test_after_background_helper_launches(false, "corpse_generation", ^{
 		int ret, val, stat;
 		/* Place the child in the idle band so that it gets elevated like a typical app. */
@@ -1875,5 +1923,470 @@ T_DECL(memorystatus_disable_freeze_corpse, "memorystatus_disable_freeze with par
 
 		T_END;
 	});
+	dispatch_main();
+}
+
+static int original_unrestrict_coalitions_val;
+
+static void
+unrestrict_coalitions()
+{
+	int ret, val = 1;
+	size_t val_size = sizeof(val);
+	size_t original_unrestrict_coalitions_size = sizeof(original_unrestrict_coalitions_val);
+	ret = sysctlbyname("kern.unrestrict_coalitions", &original_unrestrict_coalitions_val, &original_unrestrict_coalitions_size, &val, val_size);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "unrestrict_coalitions");
+}
+
+static void
+reset_unrestrict_coalitions()
+{
+	size_t size = sizeof(original_unrestrict_coalitions_val);
+	int ret = sysctlbyname("kern.unrestrict_coalitions", NULL, NULL, &original_unrestrict_coalitions_val, size);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "unrestrict_coalitions");
+}
+
+static uint64_t
+create_coalition(int type)
+{
+	uint64_t id = 0;
+	uint32_t flags = 0;
+	uint64_t param[2];
+	int ret;
+
+	COALITION_CREATE_FLAGS_SET_TYPE(flags, type);
+	ret = coalition_create(&id, flags);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "coalition_create");
+	T_QUIET; T_ASSERT_GE(id, 0ULL, "coalition_create returned a valid id");
+
+	/* disable notifications for this coalition so launchd doesn't freak out */
+	param[0] = id;
+	param[1] = 0;
+	ret = sysctlbyname("kern.coalition_notify", NULL, NULL, param, sizeof(param));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.coalition_notify");
+
+	return id;
+}
+
+static uint64_t jetsam_coal, resource_coal;
+
+#define COAL_MAX_MEMBERS 50
+#define MAX_XPC_SERVICE_FREEZE 10 /* xnu will only freeze 10 XPC services per coalition. */
+int n_coalition_members;
+pid_t coalition_members[COAL_MAX_MEMBERS];
+
+/*
+ * Spawns the given command as the leader of the given coalitions.
+ * Process will start in a stopped state (waiting for SIGCONT)
+ */
+static pid_t
+spawn_coalition_member(const char *path, char *const *argv, int role, short spawn_flags)
+{
+	int ret;
+	posix_spawnattr_t attr;
+	extern char **environ;
+	pid_t new_pid = 0;
+	kern_return_t kr;
+
+	ret = posix_spawnattr_init(&attr);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawnattr_init failed with %s", strerror(ret));
+
+	ret = posix_spawnattr_setcoalition_np(&attr, jetsam_coal,
+	    COALITION_TYPE_JETSAM, role);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawnattr_setcoalition_np failed with %s", strerror(ret));
+	ret = posix_spawnattr_setcoalition_np(&attr, resource_coal,
+	    COALITION_TYPE_RESOURCE, role);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawnattr_setcoalition_np failed with %s", strerror(ret));
+
+	ret = posix_spawnattr_setflags(&attr, spawn_flags);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawnattr_setflags failed with %s", strerror(ret));
+
+	ret = posix_spawn(&new_pid, path, NULL, &attr, argv, environ);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawn failed with %s", strerror(ret));
+
+	ret = posix_spawnattr_destroy(&attr);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "posix_spawnattr_destroy failed with %s\n", strerror(ret));
+
+	kr = memorystatus_control(MEMORYSTATUS_CMD_SET_PROCESS_IS_MANAGED, new_pid, 1, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "memorystatus_control");
+
+	return new_pid;
+}
+
+static pid_t
+get_coalition_leader(pid_t p)
+{
+	static const size_t kMaxPids = 500;
+	int ret;
+	int pid_list[kMaxPids];
+	size_t pid_list_size = sizeof(pid_list);
+
+	int iparam[3];
+#define p_type  iparam[0]
+#define p_order iparam[1]
+#define p_pid   iparam[2]
+	p_type = COALITION_TYPE_JETSAM;
+	p_order = COALITION_SORT_DEFAULT;
+	p_pid = p;
+
+	ret = sysctlbyname("kern.coalition_pid_list", pid_list, &pid_list_size, iparam, sizeof(iparam));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.coalition_pid_list");
+	T_QUIET; T_ASSERT_LE(pid_list_size, kMaxPids * sizeof(int), "coalition is small enough");
+
+	for (size_t i = 0; i < pid_list_size / sizeof(int); i++) {
+		int curr_pid = pid_list[i];
+		int roles[COALITION_NUM_TYPES] = {};
+		size_t roles_size = sizeof(roles);
+
+		ret = sysctlbyname("kern.coalition_roles", roles, &roles_size, &curr_pid, sizeof(curr_pid));
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.coalition_roles");
+		if (roles[COALITION_TYPE_JETSAM] == COALITION_TASKROLE_LEADER) {
+			return curr_pid;
+		}
+	}
+
+	T_FAIL("No leader in coalition!");
+	return 0;
+}
+
+void
+setup_coalitions() {
+}
+
+void
+coal_foreach(void (^callback)(pid_t)) {
+	for (int i = 0; i < n_coalition_members; i++) {
+		callback(coalition_members[i]);
+	}
+}
+
+void
+kill_all_coalition_members() {
+	int __block ret;
+	T_LOG("Killing coalition members...");
+	coal_foreach(^(pid_t pid){
+		ret = kill(pid, SIGKILL);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "kill");
+	});
+}
+
+void
+spawn_coalition_and_run(dispatch_block_t after_spawn) {
+	int ret, __block i = 0;
+	static uint32_t path_size;
+	static char pathbuf[PATH_MAX];
+	dispatch_source_t sig_source;
+	pid_t leader_pid;
+
+	/* Setup coalitions */
+	jetsam_coal = create_coalition(COALITION_TYPE_JETSAM);
+	resource_coal = create_coalition(COALITION_TYPE_RESOURCE);
+
+	path_size = sizeof(pathbuf);
+	ret = _NSGetExecutablePath(pathbuf, &path_size);
+	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "_NSGetExecutablePath");
+	static char *const args[] = {
+		pathbuf,
+		"-n",
+		"frozen_background",
+		NULL
+	};
+
+	T_ATEND(kill_all_coalition_members);
+
+	sig_source = run_block_after_signal(SIGUSR1, ^{
+		i++;
+		if (i < n_coalition_members) {
+			/* Spawn next child */
+			coalition_members[i] = spawn_coalition_member(pathbuf, args, COALITION_TASKROLE_XPC, 0);
+		} else {
+			after_spawn();
+		}
+	});
+	dispatch_activate(sig_source);
+
+	/* Spawn leader */
+	child_pid = spawn_coalition_member(pathbuf, args, COALITION_TASKROLE_LEADER, 0);
+	coalition_members[0] = child_pid;
+
+	/* Double-check the coalition was set up correctly */
+	leader_pid = get_coalition_leader(child_pid);
+	T_ASSERT_EQ(child_pid, leader_pid, "Child is leader of coalition");
+}
+
+static void
+kill_all_frozen()
+{
+	/* Disabling and re-enabling the freezer will evict all frozen processes. */
+	set_freeze_enabled(0);
+	set_freeze_enabled(1);
+}
+
+static unsigned int
+get_used_freezer_slots ()
+{
+	int ret;
+	unsigned int frozen_procs;
+	size_t frozen_procs_size = sizeof(frozen_procs);
+
+	ret = sysctlbyname("kern.memorystatus_freeze_count", &frozen_procs, &frozen_procs_size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "get kern.memorystatus_freeze_count");
+
+	return frozen_procs;
+}
+
+static void
+setup_coalition_freezing()
+{
+
+	/* Setup freezer. Set ordered freeze mode and kill all frozen procs. */
+	memorystatus_freeze_top_process_setup();
+	enable_ordered_freeze_mode();
+}
+
+static uint32_t
+get_max_freezer_slots()
+{
+	int ret;
+	uint32_t max_freeze_processes = 0;
+	size_t max_freeze_processes_len = sizeof(max_freeze_processes);
+	ret = sysctlbyname("kern.memorystatus_freeze_processes_max", &max_freeze_processes, &max_freeze_processes_len, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.memorystatus_freeze_processes_max");
+	return max_freeze_processes;
+}
+
+static int orig_freezer_slots = -1;
+static void restore_freezer_slots(void);
+
+static void
+set_max_freezer_slots(uint32_t max_freeze_processes)
+{
+	int ret;
+	if (orig_freezer_slots == -1) {
+		orig_freezer_slots = get_max_freezer_slots();
+		T_ATEND(restore_freezer_slots);
+	}
+	ret = sysctlbyname("kern.memorystatus_freeze_processes_max", NULL, NULL, &max_freeze_processes, sizeof(max_freeze_processes));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "set kern.memorystatus_freeze_processes_max");
+}
+
+static void
+restore_freezer_slots(void)
+{
+	set_max_freezer_slots(orig_freezer_slots);
+}
+
+static void
+prepare_coalition_for_freezing(void)
+{
+	coal_foreach(^(pid_t pid){
+		prepare_proc_for_freezing(pid);
+	});
+}
+
+static int
+freeze_coalition_leader(void)
+{
+	int ret, val = 1;
+	memorystatus_properties_freeze_entry_v1 entry;
+	construct_child_freeze_entry(&entry);
+	ret = memorystatus_control(MEMORYSTATUS_CMD_GRP_SET_PROPERTIES, 0, MEMORYSTATUS_FLAGS_GRP_SET_FREEZE_PRIORITY, &entry, sizeof(entry));
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "MEMORYSTATUS_FLAGS_GRP_SET_FREEZE_PRIORITY");
+	return sysctlbyname("vm.memorystatus_freeze_top_process", NULL, NULL, &val, sizeof(val));
+
+}
+
+#define TEST_MAX_FREEZER_SLOTS 8
+#define N_UNFROZEN_MEMBERS 3
+
+T_DECL(memorystatus_coalition_freeze, "Freezing a coalition leader should freeze all of its XPC service members",
+	T_META_ENABLED(HAS_FREEZER),
+	T_META_ASROOT(true),
+	T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+	T_META_TAG_VM_NOT_PREFERRED)
+{
+	check_for_and_enable_freezer();
+	unrestrict_coalitions();
+	T_ATEND(reset_unrestrict_coalitions);
+	setup_coalition_freezing();
+	set_max_freezer_slots(TEST_MAX_FREEZER_SLOTS);
+	kill_all_frozen();
+	T_QUIET; T_ASSERT_EQ(get_used_freezer_slots(), 0, "No freezer slots used");
+
+	/* Spawn max freezer slots coalition members */
+	n_coalition_members = TEST_MAX_FREEZER_SLOTS;
+	static_assert(TEST_MAX_FREEZER_SLOTS <= COAL_MAX_MEMBERS);
+	static_assert(TEST_MAX_FREEZER_SLOTS < MAX_XPC_SERVICE_FREEZE);
+
+	/* Create our coalitions and spawn the leader / "XPC service" members */
+	spawn_coalition_and_run(^{
+		int i, ret, n_coal_frozen = 0;
+		memorystatus_jetsam_snapshot_t *snapshot;
+		memorystatus_jetsam_snapshot_entry_t *entry;
+
+		/* Freeze coalition */
+		prepare_coalition_for_freezing();
+		ret = freeze_coalition_leader();
+		T_EXPECT_POSIX_SUCCESS(ret, "freeze_coalition_leader");
+
+		snapshot = get_jetsam_snapshot(MEMORYSTATUS_FLAGS_SNAPSHOT_ON_DEMAND, false);
+		for (i = 0; i < n_coalition_members; i++) {
+			entry = get_jetsam_snapshot_entry(snapshot, coalition_members[i]);
+			if (entry->state & P_MEMSTAT_FROZEN) {
+				n_coal_frozen++;
+			}
+		}
+		T_ASSERT_EQ(n_coal_frozen, n_coalition_members, "All coalition members frozen");
+
+		T_END;
+	});
+	dispatch_main();
+}
+
+T_DECL(memorystatus_coalition_freezer_slot_limit, "Exhausting freezer slots and freezing a large coalition should not exceed slots",
+	T_META_ENABLED(HAS_FREEZER),
+	T_META_ASROOT(true),
+	T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+	T_META_TAG_VM_NOT_PREFERRED)
+{
+	check_for_and_enable_freezer();
+	unrestrict_coalitions();
+	T_ATEND(reset_unrestrict_coalitions);
+	setup_coalition_freezing();
+	set_max_freezer_slots(TEST_MAX_FREEZER_SLOTS);
+	kill_all_frozen();
+	T_QUIET; T_ASSERT_EQ(get_used_freezer_slots(), 0, "No freezer slots used");
+
+	/* Spawn max freezer slots + 1 coalition members */
+	n_coalition_members = TEST_MAX_FREEZER_SLOTS + N_UNFROZEN_MEMBERS;
+	static_assert(TEST_MAX_FREEZER_SLOTS + N_UNFROZEN_MEMBERS <= COAL_MAX_MEMBERS);
+	static_assert(TEST_MAX_FREEZER_SLOTS < MAX_XPC_SERVICE_FREEZE);
+
+	/* Create our coalitions and spawn the leader / "XPC service" members */
+	spawn_coalition_and_run(^{
+		int i, j, ret, n_coal_frozen = 0;
+		memorystatus_jetsam_snapshot_t *snapshot;
+		memorystatus_jetsam_snapshot_entry_t *entry;
+
+		/* Freeze coalition */
+		prepare_coalition_for_freezing();
+		ret = freeze_coalition_leader();
+		T_EXPECT_POSIX_SUCCESS(ret, "freeze_coalition_leader");
+
+		/* Ensure coalition leader is frozen */
+		verify_proc_is_frozen(coalition_members[0]);
+
+		/* Make sure freezer did not exceed its slots */
+		snapshot = get_jetsam_snapshot(MEMORYSTATUS_FLAGS_SNAPSHOT_ON_DEMAND, false);
+		for (i = 0; i < n_coalition_members; i++) {
+			entry = get_jetsam_snapshot_entry(snapshot, coalition_members[i]);
+			if (entry->state & P_MEMSTAT_FROZEN) {
+				n_coal_frozen++;
+			}
+		}
+		T_ASSERT_EQ(n_coal_frozen, n_coalition_members - N_UNFROZEN_MEMBERS, "N_UNFROZEN_MEMBERS coalition members remain unfrozen");
+
+		T_END;
+	});
+	dispatch_main();
+}
+
+pid_t helper_pid;
+static void
+kill_helper()
+{
+	int ret = kill(helper_pid, SIGUSR2);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kill(helper_pid, SIGUSR2)");
+}
+
+T_DECL(memorystatus_two_coalition_freeze, "Exhausting freezer slots with one coalition and freezing another should fail",
+	T_META_ENABLED(HAS_FREEZER),
+	T_META_ASROOT(true),
+	T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+	T_META_TAG_VM_NOT_PREFERRED)
+{
+	dispatch_source_t sig_disp, exit_disp;
+
+	check_for_and_enable_freezer();
+	unrestrict_coalitions();
+	T_ATEND(reset_unrestrict_coalitions);
+	setup_coalition_freezing();
+	set_max_freezer_slots(TEST_MAX_FREEZER_SLOTS);
+	kill_all_frozen();
+	T_QUIET; T_ASSERT_EQ(get_used_freezer_slots(), 0, "No freezer slots used");
+
+	/* Spawn max freezer slots coalition members */
+	n_coalition_members = TEST_MAX_FREEZER_SLOTS;
+	static_assert(TEST_MAX_FREEZER_SLOTS <= COAL_MAX_MEMBERS);
+	static_assert(TEST_MAX_FREEZER_SLOTS < MAX_XPC_SERVICE_FREEZE);
+
+	sig_disp = run_block_after_signal(SIGUSR2, ^{
+		/* After our child signals, we can try spawning and freezing our coalition */
+		spawn_coalition_and_run(^{
+			int i, j, ret, n_coal_frozen = 0;
+			memorystatus_jetsam_snapshot_t *snapshot;
+			memorystatus_jetsam_snapshot_entry_t *entry;
+
+			/* Freeze coalition */
+			prepare_coalition_for_freezing();
+			ret = freeze_coalition_leader();
+			T_EXPECT_POSIX_FAILURE(ret, ESRCH, "freeze_coalition_leader");
+
+			/* Make sure freezer did not freeze anyone */
+			snapshot = get_jetsam_snapshot(MEMORYSTATUS_FLAGS_SNAPSHOT_ON_DEMAND, false);
+			for (i = 0; i < n_coalition_members; i++) {
+				entry = get_jetsam_snapshot_entry(snapshot, coalition_members[i]);
+				if (entry->state & P_MEMSTAT_FROZEN) {
+					n_coal_frozen++;
+				}
+			}
+
+			T_ASSERT_EQ(n_coal_frozen, 0, "all coalition members remain unfrozen");
+
+			T_END;
+		});
+	});
+	dispatch_activate(sig_disp);
+
+
+	/* Spawn helper and wait for it to spawn its coalition and freeze it */
+	helper_pid = launch_background_helper("coalition_freezer", false, false);
+	T_ATEND(kill_helper);
+
+	exit_disp = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)helper_pid, DISPATCH_PROC_EXIT, dispatch_get_main_queue());
+	dispatch_source_set_event_handler(exit_disp, ^{
+		int status = 0, code = 0;
+		pid_t rc = waitpid(child_pid, &status, 0);
+		T_QUIET; T_ASSERT_EQ(rc, child_pid, "waitpid");
+		code = WEXITSTATUS(status);
+		if (code != 0) {
+		        T_LOG("Helper exited with error: %s", exit_codes_str[code]);
+		}
+		T_QUIET; T_ASSERT_EQ(code, 0, "Helper exited cleanly");
+	});
+	dispatch_activate(exit_disp);
+
+	dispatch_main();
+}
+
+T_HELPER_DECL(coalition_freezer, "Spawns a coalition and freezes it",
+	T_META_ASROOT(true))
+{
+	dispatch_source_t sig_disp;
+
+	/* The parent will have already set up the freezer for us. */
+	n_coalition_members = TEST_MAX_FREEZER_SLOTS;
+	spawn_coalition_and_run(^{
+		prepare_coalition_for_freezing();
+		freeze_coalition_leader();
+		kill(getppid(), SIGUSR2);
+	});
+
+	sig_disp = run_block_after_signal(SIGUSR2, ^{
+		kill_all_coalition_members();
+		exit(0);
+	});
+	dispatch_activate(sig_disp);
+
 	dispatch_main();
 }

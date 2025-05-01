@@ -38,7 +38,7 @@
 #if VM_PRESSURE_EVENTS
 
 extern vm_pressure_level_t memorystatus_vm_pressure_level;
-extern boolean_t memorystatus_hwm_candidates;
+extern _Atomic bool memorystatus_hwm_candidates;
 extern unsigned int memorystatus_sustained_pressure_maximum_band;
 
 boolean_t memorystatus_warn_process(const proc_t p, boolean_t is_active,

@@ -26,8 +26,30 @@ tests()
 		delete[] p;
 	}
 	{
+		const T * p = new T[10];
+		std::span<const T> span = os::span::__unsafe_forge_span(p, 10);
+
+		CHECK(span.data() == p && span.size() == 10);
+		delete[] p;
+	}
+	{
 		std::vector<T> v;
 		std::span<T> span = os::span::__unsafe_forge_span(v.begin(), v.end());
+
+		CHECK(span.data() == v.data() && span.size() == 0);
+	}
+	{
+		T * p = new T[10];
+		std::span<T> span = os::unsafe_forge_span(p, 10);
+		std::span<T, 10> span2 = os::unsafe_forge_span<T, 10>(p);
+
+		CHECK(span.data() == p && span.size() == 10);
+		CHECK(span2.data() == p && span2.size() == 10);
+		delete[] p;
+	}
+	{
+		std::vector<T> v;
+		std::span<T> span = os::unsafe_forge_span(v.begin(), v.end());
 
 		CHECK(span.data() == v.data() && span.size() == 0);
 	}

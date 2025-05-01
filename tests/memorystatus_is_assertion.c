@@ -12,6 +12,7 @@
 #include <sys/spawn_internal.h>
 #include <sys/kern_memorystatus.h>
 #include <mach-o/dyld.h>
+#include <os/voucher_private.h>
 
 #include <darwintest.h>
 #include <darwintest_multiprocess.h>
@@ -22,13 +23,14 @@
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.memorystatus"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("VM - memory pressure"),
+	T_META_RADAR_COMPONENT_VERSION("VM"),
 	T_META_CHECK_LEAKS(false),
 	T_META_RUN_CONCURRENTLY(true),
 	T_META_TAG_VM_PREFERRED
 	);
 
 #define IDLE_AGEOUT_S 30
+#define AGEOUT_STUCK_S 35
 
 /*
  * This test has multiple sub-tests that set and then verify jetsam priority transitions
@@ -524,9 +526,46 @@ T_DECL(idle_aging_app_to_sysproc,
 {
 	dt_helper_t helper = dt_child_helper("idle_age_as_app_then_sysproc");
 
-	dt_run_helpers(&helper, 1, 60);
+	dt_run_helpers(&helper, 1, 90);
 }
 
+T_HELPER_DECL(idle_age_timeout_importance_boost,
+    "Enroll in ActivityTracking, idle age with held assertion")
+{
+	pid_t my_pid = getpid();
+	int32_t priority, ret;
+
+	// Set managed, enroll in dirty tracking, and pretend we have an importance assertion voucher
+	proc_set_managed(my_pid, true);
+	set_memlimits(my_pid, 100, 100, true, true);
+	proc_track_dirty(my_pid,
+	    (PROC_DIRTY_TRACK | PROC_DIRTY_ALLOW_IDLE_EXIT | PROC_DIRTY_DEFER));
+	ret = memorystatus_control(MEMORYSTATUS_CMD_SET_TESTING_PID, getpid(), MEMORYSTATUS_FLAGS_SET_IMP_TESTING_PID, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "MEMORYSTATUS_CMD_SET_TESTING_PID");
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_AGING_BAND1, "Process is placed in SysProc aging band");
+
+	T_LOG("Sleeping for %d sec...", IDLE_AGEOUT_S);
+	sleep(IDLE_AGEOUT_S);
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_AGING_BAND1_STUCK, "Process ages to JETSAM_PRIORITY_AGING_BAND1_STUCK");
+
+	T_LOG("Sleeping for %d sec...", AGEOUT_STUCK_S);
+	sleep(AGEOUT_STUCK_S);
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_IDLE, "Process ages to JETSAM_PRIORITY_IDLE");
+}
+
+T_DECL(idle_aging_leaked_importance_boost,
+    "Idle aging with leaked importance boost")
+{
+	dt_helper_t helper = dt_child_helper("idle_age_timeout_importance_boost");
+
+	dt_run_helpers(&helper, 1, 80);
+}
 T_DECL(assertion_test_repetitive_non_dirty_tracking, "Scenario #1 - repetitive assertion priority on non-dirty-tracking process", T_META_TIMEOUT(60), T_META_ASROOT(true)) {
 	/*
 	 * Verify back-to-back assertion calls set assertion state as expected.

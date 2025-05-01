@@ -49,7 +49,8 @@ EXPORTS_FILES := $(foreach symbolset,$(SYMBOL_COMPONENT_LIST),$(symbolset).expor
 	$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports \
 	$(notdir $(wildcard $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).$(PLATFORM).exports))) \
 	Unused.exports
-EXPORTS_FILES += Private.Tightbeam.exports
+EXPORTS_FILES += $(TIGHTBEAM_EXPORTS)
+Private_OTHER_EXPORTS += $(TIGHTBEAM_EXPORTS)
 
 
 Kasan_EXPORTS := $(SRCROOT)/config/Kasan_disabled.exports
@@ -70,6 +71,9 @@ endif
 
 define symbol_set_template
 $(1)_EXPORTS := $$(addprefix $$(SOURCE)/,$$(filter $(1)%,$$(EXPORTS_FILES)))
+ifneq "$$($(1)_OTHER_EXPORTS)" ""
+$(1)_EXPORTS += $$($(1)_OTHER_EXPORTS)
+endif
 $$(TARGET)/$(1).symbolset: MY_EXPORTS_ARGS := $$(foreach file,$$($(1)_EXPORTS),-export $$(file))
 $$(TARGET)/$(1).symbolset: $$($(1)_EXPORTS) $$(TARGET)/allsymbols $$(KEXT_CREATE_SYMBOL_SET)
 	@$$(LOG_SYMBOLSET) "$(1)$$(Color0) ($$(ColorLF)$$(CURRENT_ARCH_CONFIG_LC)$$(Color0))"

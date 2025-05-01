@@ -19,7 +19,7 @@ system's configuration `files` under each kernel component. For instance, one of
 the first components in xnu to enable -fbounds-safety is bsd/net: as a result,
 bsd/conf/files is where build system modifications were made.
 
-There are four options that control aspects related to -fbounds-safety:
+There are five options that control aspects related to -fbounds-safety:
 
 * whether -fbounds-safety is enabled at all;
 * when it is disabled, whether we should allow `__indexable` and
@@ -28,6 +28,7 @@ There are four options that control aspects related to -fbounds-safety:
   only report a telemetry event;
 * when it is set to panic, whether we should optimize for code size at the
   expense of the quality of debug information.
+* which set of new bounds checks (`-fbounds-safety-bringup-missing-checks`) are enabled
 
 ## Code size tradeoffs
 
@@ -51,7 +52,7 @@ we can't possibly have failed because of that bounds check. There are scripts
 to automate this reasoning–ask the -fbounds-safety DRIs for help if you run into
 this situation.
 
-## Bounds checking options
+## Bounds checking adoption level options
 
 * (nothing): -fbounds-safety is disabled; it is an error to use `__indexable`
   and `__bidi_indexable` in source.
@@ -69,13 +70,39 @@ this situation.
   generate a telemetry event instead of panicking; for all other kernel configurations
   failing bound checks panic.
 
+These options are mutually exclusive.
+
+### Bounds checking adoption level modifier options
+
+In addition to the bounds checking adoption level options (e.g.
+`bounds-checks-debug`), modifier options can be added to the selected adoption
+level. Note it is invalid to use these options without first specifying a
+`bound-check*` level option (i.e. any level except "nothing").
+Furthermore, the bound-check level option must appear before any modifiers (see examples below).
+
+* `bound-checks-new-checks`: If building with `-fbounds-safety` this causes
+  `-fbounds-safety-bringup-missing-checks` to be added to the compiler flags.
+
+Examples:
+
+```
+# ok: `-fbounds-safety -fbounds-safety-bringup-missing-checks` passed to compiler
+test.c optional bounds-checks bound-checks-new-checks
+
+# invalid: An adoption level that's not "nothing" needs to be specified
+test.c optional bound-checks-new-checks
+
+# invalid: `bounds-checks` needs to be specified first
+test.c optional bound-checks-new-checks bounds-checks
+```
+
 # The process of enabling bound-checks
 
-`bound-checks` is the final, desirable bounds checking configuration option. We
-do not enable `bound-checks` lightly, as it can introduce new reasons that xnu
-panics. We have found that the following process consistently helps land code
-changes that stick, and help reduce the likelihood of introducing problems that
-turn into bad kernels.
+`bound-checks` is the final, desirable bounds checking adoption level
+configuration option. We do not enable `bound-checks` lightly, as it can
+introduce new reasons that xnu panics. We have found that the following process
+consistently helps land code changes that stick, and help reduce the likelihood
+of introducing problems that turn into bad kernels.
 
 ## Step 1: adopt -fbounds-safety at desk
 
@@ -174,3 +201,4 @@ simply done with another pull request.
 
 Read "where bound-checks-seed comes in" for a different approach if you need
 a higher confidence level before enabling `bound-checks`.
+

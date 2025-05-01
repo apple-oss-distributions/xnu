@@ -506,7 +506,7 @@ struct kern_pbufpool;
 struct sksegment;
 
 typedef struct kern_pbufpool            *kern_pbufpool_t;
-typedef uint64_t                        kern_packet_t;
+typedef uint64_t                        kern_packet_t __kernel_ptr_semantics;
 typedef uint32_t                        kern_packet_idx_t;
 typedef struct __kern_buflet            *kern_buflet_t;
 typedef uint32_t                        kern_obj_idx_seg_t;
@@ -838,7 +838,7 @@ extern errno_t kern_packet_copy_bytes(const kern_packet_t, size_t, size_t len,
  * Buflets.
  */
 extern errno_t kern_buflet_set_data_address(const kern_buflet_t, const void *);
-extern void *kern_buflet_get_data_address(const kern_buflet_t);
+extern void * kern_buflet_get_data_address(const kern_buflet_t);
 extern errno_t kern_buflet_set_data_offset(const kern_buflet_t, const uint32_t);
 extern uint32_t kern_buflet_get_data_offset(const kern_buflet_t);
 extern errno_t kern_buflet_set_data_length(const kern_buflet_t, const uint32_t);

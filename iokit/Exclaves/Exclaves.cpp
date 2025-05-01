@@ -75,7 +75,6 @@ struct IOService::IOExclaveProxyState {
 	tb_endpoint_t tb_endpoint;
 	ioservice_ioserviceconcrete client;
 	// ExclaveDriverKit related state
-	bool          edk_endpoint_exists;
 	uint64_t      edk_mach_endpoint;
 	tb_endpoint_t edk_tb_endpoint;
 	ioservice_ioserviceprivate edk_client;
@@ -106,6 +105,9 @@ public:
 	IOService::IOExclaveProxyState *proxyState;
 };
 OSDefineMetaClassAndFinalStructors(IOExclaveProxyStateWrapper, OSObject);
+
+extern "C" kern_return_t
+exclaves_driver_service_lookup(const char *service_name, uint64_t *endpoint);
 #endif /* CONFIG_EXCLAVES */
 
 bool
@@ -121,7 +123,6 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		uint64_t serviceID;
 		uint64_t mach_endpoint = 0;
 		uint64_t edk_mach_endpoint = 0;
-		bool     edk_endpoint_exists = false;
 		tb_error_t                   tberr;
 		tb_endpoint_t                tb_endpoint;
 		tb_endpoint_t                edk_tb_endpoint;
@@ -131,6 +132,7 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		OSData *                     data;
 		IOWorkLoop *                 wl;
 		IOExclaveProxyStateWrapper * wrapper;
+		bool result;
 
 		// exit early if Exclaves are not available
 		if (exclaves_get_status() == EXCLAVES_STATUS_NOT_SUPPORTED) {
@@ -143,10 +145,41 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		}
 		OSSafeReleaseNULL(prop);
 
+		prop = provider->copyProperty("exclave-service");
+		if ((data = OSDynamicCast(OSData, prop))) {
+			const char *exclave_service = (const char *) data->getBytesNoCopy();
+			if (exclave_service[data->getLength() - 1] != '\0') {
+				IOLog("%s: %s-0x%qx exclave-service property is invalid\n", __func__, provider->getName(), provider->getRegistryEntryID());
+				OSSafeReleaseNULL(prop);
+				break;
+			}
+			if (exclaves_driver_service_lookup(exclave_service, &mach_endpoint) != KERN_SUCCESS) {
+				IOLog("%s: %s-0x%qx could not find exclave-service %s\n", __func__, provider->getName(), provider->getRegistryEntryID(), exclave_service);
+				OSSafeReleaseNULL(prop);
+				break;
+			}
+		}
+		OSSafeReleaseNULL(prop);
+
 		prop = provider->copyProperty("exclave-edk-endpoint");
 		if ((data = OSDynamicCast(OSData, prop))) {
 			edk_mach_endpoint = ((uint32_t *)data->getBytesNoCopy())[0];
-			edk_endpoint_exists = true;
+		}
+		OSSafeReleaseNULL(prop);
+
+		prop = provider->copyProperty("exclave-edk-service");
+		if ((data = OSDynamicCast(OSData, prop))) {
+			const char *exclave_edk_service = (const char *) data->getBytesNoCopy();
+			if (exclave_edk_service[data->getLength() - 1] != '\0') {
+				IOLog("%s: %s-0x%qx exclave-edk-service property is invalid\n", __func__, provider->getName(), provider->getRegistryEntryID());
+				OSSafeReleaseNULL(prop);
+				break;
+			}
+			if (exclaves_driver_service_lookup(exclave_edk_service, &edk_mach_endpoint) != KERN_SUCCESS) {
+				IOLog("%s: %s-0x%qx could not find exclave-edk-service %s\n", __func__, provider->getName(), provider->getRegistryEntryID(), exclave_edk_service);
+				OSSafeReleaseNULL(prop);
+				break;
+			}
 		}
 		OSSafeReleaseNULL(prop);
 
@@ -162,20 +195,18 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 			break;
 		}
 
-		if (edk_endpoint_exists) {
-			// Initialize IOServicePrivate endpoint
-			edk_tb_endpoint = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU, edk_mach_endpoint, TB_ENDPOINT_OPTIONS_NONE);
-			assert(NULL != edk_tb_endpoint);
-			if (NULL == edk_tb_endpoint) {
-				printf("%s: ERROR: Failed to create endpoint\n", __func__);
-				break;
-			}
-			tberr = ioservice_ioserviceprivate_init(&edk_client, edk_tb_endpoint);
-			assert(TB_ERROR_SUCCESS == tberr);
-			if (TB_ERROR_SUCCESS != tberr) {
-				printf("%s: ERROR: Failed to init IOServicePrivate\n", __func__);
-				break;
-			}
+		// Initialize IOServicePrivate endpoint
+		edk_tb_endpoint = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU, edk_mach_endpoint, TB_ENDPOINT_OPTIONS_NONE);
+		assert(NULL != edk_tb_endpoint);
+		if (NULL == edk_tb_endpoint) {
+			printf("%s: ERROR: Failed to create endpoint\n", __func__);
+			break;
+		}
+		tberr = ioservice_ioserviceprivate_init(&edk_client, edk_tb_endpoint);
+		assert(TB_ERROR_SUCCESS == tberr);
+		if (TB_ERROR_SUCCESS != tberr) {
+			printf("%s: ERROR: Failed to init IOServicePrivate\n", __func__);
+			break;
 		}
 
 		ref = IONewZero(IOExclaveProxyState, 1);
@@ -186,12 +217,9 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		ref->mach_endpoint = mach_endpoint;
 		ref->tb_endpoint   = tb_endpoint;
 		ref->client = client;
-		ref->edk_endpoint_exists = edk_endpoint_exists;
-		if (edk_endpoint_exists) {
-			ref->edk_mach_endpoint = edk_mach_endpoint;
-			ref->edk_tb_endpoint   = edk_tb_endpoint;
-			ref->edk_client = edk_client;
-		}
+		ref->edk_mach_endpoint = edk_mach_endpoint;
+		ref->edk_tb_endpoint   = edk_tb_endpoint;
+		ref->edk_client = edk_client;
 		ref->exclave_interrupts = OSDictionary::withCapacity(1);
 		ref->exclave_interrupts_lock = IOLockAlloc();
 		ref->exclave_timers = OSDictionary::withCapacity(1);
@@ -220,20 +248,17 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		gExclaveProxyStates->setObject(key, wrapper);
 		IORecursiveLockUnlock(gExclaveProxyStateLock);
 
-		if (ref->edk_endpoint_exists) {
-			// Start() called after lookup table registration in case upcalls are made during exclave start().
-			// Use registry ID as exclave's upcall identifer
-			bool result;
-			tberr = ioservice_ioserviceprivate_startprivate(&edk_client, serviceID, &result);
-			if (TB_ERROR_SUCCESS != tberr || !result) {
-				printf("%s ERROR: Failed StartPrivate\n", __func__);
-				// Deregister from lookup table if start() fails
-				IORecursiveLockLock(gExclaveProxyStateLock);
-				gExclaveProxyStates->removeObject(key);
-				IORecursiveLockUnlock(gExclaveProxyStateLock);
-				wrapper->release();
-				break;
-			}
+		// Start() called after lookup table registration in case upcalls are made during exclave start().
+		// Use registry ID as exclave's upcall identifer
+		tberr = ioservice_ioserviceprivate_startprivate(&edk_client, serviceID, &result);
+		if (TB_ERROR_SUCCESS != tberr || !result) {
+			printf("%s ERROR: Failed StartPrivate\n", __func__);
+			// Deregister from lookup table if start() fails
+			IORecursiveLockLock(gExclaveProxyStateLock);
+			gExclaveProxyStates->removeObject(key);
+			IORecursiveLockUnlock(gExclaveProxyStateLock);
+			wrapper->release();
+			break;
 		}
 
 		err = 0;
@@ -783,7 +808,6 @@ IOService::exclaveInterruptOccurred(IOInterruptEventSource *eventSource, int cou
 		return;
 	}
 
-	assert(ref->edk_endpoint_exists);
 	tberr = ioservice_ioserviceprivate_interruptoccurredprivate(&ref->edk_client, eventSource->getIntIndex(), count);
 	assert(TB_ERROR_SUCCESS == tberr);
 	if (TB_ERROR_SUCCESS != tberr) {
@@ -1051,7 +1075,6 @@ IOService::exclaveTimerFired(IOTimerEventSource *eventSource)
 	}
 
 	EXLOG("%s id 0x%llx (timer_id %u)\n", __func__, getRegistryEntryID(), timer_id);
-	assert(ref->edk_endpoint_exists);
 	tberr = ioservice_ioserviceprivate_timerfiredprivate(&ref->edk_client, timer_id);
 	assert(TB_ERROR_SUCCESS == tberr);
 	if (TB_ERROR_SUCCESS != tberr) {

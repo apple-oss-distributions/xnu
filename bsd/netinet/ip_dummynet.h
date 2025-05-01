@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -131,15 +131,16 @@ typedef u_int64_t dn_key;       /* sorting key */
  * is non-zero if we want to support extract from the middle.
  */
 struct dn_heap_entry {
-	dn_key key;     /* sorting key. Topmost element is smallest one */
-	void *object;   /* object pointer */
+	dn_key key;      /* sorting key. Topmost element is smallest one */
+	size_t obj_size; /* size of the pointed object */
+	void * object  __sized_by_or_null(obj_size);   /* object pointer */
 };
 
 struct dn_heap {
-	int size;
-	int elements;
-	int offset; /* XXX if > 0 this is the offset of direct ptr to obj */
-	struct dn_heap_entry *p; /* really an array of "size" entries */
+	int size;              /* Number of allocated entries in the heap */
+	int elements;          /* Number of elements in the heap */
+	int offset;            /* XXX if > 0 this is the offset of direct ptr to obj */
+	struct dn_heap_entry *__counted_by_or_null(size) p; /* really an array of "size" entries */
 };
 
 /*
@@ -333,7 +334,7 @@ struct dn_flow_set {
 	/* hash table of queues onto this flow_set */
 	int rq_size;            /* number of slots */
 	int rq_elements;        /* active elements */
-	struct dn_flow_queue **rq; /* array of rq_size entries */
+	struct dn_flow_queue **__counted_by_or_null(rq_size + 1) rq; /* array of rq_size entries */
 
 	u_int32_t last_expired; /* do not expire too frequently */
 	int backlogged;         /* #active queues for this flowset */
@@ -351,7 +352,7 @@ struct dn_flow_set {
 	u_int c_2;              /* max_p*min_th/(max_th-min_th) (scaled) */
 	u_int c_3;              /* for GRED, (1-max_p)/max_th (scaled) */
 	u_int c_4;              /* for GRED, 1 - 2*max_p (scaled) */
-	u_int * w_q_lookup;     /* lookup table for computing (1-w_q)^t */
+	u_int * __counted_by_or_null(lookup_depth) w_q_lookup;     /* lookup table for computing (1-w_q)^t */
 	u_int lookup_depth;     /* depth of lookup table */
 	int lookup_step;        /* granularity inside the lookup table */
 	int lookup_weight;      /* equal to (1-w_q)^t / (1-w_q)^(t+1) */

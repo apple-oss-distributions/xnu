@@ -74,6 +74,7 @@
 #include "err_mach_ipc.sub"
 #include "err_server.sub"
 #include "err_us.sub"
+#include "err_vm.sub"
 
 const struct error_system _mach_errors[err_max_system + 1] = {
 	/* 0; err_kern */
@@ -108,7 +109,13 @@ const struct error_system _mach_errors[err_max_system + 1] = {
 	},
 
 	/* 0x05 */ errorlib_system_null,
-	/* 0x06 */ errorlib_system_null, /* 0x07 */ errorlib_system_null,
+	/* 0x06 */ errorlib_system_null,
+	/* 0x07; err_vm */
+	{
+		.max_sub = errlib_count(err_vm_sub),
+		.bad_sub = "(vm/?) unknown subsystem error",
+		.subsystem = err_vm_sub,
+	},
 	/* 0x08 */ errorlib_system_null, /* 0x09 */ errorlib_system_null,
 	/* 0x0a */ errorlib_system_null, /* 0x0b */ errorlib_system_null,
 	/* 0x0c */ errorlib_system_null, /* 0x0d */ errorlib_system_null,

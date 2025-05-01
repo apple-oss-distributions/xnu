@@ -241,7 +241,7 @@ __hw_lck_ptr_value(hw_lck_ptr_t val)
 
 #if CONFIG_KERNEL_TAGGING
 	if (ptr) {
-		ptr = vm_memtag_add_ptr_tag(ptr, val.lck_ptr_tag);
+		ptr = vm_memtag_insert_tag(ptr, val.lck_ptr_tag);
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 	return (void *)ptr;

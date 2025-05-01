@@ -75,6 +75,13 @@
 #endif
 
 /*
+ * Because the definition interface ioctl are spread among several header files
+ * one must make sure that a new added SIOC will not conflict with an existing one.
+ * The following shell script lists all interface ioctl sorted by number:
+ *      grep "IO.*(\'i\'" `find bsd -name *.h` |sort -n -k 4
+ */
+
+/*
  * OSIOCGIF* ioctls are deprecated; they are kept for binary compatibility.
  */
 #ifdef KERNEL_PRIVATE
@@ -113,7 +120,12 @@
 #define SIOCPROTOATTACH _IOWR('i', 80, struct ifreq)    /* attach proto to interface */
 #define SIOCPROTODETACH _IOWR('i', 81, struct ifreq)    /* detach proto from interface */
 
+#define SIOCGLINKHEURISTICS _IOWR('i', 93, struct ifreq)    /* link heuristics (int) */
+
 #define SIOCSATTACHPROTONULL _IOWR('i', 94, struct ifreq)    /* attach/detach NULL proto to interface */
+
+#define SIOCGPOINTOPOINTMDNS _IOWR('i', 95, struct ifreq)   /* mDNS on point-to-point interface */
+#define SIOCSPOINTOPOINTMDNS _IOW('i', 95, struct ifreq)    /* mDNS on point-to-point interface */
 
 #ifdef KERNEL_PRIVATE
 #define SIOCSDRVSPEC32    _IOW('i', 123, struct ifdrv32)    /* set driver-specific
@@ -131,8 +143,7 @@
 #define SIOCIFGCLONERS64 _IOWR('i', 129, struct if_clonereq64) /* get cloners */
 #endif /* KERNEL_PRIVATE */
 
-
-#define SIOCSETOT     _IOW('s', 128, int)             /* deprecated */
+/* removed #define SIOCSETOT     _IOW('s', 128, int) */
 
 #define SIOCGIFGETRTREFCNT _IOWR('i', 137, struct ifreq) /* get interface route refcnt */
 #define SIOCGIFLINKQUALITYMETRIC _IOWR('i', 138, struct ifreq) /* get LQM */
@@ -280,5 +291,8 @@
 
 #define SIOCSIFDISABLEINPUT _IOW('i', 225, struct ifreq)
 #define SIOCGIFDISABLEINPUT _IOWR('i', 225, struct ifreq)
+
+#define SIOCSIFCONGESTEDLINK _IOW('i', 226, struct ifreq) /* ifr_intval */
+#define SIOCGIFCONGESTEDLINK  _IOWR('i', 226, struct ifreq) /* ifr_intval */
 
 #endif /* !_SYS_SOCKIO_PRIVATE_H_ */

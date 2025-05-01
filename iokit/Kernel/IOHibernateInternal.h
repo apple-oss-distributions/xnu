@@ -69,8 +69,10 @@ typedef struct IOHibernateVars IOHibernateVars;
 #endif          /* __cplusplus */
 
 enum{
-	kIOHibernateTagSignature = 0x53000000,
-	kIOHibernateTagLength    = 0x00007fff,
+	kIOHibernateTagSignature = 0x53000000u,
+	kIOHibernateTagSigMask   = 0xff000000u,
+	kIOHibernateTagLength    = 0x00007fffu,
+	kIOHibernateTagSKCrypt   = 0x00800000u,
 };
 
 #ifdef __cplusplus

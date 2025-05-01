@@ -132,7 +132,8 @@ T_DECL(all_cores_running,
     /* Required to get around the rate limit for processor_info() */
     T_META_BOOTARGS_SET("amfi_get_out_of_my_way=1"),
     T_META_ASROOT(true),
-    XNU_T_META_SOC_SPECIFIC)
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_ENABLED(TARGET_CPU_ARM64 /* rdar://133956403 */))
 {
 	T_SETUPBEGIN;
 	int rv;
@@ -145,14 +146,14 @@ T_DECL(all_cores_running,
 		T_LOG("WARNING: amfi_get_out_of_my_way=1 boot-arg is missing, required to reliably capture CPU load data");
 	}
 
-	wait_for_quiescence_default();
+	wait_for_quiescence_default(argc, argv);
 
 	init_host_and_cpu_count();
 	T_LOG("System has %d logical cores", cpu_count);
 
 	check_recommended_core_mask(NULL);
 
-	trace_handle_t trace_handle = begin_collect_trace("sched_all_cores_running");
+	trace_handle_t trace_handle = begin_collect_trace(argc, argv, "sched_all_cores_running");
 
 	T_SETUPEND;
 

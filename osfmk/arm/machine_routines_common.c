@@ -77,7 +77,6 @@ LCK_MTX_DECLARE(max_cpus_lock, &max_cpus_grp);
 uint32_t lockdown_done = 0;
 boolean_t is_clock_configured = FALSE;
 
-
 static void
 sched_perfcontrol_oncore_default(perfcontrol_state_t new_thread_state __unused, going_on_core_t on __unused)
 {
@@ -370,8 +369,6 @@ perfcontrol_callout_stat_avg(perfcontrol_callout_type_t type,
 	return os_atomic_load_wide(&perfcontrol_callout_stats[type][stat], relaxed) /
 	       os_atomic_load_wide(&perfcontrol_callout_count[type], relaxed);
 }
-
-
 
 #if CONFIG_SCHED_EDGE
 
@@ -849,10 +846,36 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t start, uint64_
 	const uint64_t time_elapsed = now - start;
 	const uint64_t time_elapsed_ns = (time_elapsed * timebase.numer) / timebase.denom;
 
+#if __AMP__
+	if (is_stackshot && interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
+		/*
+		 * If there are no recommended performance cores, we double the timeout to compensate
+		 * for the difference in time it takes Stackshot to run on efficiency cores, and then
+		 * recheck if we still exceeded the adjusted timeout.
+		 */
+		int cpu;
+		int max_cpu;
+
+		max_cpu = ml_get_max_cpu_number();
+		for (cpu = 0; cpu <= max_cpu; cpu++) {
+			processor_t processor = cpu_to_processor(cpu);
+			if (processor->is_recommended &&
+			    processor->processor_set->pset_cluster_type == PSET_AMP_P) {
+				break;
+			}
+		}
+		if (cpu > max_cpu) {
+			if (time_elapsed < timeout * 2) {
+				return;
+			}
+		}
+	}
+#endif /* __AMP__ */
+
 	uint64_t current_cycles = 0, current_instrs = 0;
 
 #if CONFIG_CPU_COUNTERS
-	if (sched_hygiene_debug_pmc) {
+	if (static_if(sched_debug_pmc)) {
 		mt_cur_cpu_cycles_instrs_speculative(&current_cycles, &current_instrs);
 	}
 #endif // CONFIG_CPU_COUNTERS
@@ -864,7 +887,7 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t start, uint64_
 		const uint64_t timeout_ns = ((timeout * debug_cpu_performance_degradation_factor) * timebase.numer) / timebase.denom;
 		char extra_info_string[EXTRA_INFO_STRING_SIZE] = { '\0' };
 #if CONFIG_CPU_COUNTERS
-		if (sched_hygiene_debug_pmc) {
+		if (static_if(sched_debug_pmc)) {
 			const uint64_t time_elapsed_us = time_elapsed_ns / 1000;
 			const uint64_t average_freq_mhz = cycles_elapsed / time_elapsed_us;
 			const uint64_t average_cpi_whole = cycles_elapsed / instrs_elapsed;
@@ -1033,7 +1056,7 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
 		assert3u(state & DAIF_STANDARD_DISABLE, ==, DAIF_STANDARD_DISABLE);
 		assert(getCpuDatap()->cpu_int_state == NULL); // Make sure we're not enabling interrupts from primary interrupt context
 #if SCHED_HYGIENE_DEBUG
-		if (__probable(debug && (interrupt_masked_debug_mode || sched_preemption_disable_debug_mode))) {
+		if (__probable(debug && static_if(sched_debug_interrupt_disable))) {
 			// Interrupts are currently masked, we will enable them (after finishing this check)
 			if (stackshot_active()) {
 				ml_handle_stackshot_interrupt_disabled_duration(thread);
@@ -1062,7 +1085,7 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
 		__builtin_arm_wsr("DAIFSet", DAIFSC_STANDARD_DISABLE);
 
 #if SCHED_HYGIENE_DEBUG
-		if (__probable(debug && (interrupt_masked_debug_mode || sched_preemption_disable_debug_mode))) {
+		if (__probable(debug && static_if(sched_debug_interrupt_disable))) {
 			// Interrupts were enabled, we just masked them
 			ml_interrupt_masked_debug_timestamp(thread);
 		}
@@ -1173,18 +1196,36 @@ ml_is_quiescing(void)
 uint64_t
 ml_get_booter_memory_size(void)
 {
+#if CONFIG_SPTM
+	extern uint64_t memSize;
+#endif /* CONFIG_SPTM */
 	uint64_t size;
 	uint64_t roundsize = 512 * 1024 * 1024ULL;
 	size = BootArgs->memSizeActual;
 	if (!size) {
-		size  = BootArgs->memSize;
+#if CONFIG_SPTM
+		/*
+		 * SPTM systems cache [memSize] in a CTRR-protected variable rather
+		 * than relying on [BootArgs]. This is to enable the possibility
+		 * for XNU to modify it before machine lockdown, which happens in
+		 * KASAN kernels. If we did not do this, XNU would fault on the first
+		 * attempt to overwrite [BootArgs->memSize].
+		 */
+		size = memSize;
+#else
+		size = BootArgs->memSize;
+#endif /* CONFIG_SPTM */
 		if (size < (2 * roundsize)) {
 			roundsize >>= 1;
 		}
 		size  = (size + roundsize - 1) & ~(roundsize - 1);
 	}
 
+#if CONFIG_SPTM
+	size -= memSize;
+#else
 	size -= BootArgs->memSize;
+#endif /* CONFIG_SPTM */
 
 	return size;
 }

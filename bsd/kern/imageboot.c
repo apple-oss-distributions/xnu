@@ -199,7 +199,7 @@ __private_extern__ int
 imageboot_pivot_image(const char *image_path, imageboot_type_t type, const char *mount_path,
     const char *outgoing_root_path, const bool rooted_dmg, const bool skip_signature_check)
 {
-	int error;
+	int error = 0;
 	boolean_t authenticated_dmg_chunklist = false;
 	vnode_t mount_vp = NULLVP;
 	errno_t rootauth;
@@ -235,10 +235,28 @@ imageboot_pivot_image(const char *image_path, imageboot_type_t type, const char 
 
 	dev_t dev;
 	char devname[DEVMAXNAMESIZE];
+	const char *error_func = NULL;
+	unsigned ramdisk_arg = 0;
+	(void) PE_parse_boot_argn("-bsdmgroot-ramdisk", &ramdisk_arg, sizeof(ramdisk_arg));
 
-	error = di_root_image_ext(image_path, devname, DEVMAXNAMESIZE, &dev, true);
+	if (ramdisk_arg) {
+		size_t bufsz = 0;
+		void *buf = NULL;
+		error_func = "imageboot_read_file";
+		error = imageboot_read_file_pageable(image_path, &buf, &bufsz);
+		if (error == 0) {
+			error_func = "di_root_ramfile_buf";
+			error = di_root_ramfile_buf(buf, bufsz, devname, sizeof(devname), &dev);
+		}
+		if (error && (buf != NULL)) {
+			kmem_free(kernel_map, (vm_offset_t)buf, (vm_size_t)bufsz);
+		}
+	} else {
+		error_func = "di_root_image";
+		error = di_root_image_ext(image_path, devname, DEVMAXNAMESIZE, &dev, true);
+	}
 	if (error) {
-		panic("%s: di_root_image failed: %d", __FUNCTION__, error);
+		panic("%s: %s failed: %d", __FUNCTION__, error_func, error);
 	}
 
 	printf("%s: attached disk image %s as %s\n", __FUNCTION__, image_path, devname);
@@ -364,10 +382,12 @@ imageboot_pivot_image(const char *image_path, imageboot_type_t type, const char 
 	 * If the system later pivots out of the image, vfs_switch_root
 	 * will clear it again, so the backing filesystem can be unmounted.
 	 */
-	mount_t imagemp = imagevp->v_mount;
-	lck_rw_lock_exclusive(&imagemp->mnt_rwlock);
-	imagemp->mnt_kern_flag |= MNTK_BACKS_ROOT;
-	lck_rw_done(&imagemp->mnt_rwlock);
+	if (!ramdisk_arg) {
+		mount_t imagemp = imagevp->v_mount;
+		lck_rw_lock_exclusive(&imagemp->mnt_rwlock);
+		imagemp->mnt_kern_flag |= MNTK_BACKS_ROOT;
+		lck_rw_done(&imagemp->mnt_rwlock);
+	}
 
 	error = 0;
 

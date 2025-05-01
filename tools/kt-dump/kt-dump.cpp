@@ -53,7 +53,7 @@ __options_decl(kalloc_type_flags_t, uint32_t, {
 	KT_CHANGED        = 0x0020,
 	KT_CHANGED2       = 0x0040,
 	KT_PTR_ARRAY      = 0x0080,
-	KT_NOSHARED       = 0x2000,
+	KT_NOEARLY        = 0x2000,
 	KT_SLID           = 0x4000,
 	KT_PROCESSED      = 0x8000,
 	KT_HASH           = 0xffff0000,
@@ -78,7 +78,7 @@ struct kalloc_type_view {
 	const char         *kt_signature;
 	kalloc_type_flags_t kt_flags;
 	uint32_t            kt_size;
-	struct zone        *kt_zshared;
+	struct zone        *kt_zearly;
 	struct zone        *kt_zsig;
 };
 

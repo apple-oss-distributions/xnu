@@ -488,6 +488,12 @@ PE_init_socd_client(void)
 }
 
 void
+PE_read_socd_client_buffer(__unused vm_offset_t offset, __unused void *out_buff, __unused vm_size_t size)
+{
+	/* not implemented */
+}
+
+void
 PE_write_socd_client_buffer(__unused vm_offset_t offset, __unused const void *buff, __unused vm_size_t size)
 {
 	/* not implemented */

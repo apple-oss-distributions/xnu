@@ -45,6 +45,7 @@
 #include <arm64/proc_reg.h>
 #endif
 
+
 #define C_SEG_OFFSET_BITS       16
 
 #define C_SEG_MAX_POPULATE_SIZE (4 * PAGE_SIZE)
@@ -130,7 +131,11 @@ static_assert((C_SEG_OFFSET_BITS + C_SLOT_C_SIZE_BITS +
 
 struct c_slot {
 	uint64_t        c_offset:C_SEG_OFFSET_BITS __kernel_ptr_semantics;
-	uint64_t        c_size:C_SLOT_C_SIZE_BITS; /* 0 means it's an empty slot */
+	/* 0 means it's an empty slot
+	 * 4 means it's a short-value that did not fit in the hash
+	 * [5 : PAGE_SIZE-1] means it is normally compressed
+	 * PAGE_SIZE means it was incompressible (see tag:WK-INCOMPRESSIBLE) */
+	uint64_t        c_size:C_SLOT_C_SIZE_BITS;
 #if C_SLOT_C_CODEC_BITS
 	uint64_t        c_codec:C_SLOT_C_CODEC_BITS;
 #endif
@@ -197,7 +202,11 @@ struct c_segment {
 	uint16_t        c_firstemptyslot;  /* index of lowest empty slot. used for instance in minor compaction to not have to start from 0 */
 	uint16_t        c_nextslot;        /* index of the next available slot in either c_slot_fixed_array or c_slot_var_array */
 	uint32_t        c_nextoffset;      /* next available position in the buffer space pointed by c_store.c_buffer */
-	uint32_t        c_populated_offset;
+	uint32_t        c_populated_offset; /* how much of the segment is populated from it's beginning */
+	/* c_nextoffset and c_populated_offset count ints, not bytes
+	 * Invariants: - (c_nextoffset <= c_populated_offset) always
+	 *             - c_nextoffset is rounded to WKDM alignment
+	 *             - c_populated_offset is in quanta of PAGE_SIZE/sizeof(int) */
 
 	union {
 		int32_t *c_buffer;
@@ -301,6 +310,10 @@ extern _Atomic uint64_t c_segment_compressed_bytes;
 #define C_SEG_OFFSET_ALIGNMENT_BOUNDARY __PLATFORM_WKDM_ALIGNMENT_BOUNDARY__
 #endif
 
+/* round an offset/size up to the next multiple the wkdm write alignment (64 byte) */
+#define C_SEG_ROUND_TO_ALIGNMENT(offset) \
+	(((offset) + C_SEG_OFFSET_ALIGNMENT_MASK) & ~C_SEG_OFFSET_ALIGNMENT_MASK)
+
 #define C_SEG_SHOULD_MINORCOMPACT_NOW(cseg)     ((C_SEG_UNUSED_BYTES(cseg) >= (c_seg_bufsize / 4)) ? 1 : 0)
 
 /*
@@ -355,8 +368,7 @@ extern int vm_compressor_test_seg_wp;
 	        vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
-	                       VM_PROT_READ | VM_PROT_WRITE,    \
-	                       0);                              \
+	                       0, VM_PROT_READ | VM_PROT_WRITE);    \
 	}                               \
 	MACRO_END
 
@@ -366,8 +378,7 @@ extern int vm_compressor_test_seg_wp;
 	        vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
-	                       VM_PROT_READ,                    \
-	                       0);                              \
+	                       0, VM_PROT_READ);                    \
 	}                                                       \
 	if (vm_compressor_test_seg_wp) {                                \
 	        volatile uint32_t vmtstmp = *(volatile uint32_t *)cseg->c_store.c_buffer; \
@@ -375,7 +386,7 @@ extern int vm_compressor_test_seg_wp;
 	        (void) vmtstmp;                                         \
 	}                                                               \
 	MACRO_END
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
 typedef struct c_segment *c_segment_t;
 typedef struct c_slot   *c_slot_t;
@@ -385,8 +396,6 @@ void vm_decompressor_unlock(void);
 void vm_compressor_delay_trim(void);
 void vm_compressor_do_warmup(void);
 
-extern bool             vm_swap_low_on_space(void);
-extern int              vm_swap_out_of_space(void);
 extern kern_return_t    vm_swap_get(c_segment_t, uint64_t, uint64_t);
 
 extern uint32_t         c_age_count;
@@ -422,9 +431,6 @@ extern struct vm_compressor_kdp_state vm_compressor_kdp_state;
 extern void kdp_compressor_busy_find_owner(event64_t wait_event, thread_waitinfo_t *waitinfo);
 extern kern_return_t vm_compressor_kdp_init(void);
 extern void vm_compressor_kdp_teardown(void);
-
-#define AVAILABLE_NON_COMPRESSED_MEMORY         (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
-#define AVAILABLE_MEMORY                        (AVAILABLE_NON_COMPRESSED_MEMORY + VM_PAGE_COMPRESSOR_COUNT)
 
 /*
  * TODO, there may be a minor optimisation opportunity to replace these divisions
@@ -481,14 +487,16 @@ if (vm_ktrace_enabled) {        \
 }                               \
 MACRO_END
 
-#if DEVELOPMENT || DEBUG
 extern bool compressor_running_perf_test;
 extern uint64_t compressor_perf_test_pages_processed;
 #endif /* DEVELOPMENT || DEBUG */
-#endif
 
 #endif /* MACH_KERNEL_PRIVATE */
 
+extern bool vm_swap_low_on_space(void);
+extern bool vm_swap_out_of_space(void);
+
+#define HIBERNATE_FLUSHING_SECS_TO_COMPLETE     120
 
 #if DEVELOPMENT || DEBUG
 int do_cseg_wedge_thread(void);
@@ -507,11 +515,22 @@ void vm_thrashing_jetsam_done(void);
 uint32_t vm_compression_ratio(void);
 uint32_t vm_compressor_pool_size(void);
 uint32_t vm_compressor_fragmentation_level(void);
+uint32_t vm_compressor_incore_fragmentation_wasted_pages(void);
 bool vm_compressor_is_thrashing(void);
 bool vm_compressor_swapout_is_ripe(void);
-uint64_t vm_compressor_pages_compressed(void);
+uint32_t vm_compressor_pages_compressed(void);
 void vm_compressor_process_special_swapped_in_segments(void);
-kern_return_t vm_compressor_serialize_segment_debug_info(int segno, char *buf, size_t *size);
+
+#if DEVELOPMENT || DEBUG
+__enum_closed_decl(vm_c_serialize_add_data_t, uint32_t, {
+	VM_C_SERIALIZE_DATA_NONE,
+});
+kern_return_t vm_compressor_serialize_segment_debug_info(int segno, char *buf, size_t *size, vm_c_serialize_add_data_t with_data);
+#endif /* DEVELOPMENT || DEBUG */
+
+extern bool vm_compressor_low_on_space(void);
+extern bool vm_compressor_compressed_pages_nearing_limit(void);
+extern bool vm_compressor_out_of_space(void);
 
 
 #endif /* _VM_VM_COMPRESSOR_XNU_H_ */

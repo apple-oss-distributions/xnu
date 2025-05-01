@@ -789,7 +789,6 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 	cpu_data_ptr->cpu_reset_assist = 0x0UL;
 	cpu_data_ptr->cpu_regmap_paddr = 0x0ULL;
 	cpu_data_ptr->cpu_phys_id = 0x0UL;
-	cpu_data_ptr->cpu_l2_access_penalty = 0;
 	cpu_data_ptr->cpu_cluster_type = CLUSTER_TYPE_SMP;
 	cpu_data_ptr->cpu_cluster_id = 0;
 	cpu_data_ptr->cpu_l2_id = 0;
@@ -905,7 +904,7 @@ cpu_start(int cpu)
 		cpu_data_ptr->cpu_active_thread = first_thread;
 		first_thread->machine.CpuDatap = cpu_data_ptr;
 		first_thread->machine.pcpu_data_base_and_cpu_number =
-		    ml_make_pcpu_base_and_cpu_number((char *)cpu_data_ptr - __PERCPU_ADDR(cpu_data),
+		    ml_make_pcpu_base_and_cpu_number((vm_address_t)cpu_data_ptr - __PERCPU_ADDR(cpu_data),
 		    cpu_data_ptr->cpu_number);
 
 		configure_coresight_registers(cpu_data_ptr);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2331,9 +2331,8 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 		void *buf;
 		int sz;
 
-#if CONFIG_MEMORYSTATUS
-		task_ledger_settle_dirty_time(task);
-#endif /* CONFIG_MEMORYSTATUS */
+		/* Settle ledger entries for memorystatus and pages grabbed */
+		task_ledger_settle(task);
 
 		rval = ledger_get_task_entry_info_multiple(task, &buf, &len);
 		proc_rele(proc);
@@ -2381,7 +2380,7 @@ telemetry(__unused struct proc *p, struct telemetry_args *args, __unused int32_t
 	switch (args->cmd) {
 #if CONFIG_TELEMETRY
 	case TELEMETRY_CMD_TIMER_EVENT:
-		error = telemetry_timer_event(args->deadline, args->interval, args->leeway);
+		error = ENOTSUP;
 		break;
 	case TELEMETRY_CMD_PMI_SETUP:
 		error = telemetry_pmi_setup((enum telemetry_pmi)args->deadline, args->interval);
@@ -2482,6 +2481,140 @@ out:
 	return ret;
 }
 
+/*
+ * Coprocessor logging
+ *
+ * Description: syscall to access kernel coprocessor logging from userspace
+ *
+ * Args:
+ *	buff - userspace address of string to copy.
+ *	buff_len - size of buffer.
+ *	type - log type/level
+ *	uuid - log source identifier
+ *	timestamp - log timestamp
+ *	offset - log format offset
+ *	stream_log - flag indicating stream
+ */
+int
+oslog_coproc(__unused struct proc *p, struct oslog_coproc_args *args, int *retval)
+{
+	user_addr_t buff = args->buff;
+	uint64_t buff_len = args->buff_len;
+	uint32_t type = args->type;
+	user_addr_t uuid = args->uuid;
+	uint64_t timestamp = args->timestamp;
+	uint32_t offset = args->offset;
+	uint32_t stream_log = args->stream_log;
+	char *log_buff = NULL;
+	uuid_t log_uuid;
+
+	int ret = 0;
+	*retval = 0;
+
+	const task_t __single task = proc_task(p);
+	if (task == NULL || !IOTaskHasEntitlement(task, "com.apple.private.coprocessor-logging")) {
+		return EPERM;
+	}
+
+	/* Only DEXTs are supposed to use this syscall. */
+	if (!task_is_driver(current_task())) {
+		return EPERM;
+	}
+
+	// the full message contains a 32 bit offset value, 16 byte uuid and then the provided buffer
+	// entire message needs to fit within OS_LOG_BUFFER_MAX_SIZE
+	// this is reflected in `log.c:os_log_coprocessor`
+	uint64_t full_len;
+	if (os_add_overflow(buff_len, sizeof(uuid_t) + sizeof(uint32_t), &full_len) || full_len > OS_LOG_BUFFER_MAX_SIZE) {
+		return ERANGE;
+	}
+
+	log_buff = (char *)kalloc_data(buff_len, Z_WAITOK);
+	if (!log_buff) {
+		return ENOMEM;
+	}
+
+	ret = copyin(buff, log_buff, buff_len);
+	if (ret) {
+		goto out;
+	}
+
+	ret = copyin(uuid, &log_uuid, sizeof(uuid_t));
+	if (ret) {
+		goto out;
+	}
+
+	os_log_coprocessor(log_buff, buff_len, (os_log_type_t)type, (char *)log_uuid, timestamp, offset, stream_log);
+
+out:
+	if (log_buff != NULL) {
+		kfree_data(log_buff, buff_len);
+	}
+
+	return ret;
+}
+
+/*
+ * Coprocessor logging registration
+ *
+ * Description: syscall to access kernel coprocessor logging registration from userspace
+ *
+ * Args:
+ *	uuid - coprocessor fw uuid to harvest
+ *	file_path - file name for logd to harvest from
+ *	file_path_len - file name length
+ */
+int
+oslog_coproc_reg(__unused struct proc *p, struct oslog_coproc_reg_args *args, int *retval)
+{
+	user_addr_t uuid = args->uuid;
+	user_addr_t file_path = args->file_path;
+	size_t file_path_len = args->file_path_len;
+	char *file_path_buf = NULL;
+	uuid_t uuid_buf;
+
+	int ret = 0;
+	*retval = 0;
+
+	const task_t __single task = proc_task(p);
+	if (task == NULL || !IOTaskHasEntitlement(task, "com.apple.private.coprocessor-logging")) {
+		return EPERM;
+	}
+
+	/* Only DEXTs are supposed to use this syscall. */
+	if (!task_is_driver(current_task())) {
+		return EPERM;
+	}
+
+	if (file_path_len > PATH_MAX) {
+		return EINVAL;
+	}
+
+	file_path_buf = (char *)kalloc_data(file_path_len, Z_WAITOK);
+	if (!file_path_buf) {
+		return ENOMEM;
+	}
+
+	ret = copyin(file_path, file_path_buf, file_path_len);
+	if (ret) {
+		goto out;
+	}
+
+	ret = copyin(uuid, &uuid_buf, sizeof(uuid_t));
+	if (ret) {
+		goto out;
+	}
+
+	os_log_coprocessor_register_with_type((char *)uuid_buf, file_path_buf, os_log_coproc_register_harvest_fs_ftab);
+
+out:
+	if (file_path_buf != NULL) {
+		kfree_data(file_path_buf, file_path_len);
+	}
+
+	return ret;
+}
+
 #if DEVELOPMENT || DEBUG
 
 static int
@@ -2514,11 +2647,6 @@ SYSCTL_PROC(_kern, OID_AUTO, mpsc_test_pingpong, CTLTYPE_QUAD | CTLFLAG_RW | CTL
 
 SYSCTL_NODE(_kern, OID_AUTO, microstackshot, CTLFLAG_RD | CTLFLAG_LOCKED, 0,
     "microstackshot info");
-
-extern uint32_t telemetry_sample_rate;
-SYSCTL_UINT(_kern_microstackshot, OID_AUTO, interrupt_sample_rate,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &telemetry_sample_rate, 0,
-    "interrupt-based sampling rate in Hz");
 
 #if defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES)
 
@@ -2704,7 +2832,7 @@ sysctl_kern_sched_thread_bind_cluster_type SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
-	thread_bind_cluster_type(current_thread(), cluster_type, false);
+	thread_soft_bind_cluster_type(current_thread(), cluster_type);
 
 out:
 	buff[0] = sysctl_get_bound_cluster_type();
@@ -2755,7 +2883,7 @@ out:
 SYSCTL_PROC(_kern, OID_AUTO, sched_task_set_cluster_type, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_kern_sched_task_set_cluster_type, "A", "");
 
-extern kern_return_t thread_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
+extern kern_return_t thread_soft_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
 extern uint32_t thread_bound_cluster_id(thread_t);
 static int
 sysctl_kern_sched_thread_bind_cluster_id SYSCTL_HANDLER_ARGS
@@ -2776,10 +2904,12 @@ sysctl_kern_sched_thread_bind_cluster_id SYSCTL_HANDLER_ARGS
 
 	if (changed) {
 		/*
-		 * This sysctl binds the thread to the cluster without any flags, which
-		 * means it will be hard bound and not check eligibility.
+		 * Note, this binds the thread to the cluster without passing the
+		 * THREAD_BIND_ELIGIBLE_ONLY option, which means we won't check
+		 * whether the thread is otherwise eligible to run on that cluster--
+		 * we will send it there regardless.
 		 */
-		kern_return_t kr = thread_bind_cluster_id(self, new_value, 0);
+		kern_return_t kr = thread_soft_bind_cluster_id(self, new_value, 0);
 		if (kr == KERN_INVALID_VALUE) {
 			return ERANGE;
 		}
@@ -2880,7 +3010,11 @@ sysctl_kern_tcsm_enable SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 	uint32_t soflags = 0;
+#if CONFIG_SCHED_SMT
 	uint32_t old_value = thread_get_no_smt() ? 1 : 0;
+#else /* CONFIG_SCHED_SMT */
+	uint32_t old_value = 0;
+#endif /* CONFIG_SCHED_SMT */
 
 	int error = SYSCTL_IN(req, &soflags, sizeof(soflags));
 	if (error) {
@@ -2888,7 +3022,9 @@ sysctl_kern_tcsm_enable SYSCTL_HANDLER_ARGS
 	}
 
 	if (soflags && machine_csv(CPUVN_CI)) {
+#if CONFIG_SCHED_SMT
 		thread_set_no_smt(true);
+#endif /* CONFIG_SCHED_SMT */
 		machine_tecs(current_thread());
 	}
 
@@ -2976,6 +3112,7 @@ out:
 SYSCTL_PROC(_kern, OID_AUTO, sched_task_set_no_smt, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
     0, 0, sysctl_kern_sched_task_set_no_smt, "A", "");
 
+#if CONFIG_SCHED_SMT
 static int
 sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
@@ -2989,6 +3126,13 @@ sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused v
 
 	return error;
 }
+#else /* CONFIG_SCHED_SMT */
+static int
+sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, __unused struct sysctl_req *req)
+{
+	return 0;
+}
+#endif /* CONFIG_SCHED_SMT*/
 
 SYSCTL_PROC(_kern, OID_AUTO, sched_thread_set_no_smt,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,

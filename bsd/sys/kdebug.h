@@ -153,6 +153,7 @@ __BEGIN_DECLS
 #define DBG_MACH_EXCP_EMUL      0x0E // Instruction emulated
 #define DBG_MACH_IHDLR          0x10 // Interrupt Handlers
 #define DBG_MACH_IPC            0x20 // Inter Process Comm
+#define DBG_MACH_SUSPENSION     0x21 // Task/thread suspend and resume
 #define DBG_MACH_RESOURCE       0x25 // tracing limits, etc
 #define DBG_MACH_EXCLAVES       0x2A // Exclaves
 #define DBG_MACH_EXCLAVES_SCHEDULER 0x2B // Exclaves Scheduler
@@ -392,6 +393,7 @@ __BEGIN_DECLS
 
 #define DBG_VM_MAP_LOOKUP_ENTRY_FAILURE     0x143
 
+
 /*
  * Codes for Working Set Measurement (DBG_MACH_WORKINGSET)
  */
@@ -423,8 +425,8 @@ __BEGIN_DECLS
 #define DBG_COR_FAULT                   0x0b
 
 /* Codes for IPC (DBG_MACH_IPC) */
-#define MACH_TASK_SUSPEND                       0x0     /* Suspended a task */
-#define MACH_TASK_RESUME                        0x1     /* Resumed a task */
+/* unused MACH_TASK_SUSPEND                     0x0 was: Suspended a task */
+/* unused MACH_TASK_RESUME                      0x1 was: Resumed a task */
 #define MACH_THREAD_SET_VOUCHER                 0x2
 #define MACH_IPC_MSG_SEND                       0x3     /* mach msg send, uniq msg info */
 #define MACH_IPC_MSG_RECV                       0x4     /* mach_msg receive */
@@ -437,8 +439,12 @@ __BEGIN_DECLS
 #define MACH_IPC_KMSG_LINK                      0xb     /* link a kernel kmsg pointer to user mach_msg_header_t */
 #define MACH_IPC_PORT_ENTRY_MODIFY              0xc     /* A port space gained or lost a port right (reference) */
 #define MACH_IPC_DESTROY_GUARDED_DESC           0xd     /* Unable to receive a guarded descriptor */
-#define MACH_THREAD_SUSPEND                     0xe     /* Suspended a thread */
-#define MACH_THREAD_RESUME                      0xf     /* Resumed a thread */
+
+/* Codes for Suspension (DBG_MACH_SUSPENSION) */
+#define MACH_TASK_SUSPEND                       0x0     /* Suspended a task */
+#define MACH_TASK_RESUME                        0x1     /* Resumed a task */
+#define MACH_THREAD_SUSPEND                     0x2     /* Suspended a thread */
+#define MACH_THREAD_RESUME                      0x3     /* Resumed a thread */
 
 /* Codes for Exclaves (DBG_MACH_EXCLAVES) */
 #define MACH_EXCLAVES_SWITCH                    0x0     /* Exclaves world switch (entry/return) */
@@ -459,6 +465,15 @@ __BEGIN_DECLS
 #define MACH_EXCLAVES_SCHEDULER_NOTHING_SCHEDULED 0x8   /* Exclaves scheduler NothingScheduled response */
 #define MACH_EXCLAVES_SCHEDULER_ALL_EXCLAVES_BOOTED 0x9 /* Exclaves scheduler AllExclavesBooted response */
 #define MACH_EXCLAVES_SCHEDULER_EARLY_ALLOC     0xa     /* Exclaves scheduler PmmEarlyAlloc response */
+#define MACH_EXCLAVES_SCHEDULER_WATCHDOG_PANIC_COMPLETE 0xb /* Exclaves scheduler WatchdogPanicComplete response */
+#define MACH_EXCLAVES_SCHEDULER_PANICKING       0xc     /* Exclaves scheduler Panicking response */
+#define MACH_EXCLAVES_SCHEDULER_REQ_RESUME_WITH_HOSTID       0xd  /* Exclaves scheduler ResumeWithHostId request */
+#define MACH_EXCLAVES_SCHEDULER_REQ_INTERRUPT_WITH_HOSTID    0xe  /* Exclaves scheduler InterruptWithHostIdrequest */
+#define MACH_EXCLAVES_SCHEDULER_REQ_UPDATE_TIMER_OFFSET      0xf  /* Exclaves scheduler UpdateTimerOffset request */
+#define MACH_EXCLAVES_SCHEDULER_REQ_BOOT_EXCLAVES            0x10 /* Exclaves scheduler BootExclaves request */
+#define MACH_EXCLAVES_SCHEDULER_REQ_PMM_EARLY_ALLOC_RESPONSE 0x11 /* Exclaves scheduler PmmEarlyAllocResponse request */
+#define MACH_EXCLAVES_SCHEDULER_REQ_WATCHDOG_PANIC           0x12 /* Exclaves scheduler WatchdogPanic request */
+
 
 /* Codes for Epoch Sync (DBG_MACH_EPOCH_SYNC) */
 #define MACH_EPOCH_SYNC_WAIT_STALE          0x0
@@ -637,12 +652,16 @@ __BEGIN_DECLS
 #pragma mark Deferred Memory Reclamation Codes (DBG_MACH_VM_RECLAIM)
 
 #define VM_RECLAIM_UPDATE_ACCOUNTING 0x01
-#define VM_RECLAIM_ENTRIES           0x02
+#define VM_RECLAIM_TRIM              0x02
 #define VM_RECLAIM_CHUNK             0x03
 #define VM_RECLAIM_ENTRY             0x04
-#define VM_RECLAIM_ALL_MEMORY        0x05
-#define VM_RECLAIM_ASYNC_MEMORY      0x06
+#define VM_RECLAIM_DRAIN             0x05
+
 #define VM_RECLAIM_INIT              0x07
+#define VM_RECLAIM_SAMPLE            0x08
+
+#define VM_RECLAIM_RESIZE            0x0a
+#define VM_RECLAIM_FLUSH             0x0b
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP       1       /* Internet Protocol */

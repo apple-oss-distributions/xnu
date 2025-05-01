@@ -1450,9 +1450,14 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 	 *	Before we can block (any VM code), make another
 	 *	reference to the map to keep it alive.  We do
 	 *	that by getting a reference on the task itself.
+	 *
+	 *	Additionally, if the task is not IPC active, we
+	 *	must fail early. Other tasks can't yet look up
+	 *	this task's task port to make Mach API calls, so
+	 *	we shouldn't make such calls on their behalf.
 	 */
 	task = proc_task(p);
-	if (task == NULL) {
+	if (task == NULL || !task_is_ipc_active(task)) {
 		error = EINVAL;
 		goto finish;
 	}
@@ -1796,6 +1801,7 @@ sysctl_maxproc
 	return error;
 }
 
+#if CONFIG_SCHED_SMT
 STATIC int
 sysctl_sched_enable_smt
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -1830,9 +1836,16 @@ sysctl_sched_enable_smt
 		error = ENOENT;
 		break;
 	}
-
 	return error;
 }
+#else /* CONFIG_SCHED_SMT */
+STATIC int
+sysctl_sched_enable_smt
+(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, __unused struct sysctl_req *req)
+{
+	return 0;
+}
+#endif /* CONFIG_SCHED_SMT */
 
 SYSCTL_STRING(_kern, KERN_OSTYPE, ostype,
     CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
@@ -2446,8 +2459,7 @@ static int
 sysctl_kern_quantum_us(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2, struct sysctl_req *req)
 {
-	extern uint64_t sysctl_get_quantum_us(void);
-	const uint64_t quantum_us = sysctl_get_quantum_us();
+	const uint64_t quantum_us = sched_get_quantum_us();
 
 	return sysctl_io_number(req, quantum_us, sizeof(quantum_us), NULL, NULL);
 }
@@ -4143,6 +4155,19 @@ out:
 	return error;
 }
 
+#if CONFIG_ROSETTA
+STATIC int
+sysctl_sysctl_translated(
+	__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, __unused struct sysctl_req *req)
+{
+	int res = 0;
+	if (proc_is_translated(req->p)) {
+		res = 1;
+	}
+	return SYSCTL_OUT(req, &res, sizeof(res));
+}
+SYSCTL_PROC(_sysctl, OID_AUTO, proc_translated, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_sysctl_translated, "I", "proc_translated");
+#endif /* CONFIG_ROSETTA */
 
 STATIC int
 sysctl_sysctl_native(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
@@ -4371,8 +4396,10 @@ SYSCTL_PROC(_vm, OID_AUTO, add_wire_count_over_user_limit, CTLTYPE_QUAD | CTLFLA
 /* These sysctls are used to test the wired limit. */
 extern unsigned int    vm_page_wire_count;
 extern uint32_t        vm_lopage_free_count;
+extern unsigned int    vm_page_stolen_count;
 SYSCTL_INT(_vm, OID_AUTO, page_wire_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_wire_count, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, lopage_free_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_lopage_free_count, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, page_stolen_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_stolen_count, 0, "");
 
 /*
  * Setting the per task variable exclude_physfootprint_ledger to 1 will allow the calling task to exclude memory entries that are
@@ -4685,7 +4712,7 @@ sysctl_vm_pid_toggle_selfdonate_pages SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_vm, OID_AUTO, pid_toggle_selfdonate_pages, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED,
     0, 0, &sysctl_vm_pid_toggle_selfdonate_pages, "I", "");
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 extern uint32_t vm_page_donate_mode;
 extern uint32_t vm_page_donate_target_high, vm_page_donate_target_low;
 SYSCTL_INT(_vm, OID_AUTO, vm_page_donate_mode, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_page_donate_mode, 0, "");
@@ -4760,7 +4787,7 @@ SYSCTL_INT(_vm, OID_AUTO, precompy, CTLFLAG_RW | CTLFLAG_LOCKED, &precompy, 0, "
 SYSCTL_INT(_vm, OID_AUTO, wkswhw, CTLFLAG_RW | CTLFLAG_LOCKED, &wkswhw, 0, "");
 extern unsigned int vm_ktrace_enabled;
 SYSCTL_INT(_vm, OID_AUTO, vm_ktrace, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_ktrace_enabled, 0, "");
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
 #if CONFIG_PHANTOM_CACHE
 extern uint32_t phantom_cache_thrashing_threshold;
@@ -4847,6 +4874,7 @@ SYSCTL_INT(_vm, OID_AUTO, vm_pageout_yield_for_free_pages, CTLFLAG_RD | CTLFLAG_
 
 extern int vm_page_delayed_work_ctx_needed;
 SYSCTL_INT(_vm, OID_AUTO, vm_page_needed_delayed_work_ctx, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_delayed_work_ctx_needed, 0, "");
+
 
 /* log message counters for persistence mode */
 SCALABLE_COUNTER_DECLARE(oslog_p_total_msgcount);
@@ -5490,6 +5518,8 @@ SYSCTL_PROC(_debug, OID_AUTO, xnu_simultaneous_panic_test, CTLTYPE_STRING | CTLF
 extern int exc_resource_threads_enabled;
 SYSCTL_INT(_kern, OID_AUTO, exc_resource_threads_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &exc_resource_threads_enabled, 0, "exc_resource thread limit enabled");
 
+extern unsigned int verbose_panic_flow_logging;
+SYSCTL_INT(_debug, OID_AUTO, verbose_panic_flow_logging, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &verbose_panic_flow_logging, 0, "verbose logging during panic");
 
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -5587,6 +5617,7 @@ SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_va, CTLFLAG_RD | CTLFLAG_LOCKED | CTL
 SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_size, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &phys_carveout_size,
     "size in bytes of the phys_carveout_mb boot-arg region");
+
 
 
 static int
@@ -6091,7 +6122,14 @@ SYSCTL_QUAD(_kern, OID_AUTO, num_static_scalable_counters, CTLFLAG_RD | CTLFLAG_
 
 #if SCHED_HYGIENE_DEBUG
 TUNABLE_DT(bool, sched_hygiene_nonspec_tb, "machine-timeouts", "nonspec-tb", "sched-hygiene-nonspec-tb", false, TUNABLE_DT_NONE);
+static SECURITY_READ_ONLY_LATE(int) sched_hygiene_debug_available = 1;
+#else
+static SECURITY_READ_ONLY_LATE(int) sched_hygiene_debug_available = 0;
 #endif /* SCHED_HYGIENE_DEBUG */
+
+SYSCTL_INT(_debug, OID_AUTO, sched_hygiene_debug_available,
+    CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &sched_hygiene_debug_available, 0, "");
 
 uuid_string_t trial_treatment_id;
 uuid_string_t trial_experiment_id;

@@ -46,6 +46,8 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 
+#include <corecrypto/ccmode.h>
+
 __BEGIN_DECLS
 
 #ifdef KERNEL
@@ -192,7 +194,19 @@ typedef struct {
 	 * as the HIBTEXT stack.
 	 */
 	uint64_t hibtext_stack_top;
+
 } hib_protected_metadata_t;
+
+/**
+ * SPTM-only: AES GCM initialization vector and tag for decryption
+ * of exclave pages. The IV is used during initialization, the tag
+ * is used to verify integrity after all pages have been
+ * decrypted.
+ */
+struct hib_exclave_iv {
+	uint8_t iv[CCGCM_IV_NBYTES];
+	uint8_t tag[CCGCM_BLOCK_NBYTES];
+};
 
 struct IOHibernateImageHeader {
 	uint64_t    imageSize;
@@ -360,6 +374,17 @@ struct IOHibernateImageHeader {
 	 * (even if the bounds of the segments don't).
 	 */
 	uint8_t     hib_segs_hmac[HIBERNATE_HMAC_SIZE];
+
+	/**
+	 * SPTM-only: AES GCM initialization vector and tag for decryption
+	 * of exclave pages. The IV is used during initialization, the tag
+	 * is used to verify integrity after all pages have been
+	 * decrypted.
+	 *
+	 * These are copied from the sk encryption scratch page, which the
+	 * SK fills with this struct after having encrypted all pages.
+	 */
+	struct hib_exclave_iv exclave_iv;
 #endif /* defined(__arm64__) */
 
 	uint32_t            fileExtentMapSize;

@@ -58,6 +58,7 @@
 #include <machine/machine_routines.h>
 #include <machine/smp.h>
 #include <vm/vm_map.h>
+#include <vm/vm_fault_xnu.h>
 #include <vm/vm_protos.h>
 
 #include <sys/eventvar.h>
@@ -2680,13 +2681,9 @@ workq_thread_add_dispatch_override(proc_t p, mach_port_name_t kport,
 	if (ulock_addr) {
 		uint32_t val;
 		int rc;
-		/*
-		 * Workaround lack of explicit support for 'no-fault copyin'
-		 * <rdar://problem/24999882>, as disabling preemption prevents paging in
-		 */
-		disable_preemption();
+		vm_fault_disable();
 		rc = copyin_atomic32(ulock_addr, &val);
-		enable_preemption();
+		vm_fault_enable();
 		if (rc == 0 && ulock_owner_value_to_port_name(val) != kport) {
 			goto out;
 		}

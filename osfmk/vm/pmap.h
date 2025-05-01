@@ -100,22 +100,25 @@ extern kern_return_t    copypv(
 	addr64_t sink,
 	unsigned int size,
 	int which);
-#define cppvPsnk        1
-#define cppvPsnkb      31
-#define cppvPsrc        2
-#define cppvPsrcb      30
-#define cppvFsnk        4
-#define cppvFsnkb      29
-#define cppvFsrc        8
-#define cppvFsrcb      28
-#define cppvNoModSnk   16
-#define cppvNoModSnkb  27
-#define cppvNoRefSrc   32
-#define cppvNoRefSrcb  26
-#define cppvKmap       64       /* Use the kernel's vm_map */
-#define cppvKmapb      25
+
+/* bcopy_phys and bzero_phys flags. */
+#define cppvPsnk                0x000000001     /* Destination is a physical address */
+#define cppvPsnkb               31
+#define cppvPsrc                0x000000002     /* Source is a physical address */
+#define cppvPsrcb               30
+#define cppvFsnk                0x000000004     /* Destination requires flushing (only on non-coherent I/O) */
+#define cppvFsnkb               29
+#define cppvFsrc                0x000000008     /* Source requires flushing (only on non-coherent I/O) */
+#define cppvFsrcb               28
+#define cppvNoModSnk            0x000000010     /* Ignored in bcopy_phys() */
+#define cppvNoModSnkb           27
+#define cppvNoRefSrc            0x000000020     /* Ignored in bcopy_phys() */
+#define cppvNoRefSrcb           26
+#define cppvKmap                0x000000040     /* Use the kernel's vm_map */
+#define cppvKmapb               25
 
 extern boolean_t pmap_has_managed_page(ppnum_t first, ppnum_t last);
+
 
 #if MACH_KERNEL_PRIVATE || BSD_KERNEL_PRIVATE
 #include <mach/mach_types.h>
@@ -169,9 +172,9 @@ extern void *pmap_steal_freeable_memory(vm_size_t size); /* Early memory allocat
 
 extern uint_t pmap_free_pages(void); /* report remaining unused physical pages */
 #if defined(__arm__) || defined(__arm64__)
+extern ppnum_t pmap_first_pnum;           /* the first valid physical page on the system == atop(gDramBase) */
 extern uint_t pmap_free_pages_span(void); /* report phys address range of unused physical pages */
 #endif /* defined(__arm__) || defined(__arm64__) */
-
 
 extern void pmap_startup(vm_offset_t *startp, vm_offset_t *endp); /* allocate vm_page structs */
 
@@ -238,7 +241,7 @@ extern void pmap_virtual_space(
 extern pmap_t(pmap_kernel)(void);               /* Return the kernel's pmap */
 extern void             pmap_reference(pmap_t pmap);    /* Gain a reference. */
 extern void             pmap_destroy(pmap_t pmap); /* Release a reference. */
-extern void             pmap_switch(pmap_t);
+extern void             pmap_switch(pmap_t pmap, thread_t thread);
 extern void             pmap_require(pmap_t pmap);
 
 #if MACH_ASSERT
@@ -308,6 +311,10 @@ extern void             pmap_page_protect_options(      /* Restrict access to pa
 extern void(pmap_zero_page)(
 	ppnum_t         pn);
 
+extern void(pmap_zero_page_with_options)(
+	ppnum_t         pn,
+	int             options);
+
 extern void(pmap_zero_part_page)(
 	ppnum_t         pn,
 	vm_offset_t     offset,
@@ -315,7 +322,8 @@ extern void(pmap_zero_part_page)(
 
 extern void(pmap_copy_page)(
 	ppnum_t         src,
-	ppnum_t         dest);
+	ppnum_t         dest,
+	int             options);
 
 extern void(pmap_copy_part_page)(
 	ppnum_t         src,
@@ -437,6 +445,7 @@ extern void pmap_batch_set_cache_attributes(
 	unsigned int);
 extern void pmap_sync_page_data_phys(ppnum_t pa);
 extern void pmap_sync_page_attributes_phys(ppnum_t pa);
+
 
 /*
  * debug/assertions. pmap_verify_free returns true iff
@@ -795,6 +804,7 @@ extern bool pmap_get_jit_entitled(pmap_t pmap);
 /* Inform the pmap layer that the XO register is repurposed for this map */
 extern void pmap_set_tpro(pmap_t pmap);
 
+
 /* Ask the pmap layer if there is a TPRO entry in this map. */
 extern bool pmap_get_tpro(pmap_t pmap);
 
@@ -884,6 +894,8 @@ extern ledger_t pmap_ledger_alloc(void);
 extern void pmap_ledger_free(ledger_t);
 
 extern bool pmap_is_bad_ram(ppnum_t ppn);
+
+extern bool pmap_is_page_restricted(ppnum_t pn);
 
 #if __arm64__
 extern bool pmap_is_exotic(pmap_t pmap);

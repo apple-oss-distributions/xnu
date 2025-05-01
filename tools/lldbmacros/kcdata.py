@@ -171,6 +171,8 @@ kcdata_type_def = {
     'TASK_CRASHINFO_CRASHED_THREADID':     0x81A,
     'TASK_CRASHINFO_COALITION_ID':         0x81B,
     'TASK_CRASHINFO_JIT_ADDRESS_RANGE':    0x840,
+    'TASK_CRASHINFO_MB':                   0x841,
+    'TASK_CRASHINFO_CS_AUXILIARY_INFO':    0x842,
     'EXIT_REASON_SNAPSHOT':                0x1001,
     'EXIT_REASON_USER_DESC':               0x1002,
     'EXIT_REASON_USER_PAYLOAD':            0x1003,
@@ -1386,6 +1388,15 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_JIT_ADDRESS_RANGE')] = KCT
         KCSubTypeElement.FromBasicCtype('end_address', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
     ), 'jit_address_range')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_MB')] = KCTypeDescription(GetTypeForName('TASK_CRASHINFO_MB'),
+    (
+        KCSubTypeElement.FromBasicCtype('start_address', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement('data', KCSUBTYPE_TYPE.KC_ST_UINT64, KCSubTypeElement.GetSizeForArray(64, 64), 8, 0),
+    )
+)
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_AUXILIARY_INFO')] = KCSubTypeElement('cs_auxiliary_info', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0)
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES'),
     (
         KCSubTypeElement.FromBasicCtype('user_usec', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
@@ -1523,12 +1534,14 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO'
     (
         KCSubTypeElement.FromBasicCtype('layout_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
         KCSubTypeElement.FromBasicCtype('etl_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+        KCSubTypeElement.FromBasicCtype('sharedcache_index', KCSUBTYPE_TYPE.KC_ST_UINT32, 16),
     ), 'exclave_textlayout_info')
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS'),
     (
         KCSubTypeElement('layoutSegment_uuid', KCSUBTYPE_TYPE.KC_ST_UINT8, KCSubTypeElement.GetSizeForArray(16, 1), 0, 1),
         KCSubTypeElement.FromBasicCtype('layoutSegment_loadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+        KCSubTypeElement.FromBasicCtype('layoutSegment_rawLoadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
     ), 'exclave_textlayout_segments')
 
 def GetSecondsFromMATime(mat, tb):
@@ -1642,6 +1655,8 @@ kThreadWaitMappingInProgress    = 0x1a
 kThreadWaitMemoryBlocked        = 0x1b
 kThreadWaitPagingInProgress     = 0x1c
 kThreadWaitPageInThrottle       = 0x1d
+kThreadWaitExclaveCore          = 0x1e
+kThreadWaitExclaveKit           = 0x1f
 
 
 UINT64_MAX = 0xffffffffffffffff
@@ -1815,6 +1830,16 @@ def formatWaitInfo(info, wantHex, portlabels):
             s += "eventlink, signaled by thread %s" % ownerThread
     elif type == kThreadWaitCompressor:
         s += "in compressor segment %x, busy for thread %s" % (context, ownerThread)
+    elif type == kThreadWaitExclaveCore:
+        if owner == 0:
+            s += "exclavecore wait, id 0x%x" % context
+        else:
+            s += "exclavecore wait, id 0x%x, owner thread %s" % (context, ownerThread)
+    elif type == kThreadWaitExclaveKit:
+        if owner == 0:
+            s += "exclavekit wait, id 0x%x" % context
+        else:
+            s += "exclavekit wait, id 0x%x, owner thread %s" % (context, ownerThread)
     elif type == kThreadWaitPageBusy:
         s += f"busy page 0x{context:x}"
     elif type == kThreadWaitPagerInit:
@@ -1890,13 +1915,26 @@ def FindTextLayout(text_layouts, text_layout_id):
             return layout
     return None
 
+def BinaryImagesFromExclavesLayout(layout):
+    flags = layout['exclave_textlayout_info']['etl_flags']
+    sharedCacheIndex = layout['exclave_textlayout_info'].get('sharedcache_index', 0xffffffff)
+    layouts = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
+    # 0x4 == kExclaveTextLayoutHasSharedCache
+    if ((flags & 0x4) != 0 and sharedCacheIndex < length(layouts)):
+        layouts[sharedCacheIndex][2] = "S"
+    layouts.sort(key=itemgetter(1))
+    return layouts
 
 def GetExclaveLibs(text_layouts, text_layout_id):
     from operator import itemgetter
-    textlayout = FindTextLayout(text_layouts, text_layout_id)
-    exclave_libs = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
-    exclave_libs.sort(key=itemgetter(1))
-    return exclave_libs
+    textlayout = text_layouts.get(str(text_layout_id))
+
+    # This fallback is needed to preserve compatibility with kcdata generated before rdar://123838752
+    # FindTextLayout function should be removed in future
+    if not textlayout or textlayout['exclave_textlayout_info']['layout_id'] != text_layout_id:
+        textlayout = FindTextLayout(text_layouts, text_layout_id) 
+
+    return BinaryImagesFromExclavesLayout(layout)
     
 
 # kcdata is json at path 'kcdata_stackshot/threads_exclave/0'
@@ -2532,6 +2570,7 @@ PRETTIFY_FLAGS = {
     'etl_flags': [
         'kExclaveTextLayoutLoadAddressesSynthetic',
         'kExclaveTextLayoutLoadAddressesUnslid',
+        'kExclaveTextLayoutHasSharedCache',
     ],
 }
 PRETTIFY_FLAGS['stackshot_out_flags'] = PRETTIFY_FLAGS['stackshot_in_flags']

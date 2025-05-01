@@ -64,6 +64,28 @@ typedef struct {
 	uid_t               persona_id;
 } necp_application_id_t;
 
+#define NECP_DOMAIN_TRIE_SUPPORT 1
+
+/*
+ * Request sent from user-space to create a domain trie
+ */
+#define NECP_DOMAIN_TRIE_FLAG_REVERSE_SEARCH        0x1
+#define NECP_DOMAIN_TRIE_FLAG_ALLOW_PARTIAL_MATCH   0x2
+
+typedef struct necp_domain_trie_request {
+	uint32_t id;
+	uint32_t total_mem_size;
+	uint32_t nodes_mem_size;
+	uint32_t maps_mem_size;
+	uint32_t bytes_mem_size;
+	uint32_t nodes_count;
+	uint32_t maps_count;
+	uint32_t bytes_count;
+	uint32_t partial_match_terminator;
+	uint32_t flags;
+	uint8_t  data[__counted_by(total_mem_size)];
+} necp_domain_trie_request_t;
+
 /*
  * Control message commands
  */
@@ -96,6 +118,10 @@ typedef struct {
 #define NECP_SESSION_ACTION_ADD_DOMAIN_FILTER           12      // In: struct net_bloom_filter  Out: uint32_t, ID
 #define NECP_SESSION_ACTION_REMOVE_DOMAIN_FILTER        13      // In: uint32_t, ID             Out: None
 #define NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_FILTERS   14      // In: None                     Out: None
+#define NECP_SESSION_ACTION_ADD_DOMAIN_TRIE             15      // In: struct necp_domain_trie_request  Out: uint32_t, ID
+#define NECP_SESSION_ACTION_REMOVE_DOMAIN_TRIE          16      // In: uint32_t, ID             Out: None
+#define NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_TRIES     17      // In: None                     Out: None
+#define NECP_SESSION_ACTION_TRIE_DUMP_ALL               18      // In: None                     Out: uint8_t, count, then array of struct necp_domain_trie_request with no 'data'
 
 /*
  * Control message flags
@@ -779,9 +805,10 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_RESULT_FLAG_ALF_PRESENT                     0x40000 // Application Firewall enabled
 #define NECP_CLIENT_RESULT_FLAG_PARENTAL_CONTROLS_PRESENT       0x80000 // Parental Controls present
 #define NECP_CLIENT_RESULT_FLAG_IS_GLOBAL_INTERNET              0x100000 // Routes to global Internet
+#define NECP_CLIENT_RESULT_FLAG_LINK_HEURISTICS                 0x200000 // Link heuristics enabled
 
 
-#define NECP_CLIENT_RESULT_FLAG_FORCE_UPDATE (NECP_CLIENT_RESULT_FLAG_HAS_IPV4 | NECP_CLIENT_RESULT_FLAG_HAS_IPV6 | NECP_CLIENT_RESULT_FLAG_HAS_NAT64 | NECP_CLIENT_RESULT_FLAG_INTERFACE_LOW_POWER)
+#define NECP_CLIENT_RESULT_FLAG_FORCE_UPDATE (NECP_CLIENT_RESULT_FLAG_HAS_IPV4 | NECP_CLIENT_RESULT_FLAG_HAS_IPV6 | NECP_CLIENT_RESULT_FLAG_HAS_NAT64 | NECP_CLIENT_RESULT_FLAG_INTERFACE_LOW_POWER | NECP_CLIENT_RESULT_FLAG_LINK_HEURISTICS)
 
 #define NECP_CLIENT_RESULT_FAST_OPEN_SND_PROBE                  0x01    // DEPRECATED - Fast open send probe
 #define NECP_CLIENT_RESULT_FAST_OPEN_RCV_PROBE                  0x02    // DEPRECATED - Fast open receive probe
@@ -1206,6 +1233,7 @@ necp_buffer_get_tlv_value(u_int8_t * __counted_by(buffer_length)buffer, size_t b
 #define NECPCTL_CLIENT_TRACING_LEVEL                    22      /* Client tracing level */
 #define NECPCTL_CLIENT_TRACING_PID                      23      /* Apply client tracing only to specified pid */
 #define NECPCTL_DROP_MANAGEMENT_LEVEL                   24      /* Drop management traffic at this level */
+#define NECPCTL_TRIE_COUNT                              25      /* Count of tries */
 
 #define NECP_LOOPBACK_PASS_ALL         1  // Pass all loopback traffic
 #define NECP_LOOPBACK_PASS_WITH_FILTER 2  // Pass all loopback traffic, but activate content filter and/or flow divert if applicable
@@ -1412,6 +1440,7 @@ extern void necp_inpcb_remove_cb(struct inpcb *inp);
 extern void necp_inpcb_dispose(struct inpcb *inp);
 
 extern u_int32_t necp_socket_get_content_filter_control_unit(struct socket *so);
+extern u_int32_t necp_socket_get_policy_gencount(struct socket *so);
 
 extern bool necp_socket_should_use_flow_divert(struct inpcb *inp);
 extern u_int32_t necp_socket_get_flow_divert_control_unit(struct inpcb *inp, uint32_t *aggregate_unit);

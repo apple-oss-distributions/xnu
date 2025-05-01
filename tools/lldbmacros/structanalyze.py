@@ -207,7 +207,7 @@ def showStructInfo(cmd_args=None, cmd_options={}, O=None):
                     6,[   2] (short) revents
                 }
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Please provide a type name.")
 
     ty_name = cmd_args[0]

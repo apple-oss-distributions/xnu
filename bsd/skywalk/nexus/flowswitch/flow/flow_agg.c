@@ -1475,13 +1475,13 @@ flow_agg_merge_hdr(struct flow_agg *fa, struct __kern_packet *pkt,
 	} else {
 		struct mbuf *smbuf = fa->fa_smbuf;
 		smbuf->m_pkthdr.len += pkt->pkt_flow_ulen;
-		if (smbuf->m_pkthdr.seg_cnt == 0) {
+		if (smbuf->m_pkthdr.rx_seg_cnt == 0) {
 			/* First time we append packets, need to set it to 1 */
-			smbuf->m_pkthdr.seg_cnt = 1;
+			smbuf->m_pkthdr.rx_seg_cnt = 1;
 		}
-		_CASSERT(sizeof(result) == sizeof(smbuf->m_pkthdr.seg_cnt));
-		if (!os_add_overflow(1, smbuf->m_pkthdr.seg_cnt, &result)) {
-			smbuf->m_pkthdr.seg_cnt = result;
+		_CASSERT(sizeof(result) == sizeof(smbuf->m_pkthdr.rx_seg_cnt));
+		if (!os_add_overflow(1, smbuf->m_pkthdr.rx_seg_cnt, &result)) {
+			smbuf->m_pkthdr.rx_seg_cnt = result;
 		}
 		SK_DF(logflags, "Agg mbuf len %u TCP csum 0x%04x",
 		    smbuf->m_pkthdr.len, ntohs(stcp->th_sum));

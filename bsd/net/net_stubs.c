@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -204,6 +204,10 @@ STUB(mbuf_get_minclsize);
 STUB(mbuf_get_mlen);
 STUB(mbuf_get_traffic_class);
 STUB(mbuf_get_tso_requested);
+STUB(mbuf_get_gso_info);
+STUB(mbuf_set_gso_info);
+STUB(mbuf_get_lro_info);
+STUB(mbuf_set_lro_info);
 STUB(mbuf_get_vlan_tag);
 STUB(mbuf_getcluster);
 STUB(mbuf_gethdr);

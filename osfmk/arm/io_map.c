@@ -51,8 +51,6 @@
  * any improvements or extensions that they make and grant Carnegie Mellon the
  * rights to redistribute these changes.
  */
-/*
- */
 
 #include <mach/vm_param.h>
 #include <vm/vm_kern_xnu.h>
@@ -97,11 +95,17 @@ io_map(
 	vm_offset_t start;
 
 	phys_addr = trunc_page(phys_addr);
-
 	if (startup_phase < STARTUP_SUB_KMEM) {
 		/*
 		 * VM is not initialized.  Grab memory.
+		 *
+		 * We need to steal address space, not physical memory.  Force
+		 * alignment of virtual_space_start to support this... but be
+		 * aware that if it is not already aligned we waste any
+		 * trailing memory in the last page that was stolen.
 		 */
+		virtual_space_start = round_page(virtual_space_start);
+
 		start = virtual_space_start;
 		virtual_space_start += round_page(size);
 

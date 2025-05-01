@@ -416,7 +416,8 @@ pal_hib_resume_tramp(uint32_t headerPpnum)
 	// map some device register pages
 	if (gHibernateGlobals.dockChannelRegPhysBase) {
 #define dockchannel_uart_base gHibernateGlobals.dockChannelRegPhysBase
-		vm_address_t dockChannelRegPhysBase = trunc_page(&rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL));
+		vm_address_t dockChannelRegPhysBase =
+		    (vm_address_t)rDOCKCHANNELS_DEV_WSTAT(dockchannel_uart_base, DOCKCHANNEL_UART_CHANNEL);
 		map_register_page(&ctx, dockChannelRegPhysBase);
 	}
 	map_register_page(&ctx, gHibernateGlobals.hibUartRegPhysBase);

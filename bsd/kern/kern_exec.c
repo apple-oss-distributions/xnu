@@ -118,6 +118,7 @@
 #include <crypto/sha1.h>
 
 #include <libkern/libkern.h>
+#include <libkern/amfi/amfi.h>
 #include <libkern/crypto/sha2.h>
 #include <security/audit/audit.h>
 
@@ -137,6 +138,7 @@
 #include <kern/sched_prim.h> /* thread_wakeup() */
 #include <kern/affinity.h>
 #include <kern/assert.h>
+#include <kern/ipc_kobject.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/coalition.h>
@@ -201,6 +203,8 @@ static TUNABLE(bool, bootarg_arm64e_preview_abi, "-arm64e_preview_abi", false);
 static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
 #endif /* DEBUG || DEVELOPMENT */
 #endif /* XNU_TARGET_OS_OSX */
+
+
 
 #if CONFIG_DTRACE
 /* Do not include dtrace.h, it redefines kmem_[alloc/free] */
@@ -290,22 +294,9 @@ kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnod
 /*
  * Mach things for which prototypes are unavailable from Mach headers
  */
-#define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
-void            ipc_task_enable(
-	task_t          task);
-void            ipc_task_reset(
-	task_t          task);
-void            ipc_thread_reset(
-	thread_t        thread);
-kern_return_t ipc_object_copyin(
-	ipc_space_t             space,
-	mach_port_name_t        name,
-	mach_msg_type_name_t    msgt_name,
-	ipc_object_t            *objectp,
-	mach_port_context_t     context,
-	mach_msg_guard_flags_t  *guard_flags,
-	uint32_t                kmsg_flags);
-void ipc_port_release_send(ipc_port_t);
+extern void ipc_task_enable(task_t task);
+extern void ipc_task_reset(task_t task);
+extern void ipc_thread_reset(thread_t thread);
 
 #if DEVELOPMENT || DEBUG
 void task_importance_update_owner_info(task_t);
@@ -360,6 +351,40 @@ extern int nextpidversion;
  */
 #define SPAWN_SET_PANIC_CRASH_BEHAVIOR "com.apple.private.spawn-panic-crash-behavior"
 
+/*
+ * This entitlement marks security critical binaries for which the spawned
+ * process should be hardened. Implies enable-by-default for enablement
+ * of security features. These defaults can be overridden with the control
+ * entitlements for the sub-features below.
+ */
+#define SPAWN_ENABLE_HARDENED_PROCESS "com.apple.developer.hardened-process"
+
+#if DEVELOPMENT || DEBUG
+/*
+ * The following boot-arg defines the behavior for the case
+ * where a binary entitled as hardened-process but doesn't
+ * have a specific sub-feature entitlement, which is still
+ * under adoption.
+ */
+typedef enum {
+	HARDENED_PROCESS_CONFIG_SILENT = 0,
+	HARDENED_PROCESS_CONFIG_LOG    = 1,
+	HARDENED_PROCESS_CONFIG_FATAL  = 2,
+	HARDENED_PROCESS_CONFIG_MAX    = 3
+} hardened_process_config_policy;
+
+TUNABLE(hardened_process_config_policy,
+    hardened_process_config,
+    "hardened_process_config",
+    HARDENED_PROCESS_CONFIG_SILENT);
+#endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Control entitlement to enable/disable hardened-heap in the process.
+ */
+#define SPAWN_ENABLE_HARDENED_HEAP "com.apple.developer.hardened-process.hardened-heap"
+
+
 /* Platform Code Exec Logging */
 static int platform_exec_logging = 0;
 
@@ -408,6 +433,8 @@ static errno_t exec_handle_exception_port_actions(const struct image_params *img
 static errno_t exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_t psa_qos_clamp,
     task_role_t psa_darwin_role, struct exec_port_actions *port_actions);
 static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
+
+
 
 /*
  * exec_add_user_string
@@ -1122,6 +1149,10 @@ vnode_is_rsr(vnode_t vp)
 }
 
 
+// Check entitlements to see if this is a hardened runtime binary.
+// Save this in load_result until later for two purposes:
+// 1. Once the task is created, we can mark it as hardened runtime if needed
+// 2. we can propagate which entitlements are present to the apple array
 static inline void
 encode_HR_entitlement(const char *entitlement, HR_flags_t mask,
     const struct image_params *imgp, load_result_t *load_result)
@@ -1129,6 +1160,145 @@ encode_HR_entitlement(const char *entitlement, HR_flags_t mask,
 	if (IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset, entitlement)) {
 		load_result->hardened_runtime_binary |= mask;
 	}
+}
+
+#if DEVELOPMENT || DEBUG
+/*
+ * This function handles the case where the hardened-process entitlement
+ * is set without a specific sub-feature entitlement, which is still under
+ * adoption.
+ *
+ * For in-adoption features, the fallout of having certain
+ * security sensitive components enabled but not qualified
+ * is potentially too large. Therefore, we allow to have a
+ * "forcing period" in which every binary entitled as
+ * hardened-process is required to have an explicit setting
+ * (true or false) for the security feature or otherwise
+ * gets killed or at least traced at launch.
+ *
+ * return value: true if all policies restrictions met,
+ *               false otherwise.
+ */
+static inline bool
+handle_missing_subfeature_entitlement(
+	const struct image_params *imgp,
+	const char *subfeature_entitlement)
+{
+	switch (hardened_process_config) {
+	case HARDENED_PROCESS_CONFIG_SILENT:
+		break;
+	case HARDENED_PROCESS_CONFIG_LOG:
+		/*
+		 * Use the name directly from imgp since we haven't
+		 * set_proc_name() yet.
+		 */
+		printf("[WARNING] %s has hardened-process but not %s\n",
+		    imgp->ip_ndp->ni_cnd.cn_nameptr,
+		    subfeature_entitlement);
+		break;
+	case HARDENED_PROCESS_CONFIG_FATAL:
+		/*
+		 * When the policy defined as FATAL, we SIGKILL
+		 * the process.
+		 */
+		printf("[ERROR] %s has hardened-process but not %s\n",
+		    imgp->ip_ndp->ni_cnd.cn_nameptr,
+		    subfeature_entitlement);
+		return false;
+	default:
+		panic("invalid hardened-process policy");
+	}
+
+	return true;
+}
+#endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Handle the hardened-process.hardened-heap entitlement.
+ *
+ * Note: hardened-heap is not inherited via spawn/exec;
+ *       It is inherited (only) on fork, which is done
+ *       via Apple strings.
+ */
+static inline bool
+apply_hardened_heap_policy(
+	struct image_params *imgp,
+	bool is_hardened_process)
+{
+	bool result = true;
+	bool set_hardened_heap = false;
+
+	bool hardened_heap_ent = false;
+	if (IOVnodeGetBooleanEntitlement(imgp->ip_vp,
+	    (int64_t)imgp->ip_arch_offset,
+	    SPAWN_ENABLE_HARDENED_HEAP,
+	    &hardened_heap_ent)) {
+		/*
+		 * The hardened-heap entitlement exists, use that
+		 * to decide about enablement.
+		 */
+		set_hardened_heap = hardened_heap_ent;
+	} else if (is_hardened_process) {
+#if DEVELOPMENT || DEBUG
+		/*
+		 * We should imply default from hardened-process. However,
+		 * bringup will take time and could be sensitive. We want
+		 * to allow teams to adopt incrementally.
+		 *
+		 * We will link hardened-heap to hardened-process when
+		 * adoption will be more stable.
+		 */
+		if (!handle_missing_subfeature_entitlement(imgp,
+		    SPAWN_ENABLE_HARDENED_HEAP)) {
+			result = false;
+		}
+#endif /* DEVELOPMENT || DEBUG */
+	}
+
+	if (set_hardened_heap) {
+		imgp->ip_flags |= IMGPF_HARDENED_HEAP;
+	}
+
+	return result;
+}
+
+
+/*
+ * This function handles all the hardened-process related
+ * mitigations, parse their entitlements, and apply policies.
+ *
+ * For feature-ready mitigations, having hardened-process=true
+ * implies enablement. Sub-features specific entitlements can
+ * override this, which means that even if we have hardened-process
+ * exists and set to true, but a sub-feature entitlement exists
+ * and set to false, we do not enable the sub-feature.
+ *
+ * return value: true if all policies restrictions met,
+ *               false otherwise.
+ */
+static bool
+apply_hardened_process_policy(
+	struct image_params *imgp,
+	__unused proc_t proc,
+	__unused bool is_platform_binary)
+{
+	bool result = true;
+
+	/*
+	 * Check if the binary has hardened-process entitlement.
+	 */
+	bool is_hardened_process = false;
+	if (IOVnodeHasEntitlement(imgp->ip_vp,
+	    (int64_t)imgp->ip_arch_offset, SPAWN_ENABLE_HARDENED_PROCESS)) {
+		is_hardened_process = true;
+	}
+
+	if (!apply_hardened_heap_policy(imgp, is_hardened_process)) {
+		result = false;
+	}
+
+
+	return result;
 }
 
 uint32_t
@@ -1205,6 +1375,7 @@ exec_mach_imgact(struct image_params *imgp)
 	task_t                  new_task = NULL; /* protected by vfexec */
 	thread_t                thread;
 	struct uthread          *uthread;
+	vm_map_switch_context_t switch_ctx;
 	vm_map_t old_map = VM_MAP_NULL;
 	vm_map_t map = VM_MAP_NULL;
 	load_return_t           lret;
@@ -1330,8 +1501,6 @@ grade:
 	AUDIT_ARG(envv, imgp->ip_endargv, imgp->ip_envc,
 	    imgp->ip_endenvv - imgp->ip_endargv);
 
-
-
 	/* reset local idea of thread, uthread, task */
 	thread = imgp->ip_new_thread;
 	uthread = get_bsdthread_info(thread);
@@ -1378,6 +1547,16 @@ grade:
 
 	assert(imgp->ip_free_map == NULL);
 
+
+	// It's safe to check entitlements anytime after `load_machfile` if you check
+	// based on the vnode in imgp. We must perform this entitlement check
+	// before we start using load_result->hardened_runtime_binary further down
+	load_result.hardened_runtime_binary = 0;
+	encode_HR_entitlement(kCSWebBrowserHostEntitlement, BrowserHostEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserGPUEntitlement, BrowserGPUEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserNetworkEntitlement, BrowserNetworkEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserWebContentEntitlement, BrowserWebContentEntitlementMask, imgp, &load_result);
+
 	/*
 	 * ERROR RECOVERY
 	 *
@@ -1411,6 +1590,7 @@ grade:
 	vm_map_set_size_limit(map, proc_limitgetcur(p, RLIMIT_AS));
 	vm_map_set_data_limit(map, proc_limitgetcur(p, RLIMIT_DATA));
 	vm_map_set_user_wire_limit(map, (vm_size_t)proc_limitgetcur(p, RLIMIT_MEMLOCK));
+
 #if XNU_TARGET_OS_OSX
 	if (proc_platform(p) == PLATFORM_IOS) {
 		assert(vm_map_is_alien(map));
@@ -1419,6 +1599,25 @@ grade:
 	}
 #endif /* XNU_TARGET_OS_OSX */
 	proc_unlock(p);
+
+	/*
+	 * Handle hardened-process mitigations, parse entitlements
+	 * and apply enablements.
+	 */
+	if (!apply_hardened_process_policy(imgp, p, load_result.platform_binary)) {
+#if DEVELOPMENT || DEBUG
+		set_proc_name(imgp, p);
+		exec_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_MACHO);
+		if (bootarg_execfailurereports) {
+			exec_failure_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
+			exec_failure_reason->osr_flags |= OS_REASON_FLAG_CONSISTENT_FAILURE;
+		}
+		/* release new address space since we won't use it */
+		imgp->ip_free_map = map;
+		map = VM_MAP_NULL;
+		goto badtoolate;
+#endif /* DEVELOPMENT || DEBUG */
+	}
 
 	/*
 	 * Set TPRO flags if enabled
@@ -1510,12 +1709,6 @@ grade:
 #endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
 
 
-	load_result.hardened_runtime_binary = 0;
-	// Propogate which hardened runtime entitlements are active to the apple array
-	encode_HR_entitlement(kCSWebBrowserHostEntitlement, BrowserHostEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserGPUEntitlement, BrowserGPUEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserNetworkEntitlement, BrowserNetworkEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserWebContentEntitlement, BrowserWebContentEntitlementMask, imgp, &load_result);
 
 	/*
 	 * Set up the shared cache region in the new process.
@@ -1621,10 +1814,26 @@ grade:
 	}
 #endif /* XNU_TARGET_OS_OSX */
 
-	vm_map_exec(map, task, load_result.is_64bit_addr,
+	error = vm_map_exec(map, task, load_result.is_64bit_addr,
 	    (void *)p->p_fd.fd_rdir, cputype, cpu_subtype, reslide,
 	    (imgp->ip_flags & IMGPF_DRIVER) != 0,
 	    rsr_version);
+
+	if (error) {
+		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_MAP_EXEC_FAILURE, 0, 0);
+
+		exec_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_MAP_EXEC_FAILURE);
+		if (bootarg_execfailurereports) {
+			set_proc_name(imgp, p);
+			exec_failure_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
+			exec_failure_reason->osr_flags |= OS_REASON_FLAG_CONSISTENT_FAILURE;
+		}
+		/* release new address space since we won't use it */
+		imgp->ip_free_map = map;
+		map = VM_MAP_NULL;
+		goto badtoolate;
+	}
 
 	/*
 	 * Close file descriptors which specify close-on-exec.
@@ -1805,7 +2014,7 @@ grade:
 	}
 
 	/* Switch to target task's map to copy out strings */
-	old_map = vm_map_switch(get_task_map(task));
+	switch_ctx = vm_map_switch_to(get_task_map(task));
 
 	if (load_result.unixproc) {
 		user_addr_t     ap;
@@ -1817,7 +2026,7 @@ grade:
 		ap = p->user_stack;
 		error = exec_copyout_strings(imgp, &ap);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_STRINGS, 0, 0);
@@ -1842,7 +2051,7 @@ grade:
 		error = copyoutptr(load_result.mach_header, ap, new_ptr_size);
 
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_DYNLINKER, 0, 0);
@@ -1857,7 +2066,7 @@ grade:
 		error = task_set_dyld_info(task, load_result.all_image_info_addr,
 		    load_result.all_image_info_size, false);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SET_DYLD_INFO, 0, 0);
@@ -1877,7 +2086,7 @@ grade:
 		error = task_set_dyld_info(task, MACH_VM_MIN_ADDRESS,
 		    0, true);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SET_DYLD_INFO, 0, 0);
@@ -1900,7 +2109,7 @@ grade:
 
 		error = falloc_exec(p, imgp->ip_vfs_context, &fp, &main_binary_fd);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_MAIN_FD_ALLOC, 0, 0);
@@ -1915,7 +2124,7 @@ grade:
 
 		error = VNOP_OPEN(imgp->ip_vp, FREAD, imgp->ip_vfs_context);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_MAIN_FD_ALLOC, 0, 0);
@@ -1944,7 +2153,7 @@ grade:
 
 		error = copyoutptr((user_addr_t)load_result.dynlinker_fd, ap, 8);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_ROSETTA, 0, 0);
@@ -1959,7 +2168,7 @@ grade:
 
 		error = copyoutptr(load_result.dynlinker_mach_header, ap + 8, 8);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_ROSETTA, 0, 0);
@@ -1974,7 +2183,7 @@ grade:
 
 		error = copyoutptr((user_addr_t)main_binary_fd, ap + 16, 8);
 		if (error) {
-			vm_map_switch(old_map);
+			vm_map_switch_back(switch_ctx);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_ROSETTA, 0, 0);
@@ -2000,7 +2209,7 @@ cleanup_rosetta_fp:
 	/* Avoid immediate VM faults back into kernel */
 	exec_prefault_data(p, imgp, &load_result);
 
-	vm_map_switch(old_map);
+	vm_map_switch_back(switch_ctx);
 
 	/*
 	 * Reset signal state.
@@ -2676,9 +2885,8 @@ exec_handle_port_actions(struct image_params *imgp,
 		act = &pacts->pspa_actions[i];
 
 		if (MACH_PORT_VALID(act->new_port)) {
-			kr = ipc_object_copyin(get_task_ipcspace(current_task()),
-			    act->new_port, MACH_MSG_TYPE_COPY_SEND,
-			    (ipc_object_t *) &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+			kr = ipc_typed_port_copyin_send(get_task_ipcspace(current_task()),
+			    act->new_port, IKOT_UNKNOWN, &port);
 
 			if (kr != KERN_SUCCESS) {
 				ret = EINVAL;
@@ -2937,9 +3145,8 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 				break;
 			}
 
-			kr = ipc_object_copyin(get_task_ipcspace(current_task()),
-			    psfa->psfaa_fileport, MACH_MSG_TYPE_COPY_SEND,
-			    (ipc_object_t *) &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+			kr = ipc_typed_port_copyin_send(get_task_ipcspace(current_task()),
+			    psfa->psfaa_fileport, IKOT_FILEPORT, &port);
 
 			if (kr != KERN_SUCCESS) {
 				error = EINVAL;
@@ -2949,7 +3156,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			error = fileport_makefd(p, port, 0, &origfd);
 
 			if (IPC_PORT_NULL != port) {
-				ipc_port_release_send(port);
+				ipc_typed_port_release_send(port, IKOT_FILEPORT);
 			}
 
 			if (error || origfd == psfa->psfaa_dup2args.psfad_newfiledes) {
@@ -3557,6 +3764,7 @@ spawn_posix_cred_adopt(proc_t p,
 	return 0;
 }
 
+
 /*
  * posix_spawn
  *
@@ -3854,8 +4062,16 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			}
 		}
 #if CONFIG_EXCLAVES
+
+		/*
+		 * Calling exclaves_boot_wait() ensures that the conclave name
+		 * id will only be set when exclaves are actually
+		 * supported/enabled. In practice this will never actually block
+		 * as by the time this is called the system will have booted to
+		 * EXCLAVECORE if it's supported/enabled.
+		 */
 		if ((px_args.conclave_id_size > 0) && (px_args.conclave_id_size <= MAXCONCLAVENAME) &&
-		    (exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVEKIT) == KERN_SUCCESS)) {
+		    (exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVECORE) == KERN_SUCCESS)) {
 			if (px_args.conclave_id) {
 				if (imgp->ip_px_sa != NULL && (px_sa.psa_flags & POSIX_SPAWN_SETEXEC)) {
 					/* Conclave id could be set only for true spawn */
@@ -4301,7 +4517,6 @@ do_fork1:
 	ml_thread_set_jop_pid(imgp->ip_new_thread, new_task);
 #endif
 
-
 	/*
 	 * If you've come here to add support for some new HW feature or some per-process or per-vmmap
 	 * or per-pmap flag that needs to be set before the process runs, or are in general lost, here
@@ -4484,6 +4699,7 @@ bad:
 		 * Must enable after resettextvp so that task port policies are not evaluated
 		 * until the csblob in the textvp is accurately reflected.
 		 */
+		vm_map_setup(get_task_map(new_task), new_task);
 		ipc_task_enable(new_task);
 
 		/* Set task exception ports now that we can check entitlements */
@@ -4579,12 +4795,6 @@ bad:
 			    (int)px_sa.psa_kqworkloop_hard_limit);
 		}
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
-
-		/* Disable wakeup monitoring for DriverKit processes */
-		if (px_sa.psa_apptype == POSIX_SPAWN_PROC_TYPE_DRIVER) {
-			uint32_t      flags = WAKEMON_DISABLE;
-			task_wakeups_monitor_ctl(new_task, &flags, NULL);
-		}
 	}
 
 
@@ -4637,7 +4847,7 @@ bad:
 #if __has_feature(ptrauth_calls)
 		task_set_pac_exception_fatal_flag(new_task);
 #endif /* __has_feature(ptrauth_calls) */
-		task_set_jit_exception_fatal_flag(new_task);
+		task_set_jit_flags(new_task);
 	}
 
 	/* Inherit task role from old task to new task for exec */
@@ -5238,7 +5448,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 	} *__execve_data;
 
 	/* Allocate a big chunk for locals instead of using stack since these
-	 * structures a pretty big.
+	 * structures are pretty big.
 	 */
 	__execve_data = kalloc_type(typeof(*__execve_data), Z_WAITOK | Z_ZERO);
 	if (__execve_data == NULL) {
@@ -5296,6 +5506,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 		new_task = get_threadtask(imgp->ip_new_thread);
 	}
 
+
 	p = (proc_t)get_bsdthreadtask_info(imgp->ip_new_thread);
 
 	context.vc_thread = imgp->ip_new_thread;
@@ -5305,7 +5516,6 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 
 	proc_transend(p, 0);
 	proc_signalend(p, 0);
-
 
 	/*
 	 * Activate the image.
@@ -5346,6 +5556,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 		 * Must enable after resettextvp so that task port policies are not evaluated
 		 * until the csblob in the textvp is accurately reflected.
 		 */
+		vm_map_setup(get_task_map(new_task), new_task);
 		ipc_task_enable(new_task);
 		error = process_signature(p, imgp);
 	}
@@ -5434,7 +5645,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 #if __has_feature(ptrauth_calls)
 		task_set_pac_exception_fatal_flag(new_task);
 #endif /* __has_feature(ptrauth_calls) */
-		task_set_jit_exception_fatal_flag(new_task);
+		task_set_jit_flags(new_task);
 
 #if CONFIG_ARCADE
 		/*
@@ -6483,6 +6694,17 @@ exec_add_apple_strings(struct image_params *imgp,
 		imgp->ip_applec++;
 	}
 
+	if (imgp->ip_flags & IMGPF_HARDENED_HEAP) {
+		const char *hardened_heap_shims = "hardened_heap=1";
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(hardened_heap_shims), UIO_SYSSPACE, FALSE);
+		if (error) {
+			printf("Failed to add hardened heap string with error %d\n", error);
+			goto bad;
+		}
+
+		imgp->ip_applec++;
+	}
+
 
 	/* tell dyld that it can leverage hardware for its read-only/read-write trusted path */
 	if (imgp->ip_flags & IMGPF_HW_TPRO) {
@@ -6923,8 +7145,15 @@ handle_mac_transition:
 
 #endif  /* CONFIG_MACF */
 
-	/* Update the process' identity version and set the security token */
-	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+	/* Update the process' identity version and set the security token.
+	 * Also, ensure we always see a modified identity version (rdar://129775819).
+	 */
+	int previous_pid_version = proc_get_ro(p)->p_idversion;
+	int new_pid_version;
+	do {
+		new_pid_version = OSIncrementAtomic(&nextpidversion);
+	} while (new_pid_version == previous_pid_version);
+	proc_setpidversion(p, new_pid_version);
 	task_set_uniqueid(proc_task(p));
 
 	/*
@@ -7205,6 +7434,7 @@ load_init_program(proc_t p)
 	mach_vm_offset_t scratch_addr = 0;
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
+
 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size,
 	    VM_MAP_KERNEL_FLAGS_ANYWHERE());
 #if CONFIG_MEMORYSTATUS
@@ -7383,7 +7613,8 @@ static kern_return_t
 execargs_purgeable_reference(void *execarg_address)
 {
 	int state = VM_PURGABLE_NONVOLATILE;
-	kern_return_t kr = vm_purgable_control(bsd_pageable_map, (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
+	kern_return_t kr = vm_map_purgable_control(bsd_pageable_map,
+	    (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
 
 	assert(kr == KERN_SUCCESS);
 	return kr;
@@ -7394,7 +7625,8 @@ execargs_purgeable_volatilize(void *execarg_address)
 {
 	int state = VM_PURGABLE_VOLATILE | VM_PURGABLE_ORDERING_OBSOLETE;
 	kern_return_t kr;
-	kr = vm_purgable_control(bsd_pageable_map, (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
+	kr = vm_map_purgable_control(bsd_pageable_map,
+	    (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
 
 	assert(kr == KERN_SUCCESS);
 
@@ -8134,3 +8366,17 @@ SYSCTL_NODE(_kern, OID_AUTO, sec_transition,
 SYSCTL_INT(_kern_sec_transition, OID_AUTO, available,
     CTLFLAG_RD | CTLFLAG_LOCKED, (int *)NULL, 0, "");
 
+
+#if DEBUG || DEVELOPMENT
+static int
+sysctl_setup_ensure_pidversion_changes_on_exec(__unused int64_t in, int64_t *out)
+{
+	// Tweak nextpidversion to try to trigger a reuse (unless the exec code is doing the right thing)
+	int current_pid_version = proc_get_ro(current_proc())->p_idversion;
+	nextpidversion = current_pid_version;
+	*out = 0;
+	return KERN_SUCCESS;
+}
+
+SYSCTL_TEST_REGISTER(setup_ensure_pidversion_changes_on_exec, sysctl_setup_ensure_pidversion_changes_on_exec);
+#endif /* DEBUG || DEVELOPMENT */

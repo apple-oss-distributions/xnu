@@ -63,7 +63,7 @@ def ShowWorkloadConfig(cmd_args=None, cmd_options={}):
                         print(GetWorkloadConfigSummary(entry))
                         return
     else:
-        if not cmd_args:
+        if cmd_args is None or len(cmd_args) == 0:
             raise ArgumentError("Invalid arguments passed.")
         entry = kern.GetValueFromAddress(cmd_args[0], 'workload_config_entry_t *')
         print(GetWorkloadConfigSummary.header)
@@ -80,7 +80,7 @@ def ShowWorkloadConfigPhases(cmd_args=None, cmd_options={}):
          Usage: showworkloadconfigphases <workload config>
     """
 
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid arguments passed.")
 
     print(GetWorkloadPhaseSummary.header)

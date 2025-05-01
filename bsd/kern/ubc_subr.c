@@ -3970,6 +3970,15 @@ cs_blob_cleanup(struct cs_blob *blob)
 				blob->csb_mem_kaddr = NULL;
 				blob->csb_mem_size = 0;
 			}
+		} else if (kr == KERN_ABORTED) {
+			/*
+			 * The code-signing-monitor refused to unregister the code signature. It means
+			 * whatever memory was backing the code signature may not have been released, and
+			 * attempting to free it down below will not be successful. As a result, all we
+			 * can do is prevent the kernel from touching the data.
+			 */
+			blob->csb_mem_kaddr = NULL;
+			blob->csb_mem_size = 0;
 		}
 	}
 
@@ -4254,7 +4263,7 @@ verify_code_signature_monitor(
 {
 	kern_return_t ret = KERN_DENIED;
 
-	ret = csm_verify_code_signature(cs_blob->csb_csm_obj);
+	ret = csm_verify_code_signature(cs_blob->csb_csm_obj, &cs_blob->csb_csm_trust_level);
 	if ((ret != KERN_SUCCESS) && (ret != KERN_NOT_SUPPORTED)) {
 		printf("unable to verify code signature with monitor: %d\n", ret);
 		return EPERM;

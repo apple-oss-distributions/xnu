@@ -31,7 +31,11 @@
 #if !defined(__ASSEMBLER__)
 
 #include <stdbool.h>
+#include <sys/cdefs.h>
 
+/**
+ * Defines the core type of the executing CPU.
+ */
 __enum_closed_decl(arm64_core_type_t, unsigned int, {
 	E_CORE = MPIDR_CORETYPE_ACC_E,
 	P_CORE = MPIDR_CORETYPE_ACC_P,

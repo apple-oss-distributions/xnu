@@ -42,6 +42,7 @@
 #include <sys/random.h>
 #include <kern/kern_cdata.h>
 #include <machine/lowglobals.h>
+#include <machine/static_if.h>
 #include <vm/vm_page.h>
 #include <vm/vm_object_internal.h>
 #include <vm/vm_protos.h>
@@ -110,59 +111,61 @@ extern kern_return_t specres_test(void);
 #if BTI_ENFORCED
 kern_return_t arm64_bti_test(void);
 #endif /* BTI_ENFORCED */
+extern kern_return_t arm64_speculation_guard_test(void);
 #endif /* __arm64__ */
 
 extern kern_return_t test_thread_call(void);
-
 
 struct xnupost_panic_widget xt_panic_widgets = {.xtp_context_p = NULL,
 	                                        .xtp_outval_p = NULL,
 	                                        .xtp_func_name = NULL,
 	                                        .xtp_func = NULL};
 
-struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(RandomULong_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(test_printf),
-	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log_handles),
-	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log),
-	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log_parallel),
+struct xnupost_test kernel_post_tests[] = {
+	XNUPOST_TEST_CONFIG_BASIC(zalloc_test),
+	XNUPOST_TEST_CONFIG_BASIC(RandomULong_test),
+	XNUPOST_TEST_CONFIG_BASIC(test_printf),
+	XNUPOST_TEST_CONFIG_BASIC(test_os_log_handles),
+	XNUPOST_TEST_CONFIG_BASIC(test_os_log),
+	XNUPOST_TEST_CONFIG_BASIC(test_os_log_parallel),
 #ifdef __arm64__
-	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_munger_test),
+	XNUPOST_TEST_CONFIG_BASIC(arm64_munger_test),
 #if __ARM_PAN_AVAILABLE__
-	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_pan_test),
+	XNUPOST_TEST_CONFIG_BASIC(arm64_pan_test),
 #endif
 #if defined(HAS_APPLE_PAC)
-	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_ropjop_test),
+	XNUPOST_TEST_CONFIG_BASIC(arm64_ropjop_test),
 #endif /* defined(HAS_APPLE_PAC) */
 #if CONFIG_SPTM
-	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_panic_lockdown_test),
+	XNUPOST_TEST_CONFIG_BASIC(arm64_panic_lockdown_test),
 #endif /* CONFIG_SPTM */
+	XNUPOST_TEST_CONFIG_BASIC(arm64_speculation_guard_test),
 #endif /* __arm64__ */
-	                                   XNUPOST_TEST_CONFIG_BASIC(kcdata_api_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_parallel_log_tests),
+	XNUPOST_TEST_CONFIG_BASIC(kcdata_api_test),
+	XNUPOST_TEST_CONFIG_BASIC(console_serial_test),
+	XNUPOST_TEST_CONFIG_BASIC(console_serial_parallel_log_tests),
 #if defined(__arm64__)
-	                                   XNUPOST_TEST_CONFIG_BASIC(pmap_coredump_test),
+	XNUPOST_TEST_CONFIG_BASIC(pmap_coredump_test),
 #endif
-	                                   XNUPOST_TEST_CONFIG_BASIC(bitmap_post_test),
-	                                   //XNUPOST_TEST_CONFIG_TEST_PANIC(kcdata_api_assert_tests)
-	                                   XNUPOST_TEST_CONFIG_BASIC(test_thread_call),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ts_kernel_primitive_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ts_kernel_sleep_inheritor_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ts_kernel_gate_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ts_kernel_turnstile_chain_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ts_kernel_timingsafe_bcmp_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(kprintf_hhx_test),
+	XNUPOST_TEST_CONFIG_BASIC(bitmap_post_test),
+	//XNUPOST_TEST_CONFIG_TEST_PANIC(kcdata_api_assert_tests)
+	XNUPOST_TEST_CONFIG_BASIC(test_thread_call),
+	XNUPOST_TEST_CONFIG_BASIC(ts_kernel_primitive_test),
+	XNUPOST_TEST_CONFIG_BASIC(ts_kernel_sleep_inheritor_test),
+	XNUPOST_TEST_CONFIG_BASIC(ts_kernel_gate_test),
+	XNUPOST_TEST_CONFIG_BASIC(ts_kernel_turnstile_chain_test),
+	XNUPOST_TEST_CONFIG_BASIC(ts_kernel_timingsafe_bcmp_test),
+	XNUPOST_TEST_CONFIG_BASIC(kprintf_hhx_test),
 #if __ARM_VFP__
-	                                   XNUPOST_TEST_CONFIG_BASIC(vfp_state_test),
+	XNUPOST_TEST_CONFIG_BASIC(vfp_state_test),
 #endif
-	                                   XNUPOST_TEST_CONFIG_BASIC(vm_tests),
-	                                   XNUPOST_TEST_CONFIG_BASIC(counter_tests),
+	XNUPOST_TEST_CONFIG_BASIC(vm_tests),
+	XNUPOST_TEST_CONFIG_BASIC(counter_tests),
 #if ML_IO_TIMEOUTS_ENABLED
-	                                   XNUPOST_TEST_CONFIG_BASIC(ml_io_timeout_test),
+	XNUPOST_TEST_CONFIG_BASIC(ml_io_timeout_test),
 #endif
 #if HAS_SPECRES
-	                                   XNUPOST_TEST_CONFIG_BASIC(specres_test),
+	XNUPOST_TEST_CONFIG_BASIC(specres_test),
 #endif
 };
 
@@ -3276,3 +3279,76 @@ kprintf_hhx_test(void)
 	T_PASS("kprintf_hhx_test passed");
 	return KERN_SUCCESS;
 }
+
+static STATIC_IF_KEY_DEFINE_TRUE(key_true);
+static STATIC_IF_KEY_DEFINE_TRUE(key_true_to_false);
+static STATIC_IF_KEY_DEFINE_FALSE(key_false);
+static STATIC_IF_KEY_DEFINE_FALSE(key_false_to_true);
+
+__static_if_init_func
+static void
+static_if_tests_setup(const char *args __unused)
+{
+	static_if_key_disable(key_true_to_false);
+	static_if_key_enable(key_false_to_true);
+}
+STATIC_IF_INIT(static_if_tests_setup);
+
+static void
+static_if_tests(void)
+{
+	int n = 0;
+
+	if (static_if(key_true)) {
+		n++;
+	}
+	if (probable_static_if(key_true)) {
+		n++;
+	}
+	if (improbable_static_if(key_true)) {
+		n++;
+	}
+	if (n != 3) {
+		panic("should still be enabled [n == %d, expected %d]", n, 3);
+	}
+
+	if (static_if(key_true_to_false)) {
+		n++;
+	}
+	if (probable_static_if(key_true_to_false)) {
+		n++;
+	}
+	if (improbable_static_if(key_true_to_false)) {
+		n++;
+	}
+	if (n != 3) {
+		panic("should now be disabled [n == %d, expected %d]", n, 3);
+	}
+
+	if (static_if(key_false)) {
+		n++;
+	}
+	if (probable_static_if(key_false)) {
+		n++;
+	}
+	if (improbable_static_if(key_false)) {
+		n++;
+	}
+	if (n != 3) {
+		panic("should still be disabled [n == %d, expected %d]", n, 3);
+	}
+
+	if (static_if(key_false_to_true)) {
+		n++;
+	}
+	if (probable_static_if(key_false_to_true)) {
+		n++;
+	}
+	if (improbable_static_if(key_false_to_true)) {
+		n++;
+	}
+	if (n != 6) {
+		panic("should now be disabled [n == %d, expected %d]", n, 3);
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, static_if_tests);

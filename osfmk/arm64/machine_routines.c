@@ -111,7 +111,7 @@ machine_timeout_t LockTimeOutUsec; // computed in ml_init_lock_timeout
 
 MACHINE_TIMEOUT_DEV_WRITEABLE(TLockTimeOut, "ticket-lock", 3e6 /* 0.125s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
 
-MACHINE_TIMEOUT_DEV_WRITEABLE(MutexSpin, "mutex-spin", 240 /* 10us */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+TUNABLE_DEV_WRITEABLE(uint64_t, MutexSpin, "mutex-spin", 240 /* 10us */);
 
 uint64_t low_MutexSpin;
 int64_t high_MutexSpin;
@@ -448,7 +448,7 @@ get_arm_cpu_version(void)
 }
 
 bool
-ml_feature_supported(uint32_t feature_bit)
+ml_feature_supported(uint64_t feature_bit)
 {
 	uint64_t aidr_el1_value = 0;
 
@@ -493,7 +493,7 @@ user_timebase_type(void)
 #if HAS_ACNTVCT
 	return USER_TIMEBASE_NOSPEC_APPLE;
 #elif HAS_APPLE_GENERIC_TIMER
-	// Conveniently, AGTCNTVCTSS_EL0 and ACNTVCT_EL0 have identical encodings
+	// Conveniently, S3_4_C15_C10_6 and ACNTVCT_EL0 have identical encodings
 	return USER_TIMEBASE_NOSPEC_APPLE;
 #elif __ARM_ARCH_8_6__
 	return USER_TIMEBASE_NOSPEC;
@@ -1189,7 +1189,6 @@ ml_parse_cpu_topology(void)
 
 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
 
-		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
 		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
 		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
 		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
@@ -1626,7 +1625,6 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	this_cpu_datap->platform_error_handler = in_processor_info->platform_error_handler;
 	this_cpu_datap->cpu_regmap_paddr = in_processor_info->regmap_paddr;
 	this_cpu_datap->cpu_phys_id = in_processor_info->phys_id;
-	this_cpu_datap->cpu_l2_access_penalty = in_processor_info->l2_access_penalty;
 
 	this_cpu_datap->cpu_cluster_type = in_processor_info->cluster_type;
 	this_cpu_datap->cpu_cluster_id = in_processor_info->cluster_id;
@@ -1668,16 +1666,6 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
 	if (!is_boot_cpu) {
 		processor_init(processor, this_cpu_datap->cpu_number, pset);
-
-		if (this_cpu_datap->cpu_l2_access_penalty) {
-			/*
-			 * Cores that have a non-zero L2 access penalty compared
-			 * to the boot processor should be de-prioritized by the
-			 * scheduler, so that threads use the cores with better L2
-			 * preferentially.
-			 */
-			processor_set_primary(processor, master_processor);
-		}
 	}
 
 	*processor_out = processor;
@@ -2079,7 +2067,15 @@ ml_static_mfree(
 	for (vaddr_cur = vaddr;
 	    vaddr_cur < trunc_page_64(vaddr + size);
 	    vaddr_cur += PAGE_SIZE) {
-		ppn = pmap_find_phys(kernel_pmap, vaddr_cur);
+		/*
+		 * Some clients invoke ml_static_mfree on non-physical aperture
+		 * addresses.  To support this, we convert the virtual address
+		 * to a physical aperture address, and remove all mappings of
+		 * the page as we update the physical aperture protections.
+		 */
+		vm_offset_t vaddr_papt = phystokv(kvtophys(vaddr_cur));
+		ppn = pmap_find_phys(kernel_pmap, vaddr_papt);
+
 		if (ppn != (vm_offset_t) NULL) {
 			/*
 			 * It is not acceptable to fail to update the protections on a page
@@ -2087,24 +2083,27 @@ ml_static_mfree(
 			 * For now, we'll panic (to help flag if there is memory we can
 			 * reclaim).
 			 */
-			if (ml_static_protect(vaddr_cur, PAGE_SIZE, VM_PROT_WRITE | VM_PROT_READ) != KERN_SUCCESS) {
+			pmap_disconnect(ppn);
+			if (ml_static_protect(vaddr_papt, PAGE_SIZE, VM_PROT_WRITE | VM_PROT_READ) != KERN_SUCCESS) {
 				panic("Failed ml_static_mfree on %p", (void *) vaddr_cur);
 			}
 
 			paddr_cur = ptoa(ppn);
 
 
-			vm_page_create(ppn, (ppn + 1));
+			vm_page_create_canonical(ppn);
 			freed_pages++;
 #if defined(CONFIG_SPTM)
-			if (ml_physaddr_in_bootkc_range(paddr_cur)) {
+			if (ml_physaddr_in_bootkc_range(paddr_cur))
 #else
-			if (paddr_cur >= arm_vm_kernelcache_phys_start && paddr_cur < arm_vm_kernelcache_phys_end) {
+			if (paddr_cur >= arm_vm_kernelcache_phys_start && paddr_cur < arm_vm_kernelcache_phys_end)
 #endif
+			{
 				freed_kernelcache_pages++;
 			}
 		}
 	}
+
 	vm_page_lockspin_queues();
 	vm_page_wire_count -= freed_pages;
 	vm_page_wire_count_initial -= freed_pages;
@@ -2262,12 +2261,6 @@ machine_run_count(__unused uint32_t count)
 {
 }
 
-processor_t
-machine_choose_processor(__unused processor_set_t pset, processor_t processor)
-{
-	return processor;
-}
-
 #if KASAN
 vm_offset_t ml_stack_base(void);
 vm_size_t ml_stack_size(void);
@@ -2330,9 +2323,17 @@ ml_interrupt_prewarm(__unused uint64_t deadline)
 
 #if HAS_APPLE_GENERIC_TIMER
 /* The kernel timer APIs always use the Apple timebase */
-#define KERNEL_TIMEBASE(reg)    "AGT"reg
+#define KERNEL_CNTV_TVAL_EL0 "S3_1_C15_C15_4"
+#define KERNEL_CNTVCT_EL0    "S3_4_C15_C11_7"
+#define KERNEL_CNTVCTSS_EL0  "S3_4_C15_C10_6"
+#define KERNEL_CNTV_CTL_EL0  "S3_1_C15_C0_5"
+#define KERNEL_CNTKCTL_EL1   "S3_4_C15_C9_6"
 #else
-#define KERNEL_TIMEBASE(reg)    reg
+#define KERNEL_CNTV_TVAL_EL0 "CNTV_TVAL_EL0"
+#define KERNEL_CNTVCT_EL0    "CNTVCT_EL0"
+#define KERNEL_CNTVCTSS_EL0  "CNTVCTSS_EL0"
+#define KERNEL_CNTV_CTL_EL0  "CNTV_CTL_EL0"
+#define KERNEL_CNTKCTL_EL1   "CNTKCTL_EL1"
 #endif
 
 /*
@@ -2349,7 +2350,7 @@ ml_set_decrementer(uint32_t dec_value)
 	if (cdp->cpu_set_decrementer_func) {
 		cdp->cpu_set_decrementer_func(dec_value);
 	} else {
-		__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTV_TVAL_EL0"), (uint64_t)dec_value);
+		__builtin_arm_wsr64(KERNEL_CNTV_TVAL_EL0, (uint64_t)dec_value);
 	}
 }
 
@@ -2360,7 +2361,7 @@ ml_set_decrementer(uint32_t dec_value)
 static inline uint64_t
 speculative_timebase(void)
 {
-	return __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTVCT_EL0"));
+	return __builtin_arm_rsr64(KERNEL_CNTVCT_EL0);
 }
 
 /**
@@ -2371,10 +2372,8 @@ speculative_timebase(void)
 static inline uint64_t
 nonspeculative_timebase(void)
 {
-#if defined(HAS_ACNTVCT)
-	return __builtin_arm_rsr64("ACNTVCT_EL0");
-#elif __ARM_ARCH_8_6__
-	return __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTVCTSS_EL0"));
+#if   __ARM_ARCH_8_6__
+	return __builtin_arm_rsr64(KERNEL_CNTVCTSS_EL0);
 #else
 	// ISB required by ARMV7C.b section B8.1.2 & ARMv8 section D6.1.2
 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
@@ -2389,6 +2388,13 @@ uint64_t
 ml_get_hwclock()
 {
 	uint64_t timebase = nonspeculative_timebase();
+	return timebase;
+}
+
+uint64_t
+ml_get_hwclock_speculative()
+{
+	uint64_t timebase = speculative_timebase();
 	return timebase;
 }
 
@@ -2479,7 +2485,7 @@ ml_get_decrementer(void)
 	} else {
 		uint64_t wide_val;
 
-		wide_val = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTV_TVAL_EL0"));
+		wide_val = __builtin_arm_rsr64(KERNEL_CNTV_TVAL_EL0);
 		dec = (uint32_t)wide_val;
 		assert(wide_val == (uint64_t)dec);
 	}
@@ -2490,7 +2496,7 @@ ml_get_decrementer(void)
 boolean_t
 ml_get_timer_pending(void)
 {
-	uint64_t cntv_ctl = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTV_CTL_EL0"));
+	uint64_t cntv_ctl = __builtin_arm_rsr64(KERNEL_CNTV_CTL_EL0);
 	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
 }
 
@@ -2540,7 +2546,7 @@ _enable_timebase_event_stream(uint32_t bit_index)
 		panic("%s: invalid bit index (%u)", __FUNCTION__, bit_index);
 	}
 
-	uint64_t cntkctl = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTKCTL_EL1"));
+	uint64_t cntkctl = __builtin_arm_rsr64(KERNEL_CNTKCTL_EL1);
 
 	cntkctl |= (bit_index << CNTKCTL_EL1_EVENTI_SHIFT);
 	cntkctl |= CNTKCTL_EL1_EVNTEN;
@@ -2554,7 +2560,7 @@ _enable_timebase_event_stream(uint32_t bit_index)
 		cntkctl |= (CNTKCTL_EL1_PL0PCTEN | CNTKCTL_EL1_PL0VCTEN);
 	}
 
-	__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTKCTL_EL1"), cntkctl);
+	__builtin_arm_wsr64(KERNEL_CNTKCTL_EL1, cntkctl);
 
 #if HAS_APPLE_GENERIC_TIMER
 	/* Enable EL0 access to the ARM timebase registers too */
@@ -2572,11 +2578,11 @@ _enable_virtual_timer(void)
 {
 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
 
-	__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTV_CTL_EL0"), cntvctl);
+	__builtin_arm_wsr64(KERNEL_CNTV_CTL_EL0, cntvctl);
 	/* disable the physical timer as a precaution, as its registers reset to architecturally unknown values */
 	__builtin_arm_wsr64("CNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
 #if HAS_APPLE_GENERIC_TIMER
-	__builtin_arm_wsr64("AGTCNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
+	__builtin_arm_wsr64("S3_1_C15_C13_4", CNTP_CTL_EL0_IMASKED);
 #endif
 }
 
@@ -2828,7 +2834,7 @@ ml_report_minor_badness(uint32_t __unused badness_id)
 	#endif
 }
 
-#if HAS_APPLE_PAC && (__ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM)
+#if HAS_APPLE_PAC
 /**
  * Emulates the poisoning done by ARMv8.3-PAuth instructions on auth failure.
  */
@@ -2859,7 +2865,7 @@ ml_poison_ptr(void *ptr, ptrauth_key key)
 	poisoned |= error_code << poison_shift;
 	return (void *)poisoned;
 }
-#endif /* HAS_APPLE_PAC && (__ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM) */
+#endif /* HAS_APPLE_PAC */
 
 #ifdef CONFIG_XNUPOST
 void
@@ -3112,3 +3118,4 @@ ml_task_post_signature_processing_hook(__unused task_t task)
 	os_atomic_thread_fence(acquire);
 
 }
+

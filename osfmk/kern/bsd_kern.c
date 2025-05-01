@@ -25,6 +25,8 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+#include "mach/arm/vm_param.h"
+#include "mach/kern_return.h"
 #include <mach/mach_types.h>
 #include <mach/machine/vm_param.h>
 #include <mach/task.h>
@@ -435,6 +437,9 @@ swap_task_map(task_t task, thread_t thread, vm_map_t map)
 
 	task_lock(task);
 	mp_disable_preemption();
+
+	/* verify that the map has been activated if the task is enabled for IPC access */
+	assert(!task->ipc_active || (map->owning_task == task));
 
 	old_map = task->map;
 	thread->map = task->map = map;

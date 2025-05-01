@@ -170,7 +170,8 @@ proc_2020_fall_os_sdk_or_later(void)
 	}
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mmap_sanitize(
 	vm_map_t                user_map,
 	vm_prot_ut              prot_u,
@@ -190,11 +191,8 @@ mmap_sanitize(
 	vm_map_offset_t         user_mask = vm_map_page_mask(user_map);
 	vm_sanitize_flags_t     vm_sanitize_flags;
 
-	kr = vm_sanitize_prot_bsd(prot_u, VM_SANITIZE_CALLER_MMAP, prot);
+	*prot = vm_sanitize_prot_bsd(prot_u, VM_SANITIZE_CALLER_MMAP);
 	*prot &= VM_PROT_ALL;
-	if (__improbable(kr != KERN_SUCCESS)) {
-		return kr;
-	}
 
 	/*
 	 * Check file_pos doesn't overflow with PAGE_MASK since VM objects use
@@ -240,7 +238,8 @@ mmap_sanitize(
 		 * as the file offset taken modulo PAGE_SIZE, so it
 		 * should be aligned after adjustment by (file_pos & user_mask).
 		 */
-		if (!VM_SANITIZE_UNSAFE_IS_EQUAL(addr_u, *user_addr + (*file_pos & user_mask))) {
+		if (!VM_SANITIZE_UNSAFE_IS_EQUAL(
+			    addr_u, *user_addr + (*file_pos & user_mask))) {
 			return KERN_INVALID_ARGUMENT;
 		}
 	} else {
@@ -255,7 +254,7 @@ mmap_sanitize(
 		 * rather than truncate.
 		 */
 		*user_addr = vm_sanitize_addr(user_map,
-		    vm_sanitize_compute_unsafe_end(addr_u, user_mask));
+		    vm_sanitize_compute_ut_end(addr_u, user_mask));
 		kr = vm_sanitize_size(pos_u, len_u, VM_SANITIZE_CALLER_MMAP,
 		    user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
 		    user_size);
@@ -994,41 +993,72 @@ msync(__unused proc_t p, struct msync_args *uap, int32_t *retval)
 	return msync_nocancel(p, (struct msync_nocancel_args *)uap, retval);
 }
 
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+msync_sanitize(
+	vm_map_t                user_map,
+	user_addr_ut            addr_u,
+	user_size_ut            len_u,
+	mach_vm_offset_t       *addr,
+	mach_vm_offset_t       *size)
+{
+	mach_vm_offset_t        end;
+
+	/*
+	 * UNIX SPEC: user address is not page-aligned, return EINVAL
+	 *
+	 * len == 0
+	 *   FreeBSD and NetBSD support msync with a length of zero to
+	 *   sync all pages within the region containing the address.
+	 *   We cannot support this mode without maintaining a list all
+	 *   mmaps performed. (Our list of vm_map_entry is not suitable
+	 *   because they may be split or coalesced for other reasons.)
+	 *   We therefore reject len==0 with an error, instead of
+	 *   doing the wrong thing or silently doing nothing.
+	 *
+	 *   Platforms that do not mention len==0 in their man pages,
+	 *   and are thus presumed not to support that mode either:
+	 *     Linux, Solaris, POSIX
+	 */
+	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MSYNC,
+	           user_map,
+	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START |
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS,
+	           addr, &end, size);
+}
+
 int
 msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int32_t *retval)
 {
 	mach_vm_offset_t addr;
 	mach_vm_size_t size;
+	kern_return_t kr;
 	int flags;
 	vm_map_t user_map;
 	int rv;
 	vm_sync_t sync_flags = 0;
 
 	user_map = current_map();
-	addr = (mach_vm_offset_t) uap->addr;
-	size = (mach_vm_size_t) uap->len;
+	flags    = uap->flags;
+
+	/*
+	 * Sanitize all input parameters that are addr/offset/size/prot/inheritance
+	 */
+	kr = msync_sanitize(user_map,
+	    uap->addr,
+	    uap->len,
+	    &addr,
+	    &size);
+
 #if XNU_TARGET_OS_OSX
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_msync) | DBG_FUNC_NONE), (uint32_t)(addr >> 32), (uint32_t)(size >> 32), 0, 0, 0);
 #endif /* XNU_TARGET_OS_OSX */
-	if (vm_map_range_overflows(user_map, addr, size)) {
+
+	if (__improbable(kr != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(kr));
 		return EINVAL;
-	}
-	if (addr & vm_map_page_mask(user_map)) {
-		/* UNIX SPEC: user address is not page-aligned, return EINVAL */
-		return EINVAL;
-	}
-	if (size == 0) {
-		/*
-		 * We cannot support this properly without maintaining
-		 * list all mmaps done. Cannot use vm_map_entry as they could be
-		 * split or coalesced by indepenedant actions. So instead of
-		 * inaccurate results, lets just return error as invalid size
-		 * specified
-		 */
-		return EINVAL; /* XXX breaks posix apps */
 	}
 
-	flags = uap->flags;
 	/* disallow contradictory flags */
 	if ((flags & (MS_SYNC | MS_ASYNC)) == (MS_SYNC | MS_ASYNC)) {
 		return EINVAL;
@@ -1069,7 +1099,8 @@ msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int3
 	return 0;
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 munmap_sanitize(
 	vm_map_t                user_map,
 	vm_addr_struct_t        addr_u,
@@ -1080,7 +1111,8 @@ munmap_sanitize(
 {
 	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MUNMAP,
 	           user_map,
-	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START | VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS,
+	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START |
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS,
 	           user_addr, user_end, user_size);
 }
 
@@ -1117,34 +1149,92 @@ munmap(__unused proc_t p, struct munmap_args *uap, __unused int32_t *retval)
 	return 0;
 }
 
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+mprotect_sanitize(
+	vm_map_t                 user_map,
+	mach_vm_offset_ut        user_addr_u,
+	mach_vm_size_ut          user_size_u,
+	vm_prot_ut               prot_u,
+	mach_vm_offset_t        *user_addr,
+	mach_vm_offset_t        *user_end_aligned,
+	mach_vm_size_t          *user_size,
+	vm_prot_t               *prot)
+{
+	kern_return_t            result;
+
+	/*
+	 * Validate addr and size. Use VM_SANITIZE_FLAGS_CHECK_ALIGNED_START to
+	 * check unaligned start due to UNIX SPEC: user address is not page-aligned,
+	 * return EINVAL
+	 */
+	result = vm_sanitize_addr_size(user_addr_u, user_size_u,
+	    VM_SANITIZE_CALLER_MPROTECT, user_map,
+	    VM_SANITIZE_FLAGS_CHECK_ALIGNED_START |
+	    VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+	    user_addr, user_end_aligned, user_size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		return result;
+	}
+
+	/* prot is sanitized by masking out invalid flags; it cannot fail. */
+	*prot = vm_sanitize_prot_bsd(prot_u, VM_SANITIZE_CALLER_MPROTECT);
+
+	return KERN_SUCCESS;
+}
+
 int
 mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 {
-	vm_prot_t prot;
-	mach_vm_offset_t        user_addr;
-	mach_vm_size_t  user_size;
-	kern_return_t   result;
-	vm_map_t        user_map;
+	vm_prot_t                prot;
+	mach_vm_offset_ut        user_addr_u;
+	mach_vm_size_ut          user_size_u;
+	vm_prot_ut               prot_u;
+	mach_vm_offset_t         user_addr;
+	mach_vm_offset_t         user_end_aligned;
+	mach_vm_size_t           user_size;
+	kern_return_t            result;
+	vm_map_t                 user_map;
 #if CONFIG_MACF
 	int error;
 #endif
 
-	AUDIT_ARG(addr, uap->addr);
-	AUDIT_ARG(len, uap->len);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 	AUDIT_ARG(value32, uap->prot);
 
 	user_map = current_map();
-	user_addr = (mach_vm_offset_t) uap->addr;
-	user_size = (mach_vm_size_t) uap->len;
-	prot = (vm_prot_t)(uap->prot & (VM_PROT_ALL | VM_PROT_TRUSTED | VM_PROT_STRIP_READ));
+	user_addr_u = uap->addr;
+	user_size_u = uap->len;
+	prot_u = vm_sanitize_wrap_prot((vm_prot_t)uap->prot);
 
-	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
-		return EINVAL;
+	/*
+	 * Sanitize any input parameters that are addr/size/prot/inheritance
+	 */
+	result = mprotect_sanitize(user_map,
+	    user_addr_u,
+	    user_size_u,
+	    prot_u,
+	    &user_addr,
+	    &user_end_aligned,
+	    &user_size,
+	    &prot);
+	if (__improbable(result != KERN_SUCCESS)) {
+		result = vm_sanitize_get_kr(result);
+		switch (result) {
+		case KERN_SUCCESS:
+			return 0;
+		case KERN_INVALID_ADDRESS:
+			/* UNIX SPEC: for an invalid address range, return ENOMEM */
+			return ENOMEM;
+		case KERN_INVALID_ARGUMENT:
+			return EINVAL;
+		default:
+			return EINVAL;
+		}
 	}
-	if (user_addr & vm_map_page_mask(user_map)) {
-		/* UNIX SPEC: user address is not page-aligned, return EINVAL */
-		return EINVAL;
-	}
+
+	/* user_size may be zero here */
 
 #ifdef notyet
 /* Hmm .. */
@@ -1190,10 +1280,8 @@ mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 		 * process could sign dynamically. */
 		result = vm_map_sign(
 			user_map,
-			vm_map_trunc_page(user_addr,
-			vm_map_page_mask(user_map)),
-			vm_map_round_page(user_addr + user_size,
-			vm_map_page_mask(user_map)));
+			user_addr,
+			user_end_aligned);
 		switch (result) {
 		case KERN_SUCCESS:
 			break;
@@ -1210,7 +1298,7 @@ mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 	prot &= ~VM_PROT_TRUSTED;
 
 	result = mach_vm_protect(user_map, user_addr, user_size,
-	    FALSE, prot);
+	    false, prot);
 	switch (result) {
 	case KERN_SUCCESS:
 		return 0;
@@ -1223,29 +1311,73 @@ mprotect(__unused proc_t p, struct mprotect_args *uap, __unused int32_t *retval)
 	return EINVAL;
 }
 
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+minherit_sanitize(
+	vm_map_t                 user_map,
+	mach_vm_offset_ut        addr_u,
+	mach_vm_size_ut          size_u,
+	vm_inherit_ut            inherit_u,
+	mach_vm_offset_t        *addr,
+	mach_vm_size_t          *size,
+	vm_inherit_t            *inherit)
+{
+	kern_return_t            result;
+	mach_vm_offset_t         addr_end;
+
+	result = vm_sanitize_addr_size(addr_u, size_u, VM_SANITIZE_CALLER_MINHERIT,
+	    user_map,
+	    VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, addr,
+	    &addr_end, size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		return result;
+	}
+	result = vm_sanitize_inherit(inherit_u, VM_SANITIZE_CALLER_MINHERIT,
+	    inherit);
+	if (__improbable(result != KERN_SUCCESS)) {
+		return result;
+	}
+
+	return KERN_SUCCESS;
+}
 
 int
 minherit(__unused proc_t p, struct minherit_args *uap, __unused int32_t *retval)
 {
+	mach_vm_offset_ut addr_u;
+	mach_vm_size_ut size_u;
+	vm_inherit_ut inherit_u;
+	vm_map_t        user_map;
+	kern_return_t   result;
 	mach_vm_offset_t addr;
 	mach_vm_size_t size;
 	vm_inherit_t inherit;
-	vm_map_t        user_map;
-	kern_return_t   result;
 
-	AUDIT_ARG(addr, uap->addr);
-	AUDIT_ARG(len, uap->len);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 	AUDIT_ARG(value32, uap->inherit);
 
 	user_map = current_map();
-	addr = (mach_vm_offset_t)uap->addr;
-	size = (mach_vm_size_t)uap->len;
-	inherit = uap->inherit;
-	if (vm_map_range_overflows(user_map, addr, size)) {
+	addr_u = uap->addr;
+	size_u = uap->len;
+	inherit_u = vm_sanitize_wrap_inherit((vm_inherit_t)uap->inherit);
+
+	/*
+	 * Sanitize all input parameters that are addr/offset/size/prot/inheritance
+	 */
+	result = minherit_sanitize(user_map,
+	    addr_u,
+	    size_u,
+	    inherit_u,
+	    &addr,
+	    &size,
+	    &inherit);
+	if (__improbable(result != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(result) == KERN_INVALID_ARGUMENT);
 		return EINVAL;
 	}
-	result = mach_vm_inherit(user_map, addr, size,
-	    inherit);
+
+	result = mach_vm_inherit(user_map, addr, size, inherit);
 	switch (result) {
 	case KERN_SUCCESS:
 		return 0;
@@ -1255,15 +1387,38 @@ minherit(__unused proc_t p, struct minherit_args *uap, __unused int32_t *retval)
 	return EINVAL;
 }
 
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+madvise_sanitize(
+	vm_map_t                user_map,
+	vm_addr_struct_t        addr_u,
+	vm_size_struct_t        len_u,
+	mach_vm_offset_t       *start,
+	mach_vm_offset_t       *end,
+	mach_vm_size_t         *size)
+{
+	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MADVISE,
+	           user_map,
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+	           start, end, size);
+}
+
 int
 madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 {
 	vm_map_t user_map;
-	mach_vm_offset_t start;
+	mach_vm_offset_t start, end;
 	mach_vm_size_t size;
 	vm_behavior_t new_behavior;
 	kern_return_t   result;
 
+	user_map = current_map();
+
+	result = madvise_sanitize(user_map, uap->addr, uap->len, &start, &end, &size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(result) == KERN_INVALID_ARGUMENT);
+		return EINVAL;
+	}
 	/*
 	 * Since this routine is only advisory, we default to conservative
 	 * behavior.
@@ -1313,12 +1468,6 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	}
 
-	user_map = current_map();
-	start = (mach_vm_offset_t) uap->addr;
-	size = (mach_vm_size_t) uap->len;
-	if (vm_map_range_overflows(user_map, start, size)) {
-		return EINVAL;
-	}
 #if __arm64__
 	if (start == 0 &&
 	    size != 0 &&
@@ -1351,10 +1500,25 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 	return EINVAL;
 }
 
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+mincore_sanitize(
+	vm_map_t                 map,
+	mach_vm_offset_ut        addr_u,
+	mach_vm_size_ut          len_u,
+	mach_vm_offset_t        *addr,
+	mach_vm_offset_t        *end,
+	mach_vm_size_t          *size)
+{
+	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MINCORE,
+	           map, VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, addr, end, size);
+}
+
 int
 mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 {
-	mach_vm_offset_t addr = 0, first_addr = 0, end = 0, cur_end = 0;
+	mach_vm_offset_t addr = 0, end = 0, cur_end = 0;
+	mach_vm_size_t size;
 	vm_map_t map = VM_MAP_NULL;
 	user_addr_t vec = 0;
 	int error = 0;
@@ -1372,6 +1536,20 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 	map = current_map();
 
 	/*
+	 * Make sure that the addresses presented are valid for user
+	 * mode.
+	 */
+	kr = mincore_sanitize(map,
+	    uap->addr,
+	    uap->len,
+	    &addr,
+	    &end,
+	    &size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr) ? EINVAL : 0;
+	}
+
+	/*
 	 * On systems with 4k kernel space and 16k user space, we will
 	 * use the kernel page size to report back the residency information.
 	 * This is for backwards compatibility since we already have
@@ -1386,28 +1564,11 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 	}
 
 	/*
-	 * Make sure that the addresses presented are valid for user
-	 * mode.
-	 */
-	first_addr = addr = vm_map_trunc_page(uap->addr,
-	    vm_map_page_mask(map));
-	end = vm_map_round_page(uap->addr + uap->len,
-	    vm_map_page_mask(map));
-
-	if (end < addr) {
-		return EINVAL;
-	}
-
-	if (end == addr) {
-		return 0;
-	}
-
-	/*
 	 * We are going to loop through the whole 'req_vec_size' pages
 	 * range in chunks of 'cur_vec_size'.
 	 */
 
-	req_vec_size_pages = (end - addr) >> effective_page_shift;
+	req_vec_size_pages = size >> effective_page_shift;
 	cur_vec_size_pages = MIN(req_vec_size_pages, (MAX_PAGE_RANGE_QUERY >> effective_page_shift));
 	size_t kernel_vec_size = cur_vec_size_pages;
 
@@ -1432,6 +1593,8 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 	}
 
 	while (addr < end) {
+		mach_vm_offset_t first_addr = addr;
+
 		cur_end = addr + (cur_vec_size_pages * effective_page_size);
 
 		count =  VM_PAGE_INFO_BASIC_COUNT;
@@ -1525,7 +1688,7 @@ mlock(__unused proc_t p, struct mlock_args *uap, __unused int32_t *retvalval)
 
 	/* have to call vm_map_wire directly to pass "I don't know" protections */
 	result = vm_map_wire_kernel(current_map(), uap->addr,
-	    vm_sanitize_compute_unsafe_end(uap->addr, uap->len),
+	    vm_sanitize_compute_ut_end(uap->addr, uap->len),
 	    vm_sanitize_wrap_prot(VM_PROT_NONE), VM_KERN_MEMORY_MLOCK, TRUE);
 
 	switch (result) {
@@ -1552,7 +1715,7 @@ munlock(__unused proc_t p, struct munlock_args *uap, __unused int32_t *retval)
 
 	/* JMM - need to remove all wirings by spec - this just removes one */
 	result = vm_map_unwire(current_map(), uap->addr,
-	    vm_sanitize_compute_unsafe_end(uap->addr, uap->len), TRUE);
+	    vm_sanitize_compute_ut_end(uap->addr, uap->len), TRUE);
 
 	switch (result) {
 	case KERN_SUCCESS:
@@ -1578,7 +1741,8 @@ munlockall(__unused proc_t p, __unused struct munlockall_args *uap, __unused int
 }
 
 #if CONFIG_CODE_DECRYPTION
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mremap_encrypted_sanitize(
 	vm_map_t                user_map,
 	vm_addr_struct_t        addr_u,
@@ -1589,7 +1753,8 @@ mremap_encrypted_sanitize(
 {
 	return vm_sanitize_addr_size(addr_u, len_u,
 	           VM_SANITIZE_CALLER_MREMAP_ENCRYPTED, user_map,
-	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START | VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START |
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
 	           user_addr, user_end, user_size);
 }
 

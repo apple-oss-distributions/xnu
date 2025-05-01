@@ -240,10 +240,6 @@ soioctl(struct socket *so, u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data
 		bcopy(&int_arg, data, sizeof(int_arg));
 		goto out;
 
-	case SIOCSETOT:                 /* int; deprecated */
-		error = EOPNOTSUPP;
-		goto out;
-
 	case SIOCGASSOCIDS32:           /* so_aidreq32 */
 	case SIOCGASSOCIDS64:           /* so_aidreq64 */
 	case SIOCGCONNIDS32:            /* so_cidreq32 */
@@ -471,7 +467,6 @@ soioctl_cassert(void)
 	case SIOCATMARK:
 	case SIOCSPGRP:
 	case SIOCGPGRP:
-	case SIOCSETOT:
 	case SIOCGASSOCIDS32:
 	case SIOCGASSOCIDS64:
 	case SIOCGCONNIDS32:

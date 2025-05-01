@@ -371,6 +371,19 @@ SYSCTL_PROC(_net_link_generic_system, OID_AUTO, enable_netagent,
     0, 0, &if_enable_fsw_transport_netagent_sysctl, "IU",
     "enable flowswitch netagent");
 
+#define DEFAULT_IF_LINK_HEURISTIC \
+    (IF_LINK_HEURISTICS_CELLULAR | IF_LINK_HEURISTICS_LINK_CONGESTED)
+uint32_t if_link_heuristics_flags = DEFAULT_IF_LINK_HEURISTIC;
+SYSCTL_UINT(_net_link_generic_system, OID_AUTO, link_heuristics_flags,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_link_heuristics_flags, DEFAULT_IF_LINK_HEURISTIC, "");
+
+int if_link_heuristics_lqm_max = 0;
+SYSCTL_INT(_net_link_generic_system, OID_AUTO, link_heuristics_lqm_max,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_link_heuristics_lqm_max, 0, "Max value to enable link heuristics");
+
+uint32_t if_link_heuristics_delay = IF_LINK_HEURISTICS_DELAY_MSECS;
+SYSCTL_UINT(_net_link_generic_system, OID_AUTO, link_heuristics_delay,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &if_link_heuristics_delay, IF_LINK_HEURISTICS_DELAY_MSECS, "");
 
 
 #if TEST_INPUT_THREAD_TERMINATION

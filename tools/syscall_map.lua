@@ -434,6 +434,7 @@ local syscalls = {
         'mach_vm_size_t size',
         'mach_vm_size_t size2',
         'mach_vm_size_t offset',
+        'mach_vm_address_t status',
       },
     },
 

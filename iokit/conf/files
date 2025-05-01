@@ -124,6 +124,7 @@ iokit/Kernel/IORTC.cpp				optional iokitcpp
 iokit/Kernel/IOStringFuncs.c				standard
 
 iokit/Kernel/IOUserServer.cpp				optional iokitcpp
+iokit/Kernel/IOProviderPropertyMerger.cpp	optional iokitcpp
 
 # Property tables for kernel-linked objects
 

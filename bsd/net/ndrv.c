@@ -153,7 +153,8 @@ ndrv_output(struct mbuf *m, struct socket *so)
 	 * No header is a format error
 	 */
 	if ((m->m_flags & M_PKTHDR) == 0) {
-		return EINVAL;
+		result = EINVAL;
+		goto out;
 	}
 
 	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
@@ -168,7 +169,13 @@ ndrv_output(struct mbuf *m, struct socket *so)
 	result = ifnet_output_raw(ifp, np->nd_proto_family, m);
 
 	socket_lock(so, 0);
+	m = NULL;
 
+out:
+	if (m != NULL) {
+		m_freem(m);
+		m = NULL;
+	}
 	return result;
 }
 
@@ -470,11 +477,20 @@ ndrv_send(struct socket *so, __unused int flags, struct mbuf *m,
 	int error;
 
 	if (control != NULL) {
-		m_freem(control);
-		return EOPNOTSUPP;
+		error = EOPNOTSUPP;
+		goto out;
 	}
 
 	error = ndrv_output(m, so);
+	return error;
+
+out:
+	if (control != NULL) {
+		m_freem(control);
+	}
+	if (m != NULL) {
+		m_freem(m);
+	}
 	m = NULL;
 	return error;
 }

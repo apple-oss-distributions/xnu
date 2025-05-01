@@ -35,6 +35,7 @@
 #include <mach/boolean.h>
 #include <machine/locks.h>
 
+#include <kern/assert.h>
 #include <kern/kern_types.h>
 #include <kern/lock_attr.h>
 #include <kern/lock_group.h>
@@ -1159,10 +1160,10 @@ __startup_func extern void lck_init_pv(void);
 #endif  /* KERNEL_PRIVATE */
 
 #if MACH_ASSERT
-#define LCK_SPIN_ASSERT(lck, type) lck_spin_assert((lck),(type))
-#else /* MACH_ASSERT */
+#define LCK_SPIN_ASSERT(lck, type) MACH_ASSERT_DO(lck_spin_assert(lck, type))
+#else /* !MACH_ASSERT */
 #define LCK_SPIN_ASSERT(lck, type)
-#endif /* MACH_ASSERT */
+#endif /* !MACH_ASSERT */
 
 #if DEBUG
 #define LCK_SPIN_ASSERT_DEBUG(lck, type) lck_spin_assert((lck),(type))

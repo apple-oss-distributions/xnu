@@ -101,8 +101,17 @@ class NativePointer(PointerPolicy, metaclass=Singleton):
     @staticmethod
     @cache_statically
     def isTagged(target=None):
+        """ Pointer stripping isn't required as of recent lldb changes that fixed ignoring
+        non-addresable bits.
+        Due to performance degredation on relevant coredumps, stripping is being
+        as a quick remedy.
+        Depending on future debugging needs, it'll be removed completely, or improved
+        to have acceptable performance.
+        """
+        is_tagged = False
+
         """ Returns true on TBI KASan targets, false otherwise. """
-        is_tagged = target.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+        # is_tagged = target.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
         return is_tagged
 
     def __init__(self):
@@ -116,7 +125,7 @@ class NativePointer(PointerPolicy, metaclass=Singleton):
         return cls() if sbvalue.GetType().IsPointerType() else None
 
     @staticmethod
-    def stripPtr(sbvalue):
+    def stripPtr(sbvalue: lldb.SBValue):
         """ Strips the TBI byte value. Since the value is not a plain value but
             represents a value of a variable, a register or an expression the
             conversion is performed by (re-)creating the value through expression.
@@ -125,7 +134,6 @@ class NativePointer(PointerPolicy, metaclass=Singleton):
             addr = sbvalue.GetValueAsAddress()
             sbv_new = sbvalue.CreateValueFromExpression(None, '(void *)' + str(addr))
             return sbv_new.Cast(sbvalue.GetType())
-
 
         return sbvalue
 

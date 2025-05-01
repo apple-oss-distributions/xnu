@@ -2771,14 +2771,6 @@ task_suspend_cpumon(task_t task)
 		return KERN_INVALID_ARGUMENT;
 	}
 
-#if CONFIG_TELEMETRY
-	/*
-	 * Disable task-wide telemetry if it was ever enabled by the CPU usage
-	 * monitor's warning zone.
-	 */
-	telemetry_task_ctl_locked(task, TF_CPUMON_WARNING, 0);
-#endif
-
 	/*
 	 * Suspend monitoring for the task, and propagate that change to each thread.
 	 */

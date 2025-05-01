@@ -65,6 +65,7 @@ __BEGIN_DECLS
 #include <mach/vm_param.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern_xnu.h>
 __END_DECLS
 

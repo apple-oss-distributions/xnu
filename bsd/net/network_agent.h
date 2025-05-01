@@ -54,6 +54,15 @@ struct netagent_message_header {
 	u_int32_t               message_payload_length;
 };
 
+struct netagent_session_message_header {
+	u_int8_t                message_type;
+	u_int8_t                message_flags;
+	u_int32_t               message_id;
+	u_int32_t               message_error;
+	uuid_t                  message_agent_id;
+	u_int32_t               message_payload_length;
+};
+
 struct netagent_trigger_message {
 	u_int32_t               trigger_flags;
 	pid_t                   trigger_pid;
@@ -79,6 +88,12 @@ struct netagent_assign_nexus_message {
 	u_int8_t                assign_necp_results[0];
 };
 
+struct netagent_session_assign_nexus_message {
+	uuid_t                  agent_id;
+	uuid_t                  assign_client_id;
+	u_int8_t                assign_necp_results[0];
+};
+
 #define NETAGENT_MESSAGE_TYPE_REGISTER                  1       // Pass netagent to set, no return value
 #define NETAGENT_MESSAGE_TYPE_UNREGISTER                2       // No value, no return value
 #define NETAGENT_MESSAGE_TYPE_UPDATE                    3       // Pass netagent to update, no return value
@@ -96,7 +111,7 @@ struct netagent_assign_nexus_message {
 #define NETAGENT_MESSAGE_TYPE_CLIENT_UNASSERT   15      // Kernel initiated, struct netagent_client_message
 
 #define NETAGENT_OPTION_TYPE_REGISTER                   NETAGENT_MESSAGE_TYPE_REGISTER          // Pass netagent to set, no return value
-#define NETAGENT_OPTION_TYPE_UNREGISTER                 NETAGENT_MESSAGE_TYPE_UNREGISTER        // No value, no return value
+#define NETAGENT_OPTION_TYPE_UNREGISTER                 NETAGENT_MESSAGE_TYPE_UNREGISTER        // Pass agent uuid in session mode, no return value
 #define NETAGENT_OPTION_TYPE_UPDATE                             NETAGENT_MESSAGE_TYPE_UPDATE            // Pass netagent to update, no return value
 #define NETAGENT_OPTION_TYPE_ASSIGN_NEXUS               NETAGENT_MESSAGE_TYPE_ASSIGN_NEXUS      // Pass struct netagent_assign_nexus_message
 #define NETAGENT_OPTION_TYPE_USE_COUNT                  16                                                                      // Pass use count to set, get current use count
@@ -111,7 +126,8 @@ struct netagent_assign_nexus_message {
 #define NETAGENT_MESSAGE_TYPE_TOKENS_NEEDED            25      // Kernel intiated, no content
 #define NETAGENT_MESSAGE_TYPE_CLIENT_ERROR             26      // Kernel intiated, struct netagent_client_error_message
 #define NETAGENT_OPTION_TYPE_RESET_CLIENT_ERROR        27      // Call to reset client error and counts
-
+#define NETAGENT_OPTION_TYPE_ENABLE_SESSION_MODE       28      // Enables registering multiple agents on a single fd "session". Must be set before registering an agent.
+#define NETAGENT_OPTION_TYPE_UNREGISTER_ALL            29      // Applicable for session mode, unregisters all associated agents.
 
 #define NETAGENT_MESSAGE_FLAGS_RESPONSE                 0x01    // Used for acks, errors, and query responses
 

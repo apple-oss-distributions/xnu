@@ -1107,10 +1107,8 @@ kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_
 
 	assert(last_file_offset != NULL);
 
-
 	*last_file_offset = first_file_offset;
 	cur_ret = kern_coredump_routine(core_outvars, kernel_helper, *last_file_offset, &prev_core_length, &header_update_failed, XNU_COREDUMP, details_flags);
-
 
 	if (cur_ret != KERN_SUCCESS) {
 		// As long as we didn't fail while updating the header for the raw file, we should be able to try

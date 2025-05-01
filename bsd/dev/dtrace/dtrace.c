@@ -564,14 +564,15 @@ dtrace_load##bits(uintptr_t addr)					\
 	int i;								\
 	volatile uint16_t *flags = (volatile uint16_t *)		\
 	    &cpu_core[CPU->cpu_id].cpuc_dtrace_flags;			\
+	uintptr_t caddr = vm_memtag_canonicalize_kernel(addr);		\
 									\
 	DTRACE_ALIGNCHECK(addr, size, flags);				\
 									\
 	for (i = 0; i < dtrace_toxranges; i++) {			\
-		if (addr >= dtrace_toxrange[i].dtt_limit)		\
+		if (caddr >= dtrace_toxrange[i].dtt_limit)		\
 			continue;					\
 									\
-		if (addr + size <= dtrace_toxrange[i].dtt_base)		\
+		if (caddr + size <= dtrace_toxrange[i].dtt_base)	\
 			continue;					\
 									\
 		/*							\

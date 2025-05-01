@@ -173,6 +173,7 @@ class IOUserServer : public IOUserClient2022
 	bool                  fPlatformDriver;
 	OSString            * fTeamIdentifier;
 	unsigned int          fCSValidationCategory;
+	IOWorkLoop          * fWorkLoop;
 public:
 	kern_allocation_name_t fAllocationName;
 	task_t                 fOwningTask;
@@ -192,6 +193,7 @@ public:
 	virtual bool           finalize(IOOptionBits options) APPLE_KEXT_OVERRIDE;
 	virtual void           stop(IOService * provider) APPLE_KEXT_OVERRIDE;
 	virtual void           free() APPLE_KEXT_OVERRIDE;
+	virtual IOWorkLoop   * getWorkLoop() const APPLE_KEXT_OVERRIDE;
 
 	virtual IOReturn       setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn       externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args) APPLE_KEXT_OVERRIDE;
@@ -352,6 +354,32 @@ IOUserServerUEXTTrap(OSObject * object, void * p1, void * p2, void * p3, void * 
 
 extern "C" void
 IOUserServerRecordExitReason(task_t task, os_reason_t reason);
+
+class IOUserUserClient : public IOUserClient
+{
+	OSDeclareDefaultStructors(IOUserUserClient);
+public:
+	task_t          fTask;
+	OSDictionary  * fWorkGroups;
+	OSDictionary  * fEventLinks;
+	IOLock        * fLock;
+
+	IOReturn                   setTask(task_t task);
+	IOReturn                   eventlinkConfigurationTrap(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6);
+	IOReturn                   workgroupConfigurationTrap(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6);
+
+	virtual bool           init( OSDictionary * dictionary ) APPLE_KEXT_OVERRIDE;
+	virtual void           free() APPLE_KEXT_OVERRIDE;
+	virtual void           stop(IOService * provider) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn       clientClose(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn       setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn       externalMethod(uint32_t selector, IOExternalMethodArguments * args,
+	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn           clientMemoryForType(UInt32 type,
+	    IOOptionBits * options,
+	    IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
+	virtual IOExternalTrap * getTargetAndTrapForIndex( IOService **targetP, UInt32 index ) APPLE_KEXT_OVERRIDE;
+};
 
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* _IOUSERSERVER_H */

@@ -1,10 +1,8 @@
 from xnu import *
 from utils import *
 from process import *
-from misc import *
 from memory import *
 from ipc import *
-
 
 # Macro: showallprocrunqcount
 
@@ -60,10 +58,8 @@ def ShowActiveInterrupts(cmd_args=None):
     """  Prints the interrupts that are unmasked & active with the Interrupt Controller
          Usage: showactiveinterrupts <address of Interrupt Controller object>
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowActiveInterrupts.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
     aic = kern.GetValueFromAddress(cmd_args[0], 'AppleInterruptController *')
     if not aic:
         print("unknown arguments:", str(cmd_args))
@@ -121,7 +117,7 @@ def ShowIrqByIpiTimerRatio(cmd_args=None):
 def showinterruptsourceinfo(cmd_args = None):
     """  Extract information of interrupt source causing interrupt storms.
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         print("No arguments passed")
         return False
     #Dump IOInterruptVector object
@@ -221,7 +217,7 @@ def ShowSchedClutch(cmd_args=[]):
     """ Routine to print the clutch scheduler hierarchy.
         Usage: showschedclutch <pset>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid argument")
     pset = kern.GetValueFromAddress(cmd_args[0], "processor_set_t")
     ShowSchedClutchForPset(pset)
@@ -231,7 +227,7 @@ def ShowSchedClutchRoot(cmd_args=[]):
     """ show information about the root of the sched clutch hierarchy
         Usage: showschedclutchroot <root>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid argument")
     root = kern.GetValueFromAddress(cmd_args[0], "struct sched_clutch_root *")
     if not root:
@@ -250,7 +246,7 @@ def ShowSchedClutchRootBucket(cmd_args=[]):
     """ show information about a root bucket in the sched clutch hierarchy
         Usage: showschedclutchrootbucket <root_bucket>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid argument")
     root_bucket = kern.GetValueFromAddress(cmd_args[0], "struct sched_clutch_root_bucket *")
     if not root_bucket:
@@ -304,7 +300,7 @@ def ShowSchedClutchBucket(cmd_args=[]):
     """ show information about a clutch bucket in the sched clutch hierarchy
         Usage: showschedclutchbucket <clutch_bucket>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid argument")
     clutch_bucket = kern.GetValueFromAddress(cmd_args[0], "struct sched_clutch_bucket *")
     if not clutch_bucket:
@@ -317,7 +313,7 @@ def ShowAbstimeToNanoTime(cmd_args=[]):
     """ convert mach_absolute_time units to nano seconds
         Usage: (lldb) abs2nano <timestamp in MATUs>
     """
-    if not cmd_args:
+    if cmd_args is None or len(cmd_args) == 0:
         raise ArgumentError("Invalid argument")
     timedata = ArgumentStringToInt(cmd_args[0])
     ns = kern.GetNanotimeFromAbstime(timedata)
@@ -401,13 +397,13 @@ def ShowThreadSchedHistory(thread, most_recent_dispatch):
     uthread = GetBSDThread(thread)
     # Doing the straightforward thing blows up weirdly, so use some indirections to get back on track
     if unsigned(uthread.pth_name) != 0 :
-        thread_name = str(kern.GetValueFromAddress(unsigned(uthread.pth_name), 'char*'))
+        thread_name = str(cast(uthread.pth_name, 'char*'))
 
     task = thread.t_tro.tro_task
 
     task_name = "unknown"
     p = GetProcFromTask(task)
-    if task and p:
+    if task and p is not None:
         task_name = GetProcName(p)
 
     sched_mode = ""
@@ -577,10 +573,8 @@ def ShowRunq(cmd_args=None):
          Usage: showrunq <runq>
     """
 
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowRunq.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     runq = kern.GetValueFromAddress(cmd_args[0], 'struct run_queue *')
     ShowRunQSummary(runq)
@@ -714,7 +708,9 @@ def ShowScheduler(cmd_args=None):
 
 
             print("Idle Processors:\n")
-            idle_bitmap = int(pset.cpu_state_map[processor_idle]) & int(pset.primary_map)
+            idle_bitmap = int(pset.cpu_state_map[processor_idle])
+            if hasattr(pset, "primary_map"):
+                idle_bitmap = idle_bitmap & int(pset.primary_map)
             for cpuid in IterateBitmap(idle_bitmap):
                 processor = processor_array[cpuid]
                 if processor != 0:
@@ -728,19 +724,20 @@ def ShowScheduler(cmd_args=None):
             print()
 
 
-            print("Idle Secondary Processors:\n")
-            idle_bitmap = int(pset.cpu_state_map[processor_idle]) & ~(int(pset.primary_map))
-            for cpuid in IterateBitmap(idle_bitmap):
-                processor = processor_array[cpuid]
-                if processor != 0:
-                    print("    " + GetProcessorSummary(processor), end='')
-                    ShowActiveThread(processor)
+            if hasattr(pset, "primary_map"):
+                print("Idle Secondary Processors:\n")
+                idle_bitmap = int(pset.cpu_state_map[processor_idle]) & ~(int(pset.primary_map))
+                for cpuid in IterateBitmap(idle_bitmap):
+                    processor = processor_array[cpuid]
+                    if processor != 0:
+                        print("    " + GetProcessorSummary(processor), end='')
+                        ShowActiveThread(processor)
 
-                    if show_priority_runq:
-                        runq = processor.runq
-                        if runq.count != 0:
-                            ShowRunQSummary(runq)
-            print()
+                        if show_priority_runq:
+                            runq = processor.runq
+                            if runq.count != 0:
+                                ShowRunQSummary(runq)
+                print()
 
 
             print("Other Processors:\n")
@@ -906,8 +903,9 @@ def ParanoidIterateLinkageChain(queue_head, element_type, field_name, field_ofst
             link = link.next
             if circleQueue and unsigned(queue_head) == unsigned(link):
                 break;
-    except:
+    except Exception as e:
         try:
+            print(e)
             print("Exception while iterating queue: {:>#18x} link: {:>#18x} addr: {:>#18x} obj: {:>#18x} last link: {:>#18x}".format(queue_head, link, addr, obj, last_link))
         except:
             import traceback
@@ -993,7 +991,7 @@ def ShowThreadCall(prefix, call, recent_timestamp, pqueue, is_pending=False):
                 except AttributeError:
                     # This is horrible, horrible, horrible.  But it works.  Needed because IOEventSource hides the action member in an
                     # anonymous union when XNU_PRIVATE_SOURCE is set.  To grab it, we work backwards from the enabled member.
-                    func = dereference(kern.GetValueFromAddress(addressof(iotes.enabled) - sizeof('IOEventSource::Action'), 'uint64_t *'))
+                    func = dereference(kern.CreateValueFromAddress(addressof(iotes.enabled) - sizeof('IOEventSource::Action'), 'uint64_t'))
                     param0 = iotes.owner
                     param1 = unsigned(iotes)
 
@@ -1223,10 +1221,8 @@ def ShowCalloutGroup(cmd_args=None):
         C - Continuous time - Timeout is in mach_continuous_time
         I - Callout is an IOTimerEventSource
     """
-    if not cmd_args:
-        print("No arguments passed")
-        print(ShowCalloutGroup.__doc__)
-        return False
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError()
 
     if "threads" in cmd_args[0] :
         PrintThreadCallThreads()

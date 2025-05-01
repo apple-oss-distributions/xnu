@@ -300,9 +300,8 @@ fsw_get_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu, uint32_t *tso_
 	}
 	switch (fsw->fsw_tso_mode) {
 	case FSW_TSO_MODE_HW: {
-		ASSERT(ifp->if_tso_v4_mtu != 0 || ifp->if_tso_v6_mtu != 0);
-		*tso_v4_mtu = ifp->if_tso_v4_mtu;
-		*tso_v6_mtu = ifp->if_tso_v6_mtu;
+		*tso_v4_mtu = fsw->fsw_tso_hw_v4_mtu;
+		*tso_v6_mtu = fsw->fsw_tso_hw_v6_mtu;
 		break;
 	}
 	case FSW_TSO_MODE_SW: {
@@ -325,7 +324,7 @@ fsw_tso_setup(struct nx_flowswitch *fsw)
 
 	fsw->fsw_tso_mode = FSW_TSO_MODE_NONE;
 	struct ifnet *ifp = fsw->fsw_ifp;
-	if (!SKYWALK_CAPABLE(ifp) || !SKYWALK_NATIVE(ifp)) {
+	if (!SKYWALK_CAPABLE(ifp)) {
 		DTRACE_SKYWALK2(tso__no__support, struct nx_flowswitch *, fsw,
 		    ifnet_t, ifp);
 		return;
@@ -343,13 +342,14 @@ fsw_tso_setup(struct nx_flowswitch *fsw)
 	 * flags here for the original flags because nx_netif_host_adjust_if_capabilities()
 	 * has already been called.
 	 */
-	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0 && ifp->if_tso_v4_mtu != 0) ||
-	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0 && ifp->if_tso_v6_mtu != 0)) {
-		ASSERT(large_buf_size <= ifp->if_tso_v4_mtu ||
-		    large_buf_size <= ifp->if_tso_v6_mtu);
+	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) ||
+	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0)) {
 		fsw->fsw_tso_mode = FSW_TSO_MODE_HW;
+		fsw->fsw_tso_hw_v4_mtu = large_buf_size;
+		fsw->fsw_tso_hw_v6_mtu = large_buf_size;
 	} else {
-		if (sk_fsw_gso_mtu != 0 && large_buf_size >= sk_fsw_gso_mtu) {
+		if (sk_fsw_gso_mtu != 0 && large_buf_size >= sk_fsw_gso_mtu &&
+		    SKYWALK_NATIVE(ifp)) {
 			fsw->fsw_tso_mode = FSW_TSO_MODE_SW;
 			fsw->fsw_tso_sw_mtu = sk_fsw_gso_mtu;
 		}

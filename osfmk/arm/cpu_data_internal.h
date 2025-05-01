@@ -157,9 +157,9 @@ typedef struct cpu_data {
 	bool                            cpu_hibernate; /* This cpu is currently hibernating the system */
 	bool                            cpu_running;
 	bool                            cluster_master;
-#if __ARM_ARCH_8_5__
+#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	bool                            sync_on_cswitch;
-#endif /* __ARM_ARCH_8_5__ */
+#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 	/* true if processor_start() or processor_exit() is operating on this CPU */
 	bool                            in_state_transition;
 
@@ -218,7 +218,6 @@ typedef struct cpu_data {
 	uint64_t                        cpu_regmap_paddr;
 
 	uint32_t                        cpu_phys_id;
-	uint32_t                        cpu_l2_access_penalty;
 	platform_error_handler_t        platform_error_handler;
 
 	int                             cpu_mcount_off;

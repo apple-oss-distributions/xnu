@@ -99,7 +99,7 @@
 #define NFSRV_MAXDATA     NFS_MAXDATA
 #define NFSRV_TCPSOCKBUF  (2 * NFSRV_MAXDATA)
 
-#define NFS4_CALLBACK_PROG              0x4E465343 /* "NFSC" */
+#define NFS4_CALLBACK_PROG              0x40000000
 #define NFS4_CALLBACK_PROG_VERSION      1
 
 /* Stat numbers for NFS RPC returns */
@@ -737,10 +737,12 @@ typedef enum { NFNON=0, NFREG=1, NFDIR=2, NFBLK=3, NFCHR=4, NFLNK=5,
 #define NFS_OP_RELEASE_LOCKOWNER                39
 #define NFS_OP_ILLEGAL                          10044
 #define NFS_OP_COUNT                            40
+
 /* NFSv4 callback opcodes */
 #define NFS_OP_CB_GETATTR                       3
 #define NFS_OP_CB_RECALL                        4
 #define NFS_OP_CB_ILLEGAL                       10044
+#define NFS_OP_CB_COUNT                         5
 
 /* NFSv4 file handle type flags */
 #define NFS_FH_PERSISTENT                       0x00000000

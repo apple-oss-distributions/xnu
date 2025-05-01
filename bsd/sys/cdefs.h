@@ -1118,6 +1118,11 @@
 #if __has_include(<ptrcheck.h>)
 #include <ptrcheck.h>
 #else
+#if __has_feature(bounds_safety)
+#error -fbounds-safety is enabled, but <ptrcheck.h> is missing. \
+        This will lead to difficult-to-diagnose compilation errors.
+#endif /* __has_feature(bounds_safety) */
+
 /*
  * We intentionally define to nothing pointer attributes which do not have an
  * impact on the ABI. __indexable and __bidi_indexable are not defined because
@@ -1127,7 +1132,9 @@
 #define __single
 #define __unsafe_indexable
 #define __counted_by(N)
+#define __counted_by_or_null(N)
 #define __sized_by(N)
+#define __sized_by_or_null(N)
 #define __ended_by(E)
 #define __terminated_by(T)
 #define __null_terminated
@@ -1364,5 +1371,33 @@
 # define __xnu_data_size
 # define __xnu_returns_data_pointer
 #endif
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * Macro pair which allows C code to, at build time, require that a function
+ * will not use a stack frame/spill to the stack in RELEASE or DEVELOPMENT (i.e.
+ * not DEBUG).
+ *
+ * This macro has no effect on non-optimizing/-O0 builds since we rely on the
+ * existence of some basic optimizations in order to ensure that stack usage can
+ * be avoided. Since non-optimizing builds should never be used in production,
+ * we can relax the security properties of this macro and permit stack usage
+ * without an error.
+ *
+ * When unsupported, this macro is ignored and stack usage will not generate an
+ * error. As such, this macro should only be used when stack usage may pose a
+ * security concern rather than a functional issue.
+ */
+#if __OPTIMIZE__
+#define __SECURITY_STACK_DISALLOWED_PUSH \
+	 _Pragma("clang diagnostic push") \
+	 _Pragma("clang diagnostic error \"-Wframe-larger-than\"")
+#define __SECURITY_STACK_DISALLOWED_POP \
+	 _Pragma("clang diagnostic pop")
+#else
+#define __SECURITY_STACK_DISALLOWED_PUSH
+#define __SECURITY_STACK_DISALLOWED_POP
+#endif /* __clang */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* !_CDEFS_H_ */

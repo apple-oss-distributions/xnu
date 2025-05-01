@@ -59,6 +59,11 @@
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 
+#if __arm64__
+#include <pexpert/arm64/apt_msg.h>
+#endif
+
+
 /**
  * Functions defined elsewhere that are required by this source file.
  */
@@ -79,6 +84,9 @@ extern pmap_paddr_t vm_last_phys;
 
 /* UART hibernation flag - import so we can set it ASAP on resume. */
 extern MARK_AS_HIBERNATE_DATA bool uart_hibernation;
+
+/* Used to cache memSize, as passed by iBoot */
+SECURITY_READ_ONLY_LATE(uint64_t) memSize = 0;
 
 int debug_task;
 
@@ -112,10 +120,6 @@ SECURITY_READ_ONLY_LATE(addr64_t) first_avail_phys = 0;
 /* Enable both branch target retention (0x2) and branch direction retention (0x1) across sleep */
 uint32_t bp_ret = 3;
 extern void set_bp_ret(void);
-#endif
-
-#if SCHED_HYGIENE_DEBUG
-boolean_t sched_hygiene_debug_pmc = 1;
 #endif
 
 #if SCHED_HYGIENE_DEBUG
@@ -183,8 +187,10 @@ SECURITY_READ_ONLY_LATE(boolean_t) diversify_user_jop = TRUE;
 #endif
 
 
+
 SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
+SECURITY_READ_ONLY_LATE(ppnum_t)  pmap_first_pnum;
 
 SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
 
@@ -205,6 +211,9 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) reset_vector_vaddr = 0;
  * Forward definition
  */
 void arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_args);
+#if KASAN
+void arm_init_kasan(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_args);
+#endif /* KASAN */
 
 #if __arm64__
 unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
@@ -233,6 +242,7 @@ extern vm_offset_t vm_kernel_slide;
 extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
 extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
 extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
+
 
 void arm_slide_rebase_and_sign_image(void);
 MARK_AS_FIXUP_TEXT void
@@ -287,6 +297,13 @@ arm_slide_rebase_and_sign_image(void)
 	 * arm_vm_init()
 	 */
 	vm_kernel_slide = slide;
+}
+
+void arm_static_if_init(boot_args *args);
+MARK_AS_FIXUP_TEXT void
+arm_static_if_init(boot_args *args)
+{
+	static_if_init(args->CommandLine);
 }
 
 void
@@ -620,10 +637,35 @@ static SECURITY_READ_ONLY_LATE(bool) enable_sme = true;
  */
 bool sptm_supports_local_coredump = true;
 
+#if KASAN
+/* Prototypes for KASAN functions */
+void kasan_bootstrap(boot_args *, vm_offset_t pgtable, sptm_bootstrap_args_xnu_t *sptm_boot_args);
+
 /**
- * Entry point for systems that support an SPTM. Bootstrap stacks
- * have been set up by the SPTM by this point, and XNU is responsible
- * for rebasing and signing absolute addresses.
+ * Entry point for systems that support an SPTM and are booting a KASAN kernel.
+ * This is required because KASAN kernels need to set up the shadow map before
+ * arm_init() can even run.
+ */
+void
+arm_init_kasan(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
+{
+	/* Initialize SPTM helper library. */
+	uint8_t ret = libsptm_init(&sptm_boot_args->libsptm_state);
+	if (ret != LIBSPTM_SUCCESS) {
+		panic("%s: libsptm_init failed: %u", __func__, ret);
+	}
+
+	memSize = args->memSize;
+	kasan_bootstrap(args, phystokv(sptm_boot_args->libsptm_state.root_table_paddr), sptm_boot_args);
+
+	arm_init(args, sptm_boot_args);
+}
+#endif /* KASAN */
+
+/**
+ * Entry point for systems that support an SPTM - except on KASAN kernels,
+ * see above. Bootstrap stacks have been set up by the SPTM by this point,
+ * and XNU is responsible for rebasing and signing absolute addresses.
  */
 void
 arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
@@ -632,6 +674,8 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 	uint32_t memsize;
 	uint64_t xmaxmem;
 	thread_t thread;
+	DTEntry chosen;
+	unsigned int dt_entry_size;
 
 	extern void xnu_return_to_gl2(void);
 	const sptm_vaddr_t handler_addr = (sptm_vaddr_t) ptrauth_strip((void *)xnu_return_to_gl2, ptrauth_key_function_pointer);
@@ -668,8 +712,15 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
 
+#if !KASAN
+	memSize = args->memSize;
+
 	/* Initialize SPTM helper library. */
-	libsptm_init(&const_sptm_args.libsptm_state);
+	uint8_t ret = libsptm_init(&const_sptm_args.libsptm_state);
+	if (ret != LIBSPTM_SUCCESS) {
+		panic("%s: libsptm_init failed: %u", __func__, ret);
+	}
+#endif
 
 #if __arm64__
 	configure_timer_apple_regs();
@@ -678,6 +729,26 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	configure_misc_apple_boot_args();
 	configure_misc_apple_regs(true);
+
+#if (DEVELOPMENT || DEBUG)
+	unsigned long const *platform_stall_ptr = NULL;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
+		panic("%s: Unable to find 'chosen' DT node", __FUNCTION__);
+	}
+
+	// Not usable TUNABLE here because TUNABLEs are parsed at a later point.
+	if (SecureDTGetProperty(chosen, "xnu_platform_stall", (void const **)&platform_stall_ptr,
+	    &dt_entry_size) == kSuccess) {
+		xnu_platform_stall_value = *platform_stall_ptr;
+	}
+
+	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_ARM_INIT);
+
+	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
+	dt_entry_size = 0;
+#endif
+
 #if HAS_ARM_FEAT_SME
 	(void)PE_parse_boot_argn("enable_sme", &enable_sme, sizeof(enable_sme));
 	if (enable_sme) {
@@ -690,7 +761,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 		/*
 		 * Select the advertised kernel page size.
 		 */
-		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+		if (memSize > 1ULL * 1024 * 1024 * 1024) {
 			/*
 			 * arm64 device with > 1GB of RAM:
 			 * kernel uses 16KB pages.
@@ -722,6 +793,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	ml_parse_cpu_topology();
 
+	siq_init();
 
 	master_cpu = ml_get_boot_cpu_number();
 	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
@@ -781,16 +853,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 		/* Disable if WDT is disabled */
 		if (wdt_disabled || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
 			interrupt_masked_debug_mode = SCHED_HYGIENE_MODE_OFF;
-		} else if (kern_feature_override(KF_SCHED_HYGIENE_DEBUG_PMC_OVRD)) {
-			/*
-			 * The sched hygiene facility can, in adition to checking time, capture
-			 * metrics provided by the cycle and instruction counters available in some
-			 * systems. Check if we should enable this feature based on the validation
-			 * overrides.
-			 */
-			sched_hygiene_debug_pmc = 0;
 		}
-
 		if (wdt_disabled || kern_feature_override(KF_PREEMPTION_DISABLED_DEBUG_OVRD)) {
 			sched_preemption_disable_debug_mode = SCHED_HYGIENE_MODE_OFF;
 		}
@@ -870,6 +933,9 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	PE_init_platform(TRUE, &BootCpuData);
 
+	/* Initialize the debug infrastructure system-wide and on the local core. */
+	pe_arm_debug_init_early(&BootCpuData);
+
 #if RELEASE
 	/* Validate SPTM variant. */
 	if (const_sptm_args.sptm_variant != SPTM_VARIANT_RELEASE) {
@@ -894,6 +960,10 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 #endif /* KPERF */
 
 	PE_init_cpu();
+#if __arm64__
+	apt_msg_init();
+	apt_msg_init_cpu();
+#endif
 	fiq_context_init(TRUE);
 
 
@@ -906,8 +976,6 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 	 * the actual DRAM base address and size as reported by iBoot through the
 	 * device tree.
 	 */
-	DTEntry chosen;
-	unsigned int dt_entry_size;
 	unsigned long const *dram_base;
 	unsigned long const *dram_size;
 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
@@ -924,6 +992,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	gDramBase = *dram_base;
 	gDramSize = *dram_size;
+	pmap_first_pnum = (ppnum_t)atop(gDramBase);
 
 	/*
 	 * Initialize the stack protector for all future calls
@@ -979,6 +1048,7 @@ arm_init_cpu(
 
 	os_atomic_andnot(&cpu_data_ptr->cpu_flags, SleepState, relaxed);
 
+	siq_cpu_init();
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
@@ -987,7 +1057,10 @@ arm_init_cpu(
 	if (hibargs != 0 && hibargs->hib_header_phys != 0) {
 		gIOHibernateState = kIOHibernateStateWakingFromHibernate;
 		uart_hibernation = true;
+
+
 		__nosan_memcpy(gIOHibernateCurrentHeader, (void*)phystokv(hibargs->hib_header_phys), sizeof(IOHibernateImageHeader));
+
 	}
 	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate) && ml_is_quiescing()) {
 		// the "normal" S2R code captures wake_abstime too early, so on a hibernation resume we fix it up here
@@ -1058,11 +1131,15 @@ arm_init_cpu(
 #endif /* HIBERNATION */
 	}
 	PE_init_cpu();
+#if __arm64__
+	apt_msg_init_cpu();
+#endif
 
 	fiq_context_init(TRUE);
 	cpu_data_ptr->rtcPop = EndOfAllTime;
 	timer_resync_deadlines();
 
+	/* Start tracing (secondary CPU). */
 #if DEVELOPMENT || DEBUG
 	PE_arm_debug_enable_trace(true);
 #endif /* DEVELOPMENT || DEBUG */
@@ -1443,32 +1520,6 @@ arm_vm_prot_finalize(boot_args * args __unused)
 #endif /* __ARM_KERNEL_PROTECT__ */
 }
 
-/*
- * TBI (top-byte ignore) is an ARMv8 feature for ignoring the top 8 bits of
- * address accesses. It can be enabled separately for TTBR0 (user) and
- * TTBR1 (kernel).
- */
-void
-arm_set_kernel_tbi(void)
-{
-#if !__ARM_KERNEL_PROTECT__ && CONFIG_KERNEL_TBI
-	uint64_t old_tcr, new_tcr;
-
-	old_tcr = new_tcr = get_tcr();
-	/*
-	 * For kernel configurations that require TBI support on
-	 * PAC systems, we enable DATA TBI only.
-	 */
-	new_tcr |= TCR_TBI1_TOPBYTE_IGNORED;
-	new_tcr |= TCR_TBID1_ENABLE;
-
-	if (old_tcr != new_tcr) {
-		set_tcr(new_tcr);
-		sysreg_restore.tcr_el1 = new_tcr;
-	}
-#endif /* !__ARM_KERNEL_PROTECT__ && CONFIG_KERNEL_TBI */
-}
-
 /* allocate a page for a page table: we support static and dynamic mappings.
  *
  * returns a physical address for the allocated page
@@ -1557,9 +1608,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 
 	/* Get the memory size */
 #if KASAN
-	real_phys_size = args->memSize + (shadow_ptop - shadow_pbase);
+	real_phys_size = memSize + (shadow_ptop - shadow_pbase);
 #else
-	real_phys_size = args->memSize;
+	real_phys_size = memSize;
 #endif
 
 	/**
@@ -1571,7 +1622,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 * completely own.  The KASAN shadow region, if present, is managed entirely
 	 * in units of the hardware page size and should not need similar treatment.
 	 */
-	gPhysSize = mem_size = ((gPhysBase + args->memSize) & ~PAGE_MASK) - gPhysBase;
+	gPhysSize = mem_size = ((gPhysBase + memSize) & ~PAGE_MASK) - gPhysBase;
+
 
 
 	/* Obtain total memory size, including non-managed memory */
@@ -1589,11 +1641,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 		panic("Unsupported memory configuration %lx", mem_size);
 	}
 
-
 	physmap_base = SPTMArgs->physmap_base;
 	physmap_end = static_memory_end = SPTMArgs->physmap_end;
 
-#if KASAN && !defined(ARM_LARGE_MEMORY)
+#if KASAN && !defined(ARM_LARGE_MEMORY) && !defined(CONFIG_SPTM)
 	/* add the KASAN stolen memory to the physmap */
 	dynamic_memory_begin = static_memory_end + (shadow_ptop - shadow_pbase);
 #else
@@ -1770,6 +1821,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 		 * XNU_KERNEL_RESTRICTED for now.
 		 */
 		use_xnu_restricted = false;
+
 #endif /* XNU_TARGET_OS_OSX */
 	}
 

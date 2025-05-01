@@ -33,3 +33,10 @@ T_DECL(kalloc, "kalloc_test",
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc", 0), "test succeeded");
 }
+
+T_DECL(kalloc_guard_regions, "Checks that guard regions are inserted frequently enough",
+    T_META_NAMESPACE("xnu.vm"),
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
+{
+	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc_guard_regions", 0), "kalloc_guard_regions");
+}

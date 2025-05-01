@@ -100,7 +100,7 @@
  * KDBG_EVENTID(DBG_FSYSTEM, DBG_VFS, dcode) global event id, see bsd/sys/kdebug.h.
  * Note that dcode is multiplied by 4 and ORed as part of the construction. See bsd/kern/trace_codes
  * for list of system-wide {global event id, name} pairs. Currently DBG_VFS event ids are in range
- * [0x3130000, 0x3130188].
+ * [0x3130000, 0x3130198].
  */
 
 //#define VFS_TRACE_POLICY_OPS
@@ -2947,4 +2947,12 @@ mac_vnode_check_rename_swap(vfs_context_t ctx, struct vnode *fdvp,
 	});
 	VFS_KERNEL_DEBUG_END1(100, fvp);
 	return error;
+}
+
+void
+mac_mount_notify_mount(vfs_context_t ctx, struct mount *mp)
+{
+	VFS_KERNEL_DEBUG_START1(102, mp);
+	MAC_PERFORM(mount_notify_mount, vfs_context_ucred(ctx), mp, mac_mount_label(mp));
+	VFS_KERNEL_DEBUG_END1(102, mp);
 }

@@ -21,6 +21,16 @@
 #define SET_THREAD_BIND_BOOTARG \
     T_META_BOOTARGS_SET("enable_skstb=1")
 
+// Enable/disable `T_MAYFAIL` for any expects annotated with
+// `T_MAYFAIL_IF_ENABLED`. Defaults to disabled.
+void set_expects_may_fail(bool may_fail);
+
+// Returns whether may-fail is currently enabled (for expects
+// annotated with `T_MAYFAIL_IF_ENABLED`).
+bool expects_may_fail(void);
+
+#define T_MAYFAIL_IF_ENABLED(reason) { if (expects_may_fail()) { T_MAYFAIL_WITH_REASON(reason); } }
+
 // Returns true if the system implicitly tracks CPI.
 bool has_cpi(void);
 
@@ -33,6 +43,9 @@ bool has_energy(void);
 
 // Bind the current thread to the given cluster.
 void bind_to_cluster(char type);
+
+// Returns the name of the current scheduler policy.
+char *sched_policy_name(void);
 
 // Returns the number of perf-levels on the system.
 unsigned int perf_level_count(void);

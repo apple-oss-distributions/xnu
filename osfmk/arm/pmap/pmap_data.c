@@ -633,7 +633,6 @@ pmap_data_bootstrap(void)
 	/* Number of VM pages that span all of kernel-managed memory. */
 	unsigned int npages = (unsigned int)atop(mem_size);
 
-
 	/* The pv_head_table and pp_attr_table both have one entry per VM page. */
 	const vm_size_t pp_attr_table_size = npages * sizeof(pp_attr_t);
 	const vm_size_t pv_head_size = round_page(npages * sizeof(pv_entry_t *));
@@ -887,9 +886,11 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 		/* Get the twig table entry that points to the table to reclaim. */
 		ttep = pmap_tte(pmap, va);
 
-		/* If the twig entry is either invalid or a block mapping, skip it. */
-		if ((ttep == TT_ENTRY_NULL) ||
-		    ((*ttep & ARM_TTE_TYPE_MASK) != ARM_TTE_TYPE_TABLE)) {
+		/**
+		 * If the twig entry is nonexistent, or either an invalid/block mapping,
+		 * skip it.
+		 */
+		if ((ttep == TT_ENTRY_NULL) || !tte_is_valid_table(*ttep)) {
 			continue;
 		}
 
@@ -3132,9 +3133,7 @@ pmap_ledger_free_internal(ledger_t ledger)
 	const uint64_t array_index = pmap_ledger_validate(ledger);
 
 	/* Ensure no pmap objects are still using this ledger. */
-	if (os_ref_release(&pmap_ledger_refcnt[array_index]) != 0) {
-		panic("%s: ledger still referenced, ledger=%p", __func__, ledger);
-	}
+	os_ref_release_last(&pmap_ledger_refcnt[array_index]);
 
 	/* Prepend the ledger to the free list. */
 	free_ledger->next = pmap_ledger_free_list;
@@ -4122,7 +4121,7 @@ pmap_cpu_data_array_init(void)
 			assert(*ptep == ARM_PTE_EMPTY);
 
 			pt_entry_t template = pa_to_pte(avail_start) | ARM_PTE_AF | ARM_PTE_SH(SH_OUTER_MEMORY) |
-			    ARM_PTE_TYPE | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT) | xprr_perm_to_pte(XPRR_PPL_RW_PERM);
+			    ARM_PTE_TYPE_VALID | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT) | xprr_perm_to_pte(XPRR_PPL_RW_PERM);
 
 #if __ARM_KERNEL_PROTECT__
 			/**
@@ -4213,7 +4212,7 @@ pmap_cpu_data_array_init(void)
 			assert(*ptep == ARM_PTE_EMPTY);
 
 			pt_entry_t template = pa_to_pte(avail_start) | ARM_PTE_AF | ARM_PTE_SH(SH_OUTER_MEMORY) |
-			    ARM_PTE_TYPE | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT) | xprr_perm_to_pte(XPRR_PPL_RW_PERM);
+			    ARM_PTE_TYPE_VALID | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT) | xprr_perm_to_pte(XPRR_PPL_RW_PERM);
 
 #if __ARM_KERNEL_PROTECT__
 			template |= ARM_PTE_NG;

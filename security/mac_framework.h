@@ -253,6 +253,7 @@ int     mac_mount_label_get(struct mount *mp, user_addr_t mac_p) __result_use_ch
 void    mac_mount_label_init(struct mount *);
 struct label *mac_mount_label(struct mount *);
 int     mac_mount_label_internalize(struct label *, char *string) __result_use_check;
+void    mac_mount_notify_mount(vfs_context_t ctx, struct mount *mp);
 int     mac_necp_check_open(proc_t proc, int flags) __result_use_check;
 int     mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action) __result_use_check;
 int     mac_pipe_check_ioctl(kauth_cred_t cred, struct pipe *cpipe,
@@ -337,9 +338,7 @@ int     mac_proc_check_setgid(proc_t curp, kauth_cred_t cred, gid_t gid) __resul
 int     mac_proc_check_setreuid(proc_t curp, kauth_cred_t cred, uid_t ruid, uid_t euid) __result_use_check;
 int     mac_proc_check_setregid(proc_t curp, kauth_cred_t cred, gid_t rgid, gid_t egid) __result_use_check;
 int     mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid) __result_use_check;
-int     mac_proc_check_signal(proc_t proc1, proc_t proc2,
-    int signum) __result_use_check;
-int     mac_proc_check_delegated_signal(proc_t caller, audit_token_t instigator, audit_token_t target,
+int     mac_proc_check_signal(proc_t curp, proc_ident_t instigator, proc_ident_t target,
     int signum) __result_use_check;
 int     mac_proc_check_syscall_unix(proc_t proc, int scnum) __result_use_check;
 int     mac_proc_check_wait(proc_t proc1, proc_t proc2) __result_use_check;

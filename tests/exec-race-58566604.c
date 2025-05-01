@@ -66,6 +66,7 @@ run_test(void)
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(child_pid, "fork()");
 
 	int ret = 0;
+	errno = 0;
 
 	if (child_pid == 0) {
 		pthread_t thread;
