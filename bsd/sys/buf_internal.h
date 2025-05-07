@@ -126,6 +126,7 @@ struct buf {
 	TAILQ_ENTRY(buf)        b_act;  /* Device driver queue when active */
 	void *  b_drvdata;              /* Device driver private use */
 	void *  b_fsprivate;            /* filesystem private use */
+	void    (*b_fsprivate_done)(void *);   /* callback for fs to cleanup its data. */
 	void *  b_transaction;          /* journal private use */
 	int     b_dirtyoff;             /* Offset in buffer of dirty region. */
 	int     b_dirtyend;             /* Offset of end of dirty region. */
