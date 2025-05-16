@@ -1421,13 +1421,20 @@ machine_csv(__unused cpuvn_e cve)
 	return 0;
 }
 
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 void
 arm_context_switch_requires_sync()
 {
 	current_cpu_datap()->sync_on_cswitch = 1;
 }
-#endif
+
+void
+arm_context_switch_sync()
+{
+	if (__improbable(current_cpu_datap()->sync_on_cswitch != 0)) {
+		__builtin_arm_isb(ISB_SY);
+		current_cpu_datap()->sync_on_cswitch = 0;
+	}
+}
 
 #if __has_feature(ptrauth_calls)
 boolean_t

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2381,7 +2381,7 @@ icmp6_reflect(struct mbuf *m, size_t off)
 	TAILQ_FOREACH(ia, IN6ADDR_HASH(&t), ia6_hash) {
 		IFA_LOCK(&ia->ia_ifa);
 		if (in6_are_addr_equal_scoped(&t, &ia->ia_addr.sin6_addr, tifscope, ia->ia_addr.sin6_scope_id) &&
-		    (ia->ia6_flags & (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY | IN6_IFF_CLAT46)) == 0) {
+		    (ia->ia6_flags & (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY)) == 0) {
 			IFA_UNLOCK(&ia->ia_ifa);
 			src = &t;
 			sifscope = tifscope;

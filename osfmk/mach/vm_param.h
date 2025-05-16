@@ -408,9 +408,13 @@ vm_is_addr_slid(vm_offset_t addr)
 
 #define VM_KERNEL_ADDRHASH(_v) vm_kernel_addrhash((vm_offset_t)(_v))
 
+/*
+ * ML_ADDRPERM is defined as a macro that dispatches to the correct machine version.
+ * For systems that support the generic ml_addrperm version, the actual slide address is unused.
+ */
 #define VM_KERNEL_UNSLIDE_OR_PERM(_v) ({ \
 	        VM_KERNEL_IS_SLID(_v) ? __DO_UNSLIDE(_v) : \
-	        VM_KERNEL_ADDRESS(_v) ? ((vm_offset_t)VM_KERNEL_STRIP_PTR(_v) + vm_kernel_addrperm) : \
+	        VM_KERNEL_ADDRESS(_v) ? (ML_ADDRPERM((uintptr_t)VM_KERNEL_STRIP_UPTR(_v), vm_kernel_addrperm)) : \
 	        (vm_offset_t)VM_KERNEL_STRIP_PTR(_v); \
 	})
 

@@ -46,6 +46,7 @@ PRIVATE_DATAFILES = $(sort \
 	trustcache.h \
 	turnstile.h \
 	socd_client.h \
+	kcdata_private.h \
 	$(EXTRA_PRIVATE_DATAFILES))
 
 PRIVATE_MODULEMAPFILES = $(sort \
@@ -150,12 +151,11 @@ XNU_ONLY_EXPORTS = \
 	kern_stackshot.h \
 	thread_test_context.h
 
-
 INSTALL_MI_LIST = ${DATAFILES}
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
-INSTALL_MI_LCL_LIST = $(sort cs_blobs.h debug.h panic_call.h ext_paniclog.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort cs_blobs.h debug.h panic_call.h ext_paniclog.h kcdata_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

@@ -2829,7 +2829,7 @@ pmap_init(
 	 *	structures for pages we allocate to be page tables in
 	 *	pmap_expand().
 	 */
-	_vm_object_allocate(mem_size, pmap_object);
+	_vm_object_allocate(mem_size, pmap_object, VM_MAP_SERIAL_SPECIAL);
 	pmap_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	/*

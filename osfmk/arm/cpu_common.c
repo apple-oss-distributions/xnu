@@ -402,7 +402,7 @@ cpu_signal_internal(cpu_data_t *target_proc,
 
 	/* We'll mandate that only IPIs meant to kick a core out of idle may ever be deferred. */
 	if (defer) {
-		assert(signal == SIGPnop);
+		assert(signal == SIGPnop || signal == SIGPdeferred);
 	}
 
 	if ((signal == SIGPxcall) || (signal == SIGPxcallImm)) {
@@ -519,16 +519,20 @@ cpu_signal(cpu_data_t *target_proc,
 }
 
 kern_return_t
-cpu_signal_deferred(cpu_data_t *target_proc)
+cpu_signal_deferred(cpu_data_t *target_proc, cpu_signal_t signal)
 {
-	return cpu_signal_internal(target_proc, SIGPnop, NULL, NULL, TRUE);
+	return cpu_signal_internal(target_proc, signal, NULL, NULL, TRUE);
 }
 
 void
-cpu_signal_cancel(cpu_data_t *target_proc)
+cpu_signal_cancel(cpu_data_t *target_proc, cpu_signal_t signal)
 {
-	/* TODO: Should we care about the state of a core as far as squashing deferred IPIs goes? */
-	if (!(target_proc->cpu_signal & SIGPdisabled)) {
+	cpu_signal_t current_signals;
+
+	current_signals = os_atomic_andnot(&target_proc->cpu_signal, signal, acq_rel);
+
+
+	if (!(current_signals & SIGPdisabled)) {
 #if defined(HAS_IPI)
 		if (gFastIPI) {
 			ml_cpu_signal_retract(target_proc->cpu_phys_id);
@@ -613,6 +617,9 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 			INTERRUPT_MASKED_DEBUG_START(timer_queue_expire_local, DBG_INTR_TYPE_IPI);
 			timer_queue_expire_local(current_processor());
 			INTERRUPT_MASKED_DEBUG_END();
+		}
+		if (cpu_signal & SIGPdeferred) {
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdeferred, acquire);
 		}
 
 		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);

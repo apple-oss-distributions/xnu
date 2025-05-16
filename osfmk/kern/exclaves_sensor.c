@@ -117,28 +117,28 @@ exclaves_eic_init(void)
 }
 
 static kern_return_t
-exclaves_eic_display_healthcheck_rate(uint64_t ns)
+exclaves_eic_tick_rate(uint64_t rate_hz)
 {
-	exclaveindicatorcontroller_requestedrefreshrate_s rate;
+	exclaveindicatorcontroller_indicatorrefreshrate_s rate;
 
-	/* Convert time to frequency and round up to nearest supported value. */
-	switch (NSEC_PER_SEC / ns) {
+	/* Round up to nearest supported value. */
+	switch (rate_hz) {
 	case 0 ... 30:
 		exclaves_display_healthcheck_rate_hz = 30;
-		rate = EXCLAVEINDICATORCONTROLLER_REQUESTEDREFRESHRATE_HZ_30;
+		rate.tag = EXCLAVEINDICATORCONTROLLER_INDICATORREFRESHRATE__HZ_30;
 		break;
 	case 31 ... 60:
 		exclaves_display_healthcheck_rate_hz = 60;
-		rate = EXCLAVEINDICATORCONTROLLER_REQUESTEDREFRESHRATE_HZ_60;
+		rate.tag = EXCLAVEINDICATORCONTROLLER_INDICATORREFRESHRATE__HZ_60;
 		break;
 	default:
 		exclaves_display_healthcheck_rate_hz = 120;
-		rate = EXCLAVEINDICATORCONTROLLER_REQUESTEDREFRESHRATE_HZ_120;
+		rate.tag = EXCLAVEINDICATORCONTROLLER_INDICATORREFRESHRATE__HZ_120;
 		break;
 	}
 
-	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_requestdisplayhealthcheckrate(
-		&eic_client, rate, ^(__unused exclaveindicatorcontroller_requestresponse_s result) {});
+	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_setindicatorrefreshrate(
+		&eic_client, &rate, ^(__unused exclaveindicatorcontroller_requesterror_s result) {});
 
 	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
 }
@@ -190,6 +190,19 @@ exclaves_eic_sensor_copy(uint32_t buffer, uint64_t size1, uint64_t offset1,
 	});
 
 	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static bool
+exclaves_sensor_tick(void)
+{
+	__block bool again = true;
+	__unused tb_error_t ret = exclaveindicatorcontroller_sensorrequest_tick(
+		&eic_client, ^(bool result) {
+		again = result;
+	});
+	assert3u(ret, ==, TB_ERROR_SUCCESS);
+
+	return again;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -248,15 +261,6 @@ sensor_type_to_sensor(exclaves_sensor_type_t sensor_type)
 	return &sensors[sensor_type - 1];
 }
 
-static inline exclaves_sensor_type_t
-sensor_to_sensor_type(exclaves_sensor_t *sensor)
-{
-	assert3p(sensor, <=, &sensors[EXCLAVES_SENSOR_MAX]);
-	assert3p(sensor, >=, &sensors[0]);
-
-	return (exclaves_sensor_type_t)((sensor - &sensors[0]) + 1);
-}
-
 /* Calculate the next healthcheck time. */
 static void
 healthcheck_deadline(uint64_t *deadline, uint64_t *leeway)
@@ -265,69 +269,6 @@ healthcheck_deadline(uint64_t *deadline, uint64_t *leeway)
 	    NSEC_PER_SEC / exclaves_display_healthcheck_rate_hz;
 	clock_interval_to_deadline(interval, 1, deadline);
 	nanoseconds_to_absolutetime(interval / 2, leeway);
-}
-
-/*
- * Do a healthcheck status call. The status call may be skipped if certain conditions are met.
- * Returns false is status call was skipped.
- */
-static bool
-do_healthcheck(exclaves_sensor_t *sensor)
-{
-	LCK_MTX_ASSERT(&sensor->s_mutex, LCK_MTX_ASSERT_OWNED);
-
-	/*
-	 * If the sensor has not started, and the min on-time has been processed,
-	 * skip health check.
-	 */
-	if (sensor->s_startcount == 0 && sensor->s_stop_abs == 0) {
-		return false;
-	}
-
-	exclaves_sensor_status_t status;
-	(void) exclaves_sensor_status(sensor_to_sensor_type(sensor), 0, &status);
-
-	return true;
-}
-
-/*
- * For stopped sensors, see if the minimum on-time has been reached. If so, do a
- * status call. If the minimum on-time has not been reached, return a deadline
- * for when it will be.
- */
-static void
-do_min_on_time(exclaves_sensor_t *sensor, uint64_t *deadline,
-    uint64_t *leeway)
-{
-	LCK_MTX_ASSERT(&sensor->s_mutex, LCK_MTX_ASSERT_OWNED);
-
-	/*
-	 * The sensor hasn't stopped yet or has already had its min on-time
-	 * processed.
-	 */
-	if (sensor->s_startcount != 0 || sensor->s_stop_abs == 0) {
-		*deadline = UINT64_MAX;
-		return;
-	}
-
-	uint64_t min_time = 0;
-	nanoseconds_to_absolutetime(EXCLAVES_EIC_MIN_SENSOR_TIME, &min_time);
-	nanoseconds_to_absolutetime(50 * NSEC_PER_MSEC, leeway);
-
-	*deadline = sensor->s_stop_abs + min_time;
-
-	if (*deadline <= mach_absolute_time()) {
-		/* The minimum on-time has been hit. Call status. */
-		exclaves_sensor_status_t status;
-		(void) exclaves_sensor_status(sensor_to_sensor_type(sensor), 0,
-		    &status);
-
-		sensor->s_stop_abs = 0;
-		*deadline = UINT64_MAX;
-		return;
-	}
-
-	/* The minimum on-time is in the future. Need to reschedule.  */
 }
 
 /*
@@ -340,9 +281,7 @@ do_min_on_time(exclaves_sensor_t *sensor, uint64_t *deadline,
 static void
 exclaves_sensor_healthcheck(__unused void *param0, __unused void *param1)
 {
-	uint64_t leeway, deadline = UINT64_MAX;
 	uint64_t hc_leeway, hc_deadline;
-	uint64_t mot_leeway, mot_deadline;
 
 	/*
 	 * Calculate the next deadline up-front so the overhead of calling into
@@ -350,33 +289,9 @@ exclaves_sensor_healthcheck(__unused void *param0, __unused void *param1)
 	 */
 	healthcheck_deadline(&hc_deadline, &hc_leeway);
 
-	for (int i = 0; i < EXCLAVES_SENSOR_MAX; i++) {
-		exclaves_sensor_t *sensor = &sensors[i];
-
-		if (!sensor->s_initialised) {
-			continue;
-		}
-
-		lck_mtx_lock(&sensor->s_mutex);
-
-		if (do_healthcheck(sensor) &&
-		    hc_deadline < deadline) {
-			deadline = hc_deadline;
-			leeway = hc_leeway;
-		}
-
-		do_min_on_time(sensor, &mot_deadline, &mot_leeway);
-		if (mot_deadline < deadline) {
-			deadline = mot_deadline;
-			leeway = mot_leeway;
-		}
-
-		lck_mtx_unlock(&sensor->s_mutex);
-	}
-
-	if (deadline != UINT64_MAX) {
+	if (exclaves_sensor_tick()) {
 		thread_call_enter_delayed_with_leeway(sensor_healthcheck_tcall,
-		    NULL, deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+		    NULL, hc_deadline, hc_leeway, THREAD_CALL_DELAY_LEEWAY);
 	}
 }
 
@@ -498,8 +413,6 @@ exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
 
 	lck_mtx_unlock(&sensor->s_mutex);
 
-	(void)thread_call_enter(sensor_healthcheck_tcall);
-
 	return kr;
 }
 
@@ -520,7 +433,7 @@ exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
 }
 
 kern_return_t
-exclaves_display_healthcheck_rate(uint64_t ns)
+exclaves_sensor_tick_rate(uint64_t rate_hz)
 {
 	/*
 	 * Make sure that the initialisation has taken place before calling into
@@ -531,7 +444,14 @@ exclaves_display_healthcheck_rate(uint64_t ns)
 		return KERN_FAILURE;
 	}
 
-	return exclaves_eic_display_healthcheck_rate(ns);
+	return exclaves_eic_tick_rate(rate_hz);
+}
+
+kern_return_t
+exclaves_display_healthcheck_rate(uint64_t __unused ns)
+{
+	/* Deprecated, no longer does anything */
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -552,10 +472,45 @@ exclaves_sensor_copy(uint32_t buffer, uint64_t size1, uint64_t offset1,
 	           status);
 }
 
+kern_return_t
+exclaves_indicator_min_on_time_deadlines(struct exclaves_indicator_deadlines *deadlines)
+{
+	assert(deadlines);
+
+	//For now, only one version is supported. Return an error if libsyscall sends us any other versions
+	if (deadlines->version != 1) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	// Make sure that the initialisation has taken place before calling into
+	// the EIC. Any sensor is sufficient.
+	exclaves_sensor_t *sensor = sensor_type_to_sensor(EXCLAVES_SENSOR_CAM);
+	if (!sensor->s_initialised) {
+		return KERN_FAILURE;
+	}
+
+	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_getmotstate(
+		&eic_client, ^(exclaveindicatorcontroller_motstate_s result) {
+		deadlines->camera_indicator = result.deadlinecil;
+		deadlines->mic_indicator = result.deadlinemil;
+		deadlines->faceid_indicator = result.deadlinefid;
+	});
+
+	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+
+
 #else /* CONFIG_EXCLAVES */
 
 kern_return_t
 exclaves_display_healthcheck_rate(__unused uint64_t ns)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+exclaves_sensor_tick_rate(uint64_t __unused rate_hz)
 {
 	return KERN_NOT_SUPPORTED;
 }

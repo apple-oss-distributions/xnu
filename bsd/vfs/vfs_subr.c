@@ -3780,9 +3780,9 @@ vn_getpath_no_firmlink(struct vnode *vp, char *pathbuf, int *len)
 }
 
 int
-vn_getcdhash(struct vnode *vp, off_t offset, unsigned char *cdhash)
+vn_getcdhash(struct vnode *vp, off_t offset, unsigned char *cdhash, uint8_t *type)
 {
-	return ubc_cs_getcdhash(vp, offset, cdhash);
+	return ubc_cs_getcdhash(vp, offset, cdhash, type);
 }
 
 

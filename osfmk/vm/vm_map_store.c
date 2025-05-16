@@ -242,7 +242,7 @@ vm_map_store_entry_unlink(
 	if (entry == map->hint) {
 		map->hint = vm_map_to_entry(map);
 	}
-	if (map->holelistenabled == FALSE) {
+	if ((map->holelistenabled == FALSE) && (map->disable_vmentry_reuse == FALSE)) {
 		if (VMEU_entry->vme_start <= VMEU_map->first_free->vme_start) {
 			VMEU_first_free = VMEU_entry->vme_prev;
 		} else {

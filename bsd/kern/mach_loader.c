@@ -580,6 +580,13 @@ load_machfile(
 		return lret;
 	}
 
+	/*
+	 * From now on it's safe to query entitlements via the vnode interface. Let's get figuring
+	 * out whether we're a security relevant binary out of the way immediately.
+	 */
+	result->is_hardened_process = IOVnodeHasEntitlement(imgp->ip_vp,
+	    (int64_t)imgp->ip_arch_offset, "com.apple.developer.hardened-process");
+
 #if __x86_64__
 	/*
 	 * On x86, for compatibility, don't enforce the hard page-zero restriction for 32-bit binaries.

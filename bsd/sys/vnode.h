@@ -2536,7 +2536,7 @@ int     vn_stat_noauth(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int i
 int     vaccess(mode_t file_mode, uid_t uid, gid_t gid,
     mode_t acc_mode, kauth_cred_t cred);
 int     check_mountedon(dev_t dev, enum vtype type, int  *errorp);
-int vn_getcdhash(struct vnode *vp, off_t offset, unsigned char *cdhash);
+int vn_getcdhash(struct vnode *vp, off_t offset, unsigned char *cdhash, uint8_t *type);
 void    vnode_reclaim(vnode_t);
 vnode_t current_workingdir(void);
 void    *vnode_vfsfsprivate(vnode_t);

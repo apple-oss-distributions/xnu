@@ -243,6 +243,8 @@
 #include <string.h>
 #include <uuid/uuid.h>
 
+
+
 #define KCDATA_DESC_MAXLEN 32 /* including NULL byte at end */
 
 #define KCDATA_FLAGS_STRUCT_PADDING_MASK 0xf
@@ -565,6 +567,7 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS 0x954u /* struct exclave_textlayout_segment_v2 */
 #define STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO 0x955u /* struct thread_crash_exclaves_info */
 #define STACKSHOT_KCTYPE_LATENCY_INFO_CPU            0x956u /* struct stackshot_latency_cpu */
+#define STACKSHOT_KCTYPE_TASK_EXEC_META              0x957u /* struct task_exec_meta */
 
 struct stack_snapshot_frame32 {
 	uint32_t lr;
@@ -708,6 +711,21 @@ enum task_snapshot_flags {
 enum task_transition_type {
 	kTaskIsTerminated                      = 0x1,// Past LPEXIT
 };
+
+/* See kcdata_private.h for more flag definitions */
+enum task_exec_flags : uint64_t {
+	kTaskExecTranslated     = 0x01,     /* Task is running under translation (eg, Rosetta) */
+	kTaskExecHardenedHeap   = 0x02,     /* Task has the hardened heap security feature */
+	kTaskExecReserved00     = 0x04,
+	kTaskExecReserved01     = 0x08,
+	kTaskExecReserved02     = 0x10,
+	kTaskExecReserved03     = 0x20
+};
+
+/* metadata about a task that is fixed at spawn/exec time */
+struct task_exec_meta {
+	uint64_t tem_flags; /* task_exec_flags */
+} __attribute__((packed));
 
 enum thread_snapshot_flags {
 	/* k{User,Kernel}64_p (values 0x1 and 0x2) are defined in generic_snapshot_flags */

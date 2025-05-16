@@ -314,4 +314,16 @@ struct launch_constraint_data {
 };
 typedef struct launch_constraint_data* launch_constraint_data_t;
 
+/*
+ * Ideally, this definition should live within sys/codesign.h, but adding it there
+ * causes an issue with compiling certain Swift projects due to some ambigious macro
+ * definition error on CD_CDHASH_LEN. Thus, we keep it here.
+ *
+ * For more information: rdar://145187726.
+ */
+typedef struct _csops_cdhash {
+	uint8_t hash[CS_CDHASH_LEN];
+	uint8_t type;
+} csops_cdhash_t;
+
 #endif /* _KERN_CODESIGN_H */

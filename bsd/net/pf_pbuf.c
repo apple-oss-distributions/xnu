@@ -229,12 +229,21 @@ pbuf_ensure_writable(pbuf_t *pbuf, size_t len)
 }
 
 void *
+__attribute__((warn_unused_result))
 pbuf_resize_segment(pbuf_t *pbuf, int off, int olen, int nlen)
 {
 	void *rv = NULL;
 
 	VERIFY(off >= 0);
-	VERIFY((u_int)off <= pbuf->pb_packet_len);
+
+	/*
+	 * Gracefully handle the case where `pbuf'
+	 * does not have sufficient data
+	 * for the requested `off'/`olen' combination.
+	 */
+	if ((u_int)(off + olen) > pbuf->pb_packet_len) {
+		return NULL;
+	}
 
 	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
 		struct mbuf *m, *n;
@@ -307,13 +316,22 @@ pbuf_resize_segment(pbuf_t *pbuf, int off, int olen, int nlen)
 }
 
 void *
+__attribute__((warn_unused_result))
 pbuf_contig_segment(pbuf_t *pbuf, int off, int len)
 {
 	void *__single rv = NULL;
 
 	VERIFY(off >= 0);
 	VERIFY(len >= 0);
-	VERIFY((u_int)(off + len) <= pbuf->pb_packet_len);
+
+	/*
+	 * Gracefully handle the case where `pbuf'
+	 * does not have sufficient data
+	 * for the requested `off'/`len' combination.
+	 */
+	if ((u_int)(off + len) > pbuf->pb_packet_len) {
+		return NULL;
+	}
 
 	/*
 	 * Note: If this fails, then the pbuf is destroyed. This is a

@@ -126,6 +126,7 @@ __options_closed_decl(cpu_signal_t, unsigned int, {
 	SIGPkppet       = 0x00000100U,     /* Request kperf PET handler */
 	SIGPxcallImm    = 0x00000200U,     /* Send a cross-call, fail if already pending */
 	SIGPTimerLocal  = 0x00000400U,     /* Update the decrementer via timer_queue_expire_local */
+	SIGPdeferred    = 0x00000800U,     /* Scheduler deferred IPI to wake core */
 
 	SIGPdisabled    = 0x80000000U,     /* Signal disabled */
 });
@@ -157,9 +158,7 @@ typedef struct cpu_data {
 	bool                            cpu_hibernate; /* This cpu is currently hibernating the system */
 	bool                            cpu_running;
 	bool                            cluster_master;
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	bool                            sync_on_cswitch;
-#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 	/* true if processor_start() or processor_exit() is operating on this CPU */
 	bool                            in_state_transition;
 

@@ -179,7 +179,7 @@ get_apple_array(size_t *num_array_entries, const char * filename)
 
 #define HARDENED_RUNTIME_KEY "HardenedRuntime="
 
-#define HARDENED_HEAP_KEY "hardened_heap="
+#define SECURITY_CONFIG_KEY "security_config="
 
 
 /*
@@ -241,8 +241,11 @@ T_DECL(libmalloc_hardened_binary_present,
 	free(apple_array);
 }
 
-T_DECL(libmalloc_hardened_heap_entitlements,
-    "hardened heap enablement via hardened process and hardened heap entitlements",
+#define SECURITY_CONFIG_HARDENED_HEAP_ENTRY        (0x01)
+#define SECURITY_CONFIG_TPRO_ENTRY                 (0x02)
+
+T_DECL(libmalloc_security_config_hardened_heap_entitlements,
+    "parse security_config values to verify security configs hardened_heap enablement/disablement",
     T_META_ASROOT(false))
 {
 	uint64_t apple_array_val = 0;
@@ -250,27 +253,19 @@ T_DECL(libmalloc_hardened_heap_entitlements,
 	char **apple_array;
 	bool found = false;
 
-	uint32_t mask_val = 1;
 	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_proc");
-	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
-	T_ASSERT_FALSE(found, "Didn't find " HARDENED_HEAP_KEY " in apple array");
-	free(apple_array);
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, SECURITY_CONFIG_KEY);
+	T_ASSERT_TRUE(found, "Found " SECURITY_CONFIG_KEY " in apple array");
 
-	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_heap_disable");
-	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
-	T_ASSERT_FALSE(found, "Didn't find " HARDENED_HEAP_KEY " in apple array");
+	/* Let's start parsing the security config, to see what's enabled. */
+	T_ASSERT_FALSE(apple_array_val & SECURITY_CONFIG_HARDENED_HEAP_ENTRY, "Hardened-heap is disabled");
 	free(apple_array);
 
 	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_heap");
-	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
-	T_ASSERT_TRUE(found, "Found " HARDENED_HEAP_KEY " in apple array");
-	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
-	free(apple_array);
+	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, SECURITY_CONFIG_KEY);
+	T_ASSERT_TRUE(found, "Found " SECURITY_CONFIG_KEY " in apple array");
 
-	apple_array = get_apple_array(&num_array_entries, "tools/print_apple_array_hardened_proc_all_subfeatures");
-	found = get_apple_array_key(apple_array, num_array_entries, &apple_array_val, HARDENED_HEAP_KEY);
-	T_ASSERT_TRUE(found, "Found " HARDENED_HEAP_KEY " in apple array");
-	T_ASSERT_EQ(apple_array_val, mask_val, "Bitmask value matches");
+	T_ASSERT_TRUE(apple_array_val & SECURITY_CONFIG_HARDENED_HEAP_ENTRY, "Hardened-heap is enabled");
 	free(apple_array);
 }
 

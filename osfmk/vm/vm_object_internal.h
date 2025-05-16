@@ -273,10 +273,11 @@ __private_extern__ void         vm_object_bootstrap(void);
 
 __private_extern__ void         vm_object_reaper_init(void);
 
-__private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size);
+__private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size,
+    vm_map_serial_t provenance);
 
 __private_extern__ void    _vm_object_allocate(vm_object_size_t size,
-    vm_object_t object);
+    vm_object_t object, vm_map_serial_t provenance);
 
 __private_extern__ void vm_object_set_size(
 	vm_object_t             object,

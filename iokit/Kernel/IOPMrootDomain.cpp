@@ -7519,6 +7519,29 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 		break;
 #endif
 
+		if (_driverKitMatchingAssertionCount != 0) {
+			err = kPMCPUAssertion;
+			break;
+		}
+
+		// Check for any dexts currently being added to the PM tree. Sleeping while
+		// this is in flight can cause IOServicePH to timeout.
+		if (!IOServicePH::checkPMReady()) {
+#if !defined(XNU_TARGET_OS_OSX)
+			if (!(lowBatteryCondition || thermalWarningState || thermalEmergencyState)) {
+				// 116893363: kPMDKNotReady sleep cancellations often leaves embedded devices
+				// in dark wake for long periods of time, which causes issues as apps were
+				// already informed of sleep during the f->9 transition. As a temporary
+				// measure, always full wake if we hit this specific condition.
+				pmPowerStateQueue->submitPowerEvent(
+					kPowerEventPolicyStimulus,
+					(void *) kStimulusDarkWakeActivityTickle);
+			}
+#endif
+			err = kPMDKNotReady;
+			break;
+		}
+
 		if (lowBatteryCondition || thermalWarningState || thermalEmergencyState) {
 			break; // always sleep on low battery or when in thermal warning/emergency state
 		}
@@ -7532,26 +7555,6 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 			break;
 		}
 
-		if (_driverKitMatchingAssertionCount != 0) {
-			err = kPMCPUAssertion;
-			break;
-		}
-
-		// Check for any dexts currently being added to the PM tree. Sleeping while
-		// this is in flight can cause IOServicePH to timeout.
-		if (!IOServicePH::checkPMReady()) {
-#if !defined(XNU_TARGET_OS_OSX)
-			// 116893363: kPMDKNotReady sleep cancellations often leaves embedded devices
-			// in dark wake for long periods of time, which causes issues as apps were
-			// already informed of sleep during the f->9 transition. As a temporary
-			// measure, always full wake if we hit this specific condition.
-			pmPowerStateQueue->submitPowerEvent(
-				kPowerEventPolicyStimulus,
-				(void *) kStimulusDarkWakeActivityTickle);
-#endif
-			err = kPMDKNotReady;
-			break;
-		}
 
 		if (getPMAssertionLevel( kIOPMDriverAssertionCPUBit ) ==
 		    kIOPMDriverAssertionLevelOn) {

@@ -79,6 +79,8 @@ __options_decl(vm_map_create_options_t, uint32_t, {
 	VM_MAP_CREATE_CORPSE_FOOTPRINT = 0x00000002,
 	VM_MAP_CREATE_DISABLE_HOLELIST = 0x00000004,
 	VM_MAP_CREATE_NEVER_FAULTS     = 0x00000008,
+	/* Denote that we're creating this map as part of a fork() */
+	VM_MAP_CREATE_VIA_FORK             = 0x00000010,
 });
 
 /*
@@ -96,10 +98,21 @@ typedef struct upl              *upl_t;
 typedef struct vm_map_copy      *vm_map_copy_t;
 typedef struct vm_named_entry   *vm_named_entry_t;
 typedef struct vm_page          *vm_page_t;
+/*
+ * A generation ID for vm_maps, which increments monotonically.
+ * These IDs are not globally unique among VM maps, however. Instead,
+ *  IDs represent 'independent' VM map lineages: maps interrelated via
+ *  fork() identify with the same ID.
+ */
+typedef const void                              *vm_map_serial_t;
 
 #define PMAP_NULL               ((pmap_t) NULL)
 #define VM_OBJECT_NULL          ((vm_object_t) NULL)
 #define VM_MAP_COPY_NULL        ((vm_map_copy_t) NULL)
+
+#define VM_MAP_SERIAL_NONE      ((vm_map_serial_t)-1)
+/* Denotes 'special'/one-off kernel-managed objects that don't belong to a parent map */
+#define VM_MAP_SERIAL_SPECIAL   ((vm_map_serial_t)-2)
 
 #else   /* KERNEL_PRIVATE */
 
@@ -108,6 +121,8 @@ typedef mach_port_t             upl_t;
 typedef mach_port_t             vm_named_entry_t;
 
 #endif  /* KERNEL_PRIVATE */
+
+typedef mach_vm_offset_t                *mach_vm_offset_list_t;
 
 #ifdef KERNEL
 #define VM_MAP_NULL             ((vm_map_t) NULL)

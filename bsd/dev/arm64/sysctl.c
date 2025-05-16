@@ -466,3 +466,4 @@ dram_ecc_error_injection_capable SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_vm, OID_AUTO, dram_ecc_error_injection_capable, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, &dram_ecc_error_injection_capable, "I", "");
 #endif /* DEBUG || DEVELOPMENT */
+

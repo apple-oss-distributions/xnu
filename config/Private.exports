@@ -441,6 +441,7 @@ _exclaves_register_xrt_hosted_callbacks
 _exclaves_sensor_start
 _exclaves_sensor_stop
 _exclaves_sensor_status
+_exclaves_sensor_tick_rate
 _exclaves_display_healthcheck_rate
 _ext_paniclog_handle_set_active
 _ext_paniclog_handle_set_inactive
@@ -832,6 +833,7 @@ _ml_io_read16
 _ml_io_read32
 _ml_io_read64
 _ml_io_read8
+_ml_io_read_cpu_reg
 _ml_io_reset_timeouts
 _ml_io_reset_timeouts_phys
 _ml_io_write

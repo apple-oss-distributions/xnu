@@ -312,10 +312,12 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info, bool i
 		goto out;
 	}
 
+#if !defined(XNU_TARGET_OS_OSX)
 	/*
-	 * make sure that a writable fs does not share a dev_t with another non writable fs (and vice versa)
-	 * since writable vnodes are opened RW whereas non writable fs vnodes
-	 * are opened RO
+	 * make sure that a writable fs does not share a dev_t with
+	 * another non writable fs (and vice versa) since writable
+	 * vnodes are opened RW whereas non writable fs vnodes are
+	 * opened RO
 	 */
 	int i;
 	bool is_writable_fs_tag = is_fs_writeable(fs_tag);
@@ -323,12 +325,13 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info, bool i
 		registered_tags_head_t *head = registered_tags_hash + i;
 		LIST_FOREACH(rft, head, link) {
 			if ((is_fs_writeable(rft->fstag) != is_writable_fs_tag) && rft->dev == dev) {
-				printf("tag %u has same device 0x%x as tag %u\n", fs_tag, rft->fstag, dev);
+				printf("tag %u has same device %u.%u as tag %u\n", fs_tag, major(dev), minor(dev), rft->fstag);
 				error = EBUSY;
 				goto out;
 			}
 		}
 	}
+#endif
 
 	rft = kalloc_type(registered_fs_tag_t, Z_WAITOK | Z_ZERO);
 	if (rft == NULL) {

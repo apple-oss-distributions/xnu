@@ -370,7 +370,7 @@ mach_make_memory_entry_named_create(
 	}
 #endif /* __LP64__ */
 
-	object = vm_object_allocate(map_size);
+	object = vm_object_allocate(map_size, vm_map_maybe_serial_id(target_map));
 	assert(object != VM_OBJECT_NULL);
 	vm_object_lock(object);
 
@@ -1322,7 +1322,7 @@ mach_memory_object_memory_entry_64(
 	}
 
 	if (pager == MEMORY_OBJECT_NULL && internal) {
-		object = vm_object_allocate(size);
+		object = vm_object_allocate(size, VM_MAP_SERIAL_NONE);
 		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 			object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 		}

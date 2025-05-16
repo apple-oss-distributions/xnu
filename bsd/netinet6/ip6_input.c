@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -598,6 +598,7 @@ ip6_input_adjust(struct mbuf *m, struct ip6_hdr *ip6, uint32_t plen,
 		}
 	}
 }
+
 static ip6_check_if_result_t
 ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *inifp, struct route_in6 *rin6, struct ifnet **deliverifp)
 {
@@ -623,7 +624,7 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 		 * TODO: should we accept loopback
 		 */
 		if (in6_are_addr_equal_scoped(&ia6->ia_addr.sin6_addr, &tmp_dst, ia6->ia_ifp->if_index, dst_ifscope)) {
-			if ((ia6->ia6_flags & (IN6_IFF_NOTREADY | IN6_IFF_CLAT46))) {
+			if ((ia6->ia6_flags & IN6_IFF_NOTREADY) != 0) {
 				continue;
 			}
 			best_ia6 = ia6;

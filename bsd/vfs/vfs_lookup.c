@@ -129,7 +129,6 @@ extern lck_rw_t rootvnode_rw_lock;
 
 #define RESOLVE_NOFOLLOW_ANY  0x00000001
 #define RESOLVE_CHECKED       0x80000000
-static int              lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len);
 
 /*
  * Convert a pathname into a pointer to a locked inode.
@@ -714,7 +713,7 @@ namei_compound_available(vnode_t dp, struct nameidata *ndp)
 	return 0;
 }
 
-static int
+int
 lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len)
 {
 	int error = 0;

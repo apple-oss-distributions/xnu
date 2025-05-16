@@ -140,7 +140,7 @@ struct vm_object {
 	 * the packed pointers are required to be on a 64 byte boundary
 	 * which means 2 things for the vm_object...  (1) the memq
 	 * struct has to be the first element of the structure so that
-	 * we can control it's alignment... (2) the vm_object must be
+	 * we can control its alignment... (2) the vm_object must be
 	 * aligned on a 64 byte boundary... for static vm_object's
 	 * this is accomplished via the 'aligned' attribute... for
 	 * vm_object's in the zone pool, this is accomplished by
@@ -397,6 +397,14 @@ struct vm_object {
 	task_t vo_purgeable_volatilizer; /* who made it volatile? */
 	void *purgeable_volatilizer_bt[16];
 #endif /* DEBUG */
+
+	/*
+	 * If this object is backed by anonymous memory, this represents the ID of
+	 * the vm_map that the memory originated from (i.e. this points backwards in
+	 * shadow chains). Note that an originator is present even if the object
+	 * hasn't been faulted into the backing pmap yet.
+	 */
+	vm_map_serial_t vmo_provenance;
 };
 
 #define VM_OBJECT_PURGEABLE_FAULT_ERROR(object)                         \

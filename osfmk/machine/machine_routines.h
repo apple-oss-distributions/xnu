@@ -192,6 +192,9 @@ unsigned int ml_io_read16(uintptr_t iovaddr);
 unsigned int ml_io_read32(uintptr_t iovaddr);
 unsigned long long ml_io_read64(uintptr_t iovaddr);
 
+uint64_t ml_io_read_cpu_reg(uintptr_t io_vaddr, int io_sz, int logical_cpu);
+
+
 /*!
  * @function      ml_io_write()
  * @brief         Perform an MMIO write access

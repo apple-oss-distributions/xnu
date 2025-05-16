@@ -388,6 +388,7 @@ static const struct vm_object vm_object_template = {
 	.vo_purgeable_volatilizer = NULL,
 	.purgeable_volatilizer_bt = {0},
 #endif /* DEBUG */
+	.vmo_provenance = VM_MAP_SERIAL_NONE,
 };
 
 LCK_GRP_DECLARE(vm_object_lck_grp, "vm_object");
@@ -482,9 +483,12 @@ vm_object_set_size(
 __private_extern__ void
 _vm_object_allocate(
 	vm_object_size_t        size,
-	vm_object_t             object)
+	vm_object_t             object,
+	vm_map_serial_t                 provenance)
 {
 	*object = vm_object_template;
+	object->vmo_provenance = provenance;
+
 	vm_page_queue_init(&object->memq);
 #if UPL_DEBUG || CONFIG_IOSCHED
 	queue_init(&object->uplq);
@@ -505,12 +509,12 @@ _vm_object_allocate(
 
 __private_extern__ vm_object_t
 vm_object_allocate(
-	vm_object_size_t        size)
+	vm_object_size_t        size, vm_map_serial_t provenance)
 {
 	vm_object_t object;
 
 	object = zalloc_flags(vm_object_zone, Z_WAITOK | Z_NOFAIL);
-	_vm_object_allocate(size, object);
+	_vm_object_allocate(size, object, provenance);
 
 	return object;
 }
@@ -548,8 +552,8 @@ vm_object_bootstrap(void)
 	 * Note that in the following size specifications, we need to add 1 because
 	 * VM_MAX_KERNEL_ADDRESS (vm_last_addr) is a maximum address, not a size.
 	 */
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, kernel_object_default);
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, compressor_object);
+	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, kernel_object_default, VM_MAP_SERIAL_SPECIAL);
+	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, compressor_object, VM_MAP_SERIAL_SPECIAL);
 	kernel_object_default->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	compressor_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	kernel_object_default->no_tag_update = TRUE;
@@ -557,14 +561,14 @@ vm_object_bootstrap(void)
 	/*
 	 * The object to hold retired VM pages.
 	 */
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, retired_pages_object);
+	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, retired_pages_object, VM_MAP_SERIAL_SPECIAL);
 	retired_pages_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 
 	/**
 	 * The object to hold pages owned by exclaves.
 	 */
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, exclaves_object);
+	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, exclaves_object, VM_MAP_SERIAL_SPECIAL);
 	exclaves_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 }
 
@@ -1030,6 +1034,10 @@ vm_object_cache_evict(
 		return 0;
 	}
 	clock_get_system_nanotime(&sec, &nsec);
+	if (max_objects_to_examine == INT_MAX) {
+		/* evict all pages from all cached objects now */
+		sec = (clock_sec_t)-1;
+	}
 
 	/*
 	 * the object on the head of the queue has not
@@ -1132,6 +1140,33 @@ vm_object_cache_evict(
 				ep_skipped++;
 				continue;
 			}
+			if (!object->internal &&
+			    object->pager_created &&
+			    object->pager == NULL) {
+				/*
+				 * This object has lost its pager, most likely
+				 * due to a force-unmount or ungraft.  The pager
+				 * will never come back, so there's no point in
+				 * keeping these pages, even if modified.
+				 * The object could still be mapped, so we need
+				 * to clear any PTE that might still be pointing
+				 * at this physical page before we can reclaim
+				 * it.
+				 */
+				if (p->vmp_pmapped) {
+					int refmod;
+					refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(p));
+					if (refmod & VM_MEM_MODIFIED) {
+						assert(p->vmp_wpmapped);
+						p->vmp_dirty = TRUE;
+					}
+				}
+//				printf("FBDP %s:%d object %p reason %d page %p offset 0x%llx pmapped %d wpmapped %d xpmapped %d dirty %d precious %d\n", __FUNCTION__, __LINE__, object, object->no_pager_reason, p, p->vmp_offset, p->vmp_pmapped, p->vmp_wpmapped, p->vmp_xpmapped, p->vmp_dirty, p->vmp_precious);
+				/* clear any reason to skip this page below */
+				p->vmp_dirty = FALSE;
+				p->vmp_precious = FALSE;
+				p->vmp_wpmapped = FALSE;
+			}
 			if (p->vmp_wpmapped || p->vmp_dirty || p->vmp_precious) {
 				vm_page_queue_remove(&object->memq, p, vmp_listq);
 				vm_page_queue_enter(&object->memq, p, vmp_listq);
@@ -1220,7 +1255,21 @@ vm_object_cache_evict(
 	vm_object_cache_pages_skipped += ep_skipped;
 
 	KDBG_DEBUG(0x13001ec | DBG_FUNC_END, ep_freed);
+//	printf("FBDP %s(0x%x,0x%x) freed %d moved %d skipped %u\n", __func__, num_to_evict, max_objects_to_examine, ep_freed, ep_moved, ep_skipped);
 	return ep_freed;
+}
+
+int vm_object_cache_evict_all(void);
+int
+vm_object_cache_evict_all(void)
+{
+	int freed;
+
+	vm_page_lock_queues();
+	freed = vm_object_cache_evict(INT_MAX, INT_MAX);
+	vm_page_unlock_queues();
+	printf("%s: freed %d\n", __func__, freed);
+	return freed;
 }
 
 /*
@@ -3187,7 +3236,8 @@ vm_object_copy_slowly(
 
 	size = vm_object_round_page(src_offset + size) - vm_object_trunc_page(src_offset);
 	src_offset = vm_object_trunc_page(src_offset);
-	new_object = vm_object_allocate(size);
+
+	new_object = vm_object_allocate(size, src_object->vmo_provenance);
 	new_offset = 0;
 	if (src_object->copy_strategy == MEMORY_OBJECT_COPY_NONE &&
 	    src_object->vo_inherit_copy_none) {
@@ -3575,6 +3625,8 @@ vm_object_copy_delayed(
 
 	copy_size = vm_object_round_page(copy_size);
 Retry:
+	// For iOS, we want to always skip this block. For other OS types, we use the sysctl to control the flow.
+ #if !XNU_TARGET_OS_IOS
 	if (!vm_object_copy_delayed_paging_wait_disable) {
 		/*
 		 * Wait for paging in progress.
@@ -3591,6 +3643,7 @@ Retry:
 			vm_object_paging_wait(src_object, THREAD_UNINT);
 		}
 	}
+#endif
 
 	/*
 	 *	See whether we can reuse the result of a previous
@@ -3744,7 +3797,8 @@ Retry:
 		if (new_copy == VM_OBJECT_NULL) {
 			vm_object_unlock(old_copy);
 			vm_object_unlock(src_object);
-			new_copy = vm_object_allocate(copy_size);
+			/* Carry over the provenance from the object that's backing us */
+			new_copy = vm_object_allocate(copy_size, src_object->vmo_provenance);
 			vm_object_lock(src_object);
 			vm_object_lock(new_copy);
 
@@ -3767,7 +3821,8 @@ Retry:
 		    (old_copy->vo_shadow_offset == (vm_object_offset_t) 0));
 	} else if (new_copy == VM_OBJECT_NULL) {
 		vm_object_unlock(src_object);
-		new_copy = vm_object_allocate(copy_size);
+		/* Carry over the provenance from the object that's backing us */
+		new_copy = vm_object_allocate(copy_size, src_object->vmo_provenance);
 		vm_object_lock(src_object);
 		vm_object_lock(new_copy);
 
@@ -4070,7 +4125,7 @@ vm_object_shadow(
 	 *	Allocate a new object with the given length
 	 */
 
-	if ((result = vm_object_allocate(length)) == VM_OBJECT_NULL) {
+	if ((result = vm_object_allocate(length, source->vmo_provenance)) == VM_OBJECT_NULL) {
 		panic("vm_object_shadow: no object for shadowing");
 	}
 
@@ -4212,7 +4267,8 @@ vm_object_memory_object_associate(
 		assert(!object->pager_ready);
 		assert(object->pager_trusted);
 	} else {
-		object = vm_object_allocate(size);
+		/* No provenance yet */
+		object = vm_object_allocate(size, VM_MAP_SERIAL_NONE);
 		assert(object != VM_OBJECT_NULL);
 		vm_object_lock(object);
 		VM_OBJECT_SET_INTERNAL(object, FALSE);
@@ -6315,7 +6371,7 @@ vm_object_transpose(
 	 * Allocate a temporary VM object to hold object1's contents
 	 * while we copy object2 to object1.
 	 */
-	tmp_object = vm_object_allocate(transpose_size);
+	tmp_object = vm_object_allocate(transpose_size, object1->vmo_provenance);
 	vm_object_lock(tmp_object);
 	VM_OBJECT_SET_CAN_PERSIST(tmp_object, FALSE);
 
@@ -6558,6 +6614,7 @@ MACRO_END
 	assert((object1->purgable == VM_PURGABLE_DENY) || (object1->objq.prev == NULL));
 	assert((object2->purgable == VM_PURGABLE_DENY) || (object2->objq.next == NULL));
 	assert((object2->purgable == VM_PURGABLE_DENY) || (object2->objq.prev == NULL));
+	__TRANSPOSE_FIELD(vmo_provenance);
 
 #undef __TRANSPOSE_FIELD
 
@@ -6573,7 +6630,15 @@ done:
 		 * Re-initialize the temporary object to avoid
 		 * deallocating a real pager.
 		 */
-		_vm_object_allocate(transpose_size, tmp_object);
+		_vm_object_allocate(
+			transpose_size,
+			tmp_object,
+			/*
+			 * Since we're reallocating purely to deallocate,
+			 * don't bother trying to set a sensible provenance.
+			 */
+			VM_MAP_SERIAL_NONE
+			);
 		vm_object_deallocate(tmp_object);
 		tmp_object = VM_OBJECT_NULL;
 	}
@@ -7691,6 +7756,10 @@ vm_object_compressed_freezer_pageout(
 #endif /* CONFIG_FREEZE */
 
 
+uint64_t vm_object_pageout_not_on_queue = 0;
+uint64_t vm_object_pageout_not_pageable = 0;
+uint64_t vm_object_pageout_pageable = 0;
+uint64_t vm_object_pageout_active_local = 0;
 void
 vm_object_pageout(
 	vm_object_t object)
@@ -7737,7 +7806,10 @@ ReScan:
 		p = next;
 		next = (vm_page_t)vm_page_queue_next(&next->vmp_listq);
 
+		vm_page_lockspin_queues();
+
 		assert(p->vmp_q_state != VM_PAGE_ON_FREE_Q);
+		assert(p->vmp_q_state != VM_PAGE_USED_BY_COMPRESSOR);
 
 		if ((p->vmp_q_state == VM_PAGE_ON_THROTTLED_Q) ||
 		    p->vmp_cleaning ||
@@ -7750,15 +7822,33 @@ ReScan:
 			/*
 			 * Page is already being cleaned or can't be cleaned.
 			 */
+			vm_page_unlock_queues();
 			continue;
 		}
+		if (p->vmp_q_state == VM_PAGE_NOT_ON_Q) {
+//			printf("FBDP %s:%d page %p object %p offset 0x%llx state %d not on queue\n", __FUNCTION__, __LINE__, p, VM_PAGE_OBJECT(p), p->vmp_offset, p->vmp_q_state);
+			vm_object_pageout_not_on_queue++;
+			vm_page_unlock_queues();
+			continue;
+		}
+		if (!VM_PAGE_PAGEABLE(p)) {
+			if (p->vmp_q_state == VM_PAGE_ON_ACTIVE_LOCAL_Q) {
+				vm_object_pageout_active_local++;
+			} else {
+				vm_object_pageout_not_pageable++;
+				vm_page_unlock_queues();
+				continue;
+			}
+		} else {
+			vm_object_pageout_pageable++;
+		}
+
 		if (vm_compressor_low_on_space()) {
+			vm_page_unlock_queues();
 			break;
 		}
 
 		/* Throw to the pageout queue */
-
-		vm_page_lockspin_queues();
 
 		if (VM_PAGE_Q_THROTTLED(iq)) {
 			iq->pgo_draining = TRUE;

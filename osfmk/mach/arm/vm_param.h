@@ -306,6 +306,25 @@ extern int PAGE_SHIFT_CONST;
 
 #define VM_USER_STRIP_PTR(_v)           (VM_USER_STRIP_TBI(_v))
 
+#if DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC)
+
+#define ML_ADDRPERM(addr, slide) ((addr) + (slide))
+
+#else /* DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC) */
+
+/**
+ * While these function's implementations are machine specific, due to the need
+ * to prevent header file circular dependencies, they need to be externed here
+ * for usage in the addrperm macro
+ */
+__BEGIN_DECLS
+vm_offset_t ml_addrperm_pacga(vm_offset_t addr);
+__END_DECLS
+
+#define ML_ADDRPERM(addr, slide) ml_addrperm_pacga(addr)
+
+#endif /* DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC) */
+
 #ifdef  MACH_KERNEL_PRIVATE
 /*
  *	Physical memory is mapped linearly at an offset virtual memory.

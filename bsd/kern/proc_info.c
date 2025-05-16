@@ -754,6 +754,19 @@ proc_pidbsdinfo(proc_t p, struct proc_bsdinfo * pbsd, int zombie)
 	}
 #endif /* CONFIG_DELAY_IDLE_SLEEP */
 
+
+	task_t task = proc_task(p);
+
+	if (task) {
+		if (task_has_hardened_heap(task)) {
+			pbsd->pbi_flags |= PROC_FLAG_HARDENED_HEAP_ENABLED;
+		}
+
+		if (task_has_tpro(task)) {
+			pbsd->pbi_flags |= PROC_FLAG_TPRO_ENABLED;
+		}
+	}
+
 	switch (PROC_CONTROL_STATE(p)) {
 	case P_PCTHROTTLE:
 		pbsd->pbi_flags |= PROC_FLAG_PC_THROTTLE;
@@ -851,6 +864,17 @@ proc_pidshortbsdinfo(proc_t p, struct proc_bsdshortinfo * pbsd_shortp, int zombi
 		pbsd_shortp->pbsi_flags |= PROC_FLAG_DELAYIDLESLEEP;
 	}
 #endif /* CONFIG_DELAY_IDLE_SLEEP */
+	task_t task = proc_task(p);
+
+	if (task) {
+		if (task_has_hardened_heap(task)) {
+			pbsd_shortp->pbsi_flags |= PROC_FLAG_HARDENED_HEAP_ENABLED;
+		}
+
+		if (task_has_tpro(task)) {
+			pbsd_shortp->pbsi_flags |= PROC_FLAG_TPRO_ENABLED;
+		}
+	}
 
 	switch (PROC_CONTROL_STATE(p)) {
 	case P_PCTHROTTLE:

@@ -259,7 +259,7 @@ struct cs_blob *ubc_get_cs_blobs(vnode_t);
 struct cs_blob *ubc_get_cs_supplement(vnode_t);
 #endif
 void    ubc_get_cs_mtime(vnode_t, struct timespec *);
-int     ubc_cs_getcdhash(vnode_t, off_t, unsigned char *);
+int     ubc_cs_getcdhash(vnode_t, off_t, unsigned char *, uint8_t*);
 kern_return_t ubc_cs_blob_allocate(vm_offset_t *, vm_size_t *);
 void ubc_cs_blob_deallocate(vm_offset_t, vm_size_t);
 boolean_t ubc_cs_is_range_codesigned(vnode_t, mach_vm_offset_t, mach_vm_size_t);

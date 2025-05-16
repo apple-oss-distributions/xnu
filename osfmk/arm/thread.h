@@ -162,20 +162,21 @@ struct machine_thread {
 	uint16_t                  exception_trace_code;
 	bool                      reserved7;
 	bool                      reserved8;
+	bool                      reserved9;
 #if defined(HAS_APPLE_PAC)
 	uint64_t                  rop_pid;
 	uint64_t                  jop_pid;
 #else
-	uint64_t                  reserved9;
 	uint64_t                  reserved10;
+	uint64_t                  reserved11;
 #endif
 
-	uint64_t                  reserved11;
+	uint64_t                  reserved12;
 
 #if HAS_ARM_FEAT_SME
 	uint64_t                  tpidr2_el0;
 #else
-	uint64_t                  reserved12;
+	uint64_t                  reserved13;
 #endif
 };
 #endif

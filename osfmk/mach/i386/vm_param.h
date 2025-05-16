@@ -320,6 +320,12 @@
 
 #endif  /* MACH_KERNEL_PRIVATE */
 
+#ifdef XNU_KERNEL_PRIVATE
+
+#define ML_ADDRPERM(addr, slide) ((addr) + (slide))
+
+#endif /* XNU_KERNEL_PRIVATE */
+
 #endif  /* KERNEL_PRIVATE */
 
 #endif /* defined (__i386__) || defined (__x86_64__) */

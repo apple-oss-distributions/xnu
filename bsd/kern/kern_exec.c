@@ -204,7 +204,17 @@ static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", fal
 #endif /* DEBUG || DEVELOPMENT */
 #endif /* XNU_TARGET_OS_OSX */
 
-
+#if DEVELOPMENT || DEBUG
+os_log_t exec_log_handle = NULL;
+#define EXEC_LOG(fmt, ...)      \
+do {    \
+	if (exec_log_handle) {      \
+	        os_log_with_type(exec_log_handle, OS_LOG_TYPE_INFO, "exec - %s:%d " fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__);    \
+	}   \
+} while (0)
+#else /* DEVELOPMENT || DEBUG */
+#define EXEC_LOG(fmt, ...)  do { } while (0)
+#endif /* DEVELOPMENT || DEBUG */
 
 #if CONFIG_DTRACE
 /* Do not include dtrace.h, it redefines kmem_[alloc/free] */
@@ -290,7 +300,6 @@ int task_add_conclave(task_t task, void *vnode, int64_t off, const char *task_co
 kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnode, int64_t off);
 #endif /* CONFIG_EXCLAVES */
 
-
 /*
  * Mach things for which prototypes are unavailable from Mach headers
  */
@@ -351,40 +360,6 @@ extern int nextpidversion;
  */
 #define SPAWN_SET_PANIC_CRASH_BEHAVIOR "com.apple.private.spawn-panic-crash-behavior"
 
-/*
- * This entitlement marks security critical binaries for which the spawned
- * process should be hardened. Implies enable-by-default for enablement
- * of security features. These defaults can be overridden with the control
- * entitlements for the sub-features below.
- */
-#define SPAWN_ENABLE_HARDENED_PROCESS "com.apple.developer.hardened-process"
-
-#if DEVELOPMENT || DEBUG
-/*
- * The following boot-arg defines the behavior for the case
- * where a binary entitled as hardened-process but doesn't
- * have a specific sub-feature entitlement, which is still
- * under adoption.
- */
-typedef enum {
-	HARDENED_PROCESS_CONFIG_SILENT = 0,
-	HARDENED_PROCESS_CONFIG_LOG    = 1,
-	HARDENED_PROCESS_CONFIG_FATAL  = 2,
-	HARDENED_PROCESS_CONFIG_MAX    = 3
-} hardened_process_config_policy;
-
-TUNABLE(hardened_process_config_policy,
-    hardened_process_config,
-    "hardened_process_config",
-    HARDENED_PROCESS_CONFIG_SILENT);
-#endif /* DEVELOPMENT || DEBUG */
-
-/*
- * Control entitlement to enable/disable hardened-heap in the process.
- */
-#define SPAWN_ENABLE_HARDENED_HEAP "com.apple.developer.hardened-process.hardened-heap"
-
-
 /* Platform Code Exec Logging */
 static int platform_exec_logging = 0;
 
@@ -417,7 +392,7 @@ static int execargs_alloc(struct image_params *imgp);
 static int execargs_free(struct image_params *imgp);
 static int exec_check_permissions(struct image_params *imgp);
 static int exec_extract_strings(struct image_params *imgp);
-static int exec_add_apple_strings(struct image_params *imgp, const load_result_t *load_result);
+static int exec_add_apple_strings(struct image_params *imgp, const load_result_t *load_result, task_t task);
 static int exec_handle_sugid(struct image_params *imgp);
 static int sugid_scripts = 0;
 SYSCTL_INT(_kern, OID_AUTO, sugid_scripts, CTLFLAG_RW | CTLFLAG_LOCKED, &sugid_scripts, 0, "");
@@ -433,8 +408,6 @@ static errno_t exec_handle_exception_port_actions(const struct image_params *img
 static errno_t exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_t psa_qos_clamp,
     task_role_t psa_darwin_role, struct exec_port_actions *port_actions);
 static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
-
-
 
 /*
  * exec_add_user_string
@@ -973,23 +946,24 @@ set_crash_behavior_from_bootarg(proc_t p)
 void
 set_proc_name(struct image_params *imgp, proc_t p)
 {
-	int p_name_len = sizeof(p->p_name) - 1;
+	uint64_t buflen = imgp->ip_ndp->ni_cnd.cn_namelen;
+	const int p_name_len = sizeof(p->p_name) - 1;
+	const int p_comm_len = sizeof(p->p_comm) - 1;
 
-	if (imgp->ip_ndp->ni_cnd.cn_namelen > p_name_len) {
-		imgp->ip_ndp->ni_cnd.cn_namelen = p_name_len;
+	if (buflen > p_name_len) {
+		buflen = p_name_len;
 	}
 
-	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_name,
-	    (unsigned)imgp->ip_ndp->ni_cnd.cn_namelen);
-	p->p_name[imgp->ip_ndp->ni_cnd.cn_namelen] = '\0';
+	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_name, buflen);
+	p->p_name[buflen] = '\0';
 
-	if (imgp->ip_ndp->ni_cnd.cn_namelen > MAXCOMLEN) {
-		imgp->ip_ndp->ni_cnd.cn_namelen = MAXCOMLEN;
+	if (buflen > p_comm_len) {
+		static_assert(MAXCOMLEN + 1 == sizeof(p->p_comm));
+		buflen = p_comm_len;
 	}
 
-	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_comm,
-	    (unsigned)imgp->ip_ndp->ni_cnd.cn_namelen);
-	p->p_comm[imgp->ip_ndp->ni_cnd.cn_namelen] = '\0';
+	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_comm, buflen);
+	p->p_comm[buflen] = '\0';
 
 #if (DEVELOPMENT || DEBUG)
 	/*
@@ -1078,54 +1052,17 @@ binary_match(cpu_type_t mask, cpu_type_t req_cpu,
 }
 
 
-#define MIN_IOS_TPRO_SDK_VERSION        0x00100000
-#define MIN_OSX_TPRO_SDK_VERSION        0x000D0000
-#define MIN_TVOS_TPRO_SDK_VERSION       0x000D0000
-#define MIN_WATCHOS_TPRO_SDK_VERSION    0x00090000
-#define MIN_DRIVERKIT_TPRO_SDK_VERSION  0x00600000
-
-static void
-exec_setup_tpro(struct image_params *imgp, load_result_t *load_result)
+// Check entitlements to see if this is a hardened runtime binary.
+// Save this in load_result until later for two purposes:
+// 1. Once the task is created, we can mark it as hardened runtime if needed
+// 2. we can propagate which entitlements are present to the apple array
+static inline void
+encode_HR_entitlement(const char *entitlement, HR_flags_t mask,
+    const struct image_params *imgp, load_result_t *load_result)
 {
-	extern boolean_t xprr_tpro_enabled;
-	extern boolean_t enable_user_modifiable_perms;
-	uint32_t min_sdk_version = 0;
-
-	/* x86-64 translated code cannot take advantage of TPRO */
-	if (imgp->ip_flags & IMGPF_ROSETTA) {
-		return;
+	if (IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset, entitlement)) {
+		load_result->hardened_runtime_binary |= mask;
 	}
-
-	/* Do not enable on 32-bit VA targets */
-	if (!(imgp->ip_flags & IMGPF_IS_64BIT_ADDR)) {
-		return;
-	}
-
-	switch (load_result->ip_platform) {
-	case PLATFORM_IOS:
-	case PLATFORM_IOSSIMULATOR:
-	case PLATFORM_MACCATALYST:
-		min_sdk_version = MIN_IOS_TPRO_SDK_VERSION;
-		break;
-	case PLATFORM_MACOS:
-		min_sdk_version = MIN_OSX_TPRO_SDK_VERSION;
-		break;
-	case PLATFORM_TVOS:
-	case PLATFORM_TVOSSIMULATOR:
-		min_sdk_version = MIN_TVOS_TPRO_SDK_VERSION;
-		break;
-	case PLATFORM_WATCHOS:
-	case PLATFORM_WATCHOSSIMULATOR:
-		min_sdk_version = MIN_WATCHOS_TPRO_SDK_VERSION;
-		break;
-	case PLATFORM_DRIVERKIT:
-		min_sdk_version = MIN_DRIVERKIT_TPRO_SDK_VERSION;
-		break;
-	default:
-		/* TPRO is on by default for newer platforms */
-		break;
-	}
-
 }
 
 /*
@@ -1148,157 +1085,61 @@ vnode_is_rsr(vnode_t vp)
 	return FALSE;
 }
 
+/* Runtime security mitigations */
 
-// Check entitlements to see if this is a hardened runtime binary.
-// Save this in load_result until later for two purposes:
-// 1. Once the task is created, we can mark it as hardened runtime if needed
-// 2. we can propagate which entitlements are present to the apple array
+/*
+ * Hardened-process.
+ *
+ * Security mitigations follow the notion of "hardened-process": binaries that we
+ * have identified as being security critical. They are identified by the
+ * com.apple.developer.hardened-process entitlement, which is required to further
+ * configure the other security mitigations.
+ */
+#define SPAWN_ENABLE_HARDENED_PROCESS "com.apple.developer.hardened-process"
+
+/*
+ * Hardened-Heap.
+ *
+ * This mitigation extends libmalloc xzone with a number of security features,
+ * most notably increasing the number of buckets and adding guard pages.
+ * The presence of the entitlement opts the binary into the feature.
+ */
+#define SPAWN_ENABLE_HARDENED_HEAP "com.apple.developer.hardened-process.hardened-heap"
+
+
+
+/*
+ * Enablement of hardened-heap is pretty straightforward and solely depends on
+ * the presence of the associated entitlement.
+ */
 static inline void
-encode_HR_entitlement(const char *entitlement, HR_flags_t mask,
-    const struct image_params *imgp, load_result_t *load_result)
+exec_setup_hardened_heap(struct image_params *imgp, task_t task)
 {
-	if (IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset, entitlement)) {
-		load_result->hardened_runtime_binary |= mask;
+	if (IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset,
+	    SPAWN_ENABLE_HARDENED_HEAP)) {
+		task_set_hardened_heap(task);
 	}
 }
 
-#if DEVELOPMENT || DEBUG
-/*
- * This function handles the case where the hardened-process entitlement
- * is set without a specific sub-feature entitlement, which is still under
- * adoption.
- *
- * For in-adoption features, the fallout of having certain
- * security sensitive components enabled but not qualified
- * is potentially too large. Therefore, we allow to have a
- * "forcing period" in which every binary entitled as
- * hardened-process is required to have an explicit setting
- * (true or false) for the security feature or otherwise
- * gets killed or at least traced at launch.
- *
- * return value: true if all policies restrictions met,
- *               false otherwise.
- */
-static inline bool
-handle_missing_subfeature_entitlement(
-	const struct image_params *imgp,
-	const char *subfeature_entitlement)
-{
-	switch (hardened_process_config) {
-	case HARDENED_PROCESS_CONFIG_SILENT:
-		break;
-	case HARDENED_PROCESS_CONFIG_LOG:
-		/*
-		 * Use the name directly from imgp since we haven't
-		 * set_proc_name() yet.
-		 */
-		printf("[WARNING] %s has hardened-process but not %s\n",
-		    imgp->ip_ndp->ni_cnd.cn_nameptr,
-		    subfeature_entitlement);
-		break;
-	case HARDENED_PROCESS_CONFIG_FATAL:
-		/*
-		 * When the policy defined as FATAL, we SIGKILL
-		 * the process.
-		 */
-		printf("[ERROR] %s has hardened-process but not %s\n",
-		    imgp->ip_ndp->ni_cnd.cn_nameptr,
-		    subfeature_entitlement);
-		return false;
-	default:
-		panic("invalid hardened-process policy");
-	}
-
-	return true;
-}
-#endif /* DEVELOPMENT || DEBUG */
-
-/*
- * Handle the hardened-process.hardened-heap entitlement.
- *
- * Note: hardened-heap is not inherited via spawn/exec;
- *       It is inherited (only) on fork, which is done
- *       via Apple strings.
- */
-static inline bool
-apply_hardened_heap_policy(
-	struct image_params *imgp,
-	bool is_hardened_process)
-{
-	bool result = true;
-	bool set_hardened_heap = false;
-
-	bool hardened_heap_ent = false;
-	if (IOVnodeGetBooleanEntitlement(imgp->ip_vp,
-	    (int64_t)imgp->ip_arch_offset,
-	    SPAWN_ENABLE_HARDENED_HEAP,
-	    &hardened_heap_ent)) {
-		/*
-		 * The hardened-heap entitlement exists, use that
-		 * to decide about enablement.
-		 */
-		set_hardened_heap = hardened_heap_ent;
-	} else if (is_hardened_process) {
-#if DEVELOPMENT || DEBUG
-		/*
-		 * We should imply default from hardened-process. However,
-		 * bringup will take time and could be sensitive. We want
-		 * to allow teams to adopt incrementally.
-		 *
-		 * We will link hardened-heap to hardened-process when
-		 * adoption will be more stable.
-		 */
-		if (!handle_missing_subfeature_entitlement(imgp,
-		    SPAWN_ENABLE_HARDENED_HEAP)) {
-			result = false;
-		}
-#endif /* DEVELOPMENT || DEBUG */
-	}
-
-	if (set_hardened_heap) {
-		imgp->ip_flags |= IMGPF_HARDENED_HEAP;
-	}
-
-	return result;
-}
 
 
 /*
- * This function handles all the hardened-process related
- * mitigations, parse their entitlements, and apply policies.
- *
- * For feature-ready mitigations, having hardened-process=true
- * implies enablement. Sub-features specific entitlements can
- * override this, which means that even if we have hardened-process
- * exists and set to true, but a sub-feature entitlement exists
- * and set to false, we do not enable the sub-feature.
- *
- * return value: true if all policies restrictions met,
- *               false otherwise.
+ * This routine configures the various runtime mitigations we can apply to a process.
+ * Returns true on success, false on failure. Failure will be fatal in exec_mach_imgact().
  */
-static bool
-apply_hardened_process_policy(
-	struct image_params *imgp,
-	__unused proc_t proc,
-	__unused bool is_platform_binary)
+static inline errno_t
+exec_setup_runtime_mitigations(struct image_params *imgp, __unused load_result_t *load_result,
+    __unused task_t old_task, task_t new_task, __unused vm_map_t map, __unused proc_t proc)
 {
-	bool result = true;
+	errno_t retval = 0;
 
 	/*
-	 * Check if the binary has hardened-process entitlement.
+	 * Hardened-heap enables a set of extra security features in our system memory allocator.
 	 */
-	bool is_hardened_process = false;
-	if (IOVnodeHasEntitlement(imgp->ip_vp,
-	    (int64_t)imgp->ip_arch_offset, SPAWN_ENABLE_HARDENED_PROCESS)) {
-		is_hardened_process = true;
-	}
-
-	if (!apply_hardened_heap_policy(imgp, is_hardened_process)) {
-		result = false;
-	}
+	exec_setup_hardened_heap(imgp, new_task);
 
 
-	return result;
+	return retval;
 }
 
 uint32_t
@@ -1372,7 +1213,7 @@ exec_mach_imgact(struct image_params *imgp)
 	proc_t                  p = vfs_context_proc(imgp->ip_vfs_context);
 	int                     error = 0;
 	task_t                  task;
-	task_t                  new_task = NULL; /* protected by vfexec */
+	task_t                  new_task = NULL;    /* protected by vfexec */
 	thread_t                thread;
 	struct uthread          *uthread;
 	vm_map_switch_context_t switch_ctx;
@@ -1585,7 +1426,6 @@ grade:
 	p->p_cputype = imgp->ip_origcputype;
 	p->p_cpusubtype = imgp->ip_origcpusubtype;
 	proc_setplatformdata(p, load_result.ip_platform, load_result.lr_min_sdk, load_result.lr_sdk);
-	exec_setup_tpro(imgp, &load_result);
 
 	vm_map_set_size_limit(map, proc_limitgetcur(p, RLIMIT_AS));
 	vm_map_set_data_limit(map, proc_limitgetcur(p, RLIMIT_DATA));
@@ -1601,11 +1441,9 @@ grade:
 	proc_unlock(p);
 
 	/*
-	 * Handle hardened-process mitigations, parse entitlements
-	 * and apply enablements.
+	 * Setup runtime mitigations.
 	 */
-	if (!apply_hardened_process_policy(imgp, p, load_result.platform_binary)) {
-#if DEVELOPMENT || DEBUG
+	if ((error = exec_setup_runtime_mitigations(imgp, &load_result, current_task(), new_task, map, p)) != 0) {
 		set_proc_name(imgp, p);
 		exec_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_MACHO);
 		if (bootarg_execfailurereports) {
@@ -1616,12 +1454,7 @@ grade:
 		imgp->ip_free_map = map;
 		map = VM_MAP_NULL;
 		goto badtoolate;
-#endif /* DEVELOPMENT || DEBUG */
 	}
-
-	/*
-	 * Set TPRO flags if enabled
-	 */
 
 	/*
 	 * Set code-signing flags if this binary is signed, or if parent has
@@ -1720,7 +1553,7 @@ grade:
 	 * for system processes that need to match and be able to inspect
 	 * a pre-existing task.
 	 */
-	int cpu_subtype = 0; /* all cpu_subtypes use the same shared region */
+	int cpu_subtype = 0;     /* all cpu_subtypes use the same shared region */
 #if __has_feature(ptrauth_calls)
 	char *shared_region_id = NULL;
 	size_t len;
@@ -1999,7 +1832,7 @@ grade:
 	    load_result.ip_platform,
 	    load_result.lr_sdk);
 
-	error = exec_add_apple_strings(imgp, &load_result); /* copies out main thread port */
+	error = exec_add_apple_strings(imgp, &load_result, task);     /* copies out main thread port */
 
 	if (error) {
 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
@@ -2283,7 +2116,6 @@ cleanup_rosetta_fp:
 #if CONFIG_DTRACE
 	dtrace_proc_exec(p);
 #endif
-
 
 	if (kdebug_enable) {
 		long args[4] = {};
@@ -2637,6 +2469,7 @@ bad_notrans:
 
 	return error;
 }
+
 
 /*
  * exec_validate_spawnattr_policy
@@ -3764,7 +3597,6 @@ spawn_posix_cred_adopt(proc_t p,
 	return 0;
 }
 
-
 /*
  * posix_spawn
  *
@@ -4109,11 +3941,13 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 		if ((psa->psa_options & PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS) == PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS) {
 			imgp->ip_flags |= IMGPF_PLUGIN_HOST_DISABLE_A_KEYS;
 		}
+
+
 #if (DEVELOPMENT || DEBUG)
 		if ((psa->psa_options & PSA_OPTION_ALT_ROSETTA) == PSA_OPTION_ALT_ROSETTA) {
 			imgp->ip_flags |= (IMGPF_ROSETTA | IMGPF_ALT_ROSETTA);
 		}
-#endif
+#endif /* (DEVELOPMENT || DEBUG) */
 
 		if ((error = exec_validate_spawnattr_policy(psa->psa_apptype)) != 0) {
 			goto bad;
@@ -4501,8 +4335,6 @@ do_fork1:
 		}
 	}
 #endif
-
-
 	/*
 	 * Activate the image.
 	 * Warning: If activation failed after point of no return, it returns error
@@ -4952,8 +4784,9 @@ bad:
 		}
 
 		if (error == 0 && !spawn_no_exec) {
+			extern uint64_t kdp_task_exec_meta_flags(task_t task);
 			KDBG(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXEC),
-			    proc_getpid(p));
+			    proc_getpid(p), kdp_task_exec_meta_flags(proc_task(p)));
 		}
 	}
 
@@ -6423,7 +6256,7 @@ _Atomic uint64_t libmalloc_experiment_factors = 0;
 
 static int
 exec_add_apple_strings(struct image_params *imgp,
-    const load_result_t *load_result)
+    const load_result_t *load_result, task_t task)
 {
 	int error;
 	int img_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
@@ -6547,7 +6380,7 @@ exec_add_apple_strings(struct image_params *imgp,
 	}
 
 	uint8_t cdhash[SHA1_RESULTLEN];
-	int cdhash_errror = ubc_cs_getcdhash(imgp->ip_vp, imgp->ip_arch_offset, cdhash);
+	int cdhash_errror = ubc_cs_getcdhash(imgp->ip_vp, imgp->ip_arch_offset, cdhash, NULL);
 	if (cdhash_errror == 0) {
 		char hash_string[strlen(CDHASH_KEY) + 2 * SHA1_RESULTLEN + 1];
 		strncpy(hash_string, CDHASH_KEY, sizeof(hash_string));
@@ -6694,30 +6527,27 @@ exec_add_apple_strings(struct image_params *imgp,
 		imgp->ip_applec++;
 	}
 
-	if (imgp->ip_flags & IMGPF_HARDENED_HEAP) {
-		const char *hardened_heap_shims = "hardened_heap=1";
-		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(hardened_heap_shims), UIO_SYSSPACE, FALSE);
+	/*
+	 * Push down the task security configuration. To reduce confusion when userland parses the information
+	 * still push an empty security configuration if nothing is active.
+	 */
+	{
+		#define SECURITY_CONFIG_KEY "security_config="
+		char security_config_str[strlen(SECURITY_CONFIG_KEY) + HEX_STR_LEN + 1];
+
+		snprintf(security_config_str, sizeof(security_config_str),
+		    SECURITY_CONFIG_KEY "0x%x", task_get_security_config(task));
+
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(security_config_str), UIO_SYSSPACE, FALSE);
 		if (error) {
-			printf("Failed to add hardened heap string with error %d\n", error);
+			printf("Failed to add the security config string with error %d\n", error);
 			goto bad;
 		}
-
 		imgp->ip_applec++;
 	}
 
 
-	/* tell dyld that it can leverage hardware for its read-only/read-write trusted path */
-	if (imgp->ip_flags & IMGPF_HW_TPRO) {
-		const char *dyld_hw_tpro = "dyld_hw_tpro=1";
-		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(dyld_hw_tpro), UIO_SYSSPACE, FALSE);
-		if (error) {
-			printf("Failed to add dyld hw tpro setting with error %d\n", error);
-			goto bad;
-		}
 
-		imgp->ip_applec++;
-
-	}
 
 	if (load_result->hardened_runtime_binary) {
 		const size_t HR_STRING_SIZE = sizeof(HARDENED_RUNTIME_KEY) + HR_FLAGS_NUM_NIBBLES + 2 + 1;
@@ -7434,6 +7264,10 @@ load_init_program(proc_t p)
 	mach_vm_offset_t scratch_addr = 0;
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
+#if DEVELOPMENT || DEBUG
+	/* Use the opportunity to initialize exec's debug log stream */
+	exec_log_handle = os_log_create("com.apple.xnu.bsd", "exec");
+#endif /* DEVELOPMENT || DEBUG */
 
 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size,
 	    VM_MAP_KERNEL_FLAGS_ANYWHERE());
@@ -8361,11 +8195,6 @@ EXPERIMENT_FACTOR_PROC(_kern, libmalloc_experiments, CTLTYPE_QUAD | CTLFLAG_RW, 
 
 SYSCTL_NODE(_kern, OID_AUTO, sec_transition,
     CTLFLAG_RD | CTLFLAG_LOCKED, 0, "sec_transition");
-
-
-SYSCTL_INT(_kern_sec_transition, OID_AUTO, available,
-    CTLFLAG_RD | CTLFLAG_LOCKED, (int *)NULL, 0, "");
-
 
 #if DEBUG || DEVELOPMENT
 static int

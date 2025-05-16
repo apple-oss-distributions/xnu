@@ -10622,13 +10622,12 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 		return KERN_ABORTED;
 	}
 
-#if !XNU_TARGET_OS_OSX
 	wired_size          = ptoa_64(vm_page_wire_count);
 	wired_reserved_size = ptoa_64(vm_page_wire_count_initial - vm_page_stolen_count);
-#else /* !XNU_TARGET_OS_OSX */
-	wired_size          = ptoa_64(vm_page_wire_count + vm_lopage_free_count + vm_page_throttled_count);
-	wired_reserved_size = ptoa_64(vm_page_wire_count_initial - vm_page_stolen_count + vm_page_throttled_count);
-#endif /* !XNU_TARGET_OS_OSX */
+#if XNU_TARGET_OS_OSX
+	wired_size          += ptoa_64(vm_lopage_free_count + vm_page_throttled_count);
+	wired_reserved_size += ptoa_64(vm_page_throttled_count);
+#endif /* XNU_TARGET_OS_OSX */
 	wired_managed_size  = ptoa_64(vm_page_wire_count - vm_page_wire_count_initial);
 
 	wired_size += booter_size;

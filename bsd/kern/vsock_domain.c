@@ -971,17 +971,21 @@ vsock_detach(struct socket *so)
 		return error;
 	}
 
-	// Remove from the list of all vsock sockets.
+	// Mark this socket for deallocation.
+	so->so_flags |= SOF_PCBCLEARING;
+
+	// Reorder locks.
+	socket_unlock(so, 0);
 	lck_rw_lock_exclusive(&vsockinfo.all_lock);
+	socket_lock(so, 0);
+
+	// Remove from the list of all vsock sockets.
 	TAILQ_REMOVE(&vsockinfo.all, pcb, all);
 	pcb->all.tqe_next = NULL;
 	pcb->all.tqe_prev = NULL;
 	vsockinfo.all_pcb_count--;
 	vsockinfo.vsock_gencnt++;
 	lck_rw_done(&vsockinfo.all_lock);
-
-	// Mark this socket for deallocation.
-	so->so_flags |= SOF_PCBCLEARING;
 
 	return 0;
 }

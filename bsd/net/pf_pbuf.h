@@ -96,8 +96,8 @@ struct mbuf     *pbuf_clone_to_mbuf(pbuf_t *);
 void *          pbuf_ensure_contig(pbuf_t *, size_t);
 void *          pbuf_ensure_writable(pbuf_t *, size_t);
 
-void *          pbuf_resize_segment(pbuf_t *, int off, int olen, int nlen);
-void *          pbuf_contig_segment(pbuf_t *, int off, int len);
+void *          pbuf_resize_segment(pbuf_t *, int off, int olen, int nlen) __attribute__((warn_unused_result));
+void *          pbuf_contig_segment(pbuf_t *, int off, int len) __attribute__((warn_unused_result));
 
 void            pbuf_copy_data(pbuf_t *, int, int, void *__sized_by(buflen), size_t buflen);
 void            pbuf_copy_back(pbuf_t *, int, int, void *__sized_by(buflen), size_t buflen);

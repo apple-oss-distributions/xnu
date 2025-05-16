@@ -186,7 +186,7 @@
 #define PACGA_TAG_THREAD    0b0010
 #define PACGA_TAG_IRG       0b0011
 #define PACGA_TAG_HV        0b0100
-#define PACGA_TAG_5         0b0101
+#define PACGA_TAG_ADDRPERM  0b0101
 #define PACGA_TAG_6         0b0110
 #define PACGA_TAG_7         0b0111
 #define PACGA_TAG_8         0b1000

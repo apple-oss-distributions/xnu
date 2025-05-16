@@ -50,10 +50,12 @@ extern kern_return_t                    cpu_signal(
 	void                    *p1);
 
 extern kern_return_t                    cpu_signal_deferred(
-	cpu_data_t              *target);
+	cpu_data_t              *target,
+	cpu_signal_t            signal);
 
 extern void                     cpu_signal_cancel(
-	cpu_data_t              *target);
+	cpu_data_t              *target,
+	cpu_signal_t            signal);
 
 extern bool cpu_has_SIGPdebug_pending(void);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -996,12 +996,13 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	 * CLAT46 IPv6 address
 	 */
 	if (IN6_ARE_ADDR_EQUAL(&odst, &ia6_clat_dst->ia_addr.sin6_addr)) {
+		bool translate = false;
 		pbuf_t pbuf_store, *pbuf = NULL;
 		pbuf_init_mbuf(&pbuf_store, *m, ifp);
 		pbuf = &pbuf_store;
 
 		/*
-		 * Retrive the local CLAT46 IPv4 address reserved for stateless
+		 * Retrieve the local CLAT46 IPv4 address reserved for stateless
 		 * translation.
 		 */
 		ia4_clat_dst = inifa_ifpclatv4(ifp);
@@ -1015,9 +1016,19 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 
 		/* Translate IPv6 src to IPv4 src by removing the NAT64 prefix */
 		dst = &ia4_clat_dst->ia_addr.sin_addr;
-		if ((error = nat464_synthesize_ipv4(ifp, &osrc, &src)) != 0) {
+		error = nat464_synthesize_ipv4(ifp, &osrc, &src, &translate);
+		if (error != 0) {
 			ip6stat.ip6s_clat464_in_v4synthfail_drop++;
 			error = -1;
+			goto cleanup;
+		}
+		if (!translate) {
+			/* no translation required */
+			if (ip6h->ip6_nxt != IPPROTO_ICMPV6) {
+				/* only allow icmpv6 */
+				ip6stat.ip6s_clat464_in_v4synthfail_drop++;
+				error = -1;
+			}
 			goto cleanup;
 		}
 
@@ -1069,7 +1080,7 @@ cleanup:
 			ip6stat.ip6s_clat464_in_invalpbuf_drop++;
 		}
 
-		if (error == 0) {
+		if (error == 0 && translate) {
 			*proto_family = PF_INET;
 			ip6stat.ip6s_clat464_in_success++;
 		}

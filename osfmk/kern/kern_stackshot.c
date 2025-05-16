@@ -57,6 +57,7 @@
 #include <string.h> /* bcopy */
 
 #include <kern/kern_stackshot.h>
+#include <kern/kcdata_private.h>
 #include <kern/backtrace.h>
 #include <kern/coalition.h>
 #include <kern/epoch_sync.h>
@@ -3600,6 +3601,59 @@ error_exit:
 	return error;
 }
 
+uint64_t kdp_task_exec_meta_flags(task_t task);
+
+uint64_t
+kdp_task_exec_meta_flags(task_t task)
+{
+	uint64_t flags = 0;
+
+#if CONFIG_ROSETTA
+	if (task_is_translated(task)) {
+		flags |= kTaskExecTranslated;
+	}
+#endif /* CONFIG_ROSETTA */
+
+	if (task_has_hardened_heap(task)) {
+		flags |= kTaskExecHardenedHeap;
+	}
+
+
+	return flags;
+}
+
+/* Compute the set of flags that kdp_task_exec_meta_flags can return based on the kernel config */
+static uint64_t
+stackshot_available_task_exec_flags(void)
+{
+	uint64_t flags_mask = 0;
+
+#if CONFIG_ROSETTA
+	flags_mask |= kTaskExecTranslated;
+#endif /* CONFIG_ROSETTA */
+
+	flags_mask |= kTaskExecHardenedHeap;
+
+
+	return flags_mask;
+}
+
+static kern_return_t
+kcdata_record_task_exec_meta(kcdata_descriptor_t kcd, task_t task)
+{
+	struct task_exec_meta tem = {};
+	kern_return_t error = KERN_SUCCESS;
+
+	tem.tem_flags = kdp_task_exec_meta_flags(task);
+
+	if (tem.tem_flags != 0) {
+		kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_TASK_EXEC_META, sizeof(struct task_exec_meta), &tem));
+	}
+
+error_exit:
+	return error;
+}
+
 static kern_return_t
 kcdata_record_task_iostats(kcdata_descriptor_t kcd, task_t task)
 {
@@ -4738,6 +4792,7 @@ kdp_stackshot_record_task(task_t task)
 
 			kcd_exit_on_error(kcdata_record_shared_cache_info(stackshot_kcdata_p, task, &task_snap_ss_flags));
 			kcd_exit_on_error(kcdata_record_uuid_info(stackshot_kcdata_p, task, stackshot_flags, have_pmap, &task_snap_ss_flags));
+			kcd_exit_on_error(kcdata_record_task_exec_meta(stackshot_kcdata_p, task));
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 			if (!task_in_transition) {
 				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, stackshot_flags, have_pmap, task_snap_ss_flags, &latency_info));
@@ -5131,6 +5186,8 @@ kdp_stackshot_kcdata_format(void)
 		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_initial_estimate, "stackshot_size_estimate"));
 		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_initial_estimate_adj, "stackshot_size_estimate_adj"));
 	}
+	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, stackshot_available_task_exec_flags(), "stackshot_te_flags_mask"));
+
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	stackshot_ctx.sc_latency.setup_latency_mt = mach_absolute_time();

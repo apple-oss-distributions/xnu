@@ -71,7 +71,6 @@ extern kern_return_t    vm_map_exec(
 typedef struct vm_map_entry     *vm_map_entry_t;
 #define VM_MAP_ENTRY_NULL       ((vm_map_entry_t) NULL)
 
-
 #define named_entry_lock_init(object)   lck_mtx_init(&(object)->Lock, &vm_object_lck_grp, &vm_object_lck_attr)
 #define named_entry_lock_destroy(object)        lck_mtx_destroy(&(object)->Lock, &vm_object_lck_grp)
 #define named_entry_lock(object)                lck_mtx_lock(&(object)->Lock)
@@ -467,6 +466,15 @@ struct _vm_map {
 	 * if owning_task is not NULL, since vm_map_terminate requires the map lock.
 	 */
 	task_t owning_task;
+
+	/*
+	 * A generation ID for maps that increments monotonically.
+	 * This is a pointer type just so we get dPAC out-of-the-box, but
+	 * conceptually it's just an ID.
+	 * Note that this is not a unique object ID. In particular, fork()
+	 * will produce a child map with the same ID as its parent.
+	 */
+	vm_map_serial_t serial_id;
 };
 
 #define CAST_TO_VM_MAP_ENTRY(x) ((struct vm_map_entry *)(uintptr_t)(x))
@@ -909,6 +917,7 @@ extern void             vm_map_set_tpro(
 	vm_map_t                map);
 
 
+
 extern void             vm_map_set_tpro_enforcement(
 	vm_map_t                map);
 
@@ -1134,6 +1143,9 @@ int vm_map_shadow_max(vm_map_t map);
 #endif
 
 bool vm_map_is_map_size_valid(vm_map_t target_map, vm_size_t size, bool no_soft_limit);
+
+/* Returns the map's ID or VM_MAP_SERIAL_NONE if the input map is NULL */
+vm_map_serial_t vm_map_maybe_serial_id(vm_map_t maybe_vm_map);
 
 __END_DECLS
 

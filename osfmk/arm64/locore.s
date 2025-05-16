@@ -1614,6 +1614,23 @@ Lno_sme_saved_state:
 #if HAS_ARM_FEAT_SME
 Lskip_restore_neon_saved_state:
 #endif
+	// If sync_on_cswitch and ERET is not a CSE, issue an ISB now. Unconditionally clear the
+	// sync_on_cswitch flag.
+	mrs		x1, TPIDR_EL1
+	ldr		x1, [x1, ACT_CPUDATAP]
+
+	// Redefined for backporting.
+#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) && !__ARM_KERNEL_PROTECT__
+	ldrb	w2, [x1, CPU_SYNC_ON_CSWITCH]
+#if ERET_NEEDS_ISB
+	// Set the bit, but don't sync, it will be synced shortly after this.
+	orr		x5, x5, x2, lsl #(BIT_ISB_PENDING)
+#else
+	// Last chance, sync now.
+	isb		sy
+#endif  /* ERET_NEEDS_ISB */
+#endif  /* defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) && !__ARM_KERNEL_PROTECT__ */
+	strb	wzr, [x1, CPU_SYNC_ON_CSWITCH]
 
 	/* Restore arm_saved_state64 */
 

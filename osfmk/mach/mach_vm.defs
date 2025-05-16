@@ -586,4 +586,13 @@ routine mach_vm_deferred_reclamation_buffer_resize(
 skip;
 #endif
 
+#if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
+routine PREFIX(mach_vm_update_pointers_with_remote_tags) (
+			target		 	: vm_map_t;
+			in_pointer_list			: mach_vm_offset_list_t;
+			out	out_pointer_list	: mach_vm_offset_list_t, CountInOut);
+#else /* !defined(_MACH_VM_PUBLISH_AS_LOCAL_) */
+skip;
+#endif /* !defined(_MACH_VM_PUBLISH_AS_LOCAL_) */
+
 /* vim: set ft=c : */

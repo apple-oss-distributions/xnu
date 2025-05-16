@@ -456,9 +456,8 @@ is_table_walk_error(fault_status_t status)
 
 
 static inline int
-is_servicible_fault(fault_status_t status, uint64_t esr)
+is_servicible_fault(fault_status_t status)
 {
-#pragma unused(esr)
 	return is_vm_fault(status);
 }
 
@@ -844,6 +843,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		ml_set_interrupts_enabled(TRUE);
 	}
 
+
 	switch (class) {
 	case ESR_EC_SVC_64:
 		if (!is_saved_state64(state) || !is_user) {
@@ -1085,6 +1085,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
 	}
 #endif
+
 }
 
 /*
@@ -1759,6 +1760,7 @@ handle_sw_step_debug(arm_saved_state_t *state)
 TUNABLE_WRITEABLE(int, panic_on_jit_guard, "panic_on_jit_guard", 0);
 #endif /* MACH_ASSERT */
 
+
 static void
 handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
@@ -1768,6 +1770,7 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	mach_msg_type_number_t     numcodes = 2;
 	thread_t                   thread   = current_thread();
 
+	(void)esr;
 	(void)expected_fault_handler;
 
 	if (__improbable(!SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state)))) {
@@ -1776,7 +1779,7 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 
 	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling abort from userspace */
 
-	if (!is_servicible_fault(fault_code, esr) &&
+	if (!is_servicible_fault(fault_code) &&
 	    thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
 		thread_reset_pcs_done_faulting(thread);
 	}

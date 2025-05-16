@@ -174,6 +174,7 @@
 #define USE_APPLEARMSMP                1
 #define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
 #define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+
 #endif  /* ARM64_BOARD_CONFIG_T8122_T8130 */
 
 #ifdef ARM64_BOARD_CONFIG_T8132

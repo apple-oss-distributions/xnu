@@ -1090,6 +1090,11 @@ inet_traffic_rule_notify(struct nxctl_traffic_rule *ntr, uint32_t flags)
 	}
 	ntri = (struct nxctl_traffic_rule_inet *)ntr;
 	qset = nx_netif_find_qset(nif, ntri->ntri_ra.ras_qset_id);
+	if (qset == NULL || (qset->nqs_flags & NETIF_QSET_FLAG_EXT_INITED) == 0) {
+		DTRACE_SKYWALK1(qset__not__initialized, struct netif_qset *, qset);
+		err = ENXIO;
+		goto done;
+	}
 	err = nx_netif_notify_steering_info(nif, qset,
 	    (struct ifnet_traffic_descriptor_common *)&ntri->ntri_td,
 	    ((flags & NTR_NOTIFY_FLAG_ADD) != 0));

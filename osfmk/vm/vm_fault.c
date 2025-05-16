@@ -85,6 +85,7 @@
 #include <kern/zalloc_internal.h>
 #include <kern/misc_protos.h>
 #include <kern/policy_internal.h>
+#include <kern/exc_guard.h>
 
 #include <vm/vm_compressor_internal.h>
 #include <vm/vm_compressor_pager_internal.h>
@@ -3483,6 +3484,8 @@ pmap_enter_object_options_check(
 		extra_options |= PMAP_OPTIONS_INTERNAL;
 	}
 	pmap_paddr_t physical_address = (pmap_paddr_t)ptoa(pn) + fault_phys_offset;
+
+
 	return pmap_enter_options_addr(pmap,
 	           virtual_address,
 	           physical_address,

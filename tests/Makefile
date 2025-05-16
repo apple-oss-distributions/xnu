@@ -1404,13 +1404,13 @@ test_static_binary_csflags: OTHER_LDFLAGS += -ldarwintest_utils
 libmalloc_apple_array: CODE_SIGN_ENTITLEMENTS = entitlements/libmalloc_apple_array.entitlements
 libmalloc_apple_array: OTHER_CFLAGS += -DENTITLED=1 drop_priv.c test_utils.c
 libmalloc_apple_array: OTHER_LDFLAGS += -ldarwintest_utils
-libmalloc_apple_array: libmalloc_apple_array.c print_apple_array print_apple_array_HR1 print_apple_array_HR2 print_apple_array_hardened_proc print_apple_array_hardened_heap_disable print_apple_array_hardened_heap
+libmalloc_apple_array: libmalloc_apple_array.c print_apple_array print_apple_array_HR1 print_apple_array_HR2 print_apple_array_hardened_proc print_apple_array_hardened_heap
 	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 libmalloc_apple_array_unentitled: OTHER_CFLAGS += drop_priv.c test_utils.c
 libmalloc_apple_array_unentitled: OTHER_LDFLAGS += -ldarwintest_utils
-libmalloc_apple_array_unentitled: libmalloc_apple_array.c print_apple_array print_apple_array_HR1 print_apple_array_HR2 print_apple_array_hardened_proc print_apple_array_hardened_heap_disable print_apple_array_hardened_heap
+libmalloc_apple_array_unentitled: libmalloc_apple_array.c print_apple_array print_apple_array_HR1 print_apple_array_HR2 print_apple_array_hardened_proc print_apple_array_hardened_heap
 	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $(OTHER_CFLAGS) $< -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/$@;
 
@@ -1437,18 +1437,12 @@ print_apple_array_hardened_proc: print_apple_array.c
 	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --entitlements $(SRCROOT)/$(CODE_SIGN_ENTITLEMENTS) --timestamp=none $(SYMROOT)/$@;
 
-CUSTOM_TARGETS += print_apple_array_hardened_heap_disable
-print_apple_array_hardened_heap_disable: CODE_SIGN_ENTITLEMENTS=entitlements/hardened-proc-hardened-heap-override.entitlements
-print_apple_array_hardened_heap_disable: print_apple_array.c
-	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
-	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --entitlements $(SRCROOT)/$(CODE_SIGN_ENTITLEMENTS) --timestamp=none $(SYMROOT)/$@;
 
 CUSTOM_TARGETS += print_apple_array_hardened_heap
-print_apple_array_hardened_heap: CODE_SIGN_ENTITLEMENTS=entitlements/hardened-heap-standalone.entitlements
+print_apple_array_hardened_heap: CODE_SIGN_ENTITLEMENTS=entitlements/hardened-heap.entitlements
 print_apple_array_hardened_heap: print_apple_array.c
 	$(CC) $(DT_CFLAGS) -I $(OBJROOT) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --entitlements $(SRCROOT)/$(CODE_SIGN_ENTITLEMENTS) --timestamp=none $(SYMROOT)/$@;
-
 
 install-print_apple_array: print_apple_array
 	mkdir -p $(INSTALLDIR)/tools
@@ -1465,10 +1459,6 @@ install-print_apple_array_HR2: print_apple_array_HR2
 install-print_apple_array_hardened_proc: print_apple_array_hardened_proc
 	mkdir -p $(INSTALLDIR)/tools
 	cp $(SYMROOT)/print_apple_array_hardened_proc $(INSTALLDIR)/tools/
-
-install-print_apple_array_hardened_heap_disable: print_apple_array_hardened_heap_disable
-	mkdir -p $(INSTALLDIR)/tools
-	cp $(SYMROOT)/print_apple_array_hardened_heap_disable $(INSTALLDIR)/tools/
 
 install-print_apple_array_hardened_heap: print_apple_array_hardened_heap
 	mkdir -p $(INSTALLDIR)/tools
@@ -1554,6 +1544,8 @@ task_suspend_stats: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
 # os_atomic use throws this warning
 setitimer: OTHER_CFLAGS += -Wno-c++98-compat -framework perfdata
 setitimer: OTHER_LDFLAGS += -framework perfdata
+
+exec_set_proc_name: OTHER_LDFLAGS += -ldarwintest_utils
 
 
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets

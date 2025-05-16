@@ -102,7 +102,7 @@ vm_test_collapse_compressor(void)
 
 	/* create backing object */
 	backing_size = 15 * PAGE_SIZE;
-	backing_object = vm_object_allocate(backing_size);
+	backing_object = vm_object_allocate(backing_size, kernel_map->serial_id);
 	assert(backing_object != VM_OBJECT_NULL);
 	printf("VM_TEST_COLLAPSE_COMPRESSOR: created backing object %p\n",
 	    backing_object);
@@ -152,7 +152,7 @@ vm_test_collapse_compressor(void)
 
 	/* create top object */
 	top_size = 9 * PAGE_SIZE;
-	top_object = vm_object_allocate(top_size);
+	top_object = vm_object_allocate(top_size, backing_object->vmo_provenance);
 	assert(top_object != VM_OBJECT_NULL);
 	printf("VM_TEST_COLLAPSE_COMPRESSOR: created top object %p\n",
 	    top_object);
@@ -368,7 +368,7 @@ vm_test_page_wire_overflow_panic(void)
 
 	printf("VM_TEST_PAGE_WIRE_OVERFLOW_PANIC: starting...\n");
 
-	object = vm_object_allocate(PAGE_SIZE);
+	object = vm_object_allocate(PAGE_SIZE, VM_MAP_SERIAL_NONE);
 	vm_object_lock(object);
 	page = vm_page_alloc(object, 0x0);
 	vm_page_lock_queues();
@@ -425,7 +425,7 @@ vm_test_device_pager_transpose(void)
 	kern_return_t   kr;
 
 	size = 3 * PAGE_SIZE;
-	anon_object = vm_object_allocate(size);
+	anon_object = vm_object_allocate(size, kernel_map->serial_id);
 	assert(anon_object != VM_OBJECT_NULL);
 	device_pager = device_pager_setup(NULL, 0, size, 0);
 	assert(device_pager != NULL);
@@ -872,10 +872,10 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_map_set_page_shift(map16k, 14);
 
 	/* create 4 VM objects */
-	obj1 = vm_object_allocate(0x100000);
-	obj2 = vm_object_allocate(0x100000);
-	obj3 = vm_object_allocate(0x100000);
-	obj4 = vm_object_allocate(0x100000);
+	obj1 = vm_object_allocate(0x100000, map4k->serial_id);
+	obj2 = vm_object_allocate(0x100000, map4k->serial_id);
+	obj3 = vm_object_allocate(0x100000, map4k->serial_id);
+	obj4 = vm_object_allocate(0x100000, map4k->serial_id);
 
 	/* map objects in 4k map */
 	vm_object_reference(obj1);
@@ -1066,7 +1066,7 @@ vm_test_per_mapping_internal_accounting(void)
 	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
 	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
 	assertf(balance == 0, "balance=0x%llx", balance);
-	device_object = vm_object_allocate(PAGE_SIZE);
+	device_object = vm_object_allocate(PAGE_SIZE, kernel_map->serial_id);
 	assert(device_object);
 	vm_object_lock(device_object);
 	VM_OBJECT_SET_PRIVATE(device_object, TRUE);
@@ -1218,7 +1218,7 @@ vm_test_collapse_overflow(void)
 	/* create an object for which (int)(size>>PAGE_SHIFT) = 0 */
 	size = 0x400000000000ULL;
 	assert((int)(size >> PAGE_SHIFT) == 0);
-	backing_object = vm_object_allocate(size + PAGE_SIZE);
+	backing_object = vm_object_allocate(size + PAGE_SIZE, VM_MAP_SERIAL_NONE);
 	assert(backing_object);
 	vm_object_reference(backing_object);
 	/* insert a page */
@@ -1234,7 +1234,7 @@ vm_test_collapse_overflow(void)
 	vm_page_insert(m, backing_object, 0);
 	vm_object_unlock(backing_object);
 	/* make it back another object */
-	object = vm_object_allocate(size);
+	object = vm_object_allocate(size, VM_MAP_SERIAL_NONE);
 	assert(object);
 	vm_object_reference(object);
 	object->shadow = backing_object;
@@ -1443,6 +1443,13 @@ create_map(mach_vm_address_t map_start, mach_vm_address_t map_end)
 	ledger_dereference(ledger);  // now retained by pmap
 	vm_map_t map = vm_map_create_options(pmap, map_start, map_end, VM_MAP_CREATE_PAGEABLE);//vm_compute_max_offset
 	assert(map);
+
+#if CONFIG_SPTM
+	/* Ensure the map serial looks fine */
+	if (map->serial_id != pmap->associated_vm_map_serial_id) {
+		panic("Expected a map and its pmap to have exactly the same serial");
+	}
+#endif /* CONFIG_SPTM */
 
 	return map;
 }
@@ -2255,3 +2262,4 @@ vm_get_wimg_mode(int64_t in, int64_t *out)
 	return 0;
 }
 SYSCTL_TEST_REGISTER(vm_get_wimg_mode, vm_get_wimg_mode);
+

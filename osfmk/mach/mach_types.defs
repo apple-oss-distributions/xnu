@@ -722,6 +722,8 @@ type dyld_kernel_image_info_t = struct[40] of MACH_MSG_TYPE_BYTE;
 type dyld_kernel_image_info_array_t = ^array[] of dyld_kernel_image_info_t;
 type dyld_kernel_process_info_t = struct[64] of MACH_MSG_TYPE_BYTE;
 
+type mach_vm_offset_list_t = array[*:512] of mach_vm_offset_t;
+
 #if KERNEL_SERVER
 #ifdef	MACH_KERNEL_PRIVATE
 simport <ipc/ipc_voucher.h>;	/* for voucher conversions */

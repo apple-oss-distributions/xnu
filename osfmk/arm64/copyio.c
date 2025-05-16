@@ -90,6 +90,7 @@ typedef enum {
 	USER_ACCESS_WRITE
 } user_access_direction_t;
 
+
 static inline void
 user_access_enable(__unused user_access_direction_t user_access_direction, pmap_t __unused pmap)
 {
@@ -110,7 +111,7 @@ user_access_disable(__unused user_access_direction_t user_access_direction, pmap
 }
 
 
-#define WRAP_COPYIO_PAN(_dir, _map, _op)                                        \
+#define WRAP_COPYIO_PAN(_dir, _map, _op)                                    \
 	({                                                                      \
 	        int _ret;                                                       \
 	        user_access_enable(_dir, (_map)->pmap);                         \

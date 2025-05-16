@@ -875,11 +875,11 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 	vmk_flags.vm_tag = ref->tag;
 
 	/*
-	 * Mapping memory into the kernel_map using IOMDs use a dedicated range.
+	 * Mapping memory into the kernel_map using IOMDs use the data range.
 	 * Memory being mapped should not contain kernel pointers.
 	 */
 	if (map == kernel_map) {
-		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_IOKIT;
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
 	}
 
 	err = mach_vm_map_kernel(map, &addr, size,

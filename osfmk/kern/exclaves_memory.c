@@ -461,10 +461,7 @@ exclaves_memory_upcall_alloc(uint32_t npages, xnuupcallsv2_pagekind_s kind,
 	    (exclaves_memory_pagekind_t) kind,
 	    EXCLAVES_MEMORY_PAGE_FLAGS_NONE);
 
-	tb_error_t err = u32__v_assign_copy(&pagelist, pages, npages);
-	if (err != TB_ERROR_SUCCESS) {
-		panic("u32__v_assign_copy err %u", err);
-	}
+	u32__v_assign_unowned(&pagelist, pages, npages);
 
 	return completion(pagelist);
 }
@@ -489,10 +486,7 @@ exclaves_memory_upcall_alloc_ext(uint32_t npages, xnuupcallsv2_pageallocflagsv2_
 
 	exclaves_memory_alloc(npages, pages, kind, alloc_flags);
 
-	tb_error_t err = u32__v_assign_copy(&pagelist, pages, npages);
-	if (err != TB_ERROR_SUCCESS) {
-		panic("u32__v_assign_copy err %u", err);
-	}
+	u32__v_assign_unowned(&pagelist, pages, npages);
 
 	return completion(pagelist);
 }

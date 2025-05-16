@@ -278,6 +278,94 @@ forced_unmount_crash_test(void)
 }
 
 static void
+forced_unmount_panic_test(void)
+{
+	char device_identifier[128];
+	char *file_path;
+	int test_file_fd;
+	int ret;
+	char *mapped;
+
+	setup_unmount_image(device_identifier, sizeof(device_identifier));
+	ASSERT(!disk_image_attach(FUNMOUNT_IMAGE, FUNMOUNT_MOUNT_POINT), "attaching and mounting image '%s' failed\n", FUNMOUNT_IMAGE);
+
+	// open file for write
+	file_path = FUNMOUNT_FILE;
+	if ((test_file_fd = open(file_path, O_RDWR)) == -1) {
+		printf("couldn't open file '%s'\n", file_path);
+	}
+	ret = ftruncate(test_file_fd, 12);
+	if (ret < 0) {
+		printf("ftruncate() errno %d\n", errno);
+	}
+	// map it for write
+	mapped = mmap(0, 1024, PROT_WRITE, MAP_SHARED, test_file_fd, 0);;
+	if (mapped == MAP_FAILED) {
+		close(test_file_fd);
+		printf("couldn't mmap file '%s', errno %d\n", file_path, errno);
+	} else {
+		PRINTF("mmap'd file: '%s'\n", file_path);
+	}
+	// add contents to 1st page
+	*mapped = 'A';
+	// flush page
+	ret = msync(mapped, 1024, MS_SYNC | MS_INVALIDATE);
+	if (ret < 0) {
+		printf("msync() error %d\n", errno);
+	}
+	ret = munmap(mapped, 1024);
+	if (ret < 0) {
+		printf("munmap() error %d\n", errno);
+	}
+	close(test_file_fd);
+	// re-open file for read only
+	if ((test_file_fd = open(file_path, O_RDONLY)) == -1) {
+		printf("couldn't open file '%s'\n", file_path);
+	}
+	// map file read-only
+	mapped = mmap(0, 1024, PROT_READ, MAP_SHARED, test_file_fd, 0);
+	if (mapped == MAP_FAILED) {
+		close(test_file_fd);
+		printf("couldn't mmap file '%s' read-only, errno %d\n", file_path, errno);
+	} else {
+		PRINTF("mmap'd file: '%s'\n", file_path);
+	}
+	// close file
+	close(test_file_fd);
+	// page 1st page back in
+	printf("mapped[0] = '%c'\n", mapped[0]);
+	// wire page
+	ret = mlock(mapped, 1024);
+	if (ret < 0) {
+		printf("mlock() errno %d\n", errno);
+	}
+	// force unmount
+	printf("force unmount...\n");
+	ASSERT(!disk_image_eject(device_identifier), "Failed to force unmount device '%s'", device_identifier);
+	// unwire page
+	ret = munlock(mapped, 1024);
+	if (ret < 0) {
+		printf("munlock() errno %d\n", errno);
+	}
+	// force object cache eviction
+	printf("object cache evict\n");
+	fflush(stdout);
+	ret = sysctlbyname("vm.object_cache_evict", NULL, NULL, NULL, 0);
+	if (ret < 0) {
+		printf("sysctl(vm.object_cache_evict) errno %d\n", errno);
+	} else {
+		printf("object cache eviction did not cause a panic!\n");
+	}
+	// crash
+	printf("mapped[0] = '%c'\n", mapped[0]);
+
+	// Cleanup
+	my_system("rm -f " FUNMOUNT_IMAGE);
+	disk_image_eject(device_identifier);
+	rmdir(FUNMOUNT_MOUNT_POINT);
+}
+
+static void
 create_disk_image(const char* image_path, const char* volume_name, bool use_gpt, char* device_name_out, size_t device_len, char* partition_name_out, size_t partition_len)
 {
 	char buf[512];
@@ -410,8 +498,11 @@ main(int argc, char** argv)
 	case 2:
 		ungraft_crash_test();
 		break;
+	case 3:
+		forced_unmount_panic_test();
+		break;
 	default:
-		printf("Invalid test number passed'n");
+		printf("Invalid test number passed (%d)\n", test_to_run);
 		exit(1);
 	}
 }

@@ -250,6 +250,7 @@ int     relookup(struct vnode *dvp, struct vnode **vpp,
 #if CONFIG_UNION_MOUNTS
 int     lookup_traverse_union(vnode_t dvp, vnode_t *new_dvp, vfs_context_t ctx);
 #endif /* CONFIG_UNION_MOUNTS */
+int     lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len);
 void    lookup_compound_vnop_post_hook(int error, vnode_t dvp, vnode_t vp, struct nameidata *ndp, int did_create);
 void    kdebug_lookup(struct vnode *dp, struct componentname *cnp);
 

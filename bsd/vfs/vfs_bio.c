@@ -4359,10 +4359,12 @@ biodone_done:
 vm_offset_t
 buf_kernel_addrperm_addr(void * addr)
 {
+	addr = (void *) VM_KERNEL_STRIP_PTR(addr);
+
 	if ((vm_offset_t)addr == 0) {
 		return 0;
 	} else {
-		return (vm_offset_t)addr + buf_kernel_addrperm;
+		return ML_ADDRPERM((vm_offset_t)addr, buf_kernel_addrperm);
 	}
 }
 

@@ -640,7 +640,7 @@ copy_packet_from_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 
 	if (spkt->pkt_pflags & PKT_F_MBUF_DATA) {
 		ifp_inc_traffic_class_in(fsw->fsw_ifp, spkt->pkt_mbuf);
-		mbuf_free(spkt->pkt_mbuf);
+		mbuf_freem(spkt->pkt_mbuf);
 		KPKT_CLEAR_MBUF_DATA(spkt);
 	} else {
 		fsw_ifp_inc_traffic_class_in_pkt(fsw->fsw_ifp, dph);

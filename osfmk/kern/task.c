@@ -6312,6 +6312,21 @@ task_info(
 		break;
 #endif /* CONFIG_TASK_SUSPEND_STATS && (DEVELOPMENT || DEBUG) */
 	}
+	case TASK_SECURITY_CONFIG_INFO:
+	{
+		task_security_config_info_t             security_config;
+
+		if (*task_info_count < TASK_SECURITY_CONFIG_INFO_COUNT) {
+			error = KERN_INVALID_ARGUMENT;
+			break;
+		}
+
+		security_config = (task_security_config_info_t)task_info_out;
+		security_config->config = (uint32_t)task->security_config.value;
+
+		*task_info_count = TASK_SECURITY_CONFIG_INFO_COUNT;
+		break;
+	}
 	default:
 		error = KERN_INVALID_ARGUMENT;
 	}
@@ -9813,6 +9828,36 @@ task_is_translated(task_t task)
 	return task && proc_is_translated(get_bsdtask_info(task));
 }
 #endif
+
+/* Task runtime security mitigations configuration. */
+#define TASK_SECURITY_CONFIG_HELPER_DEFINE(suffix) \
+	bool task_has_##suffix(task_t task) \
+	{ \
+	        assert(task); \
+	        return (task->security_config. suffix); \
+	} \
+        \
+	void task_set_##suffix(task_t task) \
+	{ \
+	        assert(task);\
+	        task->security_config. suffix = true; \
+	} \
+        \
+	void task_clear_##suffix(task_t task) \
+	{ \
+	        assert(task);\
+	        task->security_config. suffix = false; \
+	}
+
+uint32_t
+task_get_security_config(task_t task)
+{
+	assert(task);
+	return (uint32_t)(task->security_config.value);
+}
+
+TASK_SECURITY_CONFIG_HELPER_DEFINE(hardened_heap)
+TASK_SECURITY_CONFIG_HELPER_DEFINE(tpro)
 
 
 

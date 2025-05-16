@@ -535,10 +535,13 @@ struct machine_timeout_spec {
 };
 
 extern void
-machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *phase_suffix);
+machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *phase_suffix, bool always_enabled);
 
 extern void
 machine_timeout_init(const struct machine_timeout_spec *spec);
+
+extern void
+machine_timeout_init_always_enabled(const struct machine_timeout_spec *spec);
 
 #if DEVELOPMENT || DEBUG
 // Late timeout (re-)initialization, at the end of bsd_init()
@@ -547,7 +550,7 @@ machine_timeout_bsd_init(void);
 #endif /* DEVELOPMENT || DEBUG */
 
 /*!
- * @macro MACHINE_TIMEOUT and MACHINE_TIMEOUT_DEV_WRITEABLE
+ * @macro MACHINE_TIMEOUT, MACHINE_TIMEOUT_ALWAYS_ENABLED, and MACHINE_TIMEOUT_DEV_WRITEABLE
  *
  * @abstract
  * Defines a Machine Timeout that can be overridden and
@@ -583,7 +586,7 @@ machine_timeout_bsd_init(void);
  *     bool skip_predicate (struct machine_timeout_spec const *)
  */
 
-#define _MACHINE_TIMEOUT(var, timeout_name, timeout_default, var_unit, skip_pred) \
+#define _MACHINE_TIMEOUT(var, timeout_name, timeout_default, var_unit, skip_pred, init_fn) \
 	struct machine_timeout_spec \
 	__machine_timeout_spec_ ## var = { \
 	        .ptr = &var, \
@@ -593,16 +596,23 @@ machine_timeout_bsd_init(void);
 	        .skip_predicate = skip_pred, \
 	}; \
 	__STARTUP_ARG(var, __LINE__, TIMEOUTS, STARTUP_RANK_FIRST, \
-	    machine_timeout_init, &__machine_timeout_spec_ ## var)
+	    init_fn, &__machine_timeout_spec_ ## var)
 
 #define MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)       \
 	SECURITY_READ_ONLY_LATE(machine_timeout_t) var = 0;                                     \
-	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
+	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate, machine_timeout_init)
+
+/*
+ * Variant of MACHINE_TIMEOUT that does not get zeroed if wdt == -1 boot arg is set
+ */
+#define MACHINE_TIMEOUT_ALWAYS_ENABLED(var, name, default, unit)       \
+	SECURITY_READ_ONLY_LATE(machine_timeout_t) var = 0;                                     \
+	_MACHINE_TIMEOUT(var, name, default, unit, NULL, machine_timeout_init_always_enabled)
 
 #if DEVELOPMENT || DEBUG
 #define MACHINE_TIMEOUT_DEV_WRITEABLE(var, name, default, unit, skip_predicate)       \
 	machine_timeout_t var = 0; \
-	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)
+	_MACHINE_TIMEOUT(var, name, default, unit, skip_predicate, machine_timeout_init)
 #else
 #define MACHINE_TIMEOUT_DEV_WRITEABLE(var, name, default, unit, skip_predicate) \
 	MACHINE_TIMEOUT(var, name, default, unit, skip_predicate)

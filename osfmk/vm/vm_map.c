@@ -1507,7 +1507,7 @@ vm_map_disable_hole_optimization(vm_map_t map)
 		map->holes_list = NULL;
 		map->holelistenabled = FALSE;
 
-		map->first_free = vm_map_first_entry(map);
+		map->first_free = vm_map_to_entry(map);
 		SAVE_HINT_HOLE_WRITE(map, NULL);
 	}
 }
@@ -1649,6 +1649,32 @@ vm_map_relocate_early_elem(
 #undef relocate
 }
 
+/*
+ * Generate a serial ID to identify a newly allocated vm_map
+ */
+static uintptr_t vm_map_serial_current = 0;
+vm_map_serial_t vm_map_serial_generate(void);
+void vm_map_assign_serial(vm_map_t, vm_map_serial_t);
+
+vm_map_serial_t
+vm_map_serial_generate(void)
+{
+	vm_map_serial_t serial = (void *)os_atomic_inc(&vm_map_serial_current, relaxed);
+	return serial;
+}
+
+void
+vm_map_assign_serial(vm_map_t map, vm_map_serial_t serial)
+{
+	map->serial_id = serial;
+#if CONFIG_SPTM
+	/* Copy through our ID to the pmap (only available on SPTM systems) */
+	if (map->pmap) {
+		map->pmap->associated_vm_map_serial_id = map->serial_id;
+	}
+#endif /* CONFIG_SPTM */
+}
+
 vm_map_t
 vm_map_create_options(
 	pmap_t                  pmap,
@@ -1682,7 +1708,19 @@ vm_map_create_options(
 	result->data_limit      = RLIM_INFINITY;        /* default unlimited */
 	result->user_wire_limit = MACH_VM_MAX_ADDRESS;  /* default limit is unlimited */
 	os_ref_init_count_raw(&result->map_refcnt, &map_refgrp, 1);
+
 	result->pmap = pmap;
+
+	/*
+	 * Immediately give ourselves an ID
+	 * Unless this map is being created as part of a fork, in which case
+	 * the caller will reassign the ID of the parent (so don't waste an
+	 *  increment here).
+	 */
+	if ((options & VM_MAP_CREATE_VIA_FORK) == 0) {
+		vm_map_assign_serial(result, vm_map_serial_generate());
+	}
+
 	result->min_offset = min;
 	result->max_offset = max;
 	result->first_free = vm_map_to_entry(result);
@@ -3149,6 +3187,7 @@ vm_map_enter(
 	vm_map_lock(map);
 	map_locked = TRUE;
 
+
 	if (anywhere) {
 		result = vm_map_locate_space_anywhere(map, size, mask, vmk_flags,
 		    address, &entry);
@@ -3275,7 +3314,7 @@ vm_map_enter(
 
 		if (object == VM_OBJECT_NULL) {
 			assert(!superpage_size);
-			object = vm_object_allocate(size);
+			object = vm_object_allocate(size, map->serial_id);
 			vm_object_lock(object);
 			object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 			VM_OBJECT_SET_TRUE_SHARE(object, FALSE);
@@ -3568,7 +3607,7 @@ vm_map_enter(
 				}
 
 				/* create one vm_object per superpage */
-				sp_object = vm_object_allocate((vm_map_size_t)(entry->vme_end - entry->vme_start));
+				sp_object = vm_object_allocate((vm_map_size_t)(entry->vme_end - entry->vme_start), map->serial_id);
 				vm_object_lock(sp_object);
 				sp_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 				VM_OBJECT_SET_PHYS_CONTIGUOUS(sp_object, TRUE);
@@ -6894,7 +6933,7 @@ vm_map_wire_nested(
 				rc = KERN_INVALID_ARGUMENT;
 				goto done;
 			}
-			VME_OBJECT_SET(entry, vm_object_allocate(size), false, 0);
+			VME_OBJECT_SET(entry, vm_object_allocate(size, map->serial_id), false, 0);
 			VME_OFFSET_SET(entry, (vm_object_offset_t)0);
 			assert(entry->use_pmap);
 		} else if (VME_OBJECT(entry)->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
@@ -10597,7 +10636,8 @@ vm_map_copy_overwrite_unaligned(
 				goto RetryLookup;
 			}
 			dst_object = vm_object_allocate((vm_map_size_t)
-			    entry->vme_end - entry->vme_start);
+			    entry->vme_end - entry->vme_start,
+			    dst_map->serial_id);
 			VME_OBJECT_SET(entry, dst_object, false, 0);
 			VME_OFFSET_SET(entry, 0);
 			assert(entry->use_pmap);
@@ -11100,7 +11140,9 @@ slow_copy:
 				 * allocate a new VM object for this map entry.
 				 */
 				dst_object = vm_object_allocate(
-					entry->vme_end - entry->vme_start);
+					entry->vme_end - entry->vme_start,
+					dst_map->serial_id
+					);
 				dst_offset = 0;
 				VME_OBJECT_SET(entry, dst_object, false, 0);
 				VME_OFFSET_SET(entry, dst_offset);
@@ -13072,7 +13114,7 @@ vm_map_fork_share(
 #endif  /* NO_NESTED_PMAP */
 	} else if (object == VM_OBJECT_NULL) {
 		object = vm_object_allocate((vm_map_size_t)(old_entry->vme_end -
-		    old_entry->vme_start));
+		    old_entry->vme_start), old_map->serial_id);
 		VME_OFFSET_SET(old_entry, 0);
 		VME_OBJECT_SET(old_entry, object, false, 0);
 		old_entry->use_pmap = TRUE;
@@ -13527,7 +13569,8 @@ vm_map_fork(
 	vm_map_reference(old_map);
 	vm_map_lock(old_map);
 
-	map_create_options = 0;
+	/* Note that we're creating a map out of fork() */
+	map_create_options = VM_MAP_CREATE_VIA_FORK;
 	if (old_map->hdr.entries_pageable) {
 		map_create_options |= VM_MAP_CREATE_PAGEABLE;
 	}
@@ -13539,6 +13582,9 @@ vm_map_fork(
 	    old_map->min_offset,
 	    old_map->max_offset,
 	    map_create_options);
+
+	/* Inherit our parent's ID. */
+	vm_map_assign_serial(new_map, old_map->serial_id);
 
 	/* inherit cs_enforcement */
 	vm_map_cs_enforcement_set(new_map, old_map->cs_enforcement);
@@ -14269,7 +14315,7 @@ RetrySubMap:
 				    vm_object_allocate(
 					(vm_map_size_t)
 					(submap_entry->vme_end -
-					submap_entry->vme_start));
+					submap_entry->vme_start), map->serial_id);
 				VME_OBJECT_SET(submap_entry, sub_object, false, 0);
 				VME_OFFSET_SET(submap_entry, 0);
 				assert(!submap_entry->is_sub_map);
@@ -14841,7 +14887,9 @@ protection_failure:
 		VME_OBJECT_SET(entry,
 		    vm_object_allocate(
 			    (vm_map_size_t)(entry->vme_end -
-			    entry->vme_start)), false, 0);
+			    entry->vme_start),
+			    map->serial_id
+			    ), false, 0);
 		VME_OFFSET_SET(entry, 0);
 		assert(entry->use_pmap);
 		vm_map_lock_write_to_read(map);
@@ -17760,7 +17808,7 @@ vm_map_remap_extract(
 						/* nothing to share */
 					} else {
 						assert(copy_offset == 0);
-						copy_object = vm_object_allocate(copy_size);
+						copy_object = vm_object_allocate(copy_size, submap->serial_id);
 						VME_OFFSET_SET(copy_entry, 0);
 						VME_OBJECT_SET(copy_entry, copy_object, false, 0);
 						assert(copy_entry->use_pmap);
@@ -18057,7 +18105,7 @@ vm_map_remap_extract(
 					offset = 0; /* no object => no offset */
 					goto copy_src_entry;
 				}
-				object = vm_object_allocate(entry_size);
+				object = vm_object_allocate(entry_size, map->serial_id);
 				VME_OFFSET_SET(src_entry, 0);
 				VME_OBJECT_SET(src_entry, object, false, 0);
 				assert(src_entry->use_pmap);
@@ -18606,7 +18654,7 @@ vm_map_copy_to_physcopy(
 
 	/* allocate new VM object */
 	size = VM_MAP_ROUND_PAGE(copy_map->size, PAGE_MASK);
-	new_object = vm_object_allocate(size);
+	new_object = vm_object_allocate(size, VM_MAP_SERIAL_NONE);
 	assert(new_object);
 
 	/* allocate new VM map entry */
@@ -21403,6 +21451,7 @@ vm_map_set_tpro(vm_map_t map)
 	(void) map;
 #endif
 }
+
 
 
 /*
@@ -24518,7 +24567,6 @@ vm_map_entry_has_device_pager(vm_map_t map, vm_map_offset_t vaddr)
 	return result;
 }
 
-
 #if MACH_ASSERT
 
 extern int pmap_ledgers_panic;
@@ -24723,4 +24771,10 @@ vm_map_is_map_size_valid(
 		    "(requested %lu bytes)", size);
 	}
 #endif /* __x86_64__ */
+}
+
+vm_map_serial_t
+vm_map_maybe_serial_id(vm_map_t maybe_vm_map)
+{
+	return maybe_vm_map != NULL ? maybe_vm_map->serial_id : VM_MAP_SERIAL_NONE;
 }

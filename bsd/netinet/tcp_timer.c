@@ -1916,6 +1916,18 @@ tcp_remove_timer(struct tcpcb *tp)
 	}
 
 	LIST_REMOVE(&tp->tentry, le);
+	/*
+	 * The use count has been incremented when the PCB
+	 * was placed on the timer list, and needs to be decremented.
+	 * As a safety precaution, we are checking against underflow.
+	 */
+	if (__improbable(tp->t_inpcb->inp_socket->so_usecount == 0)) {
+		TCP_LOG(tp, "%s: inpcb socket so_usecount underflow "
+		    " when removing timer entry\n", __func__);
+	} else {
+		tp->t_inpcb->inp_socket->so_usecount--;
+	}
+
 	tp->t_flags &= ~(TF_TIMER_ONLIST);
 
 	listp->entries--;
@@ -2352,6 +2364,15 @@ tcp_sched_timers(struct tcpcb *tp)
 		}
 
 		if (!TIMER_IS_ON_LIST(tp)) {
+			/*
+			 * Adding the timer entry should constitute an incresed socket use count,
+			 * otherwise the socket use count may reach zero while being referenced
+			 * via the timer entry. If this happens, the timer service routine
+			 * will run into an UAF (use after free) when attempting
+			 * to get the related protocol control block.
+			 */
+			tp->t_inpcb->inp_socket->so_usecount++;
+
 			LIST_INSERT_HEAD(&listp->lhead, te, le);
 			tp->t_flags |= TF_TIMER_ONLIST;
 

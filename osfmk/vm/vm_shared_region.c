@@ -1569,7 +1569,7 @@ vm_shared_region_map_file_setup(
 			 * The size needs to be suitable to map into kernel.
 			 */
 			obj_size = vm_object_round_page(mappings->sms_size);
-			object = vm_object_allocate(obj_size);
+			object = vm_object_allocate(obj_size, kernel_map->serial_id);
 			if (object == VM_OBJECT_NULL) {
 				printf("%s(): for fd==-1 vm_object_allocate() failed\n", __func__);
 				kr = KERN_RESOURCE_SHORTAGE;
@@ -1801,7 +1801,7 @@ vm_shared_region_map_file_setup(
 				 * We have to create the VM object now, so that it can be mapped "copy-on-write".
 				 */
 				obj_size = vm_map_round_page(mappings[i].sms_size, VM_MAP_PAGE_MASK(sr_map));
-				object = vm_object_allocate(obj_size);
+				object = vm_object_allocate(obj_size, sr_map->serial_id);
 				if (object == VM_OBJECT_NULL) {
 					kr = KERN_RESOURCE_SHORTAGE;
 				} else {

@@ -85,6 +85,7 @@
 #include "exclaves_inspection.h"
 #include "exclaves_memory.h"
 #include "exclaves_internal.h"
+#include "exclaves_sensor.h"
 
 LCK_GRP_DECLARE(exclaves_lck_grp, "exclaves");
 
@@ -254,7 +255,11 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	 * If requirements are relaxed during development, tasks with no
 	 * conclaves are also allowed.
 	 */
-	if (task_get_conclave(task) == NULL &&
+	if (operation == EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME) {
+		if (!exclaves_has_priv(task, EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME)) {
+			return KERN_DENIED;
+		}
+	} else if (task_get_conclave(task) == NULL &&
 	    !exclaves_has_priv(task, EXCLAVES_PRIV_KERNEL_DOMAIN) &&
 	    !exclaves_requirement_is_relaxed(EXCLAVES_R_CONCLAVE_RESOURCES)) {
 		return KERN_DENIED;
@@ -735,6 +740,37 @@ notification_resource_lookup_out:
 		if (kr != KERN_SUCCESS && port_name != MACH_PORT_NULL) {
 			mach_port_deallocate(current_space(), port_name);
 		}
+		break;
+	}
+
+
+	case EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (ubuffer == USER_ADDR_NULL || usize == 0 ||
+		    usize != sizeof(struct exclaves_indicator_deadlines)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		struct exclaves_indicator_deadlines udurations;
+		error = copyin(ubuffer, &udurations, usize);
+		if (error) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		kr = exclaves_indicator_min_on_time_deadlines(&udurations);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+
+		error = copyout(&udurations, ubuffer, usize);
+		if (error) {
+			return KERN_INVALID_ADDRESS;
+		}
+
 		break;
 	}
 
@@ -2498,6 +2534,23 @@ exclaves_has_priv(task_t task, exclaves_priv_t priv)
 		return has_entitlement(task, priv,
 		    "com.apple.private.exclaves.boot");
 		/* END IGNORE CODESTYLE */
+
+	case EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME:
+		/*
+		 * If the task was entitled and has been through this path
+		 * before, it will have set the TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS flag.
+		 */
+		if ((task_ro_flags_get(task) & TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS) != 0) {
+			return true;
+		}
+
+		if (has_entitlement(task, priv,
+		    "com.apple.private.exclaves.indicator_min_on_time")) {
+			task_ro_flags_set(task, TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS);
+			return true;
+		}
+
+		return false;
 
 	/* The CONCLAVE HOST priv is always checked by vnode. */
 	case EXCLAVES_PRIV_CONCLAVE_HOST:

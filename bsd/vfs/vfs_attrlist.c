@@ -92,7 +92,7 @@ struct _attrlist_buf {
 
 
 static int
-attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, int flags)
+attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, char *prefix, int prefix_len, int flags)
 {
 	proc_t p = vfs_context_proc(vfs_context_current());
 	int retlen = 0;
@@ -114,8 +114,14 @@ attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, 
 			buf = kalloc_data(buflen, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		}
 
+		/* Add the resolve prefix if provided */
+		if (prefix && prefix_len) {
+			assert(prefix_len + 1 <= buflen);
+			strlcpy(buf, prefix, prefix_len + 1);
+		}
+
 		/* call build_path making sure NOT to use the cache-only behavior */
-		err = build_path(vp, buf, buflen, &retlen, flags, vfs_context_current());
+		err = build_path(vp, buf + prefix_len, buflen - prefix_len, &retlen, flags, vfs_context_current());
 	} while (err == ENOSPC && proc_support_long_paths(p) && (buflen *= 2) && buflen <= MAXLONGPATHLEN);
 	if (err == 0) {
 		if (outbuf) {
@@ -125,7 +131,7 @@ attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, 
 			*outbuflen = buflen;
 		}
 		if (outpathlen) {
-			*outpathlen = retlen - 1;
+			*outpathlen = retlen + prefix_len - 1;
 		}
 	}
 	return err;
@@ -2665,7 +2671,7 @@ struct _attrlist_paths {
 static errno_t
 calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
     ssize_t *varsizep, struct _attrlist_paths *pathsp, const char **vnamep,
-    const char **cnpp, ssize_t *cnlp)
+    const char **cnpp, ssize_t *cnlp, char *pathbuf)
 {
 	int error = 0;
 
@@ -2716,7 +2722,19 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->commonattr & ATTR_CMN_FULLPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, 0);
+		int err;
+		uint32_t resolve_flags = 0;
+		size_t perfix_len = 0;
+
+		if (pathbuf) {
+			err = lookup_check_for_resolve_prefix(pathbuf, PATHBUFLEN, PATHBUFLEN, &resolve_flags, &perfix_len);
+			if (err) {
+				error = err;
+				goto out;
+			}
+		}
+
+		err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, pathbuf, (int)perfix_len, 0);
 		if (err) {
 			error = err;
 			goto out;
@@ -2733,7 +2751,7 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->forkattr & ATTR_CMNEXT_RELPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->relpathptr), &buflen, &pathlen, BUILDPATH_VOLUME_RELATIVE);
+		int err = attrlist_build_path(vp, &(pathsp->relpathptr), &buflen, &pathlen, NULL, 0, BUILDPATH_VOLUME_RELATIVE);
 		if (err) {
 			error = err;
 			goto out;
@@ -2750,7 +2768,7 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->REALpathptr), &buflen, &pathlen, BUILDPATH_NO_FIRMLINK);
+		int err = attrlist_build_path(vp, &(pathsp->REALpathptr), &buflen, &pathlen, NULL, 0, BUILDPATH_NO_FIRMLINK);
 		if (err) {
 			error = err;
 			goto out;
@@ -2788,7 +2806,8 @@ out:
 static errno_t
 vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
     uint64_t options, struct vnode_attr *vap, __unused void *fndesc,
-    vfs_context_t ctx, int is_bulk, enum vtype vtype, ssize_t fixedsize)
+    vfs_context_t ctx, int is_bulk, enum vtype vtype, ssize_t fixedsize,
+    char *pathbuf)
 {
 	struct _attrlist_buf ab;
 	struct _attrlist_paths apaths = {.fullpathptr = NULL, .fullpathlen = 0, .fullpathbuflen = 0,
@@ -2885,7 +2904,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	/*
 	 * Compute variable-space requirements.
 	 */
-	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl);
+	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl, pathbuf);
 	if (error) {
 		goto out;
 	}
@@ -3168,7 +3187,7 @@ vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint6
 
 	error = vfs_attr_pack_internal(mp, vp, uio, alp,
 	    options | FSOPT_REPORT_FULLSIZE, vap, NULL, ctx, 1, v_type,
-	    fixedsize);
+	    fixedsize, NULL);
 
 	if (mp) {
 		vap->va_uid = ouid;
@@ -3200,7 +3219,8 @@ vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options,
 static int
 getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
     user_addr_t attributeBuffer, size_t bufferSize, uint64_t options,
-    enum uio_seg segflg, char* authoritative_name, struct ucred *file_cred)
+    enum uio_seg segflg, char* authoritative_name, struct ucred *file_cred,
+    char *pathbuf)
 {
 	struct vnode_attr *va;
 	kauth_action_t  action;
@@ -3400,7 +3420,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	}
 
 	error = vfs_attr_pack_internal(vp->v_mount, vp, auio, alp, options, va, NULL, ctx,
-	    0, vtype, fixedsize);
+	    0, vtype, fixedsize, pathbuf);
 
 out:
 	if (va_name) {
@@ -3423,6 +3443,7 @@ fgetattrlist(proc_t p, struct fgetattrlist_args *uap, __unused int32_t *retval)
 	int error;
 	struct attrlist al;
 	struct fileproc *fp;
+	mount_t mp;
 
 	ctx = vfs_context_current();
 	vp = NULL;
@@ -3438,6 +3459,13 @@ fgetattrlist(proc_t p, struct fgetattrlist_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 
+	/* Check for invalid or dead mounts. */
+	mp = vp->v_mount;
+	if (!mp || (mp->mnt_lflag & MNT_LDEAD)) {
+		error = EBADF;
+		goto out_vnode_put;
+	}
+
 	/*
 	 * Fetch the attribute request.
 	 */
@@ -3451,7 +3479,7 @@ fgetattrlist(proc_t p, struct fgetattrlist_args *uap, __unused int32_t *retval)
 	    uap->bufferSize, uap->options,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : \
 	    UIO_USERSPACE32), NULL,
-	    fp->fp_glob->fg_cred);
+	    fp->fp_glob->fg_cred, NULL);
 
 out_vnode_put:
 	vnode_put(vp);
@@ -3495,7 +3523,7 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	vp = nd.ni_vp;
 
 	error = getattrlist_internal(ctx, vp, alp, attributeBuffer,
-	    bufferSize, options, segflg, NULL, NOCRED);
+	    bufferSize, options, segflg, NULL, NOCRED, nd.ni_pathbuf);
 
 	/* Retain the namei reference until the getattrlist completes. */
 	nameidone(&nd);
@@ -4012,7 +4040,7 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 		    CAST_USER_ADDR_T(kern_attr_buf), kern_attr_buf_siz,
 		    options | FSOPT_REPORT_FULLSIZE, UIO_SYSSPACE,
 		    CAST_DOWN_EXPLICIT(char *, name_buffer),
-		    NOCRED);
+		    NOCRED, NULL);
 
 		nameidone(&nd);
 

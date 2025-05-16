@@ -428,6 +428,9 @@ struct pmap {
 	uint32_t reserved7[4];
 	void *reserved8;
 	uint8_t reserved9;
+
+	/* The ID of the vm_map that this pmap is backing, if any */
+	vm_map_serial_t associated_vm_map_serial_id;
 };
 
 #define PMAP_VASID(pmap) ((pmap)->asid)

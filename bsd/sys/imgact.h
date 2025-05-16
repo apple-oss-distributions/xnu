@@ -157,10 +157,8 @@ struct image_params {
 #define IMGPF_PLUGIN_HOST_DISABLE_A_KEYS  0x00002000     /* process hosts plugins, disable ptr auth A keys */
 #define IMGPF_HW_TPRO           0x00004000      /* HW support for read-only/read-write trusted paths  */
 #define IMGPF_HARDENED_HEAP     0x00008000      /* enable hardened-heap for the process */
-#define IMGPF_RESERVED_3        0x01000000
 #define IMGPF_ROSETTA           0x10000000      /* load rosetta runtime */
 #define IMGPF_ALT_ROSETTA       0x20000000      /* load alternative rosetta runtime */
-#define IMGPF_RESERVED_2        0x40000000
 #define IMGPF_NOJOP             0x80000000
 
 /*

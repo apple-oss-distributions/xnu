@@ -103,6 +103,7 @@
 #include <kern/smr_hash.h>
 #include <kern/task.h>
 #include <kern/coalition.h>
+#include <kern/cs_blobs.h>
 #include <sys/coalition.h>
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
@@ -1840,7 +1841,7 @@ proc_getcdhash(proc_t p, unsigned char *cdhash)
 	if (p == kernproc) {
 		return EINVAL;
 	}
-	return vn_getcdhash(p->p_textvp, p->p_textoff, cdhash);
+	return vn_getcdhash(p->p_textvp, p->p_textoff, cdhash, NULL);
 }
 
 uint64_t
@@ -3311,9 +3312,10 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 	int error;
 	vnode_t tvp;
 	off_t toff;
-	unsigned char cdhash[SHA1_RESULTLEN];
+	csops_cdhash_t cdhash_info = {0};
 	audit_token_t token;
 	unsigned int upid = 0, uidversion = 0;
+	bool mark_invalid_allowed = false;
 
 	forself = error = 0;
 
@@ -3322,12 +3324,13 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 	}
 	if (pid == proc_selfpid()) {
 		forself = 1;
+		mark_invalid_allowed = true;
 	}
-
 
 	switch (ops) {
 	case CS_OPS_STATUS:
 	case CS_OPS_CDHASH:
+	case CS_OPS_CDHASH_WITH_INFO:
 	case CS_OPS_PIDOFFSET:
 	case CS_OPS_ENTITLEMENTS_BLOB:
 	case CS_OPS_DER_ENTITLEMENTS_BLOB:
@@ -3411,6 +3414,10 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		break;
 	}
 	case CS_OPS_MARKINVALID:
+		if (mark_invalid_allowed == false) {
+			error = EPERM;
+			goto out;
+		}
 		proc_lock(pt);
 		if ((proc_getcsflags(pt) & CS_VALID) == CS_VALID) {           /* is currently valid */
 			proc_csflags_clear(pt, CS_VALID);       /* set invalid */
@@ -3470,16 +3477,36 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		tvp = pt->p_textvp;
 		toff = pt->p_textoff;
 
-		if (tvp == NULLVP || usize != SHA1_RESULTLEN) {
+		if (tvp == NULLVP || usize != sizeof(cdhash_info.hash)) {
 			proc_rele(pt);
 			return EINVAL;
 		}
 
-		error = vn_getcdhash(tvp, toff, cdhash);
+		error = vn_getcdhash(tvp, toff, cdhash_info.hash, &cdhash_info.type);
 		proc_rele(pt);
 
 		if (error == 0) {
-			error = copyout(cdhash, uaddr, sizeof(cdhash));
+			error = copyout(cdhash_info.hash, uaddr, sizeof(cdhash_info.hash));
+		}
+
+		return error;
+
+	case CS_OPS_CDHASH_WITH_INFO:
+
+		/* pt already holds a reference on its p_textvp */
+		tvp = pt->p_textvp;
+		toff = pt->p_textoff;
+
+		if (tvp == NULLVP || usize != sizeof(csops_cdhash_t)) {
+			proc_rele(pt);
+			return EINVAL;
+		}
+
+		error = vn_getcdhash(tvp, toff, cdhash_info.hash, &cdhash_info.type);
+		proc_rele(pt);
+
+		if (error == 0) {
+			error = copyout(&cdhash_info, uaddr, sizeof(cdhash_info));
 		}
 
 		return error;

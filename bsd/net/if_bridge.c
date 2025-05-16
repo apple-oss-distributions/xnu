@@ -176,6 +176,8 @@
 
 #include <os/log.h>
 
+#define _TSO_CSUM       (CSUM_TSO_IPV4 | CSUM_TSO_IPV6)
+
 static struct in_addr inaddr_any = { .s_addr = INADDR_ANY };
 
 
@@ -616,6 +618,11 @@ struct bridge_hostfilter_stats bridge_hostfilter_stats;
 
 typedef uint8_t ether_type_flag_t;
 
+typedef enum {
+	pkt_direction_RX,
+	pkt_direction_TX
+} pkt_direction_t;
+
 static LCK_GRP_DECLARE(bridge_lock_grp, "if_bridge");
 #if BRIDGE_LOCK_DEBUG
 static LCK_ATTR_DECLARE(bridge_lock_attr, 0, 0);
@@ -654,7 +661,7 @@ static errno_t  bridge_iff_output(void *, ifnet_t, protocol_family_t,
 static errno_t  bridge_member_output(struct bridge_softc *sc, ifnet_t ifp,
     mbuf_t *m);
 static int      bridge_enqueue(ifnet_t, ifnet_t, ifnet_t,
-    ether_type_flag_t, mbuf_t, ChecksumOperation);
+    ether_type_flag_t, mbuf_t, ChecksumOperation, pkt_direction_t);
 static mbuf_t   bridge_checksum_offload_list(ifnet_t, struct bridge_iflist *,
     mbuf_t, bool);
 static mbuf_t   bridge_filter_checksum(ifnet_t, struct bridge_iflist * bif,
@@ -665,6 +672,9 @@ static void     bridge_aging_timer(struct bridge_softc *sc);
 
 static void     bridge_broadcast(struct bridge_softc *, struct bridge_iflist *,
     ether_type_flag_t, mbuf_t);
+static void     bridge_broadcast_list(struct bridge_softc *,
+    struct bridge_iflist *, ether_type_flag_t, mbuf_t, pkt_direction_t);
+
 static void     bridge_span(struct bridge_softc *, ether_type_flag_t, struct mbuf *);
 
 static int      bridge_rtupdate(struct bridge_softc *, const uint8_t[ETHER_ADDR_LEN],
@@ -1461,7 +1471,6 @@ _mbuf_get_tso_mss(mbuf_t m)
 {
 	int     mss = 0;
 
-#define _TSO_CSUM       (CSUM_TSO_IPV4 | CSUM_TSO_IPV6)
 	if ((m->m_pkthdr.csum_flags & _TSO_CSUM) != 0) {
 		mss = m->m_pkthdr.tso_segsz;
 	}
@@ -5202,8 +5211,6 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 			goto done;
 		}
 	}
-	*is_large_tcp = true;
-	(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
 	if (mss == 0) {
 		uint32_t            hdr_len;
 		struct tcphdr *     tcp;
@@ -5221,11 +5228,16 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 			BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
 			    "%s: mss %d = len %d / seg cnt %d",
 			    ifp->if_xname, mss, len, seg_cnt);
+			if (mss <= 0) {
+				/* unexpected value */
+				mss = 0;
+				goto done;
+			}
 		} else {
 			mss = ifp->if_mtu - hdr_len
 			    - if_bridge_tso_reduce_mss_tx;
+			assert(mss > 0);
 		}
-		assert(mss > 0);
 		csum_flags = mbuf_tso;
 		if (supports_cksum) {
 			csum_flags |= if_csum;
@@ -5234,6 +5246,8 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		(*mp)->m_pkthdr.csum_flags |= csum_flags;
 		(*mp)->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
 	}
+	*is_large_tcp = true;
+	(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
 	if ((ifp->if_hwassist & if_tso) == 0) {
 		/* need gso if no hardware support */
 		*need_gso = true;
@@ -5259,7 +5273,8 @@ done:
  */
 static int
 bridge_enqueue(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
-    ether_type_flag_t etypef, mbuf_t in_list, ChecksumOperation orig_cksum_op)
+    ether_type_flag_t etypef, mbuf_t in_list, ChecksumOperation orig_cksum_op,
+    pkt_direction_t direction)
 {
 	int             enqueue_error = 0;
 	mbuf_t          next_packet;
@@ -5287,7 +5302,8 @@ bridge_enqueue(ifnet_t bridge_ifp, ifnet_t src_if, ifnet_t dst_if,
 		if (mss != 0) {
 			/* packet is marked for segmentation */
 			check_gso = true;
-		} else if (scan->m_pkthdr.rx_seg_cnt != 0) {
+		} else if (direction == pkt_direction_RX &&
+		    scan->m_pkthdr.rx_seg_cnt != 0) {
 			/* LRO packet */
 			check_gso = true;
 		} else if (ether_type_flag_is_ip(etypef) &&
@@ -5505,7 +5521,7 @@ bridge_member_output(struct bridge_softc *sc, ifnet_t ifp, mbuf_t *data)
 				continue;
 			}
 			(void)bridge_enqueue(bridge_ifp, ifp, dst_if, etypef,
-			    mc, CHECKSUM_OPERATION_COMPUTE);
+			    mc, CHECKSUM_OPERATION_COMPUTE, pkt_direction_TX);
 		}
 		BRIDGE_UNREF(sc);
 
@@ -5536,7 +5552,7 @@ sendunicast:
 	}
 	if (dst_if != mac_nat_ifp) {
 		(void) bridge_enqueue(bridge_ifp, ifp, dst_if, etypef, m,
-		    CHECKSUM_OPERATION_COMPUTE);
+		    CHECKSUM_OPERATION_COMPUTE, pkt_direction_TX);
 	} else {
 		/*
 		 * This is not the original output interface
@@ -5590,7 +5606,7 @@ bridge_output(struct ifnet *ifp, struct mbuf *m)
 		BRIDGE_UNLOCK(sc);
 
 		error = bridge_enqueue(bridge_ifp, NULL, dst_if, etypef, m,
-		    CHECKSUM_OPERATION_FINALIZE);
+		    CHECKSUM_OPERATION_FINALIZE, pkt_direction_TX);
 	}
 
 	return error;
@@ -5922,11 +5938,11 @@ bridge_interface_input_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
 		 * we think it's a large packet, segment it.
 		 */
 		if (info.ip_proto_hdr != NULL &&
-		    (_mbuf_get_tso_mss(scan) != 0 ||
-		    scan->m_pkthdr.rx_seg_cnt > 1 ||
+		    ((bif_uses_virtio && _mbuf_get_tso_mss(scan) != 0) ||
 		    (!bif_uses_virtio &&
+		    (scan->m_pkthdr.rx_seg_cnt > 1 ||
 		    (mbuf_pkthdr_len(scan) >
-		    (bridge_ifp->if_mtu + ETHER_HDR_LEN))))) {
+		    (bridge_ifp->if_mtu + ETHER_HDR_LEN)))))) {
 			mblist          seg;
 
 			seg = gso_tcp_with_info(bridge_ifp, scan, &info,
@@ -6146,7 +6162,8 @@ bridge_broadcast(struct bridge_softc *sc, struct bridge_iflist * sbif,
 			}
 			if (mc != NULL) {
 				(void) bridge_enqueue(bridge_ifp,
-				    NULL, dst_if, etypef, mc, cksum_op);
+				    NULL, dst_if, etypef, mc, cksum_op,
+				    pkt_direction_TX);
 			}
 		}
 
@@ -6203,7 +6220,7 @@ copy_packet_list(mbuf_t m)
  */
 static void
 bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
-    ether_type_flag_t etypef, mbuf_t m)
+    ether_type_flag_t etypef, mbuf_t m, pkt_direction_t direction)
 {
 	bool                    bridge_has_address;
 	ifnet_t                 bridge_ifp;
@@ -6253,7 +6270,7 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 	} else {
 		/*
 		 * sbif is NULL when the bridge interface calls
-		 * bridge_broadcast().
+		 * bridge_broadcast_list() (TBD).
 		 */
 		cksum_op = CHECKSUM_OPERATION_FINALIZE;
 		src_if = NULL;
@@ -6276,7 +6293,7 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 	is_bcast_mcast = IS_BCAST_MCAST(m);
 
 	/* make a copy for the bridge interface */
-	if (is_bcast_mcast && bridge_has_address) {
+	if (sbif != NULL && is_bcast_mcast && bridge_has_address) {
 		mbuf_t  in_list;
 
 		in_list = copy_packet_list(m);
@@ -6369,7 +6386,7 @@ bridge_broadcast_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 			}
 			if (out_m != NULL) {
 				bridge_enqueue(bridge_ifp, src_if, dst_if,
-				    etypef, out_m, cksum_op);
+				    etypef, out_m, cksum_op, direction);
 			}
 		}
 
@@ -6480,7 +6497,7 @@ bridge_forward_list(struct bridge_softc *sc, struct bridge_iflist * sbif,
 	 */
 	if (m != NULL) {
 		bridge_enqueue(bridge_ifp, src_if, dst_if, etypef, m,
-		    cksum_op);
+		    cksum_op, pkt_direction_RX);
 	}
 	return;
 
@@ -6521,7 +6538,7 @@ bridge_span(struct bridge_softc *sc, ether_type_flag_t etypef, struct mbuf *m)
 		}
 
 		(void) bridge_enqueue(sc->sc_ifp, NULL, dst_if, etypef, mc,
-		    CHECKSUM_OPERATION_NONE);
+		    CHECKSUM_OPERATION_NONE, pkt_direction_TX);
 	}
 }
 
@@ -8587,7 +8604,7 @@ bridge_mac_nat_forward_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
 			    dst_if->if_xname, n_lists, count);
 			bridge_enqueue(bridge_ifp, NULL,
 			    dst_if, etypef, list.head,
-			    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
+			    CHECKSUM_OPERATION_CLEAR_OFFLOAD, pkt_direction_RX);
 
 			/* start new list */
 			list.head = list.tail = scan;
@@ -8605,7 +8622,7 @@ bridge_mac_nat_forward_list(ifnet_t bridge_ifp, ether_type_flag_t etypef,
 			    dst_if->if_xname, n_lists, count);
 			bridge_enqueue(bridge_ifp, NULL,
 			    dst_if, etypef, list.head,
-			    CHECKSUM_OPERATION_CLEAR_OFFLOAD);
+			    CHECKSUM_OPERATION_CLEAR_OFFLOAD, pkt_direction_RX);
 		}
 	}
 	return;
@@ -9691,7 +9708,7 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 				/* forward to all members except this one */
 				/* bridge_broadcast_list unlocks */
 				bridge_broadcast_list(sc, bif, etypef,
-				    ip_bcast);
+				    ip_bcast, pkt_direction_RX);
 			} else {
 				BRIDGE_UNLOCK(sc);
 			}
@@ -9740,7 +9757,8 @@ bridge_input_list(struct bridge_softc * sc, ifnet_t ifp,
 		m = copy_packet_list(list.head);
 		if (m != NULL) {
 			/* bridge_broadcast_list unlocks */
-			bridge_broadcast_list(sc, bif, etypef, m);
+			bridge_broadcast_list(sc, bif, etypef, m,
+			    pkt_direction_RX);
 		} else {
 			BRIDGE_UNLOCK(sc);
 		}
@@ -10009,7 +10027,6 @@ m_seg(struct mbuf *m0, int hdr_len, int mss, char * hdr2_buf __sized_by_or_null(
 		n = 1;
 		goto done;
 	}
-
 	if (hdr2_buf == NULL || hdr2_len <= 0) {
 		hdr2_buf = NULL;
 		hdr2_len = 0;
@@ -10301,13 +10318,15 @@ static mblist
 gso_ip_tcp(ifnet_t ifp, mbuf_t m0, struct gso_ip_tcp_state *state, bool is_tx)
 {
 	struct mbuf *m;
+	int orig_mss;
 	int mss = 0;
 #ifdef GSO_STATS
 	int total_len = m0->m_pkthdr.len;
 #endif /* GSO_STATS */
 	mblist  seg;
+	bool tso_with_gso = false;
 
-	mss = _mbuf_get_tso_mss(m0);
+	orig_mss = mss = _mbuf_get_tso_mss(m0);
 	if (mss == 0 && !is_tx) {
 		uint8_t seg_cnt = m0->m_pkthdr.rx_seg_cnt;
 
@@ -10349,18 +10368,31 @@ gso_ip_tcp(ifnet_t ifp, mbuf_t m0, struct gso_ip_tcp_state *state, bool is_tx)
 			uint32_t        if_tso_max;
 
 			if_tso_max = get_if_tso_mtu(ifp, is_ipv4);
-			mss = if_tso_max - state->ip_hlen - state->tcp_hlen;
+			mss = if_tso_max - state->ip_hlen - state->tcp_hlen
+			    - ETHER_HDR_LEN;
+			tso_with_gso = true;
 		}
+	}
+	if (!tso_with_gso) {
+		/* clear TSO flags */
+		m0->m_pkthdr.csum_flags &= ~_TSO_CSUM;
 	}
 	seg = m_seg(m0, state->hlen, mss, 0, 0);
 	if (seg.head == NULL || seg.head->m_nextpkt == NULL) {
 		return seg;
 	}
-	BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
-	    "%s %s mss %d nsegs %d",
-	    ifp->if_xname,
-	    is_tx ? "TX" : "RX",
-	    mss, seg.count);
+	if (tso_with_gso) {
+		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+		    "%s TX gso size %d mss %d nsegs %d",
+		    ifp->if_xname,
+		    mss, orig_mss, seg.count);
+	} else {
+		BRIDGE_LOG(LOG_DEBUG, BR_DBGF_CHECKSUM,
+		    "%s %s mss %d nsegs %d",
+		    ifp->if_xname,
+		    is_tx ? "TX" : "RX",
+		    mss, seg.count);
+	}
 #ifdef GSO_STATS
 	GSOSTAT_SET_MAX(tcp.gsos_max_mss, mss);
 	GSOSTAT_SET_MIN(tcp.gsos_min_mss, mss);
@@ -10414,7 +10446,7 @@ gso_tcp_with_info(ifnet_t ifp, mbuf_t m, ip_packet_info_t info_p,
 	    info_p->ip_hlen + info_p->ip_opt_len,
 	    info_p->ip_hdr, info_p->ip_m0_len, tcp);
 	csum_flags = is_ipv4 ? CSUM_DELAY_DATA : CSUM_DELAY_IPV6_DATA; /* XXX */
-	m->m_pkthdr.csum_flags = csum_flags;
+	m->m_pkthdr.csum_flags |= csum_flags;
 	m->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
 	return gso_ip_tcp(ifp, m, &state, is_tx);
 }

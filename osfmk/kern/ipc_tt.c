@@ -375,7 +375,7 @@ ipc_task_enable(
 		return;
 	}
 
-	assert(task->map->owning_task == task); /* verify vm_map_setup called */
+	assert(task_is_a_corpse(task) || task->map->owning_task == task); /* verify vm_map_setup called */
 	assert(!task->ipc_active || task_is_a_corpse(task));
 	task->ipc_active = true;
 

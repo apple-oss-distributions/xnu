@@ -88,7 +88,8 @@ typedef struct _load_result {
 	is_64bit_addr           : 1,
 	    is_64bit_data           : 1,
 	    custom_stack            : 1,
-	    is_rosetta              : 1;
+	    is_rosetta              : 1,
+	    is_hardened_process     : 1;
 	unsigned int            csflags;
 	unsigned char           uuid[16];
 	mach_vm_address_t       min_vm_addr;

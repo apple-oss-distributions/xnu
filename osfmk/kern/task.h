@@ -178,6 +178,18 @@ struct task_pend_token {
 typedef struct task_pend_token task_pend_token_s;
 typedef struct task_pend_token *task_pend_token_t;
 
+struct task_security_config {
+	union {
+		struct {
+			uint8_t hardened_heap: 1,
+			    tpro :1,
+			reserved: 1;
+		};
+		uint8_t value;
+	};
+};
+
+typedef struct task_security_config task_security_config_s;
 
 struct task_watchports;
 #include <bank/bank_internal.h>
@@ -186,7 +198,6 @@ struct task_watchports;
 struct proc;
 struct proc_ro;
 #endif
-
 
 struct task {
 	/* Synchronization/destruction information */
@@ -363,6 +374,9 @@ struct task {
 #define TFRO_HAS_KD_ACCESS              0x02000000                      /* Access to the kernel exclave resource domain  */
 #endif /* CONFIG_EXCLAVES */
 #define TFRO_FREEZE_EXCEPTION_PORTS     0x04000000                      /* Setting new exception ports on the task/thread is disallowed */
+#if CONFIG_EXCLAVES
+#define TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS     0x08000000               /* Access to sensor minimum on time call  */
+#endif /* CONFIG_EXCLAVES */
 
 /*
  * Task is running within a 64-bit address space.
@@ -616,6 +630,8 @@ struct task {
 	/* Auxiliary code-signing information */
 	uint64_t task_cs_auxiliary_info;
 
+	/* Runtime security mitigations */
+	task_security_config_s security_config;
 };
 
 ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, void *);
@@ -1245,6 +1261,22 @@ struct _task_ledger_indices {
 };
 
 /*
+ * Each runtime security mitigation that we support for userland processes
+ * is tracked in the task security configuration and managed by the following
+ * helpers.
+ */
+#define TASK_SECURITY_CONFIG_HELPER_DECLARE(suffix) \
+	extern bool task_has_##suffix(task_t); \
+	extern void task_set_##suffix(task_t); \
+	extern void task_clear_##suffix(task_t)
+
+extern uint32_t task_get_security_config(task_t);
+
+TASK_SECURITY_CONFIG_HELPER_DECLARE(hardened_heap);
+TASK_SECURITY_CONFIG_HELPER_DECLARE(tpro);
+
+
+/*
  * Many of the task ledger entries use a reduced feature set
  * (specifically they just use LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE)
  * and are stored in a smaller entry structure.
@@ -1553,7 +1585,6 @@ extern kern_return_t task_get_suspend_sources_kdp(task_t task, task_suspend_sour
 #if CONFIG_ROSETTA
 extern bool task_is_translated(task_t task);
 #endif
-
 
 
 #ifdef MACH_KERNEL_PRIVATE

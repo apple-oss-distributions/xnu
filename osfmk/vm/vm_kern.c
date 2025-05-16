@@ -117,7 +117,6 @@ static TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges",
 btlog_t kmem_outlier_log;
 #endif /* DEBUG || DEVELOPMENT */
 
-__startup_data static vm_map_size_t iokit_range_size;
 __startup_data static vm_map_size_t data_range_size;
 __startup_data static vm_map_size_t ptr_range_size;
 __startup_data static vm_map_size_t sprayqtn_range_size;
@@ -913,7 +912,7 @@ kmem_alloc_guard_internal(
 		object = compressor_object;
 		vm_object_reference(object);
 	} else {
-		object = vm_object_allocate(map_size);
+		object = vm_object_allocate(map_size, map->serial_id);
 		vm_object_lock(object);
 		vm_object_set_size(object, map_size, size);
 		/* stabilize the object to prevent shadowing */
@@ -3970,8 +3969,6 @@ kmem_add_extra_claims(void)
 	ptr_range_size = round_page(ptr_range_size);
 	sprayqtn_range_size = round_page(sprayqtn_range_size);
 
-	iokit_range_size = 0;
-
 	/* Less any necessary allocation padding... */
 	ptr_range_size = kmem_allocation_to_claim_size(ptr_range_size);
 	sprayqtn_range_size = kmem_allocation_to_claim_size(sprayqtn_range_size);
@@ -4004,22 +4001,11 @@ kmem_add_extra_claims(void)
 	data_range_size = largest_free_size - sprayqtn_allocation_size -
 	    ptr_total_allocation_size;
 
-#if defined(ARM_LARGE_MEMORY)
-	/*
-	 * Reserve space for our dedicated IOKit carveout.
-	 * Currently, we carve off a quarter of the data region.
-	 */
-	iokit_range_size = round_page(data_range_size / 4);
-	data_range_size -= kmem_claim_to_allocation_size(
-		iokit_range_size, /* known_last */ false);
-#endif /* defined(ARM_LARGE_MEMORY) */
-
 	/* Less any necessary allocation padding... */
 	data_range_size = kmem_allocation_to_claim_size(data_range_size);
 
 	/* Check: our allocations should all still fit in the free space */
 	assert(sprayqtn_allocation_size + ptr_total_allocation_size +
-	    kmem_claim_to_allocation_size(iokit_range_size, /* known_last */ false) +
 	    kmem_claim_to_allocation_size(data_range_size, /* known_last */ false) <=
 	    largest_free_size);
 
@@ -4030,21 +4016,6 @@ kmem_add_extra_claims(void)
 		.kc_flags = KC_NO_ENTRY,
 	};
 	kmem_claims[kmem_claim_count++] = kmem_spec_sprayqtn;
-
-	/*
-	 * If !defined(ARM_LARGE_MEMORY), KMEM_RANGE_ID_IOKIT is coalesced into the data range.
-	 * This is to minimize wasted translation tables in constrained environments.
-	 * The coalescing happens during kmem_scramble_ranges.
-	 */
-#if defined(ARM_LARGE_MEMORY)
-	struct kmem_range_startup_spec kmem_spec_iokit = {
-		.kc_name = "kmem_iokit_range",
-		.kc_range = &kmem_ranges[KMEM_RANGE_ID_IOKIT],
-		.kc_size = iokit_range_size,
-		.kc_flags = KC_NO_ENTRY,
-	};
-	kmem_claims[kmem_claim_count++] = kmem_spec_iokit;
-#endif /* defined(ARM_LARGE_MEMORY) */
 
 	struct kmem_range_startup_spec kmem_spec_data = {
 		.kc_name = "kmem_data_range",
@@ -4194,14 +4165,6 @@ kmem_scramble_ranges(void)
 	}
 
 	/*
-	 * If we're not on a large memory system KMEM_RANGE_ID_IOKIT acts as a synonym for KMEM_RANGE_ID_DATA.
-	 * On large memory systems KMEM_RANGE_ID_IOKIT is a dedicated carveout.
-	 */
-#if !defined(ARM_LARGE_MEMORY)
-	kmem_ranges[KMEM_RANGE_ID_IOKIT] = kmem_ranges[KMEM_RANGE_ID_DATA];
-#endif /* !defined(ARM_LARGE_MEMORY) */
-
-	/*
 	 * Now that we are done assigning all the ranges, reset
 	 * kmem_ranges[KMEM_RANGE_ID_NONE]
 	 */
@@ -4244,12 +4207,6 @@ kmem_range_init(void)
 	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address + range_adjustment;
 	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address =
 	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address;
-
-	range_adjustment = iokit_range_size >> 3;
-	kmem_large_ranges[KMEM_RANGE_ID_IOKIT].min_address =
-	    kmem_ranges[KMEM_RANGE_ID_IOKIT].min_address + range_adjustment;
-	kmem_large_ranges[KMEM_RANGE_ID_IOKIT].max_address =
-	    kmem_ranges[KMEM_RANGE_ID_IOKIT].max_address;
 
 	range_adjustment = data_range_size >> 3;
 	kmem_large_ranges[KMEM_RANGE_ID_DATA].min_address =
@@ -4643,10 +4600,12 @@ vm_kernel_addrperm_external(
 	vm_offset_t addr,
 	vm_offset_t *perm_addr)
 {
+	addr = VM_KERNEL_STRIP_UPTR(addr);
+
 	if (VM_KERNEL_IS_SLID(addr)) {
 		*perm_addr = VM_KERNEL_UNSLIDE(addr);
 	} else if (VM_KERNEL_ADDRESS(addr)) {
-		*perm_addr = addr + vm_kernel_addrperm_ext;
+		*perm_addr = ML_ADDRPERM(addr, vm_kernel_addrperm_ext);
 	} else {
 		*perm_addr = addr;
 	}

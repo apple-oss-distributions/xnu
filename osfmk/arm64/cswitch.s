@@ -211,15 +211,11 @@
 .macro set_process_dependent_keys_and_sync_context	thread, new_key, tmp_key, cpudatap, wsync
 
 
-#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) || defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC)
 	ldr		\cpudatap, [\thread, ACT_CPUDATAP]
-#endif /* defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) || defined(HAS_APPLE_PAC) */
+#endif /* defined(HAS_APPLE_PAC) */
 
-#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING)
-	ldrb	\wsync, [\cpudatap, CPU_SYNC_ON_CSWITCH]
-#else /* defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING) */
 	mov		\wsync, #0
-#endif
 
 #if CSWITCH_ROP_KEYS
 	ldr		\new_key, [\thread, TH_ROP_PID]
@@ -250,9 +246,7 @@ Lskip_jop_keys_\@:
 #if HAS_PARAVIRTUALIZED_PAC
 1:	/* guests need to clear the sync flag even after skipping the isb, in case they synced via hvc instead */
 #endif
-#if defined(ERET_IS_NOT_CONTEXT_SYNCHRONIZING)
 	strb	wzr, [\cpudatap, CPU_SYNC_ON_CSWITCH]
-#endif
 1:
 .endmacro
 

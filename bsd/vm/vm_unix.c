@@ -136,6 +136,18 @@ SYSCTL_INT(_vm, OID_AUTO, map_debug_apple_protect, CTLFLAG_RW | CTLFLAG_LOCKED, 
 
 #if DEVELOPMENT || DEBUG
 
+extern int vm_object_cache_evict_all(void);
+static int
+sysctl_vm_object_cache_evict SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, req)
+	(void) vm_object_cache_evict_all();
+	return 0;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, object_cache_evict, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+    0, 0, &sysctl_vm_object_cache_evict, "I", "");
+
 static int
 sysctl_kmem_alloc_contig SYSCTL_HANDLER_ARGS
 {
@@ -3380,6 +3392,15 @@ SYSCTL_INT(_vm, OID_AUTO, fbdp_no_panic, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_A
 
 extern uint64_t cluster_direct_write_wired;
 SYSCTL_QUAD(_vm, OID_AUTO, cluster_direct_write_wired, CTLFLAG_RD | CTLFLAG_LOCKED, &cluster_direct_write_wired, "");
+
+extern uint64_t vm_object_pageout_not_on_queue;
+extern uint64_t vm_object_pageout_not_pageable;
+extern uint64_t vm_object_pageout_pageable;
+extern uint64_t vm_object_pageout_active_local;
+SYSCTL_QUAD(_vm, OID_AUTO, object_pageout_not_on_queue, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_object_pageout_not_on_queue, "");
+SYSCTL_QUAD(_vm, OID_AUTO, object_pageout_not_pageable, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_object_pageout_not_pageable, "");
+SYSCTL_QUAD(_vm, OID_AUTO, object_pageout_pageable, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_object_pageout_pageable, "");
+SYSCTL_QUAD(_vm, OID_AUTO, object_pageout_active_local, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_object_pageout_active_local, "");
 
 
 #if DEVELOPMENT || DEBUG

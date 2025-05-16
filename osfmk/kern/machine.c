@@ -138,6 +138,7 @@ TUNABLE(long, wdt, "wdt", 0);
 
 struct machine_info     machine_info;
 
+
 /* Forwards */
 static void
 processor_offline(void * parameter, __unused wait_result_t result);
@@ -972,12 +973,30 @@ ml_io_reset_timeouts_phys(vm_offset_t ioaddr_base, unsigned int size)
 #endif /* ML_IO_TIMEOUTS_ENABLED */
 }
 
+
+#if DEVELOPMENT || DEBUG
+static int ml_io_read_test_mode;
+#endif
+
 unsigned long long
 ml_io_read(uintptr_t vaddr, int size)
 {
 	unsigned long long result = 0;
 	unsigned char s1;
 	unsigned short s2;
+
+#if DEVELOPMENT || DEBUG
+	/* For testing */
+	extern void IODelay(int);
+	if (__improbable(ml_io_read_test_mode)) {
+		if (vaddr == 1) {
+			IODelay(100);
+			return 0;
+		} else if (vaddr == 2) {
+			return 0;
+		}
+	}
+#endif /* DEVELOPMENT || DEBUG */
 
 #ifdef ML_IO_VERIFY_UNCACHEABLE
 	uintptr_t paddr = pmap_verify_noncacheable(vaddr);
@@ -1127,6 +1146,20 @@ ml_io_read64(uintptr_t vaddr)
 {
 	return ml_io_read(vaddr, 8);
 }
+
+
+uint64_t
+ml_io_read_cpu_reg(uintptr_t vaddr, int sz, __unused int logical_cpu)
+{
+	uint64_t val;
+
+
+	val = ml_io_read(vaddr, sz);
+
+
+	return val;
+}
+
 
 /* ml_io_write* */
 
@@ -1329,9 +1362,9 @@ ml_broadcast_cpu_event(enum cpu_event event, unsigned int cpu_or_cluster)
 // definition)
 
 void
-machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *suffix)
+machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *suffix, bool always_enabled)
 {
-	if (wdt == -1 || (spec->skip_predicate != NULL && spec->skip_predicate(spec))) {
+	if (!always_enabled && (wdt == -1 || (spec->skip_predicate != NULL && spec->skip_predicate(spec)))) {
 		// This timeout should be disabled.
 		os_atomic_store_wide((uint64_t*)spec->ptr, 0, relaxed);
 		return;
@@ -1518,7 +1551,13 @@ machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char c
 void
 machine_timeout_init(const struct machine_timeout_spec *spec)
 {
-	machine_timeout_init_with_suffix(spec, "");
+	machine_timeout_init_with_suffix(spec, "", false);
+}
+
+void
+machine_timeout_init_always_enabled(const struct machine_timeout_spec *spec)
+{
+	machine_timeout_init_with_suffix(spec, "", true);
 }
 
 #if DEVELOPMENT || DEBUG
@@ -1530,8 +1569,8 @@ machine_timeout_bsd_init(void)
 {
 	char const * const __unused mt_suffix = "-b";
 #if SCHED_HYGIENE_DEBUG
-	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(interrupt_masked_timeout), mt_suffix);
-	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(sched_preemption_disable_threshold_mt), mt_suffix);
+	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(interrupt_masked_timeout), mt_suffix, false);
+	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(sched_preemption_disable_threshold_mt), mt_suffix, false);
 
 	/*
 	 * The io timeouts can inherit from interrupt_masked_timeout.
@@ -1694,3 +1733,24 @@ ml_io_timeout_test(void)
 	return KERN_SUCCESS;
 }
 #endif /* CONFIG_XNUPOST */
+
+#if DEVELOPMENT || DEBUG
+static int
+ml_io_read_cpu_reg_test(__unused int64_t in, int64_t *out)
+{
+	printf("Testing ml_io_read_cpu_reg()...\n");
+
+	ml_io_read_test_mode = 1;
+	boolean_t istate = ml_set_interrupts_enabled_with_debug(false, false);
+	(void) ml_io_read_cpu_reg((uintptr_t)1, 8, 1);
+	(void) ml_io_read_cpu_reg((uintptr_t)2, 8, 1);
+	ml_set_interrupts_enabled_with_debug(istate, false);
+	(void) ml_io_read_cpu_reg((uintptr_t)1, 8, 1);
+	(void) ml_io_read_cpu_reg((uintptr_t)2, 8, 1);
+	ml_io_read_test_mode = 0;
+
+	*out = 0;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(ml_io_read_cpu_reg, ml_io_read_cpu_reg_test);
+#endif /* DEVELOPMENT || DEBUG */

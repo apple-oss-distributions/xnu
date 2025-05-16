@@ -169,7 +169,7 @@ bsd/net/if_bridge.c			optional if_bridge bound-checks
 bsd/net/bridgestp.c			optional bridgestp
 bsd/net/if.c				optional networking bound-checks
 bsd/net/init.c				optional sockets bound-checks
-bsd/net/dlil.c				optional networking bound-checks-pending
+bsd/net/dlil.c				optional networking bound-checks
 bsd/net/dlil_ctl.c          optional networking bound-checks
 bsd/net/dlil_input.c         optional networking bound-checks
 bsd/net/dlil_output.c         optional networking bound-checks
@@ -206,7 +206,7 @@ bsd/net/kpi_interfacefilter.c		optional networking bound-checks
 bsd/net/net_str_id.c			optional networking bound-checks
 bsd/net/if_utun.c			optional networking bound-checks
 bsd/net/if_ipsec.c			optional ipsec bound-checks
-bsd/net/necp.c				optional necp
+bsd/net/necp.c				optional necp bound-checks
 bsd/net/necp_client.c			optional necp bound-checks
 bsd/net/network_agent.c			optional networking bound-checks
 bsd/net/bloom_filter.c			optional networking bound-checks

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -109,7 +109,7 @@ int
     nat464_synthesize_ipv6(ifnet_t, const struct in_addr *, struct in6_addr *);
 
 int
-    nat464_synthesize_ipv4(ifnet_t, const struct in6_addr *, struct in_addr *);
+    nat464_synthesize_ipv4(ifnet_t, const struct in6_addr *, struct in_addr *, bool *);
 
 int
     nat464_translate_64(pbuf_t *, int, uint8_t, uint8_t *, uint8_t, struct in_addr,

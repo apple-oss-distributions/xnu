@@ -156,6 +156,7 @@ struct scenario {
 	bool no_recordfile;
 	pid_t target_pid;
 	bool target_kernel;
+	bool nocheck_recordfile;
 	uint64_t since_timestamp;
 	uint32_t size_hint;
 	dt_stat_time_t timer;
@@ -267,6 +268,61 @@ retry: ;
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(written, "wrote stackshot to file");
 
 		fclose(f);
+
+		// the xnu lldbmacros include a kcdata dumper which is used by
+		// panic triage and other things to process the recorded data
+		// from panics.  With `-s foo.ips`, this generates a panic
+		// report similar.  It's really important that this continues to
+		// work.
+		//
+		// We also ship the same code as /usr/local/bin/kcdata.  To make
+		// sure the *.ips continues to work without aborting or otherwise
+		// tripping over the current data being output by xnu, we do a
+		// `kcdata.py -s /dev/null` run on the *first* kcdata we get for
+		// a given test, and save the stdout/err to files that get
+		// reported in the test report.  Typically it will tell you the
+		// shared cache UUID and maybe complain about missing exclaves
+		// data.
+		//
+		// This only works on full stackshots, so we skip it for DELTAs,
+		// and BridgeOS is missing python, so we make sure everything we
+		// need is executable before trying
+#define PYTHON3_PATH "/usr/local/bin/python3"
+#define KCDATA_PATH "/usr/local/bin/kcdata"
+		if (!(scenario->flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) &&
+		    !scenario->nocheck_recordfile &&
+		    access(PYTHON3_PATH, X_OK) == 0 && access(KCDATA_PATH, X_OK) == 0) {
+
+			scenario->nocheck_recordfile = true; // don't do this more than once per scenario
+			char outpath[MAXPATHLEN];
+			strlcpy(outpath, scenario->name, sizeof(outpath));
+			strlcat(outpath, ".kcdpy-out", sizeof(outpath));
+			char errpath[MAXPATHLEN];
+			strlcpy(errpath, scenario->name, sizeof(errpath));
+			strlcat(errpath, ".kcdpy-err", sizeof(errpath));
+			T_QUIET; T_ASSERT_POSIX_ZERO(dt_resultfile(outpath, sizeof(outpath)), "create py-out path");
+			T_QUIET; T_ASSERT_POSIX_ZERO(dt_resultfile(errpath, sizeof(errpath)), "create py-err path");
+
+			char *launch_tool_args[] = {
+				KCDATA_PATH,
+				"-s",
+				"/dev/null",
+				sspath,
+				NULL
+			};
+			pid_t child_pid = -1;
+			int ret = dt_launch_tool(&child_pid, launch_tool_args, false, outpath, errpath);
+			T_WITH_ERRNO; T_EXPECT_EQ(ret, 0, "dt_launch_tool(\"" KCDATA_PATH " -s /dev/null kcdata\") should succeed");
+			if (ret == 0) {
+				int exit_status = 0, signum = 0;
+				ret = dt_waitpid(child_pid, &exit_status, &signum, 60);
+				T_QUIET; T_EXPECT_EQ(ret, 1, "dt_waitpid() on "KCDATA_PATH);
+				if (ret == 1) {
+					T_EXPECT_EQ(exit_status, 0, "kcdata.py should successfully run against our output");
+					T_QUIET; T_EXPECT_EQ(signum, 0, "kcdata.py shouldn't get a signal");
+				}
+			}
+		}
 	}
 	cb(buf, size);
 	if (compress_ok) {

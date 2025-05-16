@@ -629,6 +629,26 @@ vm_read_overwrite(
 	return mach_vm_read_overwrite(map, address, size, data, data_size);
 }
 
+/*
+ * mach_vm_read_overwrite -
+ */
+
+kern_return_t
+mach_vm_update_pointers_with_remote_tags(
+	__unused vm_map_t map,
+	__unused mach_vm_offset_list_t in_pointer_list,
+	__unused mach_msg_type_number_t in_pointer_listCnt,
+	__unused mach_vm_offset_list_t out_pointer_list,
+	__unused mach_msg_type_number_t *out_pointer_listCnt)
+{
+	if (!in_pointer_list || !out_pointer_list || in_pointer_listCnt >= 512) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (!map || !map->pmap) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_FAILURE;
+}
 
 /*
  * mach_vm_write -

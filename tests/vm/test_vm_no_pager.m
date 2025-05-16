@@ -329,3 +329,12 @@ T_DECL(vm_no_pager_ungraft, "test correct detection and propagation of reason fo
 	current_expected_triage_string = UNGRAFTED_ERROR;
 	run_test("2", argc, argv);
 }
+
+T_DECL(vm_no_pager_force_unmount_evict, "test object cache eviction when not having a pager (forced unmount)",
+	T_META_IGNORECRASHES(".*test_vm_no_pager.*"),
+	T_META_ENABLED(!TARGET_OS_BRIDGE),
+	T_META_ASROOT(true))
+{
+	current_expected_triage_string = FORCED_UNMOUNT_ERROR;
+	run_test("3", argc, argv);
+}

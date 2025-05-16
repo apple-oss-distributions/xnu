@@ -123,8 +123,16 @@ struct proc_delegated_signal_info {
 #define PROC_FLAG_APPLICATION 0x1000000 /* Process is an application */
 #define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION /* Process is an application */
 #define PROC_FLAG_ROSETTA 0x2000000 /* Process is running translated under Rosetta */
-#define PROC_FLAG_SEC_ENABLED 0x4000000
-#define PROC_FLAG_SEC_BYPASS_ENABLED 0x8000000
+
+/*
+ * Security config.
+ * These flags are currently folded inside pbi_flags, but per-feature policies should
+ * likely move elsewhere.
+ */
+#define PROC_FLAG_SEC_ENABLED                   0x04000000
+#define PROC_FLAG_SEC_BYPASS_ENABLED            0x08000000
+#define PROC_FLAG_HARDENED_HEAP_ENABLED         0x10000000
+#define PROC_FLAG_TPRO_ENABLED                  0x20000000
 
 /* keep in sync with KQ_* in sys/eventvar.h */
 #define PROC_KQUEUE_WORKQ       0x0040

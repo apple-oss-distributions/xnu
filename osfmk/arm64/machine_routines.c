@@ -924,7 +924,7 @@ void
 machine_signal_idle_deferred(
 	processor_t processor)
 {
-	cpu_signal_deferred(processor_to_cpu_datap(processor));
+	cpu_signal_deferred(processor_to_cpu_datap(processor), SIGPdeferred);
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_DEFERRED_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
 }
 
@@ -932,7 +932,7 @@ void
 machine_signal_idle_cancel(
 	processor_t processor)
 {
-	cpu_signal_cancel(processor_to_cpu_datap(processor));
+	cpu_signal_cancel(processor_to_cpu_datap(processor), SIGPdeferred);
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_CANCEL_AST), processor->cpu_id, 0 /* nop */, 0, 0, 0);
 }
 

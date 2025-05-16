@@ -239,6 +239,28 @@ exclaves_sensor_status(mach_port_t sensor_port, uint64_t flags,
 }
 
 kern_return_t
+exclaves_indicator_min_on_time(mach_port_t port, uint64_t flags,
+    uint64_t *camera_indicator, uint64_t *mic_indicator, uint64_t *faceid_indicator)
+{
+	if ((camera_indicator == NULL) || (mic_indicator == NULL) || (faceid_indicator == NULL)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	struct exclaves_indicator_deadlines indicator = {
+		.version = 1
+	};
+
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(SENSOR_MIN_ON_TIME, 0);
+	kern_return_t kr = EXCLAVES_CTL_TRAP(port, opf, flags, (mach_vm_address_t)&indicator, sizeof(indicator), 0, 0, 0);
+	if (kr == KERN_SUCCESS) {
+		*camera_indicator = indicator.camera_indicator;
+		*mic_indicator = indicator.mic_indicator;
+		*faceid_indicator = indicator.faceid_indicator;
+	}
+	return kr;
+}
+
+kern_return_t
 exclaves_notification_create(__unused mach_port_t port, const char *name,
     uint64_t *notification_id)
 {

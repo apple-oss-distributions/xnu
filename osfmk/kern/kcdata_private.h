@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,58 +25,5 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-
-#if CONFIG_EXCLAVES
-
 #pragma once
 
-#include <mach/exclaves.h>
-#include <mach/kern_return.h>
-
-#include <stdint.h>
-
-__BEGIN_DECLS
-
-/*!
- * @function exclaves_sensor_copy
- *
- * @abstract
- * Allow a copy from an aribtrated audio memory segment
- *
- * @param buffer
- * Identifies which arbitrated memory buffer to operate on
- *
- * @param size1
- * The length in bytes of the data to be copied
- *
- * @param offset1
- * Offset in bytes of the data to be copied
- *
- * @param size2
- * The length in bytes of the data to be copied
- *
- * @param offset2
- * Offset in bytes of the data to be copied
- *
- * @param sensor_status
- * Out parameter filled with the sensor status.
- *
- * @result
- * KERN_SUCCESS or mach system call error code.
- */
-kern_return_t
-exclaves_sensor_copy(uint32_t buffer, uint64_t size1,
-    uint64_t offset1, uint64_t size2, uint64_t offset2,
-    exclaves_sensor_status_t *sensor_status);
-
-/*!
- * Returns the minimum on time deadlines for various sensors
- * @param deadlines out parameter filled with indicator deadlines
- */
-kern_return_t
-exclaves_indicator_min_on_time_deadlines(struct exclaves_indicator_deadlines *deadlines);
-
-
-__END_DECLS
-
-#endif /* CONFIG_EXCLAVES */

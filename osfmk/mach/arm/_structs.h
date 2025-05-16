@@ -657,25 +657,25 @@ _STRUCT_ARM_SME_STATE
 _STRUCT_ARM_SVE_Z_STATE
 {
 	char            __z[16][256];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SVE_P_STATE struct __darwin_arm_sve_p_state
 _STRUCT_ARM_SVE_P_STATE
 {
 	char            __p[16][256 / 8];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SME_ZA_STATE struct __darwin_arm_sme_za_state
 _STRUCT_ARM_SME_ZA_STATE
 {
 	char            __za[4096];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SME2_STATE struct __darwin_arm_sme2_state
 _STRUCT_ARM_SME2_STATE
 {
 	char            __zt0[64];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 #else /* !__DARWIN_UNIX03 */
 #define _STRUCT_ARM_SME_STATE struct arm_sme_state
 _STRUCT_ARM_SME_STATE
@@ -689,25 +689,25 @@ _STRUCT_ARM_SME_STATE
 _STRUCT_ARM_SVE_Z_STATE
 {
 	char            z[16][256];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SVE_P_STATE struct arm_sve_p_state
 _STRUCT_ARM_SVE_P_STATE
 {
 	char            p[16][256 / 8];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SME_ZA_STATE struct arm_sme_za_state
 _STRUCT_ARM_SME_ZA_STATE
 {
 	char            za[4096];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 
 #define _STRUCT_ARM_SME2_STATE struct arm_sme2_state
 _STRUCT_ARM_SME2_STATE
 {
 	char            zt0[64];
-} __attribute__((aligned(_Alignof(unsigned int))));
+} __attribute__((aligned(4)));
 #endif /* __DARWIN_UNIX03 */
 
 /*

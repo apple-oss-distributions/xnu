@@ -187,6 +187,14 @@ vm_phantom_cache_add_ghost(vm_page_t m)
 	if (vm_phantom_cache_num_entries == 0) {
 		return;
 	}
+	if (object->pager == MEMORY_OBJECT_NULL) {
+		/*
+		 * This object must have lost its memory object due to a force-unmount
+		 * or ungraft, for example;  this page won't come back, so no need to
+		 * track it.
+		 */
+		return;
+	}
 
 	pg_mask = pg_masks[(m->vmp_offset >> PAGE_SHIFT) & VM_GHOST_PAGE_MASK];
 

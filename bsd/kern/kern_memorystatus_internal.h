@@ -316,6 +316,13 @@ _memstat_proc_can_idle_exit(proc_t p)
 }
 
 static inline bool
+_memstat_proc_shutdown_on_clean(proc_t p)
+{
+	return _memstat_proc_is_tracked(p) &&
+	       (p->p_memstat_dirty & P_DIRTY_SHUTDOWN_ON_CLEAN);
+}
+
+static inline bool
 _memstat_proc_has_priority_assertion(proc_t p)
 {
 	return p->p_memstat_state & P_MEMSTAT_PRIORITY_ASSERTION;

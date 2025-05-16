@@ -6158,7 +6158,8 @@ int
 ubc_cs_getcdhash(
 	vnode_t         vp,
 	off_t           offset,
-	unsigned char   *cdhash)
+	unsigned char   *cdhash,
+	uint8_t         *type)
 {
 	struct cs_blob  *blobs, *blob;
 	off_t           rel_offset;
@@ -6183,8 +6184,14 @@ ubc_cs_getcdhash(
 		/* we didn't find a blob covering "offset" */
 		ret = EBADEXEC; /* XXX any better error ? */
 	} else {
-		/* get the SHA1 hash of that blob */
+		/* get the CDHash of that blob */
 		bcopy(blob->csb_cdhash, cdhash, sizeof(blob->csb_cdhash));
+
+		/* get the type of the CDHash */
+		if (type != NULL) {
+			*type = blob->csb_cd->hashType;
+		}
+
 		ret = 0;
 	}
 

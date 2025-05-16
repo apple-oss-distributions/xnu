@@ -937,7 +937,31 @@ posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_
 
 	psattr = *(_posix_spawnattr_t *)attr;
 	sec_flags = (posix_spawn_secflag_options)(flags);
-	sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE;
+
+	if (!(sec_flags & POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE) &&
+	    !(sec_flags & POSIX_SPAWN_SECFLAG_EXPLICIT_REQUIRE_ENABLE)) {
+		/*
+		 * For a long time we've had this unconditional setting
+		 * of POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE whenever this
+		 * function is called. This setting makes little sense
+		 * in face of a request to explicitly disable (in fact, that's
+		 * a combo that is explicitly refused by the kernel) and
+		 * completely defeats the purpose of EXPLICIT_REQUIRE_ENABLE.
+		 * To not risk breaking test environments that may incorrectly
+		 * rely on this behavior, we single out the DISABLE and EXPLICIT_REQUIRE cases
+		 * and proceed otherwise setting the flag.
+		 */
+		sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE;
+	}
+
+	/*
+	 * Inheritance used to be the internal default, so we maintain legacy
+	 * behavior in this API, as Xcode and internal tests expect.
+	 */
+	if (!(sec_flags & POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE_INHERIT)) {
+		sec_flags |= POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE_INHERIT;
+	}
+
 	psattr->psa_sec_flags = (uint16_t)sec_flags;
 
 	return 0;

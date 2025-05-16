@@ -1500,6 +1500,32 @@ LEXT(fill32_nt)
 
 #if defined(HAS_APPLE_PAC)
 
+/*
+ * vm_offset_t ml_addrperm_pacga(vm_offset_t addr)
+ *
+ * Permutes a 64bit address to a random 64bit value. Lowest
+ * bit is forced to 1, to distinguish from a NULL pointer.
+ *
+ * Expected to be called only with non static kernel addresses.
+ *
+ * Should only be called with canonicalized kernel addresses, no PAC
+ * signature, no TAGS.
+ */
+	.text
+	.align 2
+	.globl EXT(ml_addrperm_pacga)
+LEXT(ml_addrperm_pacga)
+	ARM64_PROLOG
+	mov    w17, #PACGA_TAG_ADDRPERM
+	pacga  x16, x17, x0
+	/* Force the output to not be NULL, so debug can tell them apart */
+	orr    x16, x16, #0x1
+	mov    w17, #(0x10 | PACGA_TAG_ADDRPERM)
+	/* pacga puts the output in the top 32bits */
+	pacga  x0, x17, x0
+	/* combine the two outputs into a 64bit value, with lowest bit set to 1 */
+	orr    x0, x16, x0, lsr #32
+	ret
 
 /*
  * ptrauth_utils_sign_blob_generic(const void * ptr, size_t len_bytes, uint64_t data, int flags)

@@ -380,9 +380,7 @@ main(int     argc,
 #endif /* defined(HAS_APPLE_PAC) */
 
 
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	DECLARE("CPU_SYNC_ON_CSWITCH", offsetof(cpu_data_t, sync_on_cswitch));
-#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 
 #if HIBERNATION
 	DECLARE("HIBHDR_STACKOFFSET", offsetof(IOHibernateImageHeader, restore1StackOffset));

@@ -420,9 +420,6 @@ vm_guard_is_sec_policy(uint32_t flavor)
  * - OOBs on the allocation is carefully considered and sufficiently
  *   addressed.
  *
- * @const KMEM_RANGE_ID_IOKIT
- * Range containing memory mappings belonging to IOKit.
- *
  * @const KMEM_RANGE_ID_DATA
  * Range containing allocations that are bags of bytes and contain no
  * pointers.
@@ -433,7 +430,6 @@ __enum_decl(vm_map_range_id_t, uint8_t, {
 	KMEM_RANGE_ID_PTR_1,
 	KMEM_RANGE_ID_PTR_2,
 	KMEM_RANGE_ID_SPRAYQTN,
-	KMEM_RANGE_ID_IOKIT,
 	KMEM_RANGE_ID_DATA,
 
 	KMEM_RANGE_ID_FIRST   = KMEM_RANGE_ID_PTR_0,

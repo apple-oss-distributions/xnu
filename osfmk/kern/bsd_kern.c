@@ -438,8 +438,8 @@ swap_task_map(task_t task, thread_t thread, vm_map_t map)
 	task_lock(task);
 	mp_disable_preemption();
 
-	/* verify that the map has been activated if the task is enabled for IPC access */
-	assert(!task->ipc_active || (map->owning_task == task));
+	/* verify that the map has been activated if the task is enabled for IPC access and is not a corpse */
+	assert(!task->ipc_active || task_is_a_corpse(task) || (map->owning_task == task));
 
 	old_map = task->map;
 	thread->map = task->map = map;

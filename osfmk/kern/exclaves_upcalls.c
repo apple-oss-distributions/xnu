@@ -68,6 +68,9 @@
 #define EXCLAVES_ID_TIGHTBEAM_UPCALL \
     ((exclaves_id_t)XNUPROXY_UPCALL_TIGHTBEAM)
 
+#define EXCLAVES_ID_TIGHTBEAM_PMM_UPCALL_V2 \
+    ((exclaves_id_t)XNUPROXY_PMM_UPCALL_TIGHTBEAM_V2)
+
 #define EXCLAVES_ID_TIGHTBEAM_UPCALL_V2 \
     ((exclaves_id_t)XNUPROXY_UPCALL_TIGHTBEAM_V2)
 
@@ -322,15 +325,9 @@ static const xnuupcalls_xnuupcalls__server_s exclaves_tightbeam_upcalls = {
 	/* END IGNORE CODESTYLE */
 };
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-parameter"
-static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
+static const xnuupcallsv2_memoryupcallsprivate__server_s exclaves_tightbeam_memory_upcalls_v2 = {
 	/* BEGIN IGNORE CODESTYLE */
 	/* Uncrustify doesn't deal well with Blocks. */
-	.helloupcall = ^(const uint64_t arg, tb_error_t (^completion)(uint64_t)) {
-		return exclaves_helloupcall(arg, completion);
-	},
-
 	.alloc = ^(const uint32_t npages, xnuupcallsv2_pagekind_s kind,
 	    tb_error_t (^completion)(xnuupcallsv2_pagelist_s)) {
 		return exclaves_memory_upcall_alloc(npages, kind, completion);
@@ -348,6 +345,19 @@ static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
 	.free_ext = ^(const xnuupcallsv2_pagelist_s pages, xnuupcallsv2_pagefreeflagsv2_s flags, tb_error_t (^completion)(void)) {
 		return exclaves_memory_upcall_free_ext(pages, flags, completion);
 	},
+	/* END IGNORE CODESTYLE */
+};
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
+	/* BEGIN IGNORE CODESTYLE */
+	/* Uncrustify doesn't deal well with Blocks. */
+	.helloupcall = ^(const uint64_t arg, tb_error_t (^completion)(uint64_t)) {
+		return exclaves_helloupcall(arg, completion);
+	},
+
+    /* Unset memoryupcalls handlers */
 
 	.root = ^(const uint8_t exclaveid[_Nonnull 32],
 	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_root__result_s)) {
@@ -590,6 +600,10 @@ exclaves_upcall_init(void)
 		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_TIGHTBEAM_UPCALL,
 		TB_ENDPOINT_OPTIONS_NONE);
 
+	tb_endpoint_t tb_pmm_upcall_v2_ep = tb_endpoint_create_with_value(
+		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_TIGHTBEAM_PMM_UPCALL_V2,
+		TB_ENDPOINT_OPTIONS_NONE);
+
 	tb_endpoint_t tb_upcall_v2_ep = tb_endpoint_create_with_value(
 		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_TIGHTBEAM_UPCALL_V2,
 		TB_ENDPOINT_OPTIONS_NONE);
@@ -598,11 +612,17 @@ exclaves_upcall_init(void)
 #pragma clang diagnostic ignored "-Wcast-qual" /* FIXME: rdar://103647654 */
 	tb_error_t error = xnuupcalls_xnuupcalls__server_start(tb_upcall_ep,
 	    (xnuupcalls_xnuupcalls__server_s *)&exclaves_tightbeam_upcalls);
-	tb_error_t error2 = xnuupcallsv2_xnuupcalls__server_start(tb_upcall_v2_ep,
+	tb_error_t error2 = xnuupcallsv2_memoryupcallsprivate__server_start(
+		tb_pmm_upcall_v2_ep,
+		(xnuupcallsv2_memoryupcallsprivate__server_s*)&exclaves_tightbeam_memory_upcalls_v2);
+	tb_error_t error3 = xnuupcallsv2_xnuupcalls__server_start(tb_upcall_v2_ep,
 	    (xnuupcallsv2_xnuupcalls__server_s *)&exclaves_tightbeam_upcalls_v2);
 #pragma clang diagnostic pop
 
-	return (error == TB_ERROR_SUCCESS && error2 == TB_ERROR_SUCCESS) ? KERN_SUCCESS : KERN_FAILURE;
+	return (error == TB_ERROR_SUCCESS
+	       && error2 == TB_ERROR_SUCCESS
+	       && error3 == TB_ERROR_SUCCESS)
+	       ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 /* Unslid pointers defining the range of code which triggers upcall handlers */

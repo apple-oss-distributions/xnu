@@ -174,7 +174,7 @@ extern uint64_t roots_installed;
 #define FP_MAX_NUM_TO_EVALUATE (50)
 
 /* Timeout for all processors responding to debug crosscall */
-MACHINE_TIMEOUT(debug_ack_timeout, "debug-ack", 240000, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT_ALWAYS_ENABLED(debug_ack_timeout, "debug-ack", 240000, MACHINE_TIMEOUT_UNIT_TIMEBASE);
 
 /* Forward functions definitions */
 void panic_display_times(void);

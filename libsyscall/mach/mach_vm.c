@@ -413,3 +413,14 @@ vm_purgable_control(
 	           control,
 	           state);
 }
+
+kern_return_t
+mach_vm_update_pointers_with_remote_tags(
+	mach_port_name_t        target,
+	mach_vm_offset_list_t in_pointer_list,
+	mach_msg_type_number_t in_pointer_listCnt,
+	mach_vm_offset_list_t out_pointer_list,
+	mach_msg_type_number_t *out_pointer_listCnt)
+{
+	return _kernelrpc_mach_vm_update_pointers_with_remote_tags(target, in_pointer_list, in_pointer_listCnt, out_pointer_list, out_pointer_listCnt);
+}

@@ -3416,6 +3416,21 @@ return_from_scan:
 			} else {
 				VM_PAGEOUT_DEBUG(vm_pageout_inactive_error, 1);
 			}
+			if (m->vmp_pmapped) {
+				int refmod;
+
+				/*
+				 * If this page was file-backed and wired while its pager
+				 * was lost (during a forced unmount, for example), there
+				 * could still be some pmap mappings that need to be
+				 * cleaned up before we can free the page.
+				 */
+				refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m));
+				if ((refmod & VM_MEM_MODIFIED) &&
+				    !m->vmp_dirty) {
+					SET_PAGE_DIRTY(m, FALSE);
+				}
+			}
 reclaim_page:
 			if (vm_pageout_deadlock_target) {
 				VM_PAGEOUT_DEBUG(vm_pageout_scan_inactive_throttle_success, 1);
@@ -5918,7 +5933,7 @@ vm_object_upl_request(
 	if (cntrl_flags & UPL_SET_LITE) {
 		upl->map_object = object;
 	} else {
-		upl->map_object = vm_object_allocate(size);
+		upl->map_object = vm_object_allocate(size, object->vmo_provenance);
 		vm_object_lock(upl->map_object);
 		/*
 		 * No neeed to lock the new object: nobody else knows
@@ -6754,7 +6769,7 @@ REDISCOVER_ENTRY:
 
 			VME_OBJECT_SET(entry,
 			    vm_object_allocate((vm_size_t)
-			    vm_object_round_page((entry->vme_end - entry->vme_start))),
+			    vm_object_round_page((entry->vme_end - entry->vme_start)), map->serial_id),
 			    false, 0);
 			VME_OFFSET_SET(entry, 0);
 			assert(entry->use_pmap);
@@ -7257,7 +7272,10 @@ process_upl_to_enter:
 
 		size = upl_adjusted_size(upl, VM_MAP_PAGE_MASK(map));
 		object = upl->map_object;
-		upl->map_object = vm_object_allocate(vm_object_round_page(size));
+		upl->map_object = vm_object_allocate(
+			vm_object_round_page(size),
+			/* Provenance is copied from the object we're shadowing */
+			object->vmo_provenance);
 
 		vm_object_lock(upl->map_object);
 

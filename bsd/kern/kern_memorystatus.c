@@ -312,7 +312,7 @@ _memstat_write_memlimit_to_ledger_locked(proc_t p, bool is_active, bool drop_loc
 #endif /* (XNU_TARGET_OS_IOS && !XNU_TARGET_OS_XR) */
 #define MEMORYSTATUS_REAPER_MIN_AGE_SECS_DEFAULT 300
 #define MEMORYSTATUS_REAPER_MAX_PRIORITY_DEFAULT JETSAM_PRIORITY_IDLE
-#define MEMORYSTATUS_REAPER_RESCAN_SECS_DEFAULT 300
+#define MEMORYSTATUS_REAPER_RESCAN_SECS_DEFAULT 30
 #define MEMORYSTATUS_REAPER_SENTINAL_VALUE_MEANING_USE_DEFAULT -1
 
 #define MEMORYSTATUS_REAPER_REAP_RELAUNCH_MASK_UNKNOWN (P_MEMSTAT_RELAUNCH_HIGH << 1)
@@ -3394,6 +3394,7 @@ memorystatus_dirty_track(proc_t p, uint32_t pcontrol)
 	boolean_t defer_now = FALSE;
 	int ret = 0;
 	int priority;
+	bool kill = false;
 	memstat_priority_options_t priority_options =
 	    MEMSTAT_PRIORITY_OPTIONS_NONE;
 
@@ -3478,6 +3479,14 @@ memorystatus_dirty_track(proc_t p, uint32_t pcontrol)
 		defer_now = TRUE;
 	}
 
+	if (pcontrol & PROC_DIRTY_SHUTDOWN_ON_CLEAN) {
+		p->p_memstat_dirty |= P_DIRTY_SHUTDOWN_ON_CLEAN;
+
+		if (_memstat_proc_is_tracked(p) && !_memstat_proc_is_dirty(p)) {
+			kill = true;
+		}
+	}
+
 	memorystatus_log_info(
 		"%s [%d] enrolled in ActivityTracking tracked %d / idle-exit %d / defer %d / dirty %d",
 		proc_best_name(p), proc_getpid(p),
@@ -3505,7 +3514,13 @@ memorystatus_dirty_track(proc_t p, uint32_t pcontrol)
 	memstat_update_priority_locked(p, priority, priority_options);
 
 exit:
-	proc_list_unlock();
+	if (kill && proc_ref(p, true) == p) {
+		proc_list_unlock();
+		psignal(p, SIGKILL);
+		proc_rele(p);
+	} else {
+		proc_list_unlock();
+	}
 
 	return ret;
 }
@@ -3593,6 +3608,9 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 		}
 		task_ledger_settle_dirty_time(t);
 		task_set_dirty_start(t, 0);
+		if (_memstat_proc_shutdown_on_clean(p)) {
+			kill = true;
+		}
 	} else if (!was_dirty && now_dirty) {
 		priority = p->p_memstat_requestedpriority;
 		task_set_dirty_start(t, mach_absolute_time());
@@ -3604,17 +3622,14 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 
 	memstat_update_priority_locked(p, priority, MEMSTAT_PRIORITY_OPTIONS_NONE);
 
-	if (kill) {
-		if (proc_ref(p, true) == p) {
-			proc_list_unlock();
-			psignal(p, SIGKILL);
-			proc_list_lock();
-			proc_rele(p);
-		}
-	}
-
 exit:
-	proc_list_unlock();
+	if (kill && proc_ref(p, true) == p) {
+		proc_list_unlock();
+		psignal(p, SIGKILL);
+		proc_rele(p);
+	} else {
+		proc_list_unlock();
+	}
 
 	return ret;
 }
@@ -3918,8 +3933,7 @@ memstat_kill_idle_process(memorystatus_kill_cause_t cause,
 			break;
 		}
 
-		if ((_memstat_proc_can_idle_exit(p) && !_memstat_proc_is_dirty(p)) ||
-		    (_memstat_proc_is_managed(p) && !_memstat_proc_has_priority_assertion(p))) {
+		if ((p->p_memstat_dirty & (P_DIRTY_ALLOW_IDLE_EXIT | P_DIRTY_IS_DIRTY | P_DIRTY_TERMINATED)) == (P_DIRTY_ALLOW_IDLE_EXIT)) {
 			if (current_time >= p->p_memstat_idledeadline) {
 				p->p_memstat_dirty |= P_DIRTY_TERMINATED;
 				p = proc_ref(p, true);
@@ -6492,8 +6506,7 @@ memorystatus_kill_top_process(bool any, bool sort_flag, uint32_t cause, os_reaso
 
 #if !CONFIG_JETSAM
 		if (max_priority == JETSAM_PRIORITY_IDLE &&
-		    !((_memstat_proc_can_idle_exit(p) && !_memstat_proc_is_dirty(p)) ||
-		    (_memstat_proc_is_managed(p) && !_memstat_proc_has_priority_assertion(p)))) {
+		    ((p->p_memstat_dirty & (P_DIRTY_ALLOW_IDLE_EXIT | P_DIRTY_IS_DIRTY | P_DIRTY_TERMINATED)) != (P_DIRTY_ALLOW_IDLE_EXIT))) {
 			/*
 			 * This process is in the idle band but is not clean+idle-exitable or
 			 * managed+assertion-less. Skip it.
@@ -9448,8 +9461,7 @@ memstat_get_idle_proccnt(void)
 	for (proc_t p = memorystatus_get_first_proc_locked(&bucket, FALSE);
 	    p != PROC_NULL;
 	    p = memorystatus_get_next_proc_locked(&bucket, p, FALSE)) {
-		if ((_memstat_proc_can_idle_exit(p) && !_memstat_proc_is_dirty(p)) ||
-		    (_memstat_proc_is_managed(p) && !_memstat_proc_has_priority_assertion(p))) {
+		if ((p->p_memstat_dirty & (P_DIRTY_ALLOW_IDLE_EXIT | P_DIRTY_IS_DIRTY | P_DIRTY_TERMINATED)) == (P_DIRTY_ALLOW_IDLE_EXIT)) {
 			count++;
 		}
 	}

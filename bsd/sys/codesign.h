@@ -58,6 +58,7 @@
 #define CS_OPS_CLEAR_LV     15  /* clear the library validation flag */
 #define CS_OPS_DER_ENTITLEMENTS_BLOB 16  /* get der entitlements blob */
 #define CS_OPS_VALIDATION_CATEGORY 17   /* get process validation category */
+#define CS_OPS_CDHASH_WITH_INFO 18       /* get code directory hash with info */
 
 #define CS_MAX_TEAMID_LEN       64
 

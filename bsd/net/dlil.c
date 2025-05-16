@@ -915,7 +915,22 @@ dlil_attach_flowswitch_nexus(ifnet_t ifp)
 		return FALSE;
 	}
 	bzero(&nexus_fsw, sizeof(nexus_fsw));
-	if (!ifnet_is_attached(ifp, 1)) {
+
+	/*
+	 * A race can happen between a thread creating a flowswitch and another thread
+	 * detaching the interface (also destroying the flowswitch).
+	 *
+	 * ifnet_datamov_begin() is used here to force dlil_quiesce_and_detach_nexuses()
+	 * (called by another thread) to wait until this function finishes so the
+	 * flowswitch can be cleaned up by dlil_detach_flowswitch_nexus().
+	 *
+	 * If ifnet_is_attached() is used instead, dlil_quiesce_and_detach_nexuses()
+	 * would not wait (because ifp->if_nx_flowswitch isn't assigned) and the
+	 * created flowswitch would be left hanging and ifnet_detach_final() would never
+	 * wakeup because the existence of the flowswitch prevents the ifnet's ioref
+	 * from being released.
+	 */
+	if (!ifnet_datamov_begin(ifp)) {
 		os_log(OS_LOG_DEFAULT, "%s: %s not attached",
 		    __func__, ifp->if_xname);
 		goto done;
@@ -928,7 +943,7 @@ dlil_attach_flowswitch_nexus(ifnet_t ifp)
 			ifnet_lock_done(ifp);
 		}
 	}
-	ifnet_decr_iorefcnt(ifp);
+	ifnet_datamov_end(ifp);
 
 done:
 	return attached;
@@ -5366,11 +5381,8 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 
 	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_IF_ATTACHED, NULL, 0, FALSE);
 
-	if (dlil_verbose) {
-		DLIL_PRINTF("%s: attached%s\n", if_name(ifp),
-		    (dl_if->dl_if_flags & DLIF_REUSE) ? " (recycled)" : "");
-	}
-
+	os_log(OS_LOG_DEFAULT, "%s: attached%s\n", if_name(ifp),
+	    (dl_if->dl_if_flags & DLIF_REUSE) ? " (recycled)" : "");
 	return 0;
 }
 

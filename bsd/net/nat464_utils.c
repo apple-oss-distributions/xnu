@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -183,14 +183,16 @@ nat464_synthesize_ipv6(ifnet_t ifp, const struct in_addr *addrv4, struct in6_add
 
 /* Synthesize ipv4 from ipv6 */
 int
-nat464_synthesize_ipv4(ifnet_t ifp, const struct in6_addr *addr, struct in_addr *addrv4)
+nat464_synthesize_ipv4(ifnet_t ifp, const struct in6_addr *addr,
+    struct in_addr *addrv4, bool * translate_p)
 {
 	struct ipv6_prefix nat64prefixes[NAT64_MAX_NUM_PREFIXES];
 	int error = 0, i = 0;
+	bool translate = false;
 
 	/* Below call is not optimized as it creates a copy of prefixes */
 	if ((error = ifnet_get_nat64prefix(ifp, nat64prefixes)) != 0) {
-		return error;
+		goto done;
 	}
 
 	for (i = 0; i < NAT64_MAX_NUM_PREFIXES; i++) {
@@ -214,7 +216,8 @@ nat464_synthesize_ipv4(ifnet_t ifp, const struct in6_addr *addr, struct in_addr 
 	 * we already checked that above.
 	 */
 	if (memcmp((const struct in6_addr *__indexable)addr, &prefix, prefix_len) != 0) {
-		return -1;
+		/* it's not the NAT64 prefix, so let it pass */
+		goto done;
 	}
 
 	switch (prefix_len) {
@@ -249,6 +252,9 @@ nat464_synthesize_ipv4(ifnet_t ifp, const struct in6_addr *addr, struct in_addr 
 		clat_log2((LOG_DEBUG, "%s desynthesized to %s\n", __func__,
 		    inet_ntop(AF_INET, (void *)addrv4, buf, sizeof(buf))));
 	}
+	translate = true;
+done:
+	*translate_p = translate;
 	return error;
 }
 
@@ -961,8 +967,14 @@ nat464_translate_proto(pbuf_t *pbuf, struct nat464_addr *osrc,
 			hlen2 = (uint16_t)(ip2off + (iph2->ip_hl << 2));
 			tot_len2 = ntohs(iph2->ip_len);
 
-			/* Destination in outer IP should be Source in inner IP */
-			VERIFY(IN_ARE_ADDR_EQUAL(&odst->natv4addr, &iph2->ip_src));
+			/*
+			 * Destination in outer IP should be Source in inner IP,
+			 * otherwise the ICMP is likely errnoneous.
+			 */
+			if (!IN_ARE_ADDR_EQUAL(&odst->natv4addr, &iph2->ip_src)) {
+				return NT_DROP;
+			}
+
 			if (nat464_translate_icmp_ip(pbuf, ip2off, &tot_len,
 			    &hlen2, iph2->ip_p, iph2->ip_ttl, tot_len2,
 			    (struct nat464_addr *)ndst, (struct nat464_addr *)nsrc,

@@ -661,6 +661,29 @@ exclaves_sensor_status(mach_port_t sensor_port, uint64_t flags,
     exclaves_sensor_status_t *sensor_status);
 
 /*!
+ * @function exclaves_indicator_min_on_time
+ *
+ * @abstract
+ * Get time remaining until minimum on time is satisfied for all sensor types.
+ * The return value for each indicator type is a future clock tick on the Global time base
+ * if the minimum on time is not satisfied, and 0 otherwise.
+ *
+ * @param port Reserved, must be MACH_PORT_NULL for now.
+ * @param flags Reserved, must be 0 for now.
+ * @param camera_indicator Out parameter filled with remaining camera indicator time to meet minimum on time
+ * @param mic_indicator Out parameter filled with remaining microphone indicator time to meet minimum on time
+ * @param faceid Out parameter filled with remaining Face ID indicator time to meet minimum on time
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+
+SPI_AVAILABLE(macos(15.5), ios(18.5), tvos(18.5), watchos(11.5), visionos(2.5))
+kern_return_t
+exclaves_indicator_min_on_time(mach_port_t port, uint64_t flags,
+    uint64_t *camera_indicator, uint64_t *mic_indicator, uint64_t *faceid);
+
+/*!
  * @function exclaves_launch_conclave
  *
  * @abstract
@@ -926,6 +949,7 @@ exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
 kern_return_t
 exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
     exclaves_sensor_status_t *sensor_status);
+
 /*!
  * @function exclaves_sensor_status
  *
@@ -948,20 +972,35 @@ exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
     exclaves_sensor_status_t *sensor_status);
 
 /*!
- * @function exclaves_display_healthcheck_rate
+ * @function exclaves_sensor_tick_rate
  *
  * @abstract
- * Update the rate of the display healthcheck based on the specified
- * display update rate
+ * Set the fire rate of the timer that ticks the EIC periodically.
+ * This should only be called by the brightness stack to adjust the rate at which
+ * LED indicators can get new brightness values.
  *
- * @param ns
- * The rate in nanoseconds.
- * Note: This value may be be rounded to the nearest rate supported and not used
- * as-is.
+ * @param rate_hz
+ * Timer rate in Hz.
  *
  * @result
  * KERN_SUCCESS or mach system call error code.
  */
+kern_return_t
+exclaves_sensor_tick_rate(uint64_t rate_hz);
+
+/*!
+ * @function exclaves_display_healthcheck_rate
+ *
+ * @abstract
+ * Deprecated, no longer does anything.
+ *
+ * @param ns
+ * Unused.
+ *
+ * @result
+ * KERN_SUCCESS.
+ */
+/* __kpi_deprecated("Inoperative noop, can remove") */
 kern_return_t
 exclaves_display_healthcheck_rate(uint64_t ns);
 
@@ -1017,6 +1056,7 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
     EXCLAVES_CTL_OP_SENSOR_STOP = 12,
     EXCLAVES_CTL_OP_SENSOR_STATUS = 13,
     EXCLAVES_CTL_OP_NOTIFICATION_RESOURCE_LOOKUP = 14,
+    EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME = 15,
     EXCLAVES_CTL_OP_LAST,
     );
 #define EXCLAVES_CTL_FLAGS_MASK (0xfffffful)
@@ -1040,6 +1080,20 @@ typedef struct exclaves_resource_user {
 	exclaves_id_t         r_id;
 	mach_port_name_t      r_port;
 } exclaves_resouce_user_t;
+
+/*!
+ * @struct exclaves_indicator_deadline
+ *
+ * @brief
+ * This struct will contain the amount of time remaining before
+ * minimum on time is met for various sensors
+ */
+typedef struct exclaves_indicator_deadlines {
+	uint64_t version;
+	uint64_t camera_indicator;
+	uint64_t mic_indicator;
+	uint64_t faceid_indicator;
+} exclaves_indicator_deadlines_t;
 
 #if !defined(KERNEL)
 
@@ -1126,6 +1180,7 @@ __options_closed_decl(exclaves_priv_t, unsigned int, {
 	EXCLAVES_PRIV_CONCLAVE_SPAWN = 0x2,  /* Can spawn conclaves. */
 	EXCLAVES_PRIV_KERNEL_DOMAIN  = 0x4,  /* Access to kernel resources. */
 	EXCLAVES_PRIV_BOOT           = 0x8,  /* Can boot exclaves. */
+	EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME = 0x10 /* Can access sensor minimum on time*/
 });
 
 /*

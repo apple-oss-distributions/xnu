@@ -2175,14 +2175,14 @@ pmap_init(
 	 *	structures for pages we allocate to be page tables in
 	 *	pmap_expand().
 	 */
-	_vm_object_allocate(mem_size, pmap_object);
+	_vm_object_allocate(mem_size, pmap_object, VM_MAP_SERIAL_SPECIAL);
 	pmap_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	/*
 	 *	Initialize the TXM VM object in the same way as the
 	 *	PMAP VM object.
 	 */
-	_vm_object_allocate(mem_size, txm_vm_object);
+	_vm_object_allocate(mem_size, txm_vm_object, VM_MAP_SERIAL_SPECIAL);
 	txm_vm_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	/*
@@ -2446,6 +2446,7 @@ pmap_create_options_internal(
 	p->nested_no_bounds_refcnt = 0;
 	p->nested_bounds_set = false;
 
+	p->associated_vm_map_serial_id = VM_MAP_SERIAL_NONE;
 
 #if MACH_ASSERT
 	p->pmap_pid = 0;

@@ -4404,8 +4404,9 @@ dtrace_thread_bootstrap(void)
 		if (thread->t_dtrace_flags & TH_DTRACE_EXECSUCCESS) {
 			thread->t_dtrace_flags &= ~TH_DTRACE_EXECSUCCESS;
 			DTRACE_PROC(exec__success);
+			extern uint64_t kdp_task_exec_meta_flags(task_t task);
 			KDBG(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXEC),
-			    task_pid(task));
+			    task_pid(task), kdp_task_exec_meta_flags(task));
 		}
 		DTRACE_PROC(start);
 	}

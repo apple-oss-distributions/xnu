@@ -109,21 +109,18 @@ extern void arm_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state);
  * Indicate during a context-switch event that we have updated some CPU
  * state which requires a later context-sync event.
  *
- * When the CPU is configured to speculate across eret, this function sets a
- * flag that will trigger an explicit isb instruction sometime before the
- * upcoming eret instruction.
- *
- * Otherwise, the eret instruction itself is always synchronizing, and
- * this function is an empty stub which serves only as documentation.
+ * Sets a per-CPU flag indicating the processor context needs synchronizing.
+ * This is done to defer synchronization until returning from an exception. If
+ * synchronization is needed before that, call arm_context_switch_sync().
  */
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 extern void arm_context_switch_requires_sync(void);
-#else
-static inline void
-arm_context_switch_requires_sync(void)
-{
-}
-#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
+
+/**
+ * Synchronize context switch state immediately. Clears the dirty flag used by
+ * arm_context_switch_requires_sync(). If the context switch state has already
+ * been synchronized, does nothing.
+ */
+extern void arm_context_switch_sync(void);
 
 #if __has_feature(ptrauth_calls)
 extern boolean_t arm_user_jop_disabled(void);
