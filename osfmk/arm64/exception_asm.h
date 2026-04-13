@@ -240,12 +240,23 @@ Lsave_neon_state_done_\@:
 	mov		x4, x16
 	mov		x5, x17
 
+#if !CONFIG_SPTM
+	/* We don't have Panic Lockdown, so as a backstop switch to SP1 */
 	mrs		x19, SPSel
 	msr		SPSel, #1
+#endif /* !CONFIG_SPTM */
+
 	bl		_ml_sign_thread_state
 	/* ml_sign_thread_state has special ABI, overwrites x1, x2, x17 */
 	mov		x17, x5
-	msr		SPSel, x19
+
+#if !CONFIG_SPTM
+	/* If we called in on SP0, switch back */
+	cbnz	x19, Lspill_registers_was_on_sp1_\@
+	msr		SPSel, #0
+Lspill_registers_was_on_sp1_\@:
+#endif /* !CONFIG_SPTM */
+
 	mov		lr, x20
 	mov		x1, x21
 .ifnb \options_register

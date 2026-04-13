@@ -148,7 +148,7 @@ kernel_trap(swtch,-60,0)
 kernel_trap(syscall_thread_switch,-61,3)
 kernel_trap(clock_sleep_trap,-62,5)
 #if defined(__LP64__)
-kernel_trap(mach_vm_reclaim_update_kernel_accounting_trap,-63,2)
+kernel_trap(mach_vm_reclaim_update_kernel_accounting_trap,-63,3)
 #endif /* __LP64__ */
 
 /* voucher traps */
@@ -200,6 +200,9 @@ kernel_trap(debug_control_port_for_pid,-96,3)
  * N.B: Trap #-100 is in use by IOTrap.s in the IOKit Framework
  * (iokit_user_client_trap)
  */
+
+kernel_trap(thread_set_x86_64_compat,-108,1)
+
 #endif	/* _MACH_SYSCALL_SW_H_ */
 
 #endif	/* PRIVATE */

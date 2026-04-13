@@ -141,8 +141,8 @@ struct direntry __DARWIN_STRUCT_DIRENTRY;
 #define DTTOIF(dirtype) ((dirtype) << 12)
 #endif
 
-#if PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/dirent_private.h>
-#endif
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* _SYS_DIRENT_H  */

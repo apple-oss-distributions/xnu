@@ -737,6 +737,8 @@ def ShowFlowswitches(cmd_args=None):
         if not IsNexusAFlowswitch(nx):
             continue
         fsw = GetNexusAsFlowswitch(nx)
+        if not fsw or not fsw.fsw_ifp:
+            continue
         if ifname not in str(fsw.fsw_ifp.if_xname):
             continue
         print("{}".format(FlowswitchStr(fsw)))

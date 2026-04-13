@@ -1,4 +1,6 @@
-/* Copyright (c) 2018-2021 Apple Inc.  All rights reserved. */
+/* Copyright (c) 2018-2021,2024-2025 Apple Inc.  All rights reserved. */
+
+#include <kern/telemetry.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <darwintest.h>
@@ -7,20 +9,15 @@
 #include <ktrace/ktrace.h>
 #include <kperf/kperf.h>
 #include <kern/debug.h>
+#include <mach/mach_time.h>
 #include <notify.h>
 #include <stdio.h>
 #include <sys/kdebug.h>
 #include <sys/sysctl.h>
 #include <TargetConditionals.h>
 
+#include "test_utils.h"
 #include "ktrace/ktrace_helpers.h"
-
-enum telemetry_pmi {
-	TELEMETRY_PMI_NONE,
-	TELEMETRY_PMI_INSTRS,
-	TELEMETRY_PMI_CYCLES,
-};
-#define TELEMETRY_CMD_PMI_SETUP 3
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.stackshot.microstackshot"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -28,9 +25,6 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.stackshot.microstackshot"),
     T_META_OWNER("mwidmann"),
     T_META_CHECK_LEAKS(false),
     T_META_ASROOT(true));
-
-extern int __telemetry(uint64_t cmd, uint64_t deadline, uint64_t interval,
-    uint64_t leeway, uint64_t arg4, uint64_t arg5);
 
 /*
  * Data Analytics (da) also has a microstackshot configuration -- set a PMI
@@ -107,6 +101,36 @@ thread_spin(__unused void *arg)
 	return NULL;
 }
 
+volatile static bool grabbing = true;
+
+static void *
+thread_use_memory(__unused void *arg)
+{
+	char path[MAXPATHLEN];
+	snprintf(path, MAXPATHLEN, "%s/microstackshot_tests-upl-induce", dt_tmpdir());
+	int fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, 0777);
+	T_ASSERT_POSIX_SUCCESS(fd, "open file for writing for reading");
+
+	while (grabbing) {
+		mach_vm_address_t addr = 0;
+		mach_vm_size_t size = 1 << 20;
+
+		kern_return_t kr = mach_vm_allocate(mach_task_self(), &addr, size, VM_FLAGS_ANYWHERE);
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "allocated %llu bytes", size);
+		T_QUIET; T_ASSERT_NE_ULLONG(0ULL, addr, "allocated address is not NULL");
+		memset((char *)addr, 0, size);
+		ssize_t bytes = write(fd, (char *)addr, size / 4);
+		T_QUIET; T_ASSERT_GT(bytes, 0L, "wrote to file");
+		kr = mach_vm_deallocate(mach_task_self(), addr, size);
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "deallocated %llu bytes", size);
+	}
+
+	close(fd);
+	unlink(path);
+
+	return NULL;
+}
+
 static bool
 query_pmi_params(unsigned int *pmi_counter, uint64_t *pmi_period)
 {
@@ -131,6 +155,82 @@ query_pmi_params(unsigned int *pmi_counter, uint64_t *pmi_period)
 	return pmi_support;
 }
 
+__enum_closed_decl(record_type_t, uint16_t, {
+	REC_PMI = 0,
+	REC_IO,
+	REC_VM_FAULT,
+	REC_PAGE_GRAB,
+	REC_INTERRUPT,
+	REC_INVALID,
+	REC_COUNT,
+});
+
+struct record_info {
+	uint32_t ri_bits;
+	const char *ri_name;
+};
+
+static struct record_info record_info[REC_COUNT] = {
+	[REC_PMI] = { .ri_bits = kPMIRecord, .ri_name = "PMI", },
+	[REC_IO] = { .ri_bits = kIORecord, .ri_name = "I/O", },
+	[REC_VM_FAULT] = { .ri_bits = kVMFaultRecord, .ri_name = "VM fault", },
+	[REC_PAGE_GRAB] = { .ri_bits = kPageGrabRecord, .ri_name = "page grab", },
+	[REC_INTERRUPT] = { .ri_bits = kInterruptRecord, .ri_name = "interrupt", },
+	[REC_INVALID] = {
+		.ri_bits = ~(kPMIRecord | kIORecord | kVMFaultRecord | kPageGrabRecord),
+		.ri_name = "invalid",
+	},
+};
+
+struct record_stats {
+	unsigned int rs_total_count;
+	unsigned int rs_counts[REC_COUNT];
+	uint64_t rs_time_range_mach[2];
+	double rs_duration_secs;
+};
+
+static void
+_record_stats_handle(struct record_stats *stats, uint64_t type, uint64_t time_mach)
+{
+	if (stats->rs_time_range_mach[0] == 0) {
+		stats->rs_time_range_mach[0] = time_mach;
+	}
+
+	for (uint16_t i = 0; i < REC_COUNT; i++) {
+		if (record_info[i].ri_bits & type) {
+			stats->rs_counts[i] += 1;
+		}
+	}
+	stats->rs_total_count += 1;
+
+	stats->rs_time_range_mach[1] = time_mach;
+}
+
+static void
+_record_stats_log(struct record_stats *stats)
+{
+	uint64_t duration_mach = stats->rs_time_range_mach[1] - stats->rs_time_range_mach[0];
+	mach_timebase_info_data_t tb = { 0 };
+	(void)mach_timebase_info(&tb);
+	uint64_t duration_ns = duration_mach * tb.numer / tb.denom;
+	T_LOG("saw record events over %.3f seconds (%.1f%% of expected)",
+	    (double)duration_ns / 1e9,
+	    (double)duration_ns / 1e9 / stats->rs_duration_secs * 100.0);
+
+	for (uint16_t i = 0; i < REC_COUNT; i++) {
+		struct record_info *info = &record_info[i];
+		uint32_t count = stats->rs_counts[i];
+		if (count == 0) {
+			T_LOG("saw no %s record events", info->ri_name);			
+		} else {
+			double rate = (double)count / (double)stats->rs_duration_secs;
+			T_LOG("saw %.2f %s record events per second, %.1f%% of total",
+			    rate, info->ri_name,
+			    (double)count / (double)stats->rs_total_count * 100.0);
+		}
+	}
+}
+
 #define MT_MICROSTACKSHOT KDBG_EVENTID(DBG_MONOTONIC, 2, 1)
 #define MS_RECORD MACHDBG_CODE(DBG_MACH_STACKSHOT, \
 	        MICROSTACKSHOT_RECORD)
@@ -150,32 +250,12 @@ T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "session create");
 
-	__block int pmi_events = 0;
-	__block int microstackshot_record_events = 0;
-	__block int pmi_records = 0;
-	__block int io_records = 0;
-	__block int interrupt_records = 0;
-	__block int timer_arm_records = 0;
-	__block int unknown_records = 0;
+	__block struct record_stats stats = { .rs_duration_secs = SLEEP_SECS, };
 	__block int empty_records = 0;
 
-	ktrace_events_single(s, MT_MICROSTACKSHOT, ^(__unused struct trace_point *tp) {
-		pmi_events++;
-	});
 	ktrace_events_single_paired(s, MS_RECORD,
 	    ^(struct trace_point *start, __unused struct trace_point *end) {
-		if (start->arg1 & kPMIRecord) {
-		        pmi_records++;
-		}
-		if (start->arg1 & kIORecord) {
-		        io_records++;
-		}
-		if (start->arg1 & kInterruptRecord) {
-		        interrupt_records++;
-		}
-		if (start->arg1 & kTimerArmingRecord) {
-		        timer_arm_records++;
-		}
+	    _record_stats_handle(&stats, start->arg1, start->timestamp);
 
 		if (start->arg2 == end->arg2) {
 			/*
@@ -184,48 +264,15 @@ T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",
 			 */
 			empty_records++;
 		}
-
-		const uint8_t any_record = kPMIRecord | kIORecord | kInterruptRecord |
-		kTimerArmingRecord;
-		if ((start->arg1 & any_record) == 0) {
-		        unknown_records++;
-		}
-
-		microstackshot_record_events++;
 	});
 
 	ktrace_set_completion_handler(s, ^{
 		ktrace_session_destroy(s);
-		T_EXPECT_GT(pmi_events, 0, "saw non-zero PMIs (%g/sec)",
-				pmi_events / (double)SLEEP_SECS);
-		T_EXPECT_GT(pmi_records, 0, "saw non-zero PMI record events (%g/sec)",
-				pmi_records / (double)SLEEP_SECS);
-		T_LOG("saw %d unknown record events", unknown_records);
-		T_EXPECT_GT(microstackshot_record_events, 0,
-				"saw non-zero microstackshot record events (%d -- %g/sec)",
-				microstackshot_record_events,
-				microstackshot_record_events / (double)SLEEP_SECS);
-		T_EXPECT_NE(empty_records, microstackshot_record_events,
-				"saw non-empty records (%d empty)", empty_records);
-
-		if (interrupt_records > 0) {
-			T_LOG("saw %g interrupt records per second",
-					interrupt_records / (double)SLEEP_SECS);
-		} else {
-			T_LOG("saw no interrupt records");
-		}
-		if (io_records > 0) {
-			T_LOG("saw %g I/O records per second",
-					io_records / (double)SLEEP_SECS);
-		} else {
-			T_LOG("saw no I/O records");
-		}
-		if (timer_arm_records > 0) {
-			T_LOG("saw %g timer arming records per second",
-					timer_arm_records / (double)SLEEP_SECS);
-		} else {
-			T_LOG("saw no timer arming records");
-		}
+		_record_stats_log(&stats);
+		T_LOG("saw %d empty records", empty_records);
+		T_EXPECT_GT(stats.rs_counts[REC_PMI], 0, "saw non-zero PMI record events");
+		T_EXPECT_GT(stats.rs_total_count, 0, "saw non-zero microstackshot record events");
+		T_EXPECT_NE(empty_records, stats.rs_total_count, "saw non-empty records");
 
 		T_END;
 	});
@@ -268,6 +315,84 @@ T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, SLEEP_SECS * NSEC_PER_SEC),
 			dispatch_get_main_queue(), ^{
 		spinning = false;
+		ktrace_end(s, 0);
+		(void)pthread_join(thread, NULL);
+		T_LOG("ending trace session after %d seconds", SLEEP_SECS);
+	});
+
+	dispatch_main();
+}
+
+static void
+_reset_telemetry_memory_usage(void)
+{
+	(void)__telemetry(TELEMETRY_CMD_MEMORY_USAGE_SETUP, 0, 0, 0, 0, 0);
+}
+
+#if TARGET_OS_BRIDGE || defined(__x86_64__)
+#define SUPPORTS_MEMORY_MICROSTACKSHOTS false
+#else /* TARGET_OS_BRIDGE || defined(__x86_64__) */
+#define SUPPORTS_MEMORY_MICROSTACKSHOTS true
+#endif /* !(TARGET_OS_BRIDGE || defined(__x86_64__)) */ 
+
+T_DECL(memory_sampling, "attempt to configure microstackshots on memory usage",
+		XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,
+		T_META_ENABLED(SUPPORTS_MEMORY_MICROSTACKSHOTS))
+{
+	start_controlling_ktrace();
+
+	T_SETUPBEGIN;
+	ktrace_session_t s = ktrace_session_create();
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "session create");
+
+	__block struct record_stats stats = { .rs_duration_secs = SLEEP_SECS, };
+	__block int empty_records = 0;
+
+	ktrace_events_single_paired(s, MS_RECORD,
+	    ^(struct trace_point *start, __unused struct trace_point *end) {
+	    _record_stats_handle(&stats, start->arg1, start->timestamp);
+		if (start->arg2 == end->arg2) {
+			/*
+			 * The buffer didn't grow for this record -- there was
+			 * an error.
+			 */
+			empty_records++;
+		}
+	});
+
+	ktrace_set_completion_handler(s, ^{
+		ktrace_session_destroy(s);
+		_record_stats_log(&stats);
+		T_EXPECT_GT(stats.rs_counts[REC_VM_FAULT], 0, "saw non-zero VM fault record events");
+		T_EXPECT_GT(stats.rs_counts[REC_PAGE_GRAB], 0, "saw non-zero page grab record events");
+		T_EXPECT_GT(stats.rs_total_count, 0, "saw non-zero microstackshot record events");
+		T_EXPECT_NE(empty_records, stats.rs_total_count, "saw non-empty records");
+		T_END;
+	});
+
+	T_SETUPEND;
+
+	telemetry_init();
+
+	/*
+	 * Start sampling via telemetry on faults and page grabs.
+	 */
+	int ret = __telemetry(TELEMETRY_CMD_MEMORY_USAGE_SETUP, 5,
+			(1 << 20) / (16 << 10), 0, 0, 0);
+	T_ASSERT_POSIX_SUCCESS(ret,
+			"telemetry syscall succeeded, started memory microstackshots");
+	T_ATEND(_reset_telemetry_memory_usage);
+
+	pthread_t thread;
+	int error = pthread_create(&thread, NULL, thread_use_memory, NULL);
+	T_ASSERT_POSIX_ZERO(error, "started thread to use memory");
+
+	error = ktrace_start(s, dispatch_get_main_queue());
+	T_ASSERT_POSIX_ZERO(error, "started tracing");
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, SLEEP_SECS * NSEC_PER_SEC),
+			dispatch_get_main_queue(), ^{
+		grabbing = false;
 		ktrace_end(s, 0);
 		(void)pthread_join(thread, NULL);
 		T_LOG("ending trace session after %d seconds", SLEEP_SECS);
@@ -325,31 +450,14 @@ T_DECL(excessive_sampling,
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "session create");
 
-	__block int microstackshot_record_events = 0;
-	__block int pmi_records = 0;
-	__block int io_records = 0;
-	__block int interrupt_records = 0;
-	__block int timer_arm_records = 0;
-	__block int unknown_records = 0;
-	__block int empty_records = 0;
+	__block struct record_stats stats = { .rs_duration_secs = SLEEP_SECS, };
 	__block uint64_t first_timestamp_ns = 0;
 	__block uint64_t last_timestamp_ns = 0;
+	__block int empty_records = 0;
 
 	ktrace_events_single_paired(s, MS_RECORD,
 			^(struct trace_point *start, __unused struct trace_point *end) {
-		if (start->arg1 & kPMIRecord) {
-			pmi_records++;
-		}
-		if (start->arg1 & kIORecord) {
-			io_records++;
-		}
-		if (start->arg1 & kInterruptRecord) {
-			interrupt_records++;
-		}
-		if (start->arg1 & kTimerArmingRecord) {
-			timer_arm_records++;
-		}
-
+		_record_stats_handle(&stats, start->arg1, start->timestamp);
 		if (start->arg2 == end->arg2) {
 			/*
 			 * The buffer didn't grow for this record -- there was
@@ -357,14 +465,6 @@ T_DECL(excessive_sampling,
 			 */
 			empty_records++;
 		}
-
-		const uint8_t any_record = kPMIRecord | kIORecord | kInterruptRecord |
-				kTimerArmingRecord;
-		if ((start->arg1 & any_record) == 0) {
-			unknown_records++;
-		}
-
-		microstackshot_record_events++;
 	});
 
 	ktrace_events_single(s, START_EVENT, ^(struct trace_point *tp) {
@@ -384,30 +484,15 @@ T_DECL(excessive_sampling,
 
 	ktrace_set_completion_handler(s, ^{
 		ktrace_session_destroy(s);
-
-		uint64_t duration_ns = last_timestamp_ns - first_timestamp_ns;
-		double duration_secs = (double)duration_ns / 1e9;
-
-		T_LOG("test lasted %g seconds", duration_secs);
+		_record_stats_log(&stats);
 
 		T_MAYFAIL;
-		T_EXPECT_EQ(unknown_records, 0, "saw zero unknown record events");
+		T_EXPECT_EQ(stats.rs_counts[REC_INVALID], 0, "saw zero invalid record events");
 		T_MAYFAIL;
-		T_EXPECT_GT(microstackshot_record_events, 0,
-				"saw non-zero microstackshot record events (%d, %gHz)",
-				microstackshot_record_events,
-				microstackshot_record_events / duration_secs);
-		T_EXPECT_NE(empty_records, microstackshot_record_events,
-				"saw non-empty records (%d empty)", empty_records);
+		T_EXPECT_GT(stats.rs_total_count, 0,
+				"saw non-zero microstackshot record events");
 
-		double record_rate_hz = microstackshot_record_events / duration_secs;
-		T_LOG("record rate: %gHz", record_rate_hz);
-		T_LOG("PMI record rate: %gHz", pmi_records / duration_secs);
-		T_LOG("interrupt record rate: %gHz",
-				interrupt_records / duration_secs);
-		T_LOG("I/O record rate: %gHz", io_records / duration_secs);
-		T_LOG("timer arm record rate: %gHz",
-				timer_arm_records / duration_secs);
+		double record_rate_hz = (double)stats.rs_total_count / stats.rs_duration_secs;
 
 		T_EXPECT_LE(record_rate_hz, (double)(dt_ncpu() * 50),
 				"found appropriate rate of microstackshots");

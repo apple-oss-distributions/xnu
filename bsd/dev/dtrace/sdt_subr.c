@@ -977,8 +977,10 @@ sdt_argdesc_t sdt_args[] = {
 	{ "mptcp", "disconnectx", 2, 2, "sae_connid_t", "sae_connid_t" },
 	{ "mptcp", "disconnectx", 3, 3, "struct socket *", "sockinfo_t *" },
 	{ "mptcp", "disconnectx", 4, 4, "struct mptcb *", "mptsinfo_t *" },
+	// VM Map
 	{"vminfo", "vm_map_lookup_entry_failure", 0, 0, "vm_map_offset_t", "vm_map_offset_t"},
 	{"vminfo", "vm_map_lookup_entry_failure", 1, 1, "vm_map_offset_t", "vm_map_offset_t"},
+	// zalloc
 	{"vminfo", "kalloc", 0, 0, "vm_size_t", "vm_size_t" },
 	{"vminfo", "kalloc", 1, 1, "vm_size_t", "vm_size_t" },
 	{"vminfo", "kalloc", 2, 2, "void*", "void*" },
@@ -989,6 +991,7 @@ sdt_argdesc_t sdt_args[] = {
 	{"vminfo", "zalloc", 1, 1, "void*", "void*" },
 	{"vminfo", "zfree", 0, 0, "zone_t", "zone_t" },
 	{"vminfo", "zfree", 1, 1, "void*", "void*" },
+	// VM Sanitization
 	{"vminfo", "vm_sanitize", 0, 0, "uint64_t", "uint64_t" },
 	{"vminfo", "vm_sanitize", 1, 1, "uint64_t", "uint64_t" },
 	{"vminfo", "vm_sanitize", 2, 2, "uint64_t", "uint64_t" },
@@ -996,6 +999,7 @@ sdt_argdesc_t sdt_args[] = {
 	{"vminfo", "vm_sanitize", 4, 4, "uint64_t", "uint64_t" },
 	{"vminfo", "vm_sanitize", 5, 5, "uint64_t", "uint64_t" },
 	{"vminfo", "vm_sanitize", 6, 6, "uint64_t", "uint64_t" },
+	// Corpse Footprint
 	{"vminfo", "corpse_footprint_collect", 0, 0, "uint32_t", "uint32_t" },
 	{"vminfo", "corpse_footprint_collect", 1, 1, "vm_map_offset_t", "vm_map_offset_t" },
 	{"vminfo", "corpse_footprint_collect", 2, 2, "uint32_t", "uint32_t" },
@@ -1008,6 +1012,7 @@ sdt_argdesc_t sdt_args[] = {
 	{"vminfo", "corpse_footprint_collect_zero_gap", 2, 2, "uint64_t", "uint64_t" },
 	{"vminfo", "corpse_footprint_collect_page_info", 0, 0, "vm_map_offset_t", "vm_map_offset_t" },
 	{"vminfo", "corpse_footprint_collect_page_info", 1, 1, "uint8_t", "uint8_t" },
+	// Deferred Reclaim
 	{"vminfo", "reclaim_ring_allocate", 0, 0, "mach_vm_address_t", "mach_vm_address_t" },
 	{"vminfo", "reclaim_ring_allocate", 1, 1, "mach_vm_reclaim_count_t", "mach_vm_reclaim_count_t" },
 	{"vminfo", "reclaim_ring_allocate", 2, 2, "mach_vm_reclaim_count_t", "mach_vm_reclaim_count_t" },
@@ -1033,6 +1038,9 @@ sdt_argdesc_t sdt_args[] = {
 	{"vminfo", "reclaim_sample", 3, 3, "size_t", "size_t" },
 	{"vminfo", "reclaim_drain", 0, 0, "pid_t", "pid_t" },
 	{"vminfo", "reclaim_drain", 1, 1, "size_t", "size_t" },
+	// Compressor/Swapper
+	{"vminfo", "c_swapout_enqueue", 0, 0, "struct c_segment *", "struct c_segment *" },
+	{"vminfo", "c_swapout_enqueue", 1, 1, "c_swapout_reason_t", "c_swapout_reason_t" },
 #if CONFIG_KCOV && CONFIG_STKSZ
 	{"kcov", "stksz-threshold-above", 0, 0, "uint32_t", "uint32_t" },
 	{"kcov", "stksz-threshold-below", 0, 0, "uint32_t", "uint32_t" },

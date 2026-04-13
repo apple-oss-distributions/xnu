@@ -1,7 +1,6 @@
-from memory import IterateZPerCPU
 from xnu import (
     LazyTarget, value, ArgumentError,
-    lldb_command, lldb_type_summary, header
+    lldb_command, lldb_type_summary, header, GetCounterVal
 )
 
 
@@ -12,10 +11,7 @@ def GetSimpleCounter(counter):
         params: counter: value - value object representing counter
         returns: str - THe value of the counter as a string.
     """
-    val = 0
-    for v in IterateZPerCPU(counter):
-        val += v
-    return str(val)
+    return GetCounterVal(counter)
 
 @lldb_command('showcounter')
 def ShowSimpleCounter(cmd_args=None):

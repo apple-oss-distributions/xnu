@@ -393,8 +393,8 @@ __END_DECLS
 
 #endif /* KERNEL */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/event_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* !_SYS_EVENT_H_ */

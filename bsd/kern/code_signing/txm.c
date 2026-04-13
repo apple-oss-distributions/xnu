@@ -1610,20 +1610,18 @@ txm_resolve_kernel_entitlements(
 kern_return_t
 txm_accelerate_entitlements(
 	void *sig_obj,
-	CEQueryContext_t *ce_ctx)
+	const CEContext_t **ce_ctx)
 {
 	txm_call_t txm_call = {
 		.selector = kTXMKernelSelectorAccelerateEntitlements,
 		.num_input_args = 1,
 		.num_output_args = 1,
 	};
-	kern_return_t ret = KERN_DENIED;
+	kern_return_t ret = txm_kernel_call(&txm_call, sig_obj);
 
-	ret = txm_kernel_call(&txm_call, sig_obj);
 	if ((ret == KERN_SUCCESS) && (ce_ctx != NULL)) {
-		*ce_ctx = (CEQueryContext_t)txm_call.return_words[0];
+		*ce_ctx = (const CEContext_t*)txm_call.return_words[0];
 	}
-
 	return ret;
 }
 

@@ -51,6 +51,8 @@ extern "C" {
  * files.
  */
 
+struct proc;
+extern const char *proc_best_name(struct proc *);
 
 /*
  * osfmk
@@ -60,6 +62,9 @@ extern mach_port_name_t ipc_port_copyout_send(
 	ipc_port_t      sright,
 	ipc_space_t     space);
 extern mach_port_name_t ipc_port_copyout_send_pinned(
+	ipc_port_t      sright,
+	ipc_space_t     space);
+extern mach_port_name_t ipc_port_copyout_send_allow_immovable(
 	ipc_port_t      sright,
 	ipc_space_t     space);
 extern kern_return_t mach_port_deallocate_kernel(
@@ -438,11 +443,12 @@ extern uint64_t vm_purge_filebacked_pagers(void);
 
 #endif /* __arm64__ */
 
+#define DEBUG4K_UNSAFE_LOGGING 0
+
 #if DEVELOPMENT || DEBUG
 struct proc;
 extern struct proc *current_proc(void);
 extern int proc_pid(struct proc *);
-extern const char *proc_best_name(struct proc *);
 struct thread;
 extern uint64_t thread_tid(struct thread *);
 extern int debug4k_filter;

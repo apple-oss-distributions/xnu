@@ -160,7 +160,7 @@ kxld_calloc(size_t size)
 	void * ptr = NULL;
 
 #if KERNEL
-	ptr = kheap_alloc_tag(GET_KEXT_KHEAP_DATA(), size, Z_WAITOK | Z_ZERO,
+	ptr = kheap_alloc_tag(KHEAP_DATA_PRIVATE, size, Z_WAITOK | Z_ZERO,
 	    VM_KERN_MEMORY_OSKEXT);
 #else
 	ptr = calloc(1, size);
@@ -182,7 +182,7 @@ kxld_alloc(size_t size)
 	void * ptr = NULL;
 
 #if KERNEL
-	ptr = kheap_alloc_tag(GET_KEXT_KHEAP_DATA(), size, Z_WAITOK | Z_ZERO,
+	ptr = kheap_alloc_tag(KHEAP_DATA_PRIVATE, size, Z_WAITOK | Z_ZERO,
 	    VM_KERN_MEMORY_OSKEXT);
 #else
 	ptr = malloc(size);
@@ -208,7 +208,7 @@ kxld_page_alloc_untracked(size_t size)
 	size = round_page(size);
 
 #if KERNEL
-	ptr = kheap_alloc_tag(GET_KEXT_KHEAP_DATA(), size, Z_WAITOK | Z_ZERO,
+	ptr = kheap_alloc_tag(KHEAP_DATA_PRIVATE, size, Z_WAITOK | Z_ZERO,
 	    VM_KERN_MEMORY_OSKEXT);
 #else /* !KERNEL */
 	ptr = calloc(1, size);

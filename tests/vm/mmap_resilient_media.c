@@ -167,9 +167,31 @@ T_DECL(mmap_resilient_media,
 	T_PASS("mmap(MAP_RESILIENT_MEDIA)");
 }
 
-T_DECL(mmap_resilient_media_cow,
-    "test mmap(MAP_RESILIENT_MEDIA) and CoW",
-    T_META_TAG_VM_PREFERRED)
+static void
+allow_signal(int signal, char *signal_name, void (*fn)(void), const char *msg)
+{
+	pid_t pid = fork();
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(pid, "fork");
+
+	if (pid == 0) {
+		fn();
+		T_PASS("Child ran with no signal. This is allowed.\n");
+		return;
+	} else {
+		int status = 0;
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(waitpid(pid, &status, 0), "waitpid");
+		T_EXPECT_TRUE(WIFSIGNALED(status), "%s: exited with signal", msg);
+		if (WIFSIGNALED(status)) {
+			T_EXPECT_EQ(WTERMSIG(status), signal, "%s is allowed to exit with %s", msg, signal_name);
+		} else {
+			T_PASS("Exited without a signal\n");
+		}
+	}
+}
+
+
+static void
+mmap_resilient_media_cow_impl()
 {
 	int ret;
 	int fd;
@@ -223,4 +245,14 @@ T_DECL(mmap_resilient_media_cow,
 	T_WITH_ERRNO;
 	ret = unlink(tmpf);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "unlink(%s)", tmpf);
+}
+
+
+T_DECL(mmap_resilient_media_cow,
+    "test mmap(MAP_RESILIENT_MEDIA) and CoW",
+    T_META_TAG_VM_PREFERRED,
+    T_META_IGNORECRASHES(".*mmap_resilient_media.*"))
+{
+	/* Allow, but don't require a SIGBUS signal */
+	allow_signal(SIGBUS, "SIGBUS", &mmap_resilient_media_cow_impl, "mmap_resilient_media_cow_impl");
 }

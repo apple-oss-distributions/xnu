@@ -864,7 +864,7 @@ cluster_verify_thread(void)
 	thread_set_thread_name(self, "cluster_verify_thread");
 #if __AMP__
 	if (ecore_verify_threads) {
-		kern_return_t kr = thread_soft_bind_cluster_type(self, 'E');
+		kern_return_t kr = thread_soft_bind_pset_type(self, 'E');
 		if (kr != KERN_SUCCESS) {
 			printf("%s: WARN: failed to bind thread to cluster type; does the hardware topology match expectations?\n", __FUNCTION__);
 		}
@@ -6825,7 +6825,7 @@ cluster_try_push(struct cl_writebehind *wbp, vnode_t vp, off_t EOF, int push_fla
 		struct  cl_extent cl;
 		int retval;
 
-		flags = io_flags & (IO_PASSIVE | IO_CLOSE);
+		flags = io_flags & (IO_PASSIVE | IO_CLOSE | IO_SYNC);
 
 		/*
 		 * try to push each cluster in turn...

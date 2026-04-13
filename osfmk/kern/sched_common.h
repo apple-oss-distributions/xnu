@@ -32,18 +32,15 @@
 #include <stdint.h>
 
 #include <kern/assert.h>
+#include <kern/kern_types.h>
 #include <kern/qsort.h>
 #include <kern/smp.h>
-
-typedef uint8_t pset_id_t;
-static_assert(MAX_PSETS < UINT8_MAX, "Can store pset ids within 8 bits");
-#define PSET_ID_INVALID UINT8_MAX
-
-#if __AMP__
 
 /* How many psets the system is configured to use. Only values less than
  * sched_num_psets are considered valid pset IDs. */
 extern uint8_t sched_num_psets;
+
+#if __AMP__
 
 /*
  * sched_pset_search_order_t
@@ -100,14 +97,9 @@ sched_pset_search_order_compute(sched_pset_search_order_t *search_order_out,
     sched_pset_search_order_sort_data_t *datas, size_t num_datas,
     sched_pset_search_order_sort_cmpfunc_t cmp);
 
-/*
- * sched_pset_search_order_init()
- *
- * Generates a search order of all psets sorted by increasing pset id, still
- * excluding the source pset.
- */
-void
-sched_pset_search_order_init(processor_set_t src_pset, sched_pset_search_order_t *search_order_out);
+/* Represents an empty search order; used in early boot. */
+#define SCHED_PSET_SEARCH_ORDER_INIT ((sched_pset_search_order_t) \
+	{ .spso_search_order = {PSET_ID_INVALID}})
 
 /* Options specifying how to iterate the search order */
 __options_decl(sched_pset_iterate_state_options_t, uint32_t, {
@@ -145,6 +137,15 @@ typedef struct {
 bool
 sched_iterate_psets_ordered(processor_set_t starting_pset, sched_pset_search_order_t *search_order,
     uint64_t candidate_map, sched_pset_iterate_state_t *istate);
+
+/*
+ * sched_is_standard_topology()
+ *
+ * Returns whether the scheduler topology matches the device tree (i.e., the CPU
+ * config has not been modified).
+ */
+bool
+sched_is_standard_topology(void);
 
 #endif /* __AMP__ */
 

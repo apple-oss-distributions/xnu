@@ -151,6 +151,23 @@ assert_allocation_checker(
 }
 
 /*
+ * Verify the checker for an expected guard page.
+ * Does not verify the actual VM state.
+ */
+static void
+assert_guard_page_checker(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t start)
+{
+	assert(start % PAGE_SIZE == 0);
+	assert(checker->kind == Guard);
+	assert(checker->address == start);
+	assert(checker->size == PAGE_SIZE);
+	assert(checker->protection == VM_PROT_NONE);
+	assert(checker->max_protection == VM_PROT_NONE);
+}
+
+/*
  * Verify the actual VM state for an expected allocated entry.
  * Does not verify the matching checker.
  * Returns the vm_region output for the memory.
@@ -345,6 +362,64 @@ assert_submap_checker_and_entry(
 	assert(entry_size == size);
 }
 
+/*
+ * Verify the memory and the checker for an expected guard page.
+ */
+static void
+assert_guard_page_checker_and_entry(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t start)
+{
+	assert_guard_page_checker(checker, start);
+	vm_region_submap_info_data_64_t info;
+	assert_allocation_entry(start, PAGE_SIZE, 0, &info);
+	assert_checker_and_entry_protection_equals(checker, &info,
+	    VM_PROT_NONE, VM_PROT_NONE);
+}
+
+/*
+ * Verify the memory and the checkers for two guard pages.
+ * The guard pages are expected to be PAGE_SIZE each,
+ * preceding and following the given guarded address range.
+ */
+static void
+assert_guard_pages(
+	checker_list_t *checker_list,
+	mach_vm_address_t guarded_start,
+	mach_vm_size_t guarded_size)
+{
+	mach_vm_address_t first_guard_address = guarded_start - PAGE_SIZE;
+	mach_vm_address_t last_guard_address = guarded_start + guarded_size;
+
+	vm_entry_checker_t *first_guard_checker = checker_list->guard_pages.head;
+	vm_entry_checker_t *last_guard_checker = checker_list->guard_pages.tail;
+	assert(first_guard_checker);
+	assert(last_guard_checker);
+	assert(first_guard_checker->next == last_guard_checker);
+	assert_guard_page_checker_and_entry(first_guard_checker, first_guard_address);
+	assert_guard_page_checker_and_entry(last_guard_checker, last_guard_address);
+}
+
+/*
+ * Verify that address `start` belongs to a VM map entry
+ * whose VM object is not null.
+ */
+static void
+assert_nonnull_object(
+	checker_list_t *checker_list,
+	mach_vm_address_t start)
+{
+	vm_entry_checker_t *checker = checker_list_find_allocation(checker_list, start);
+	assert(checker);
+	assert(!object_is_null(checker->object));
+
+	mach_vm_address_t entry_start = start;
+	mach_vm_address_t entry_size;
+	vm_region_submap_info_data_64_t info;
+	assert(get_info_for_address(&entry_start, &entry_size, &info, checker->submap_depth));
+	assert(info.object_id_full != 0);
+}
+
 
 static test_result_t
 test_single_entry_1(
@@ -356,6 +431,7 @@ test_single_entry_1(
 	vm_entry_checker_t *checker = checker_list_nth(checker_list, 0);
 	vm_region_submap_info_data_64_t info;
 	assert_allocation_checker_and_entry(checker, start, size, &info);
+	assert_guard_pages(checker_list, start, size);
 
 	return TestSucceeded;
 }
@@ -370,9 +446,11 @@ test_single_entry_2(
 	vm_region_submap_info_data_64_t info;
 
 	/* test range excludes the end of the allocation */
-	assert(size == DEFAULT_ENTRY_SIZE - DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert_allocation_checker_and_entry(checker,
-	    start, DEFAULT_ENTRY_SIZE, &info);
+	mach_vm_address_t full_start = start;
+	mach_vm_size_t full_size = size + DEFAULT_PARTIAL_ENTRY_SIZE;
+	assert(full_size == DEFAULT_ENTRY_SIZE);
+	assert_allocation_checker_and_entry(checker, full_start, full_size, &info);
+	assert_guard_pages(checker_list, full_start, full_size);
 
 	return TestSucceeded;
 }
@@ -387,9 +465,11 @@ test_single_entry_3(
 	vm_region_submap_info_data_64_t info;
 
 	/* test range excludes the start of the allocation */
-	assert(size == DEFAULT_ENTRY_SIZE - DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert_allocation_checker_and_entry(checker,
-	    start - DEFAULT_PARTIAL_ENTRY_SIZE, DEFAULT_ENTRY_SIZE, &info);
+	mach_vm_address_t full_start = start - DEFAULT_PARTIAL_ENTRY_SIZE;
+	mach_vm_size_t full_size = size + (start - full_start);
+	assert(full_size = DEFAULT_ENTRY_SIZE);
+	assert_allocation_checker_and_entry(checker, full_start, full_size, &info);
+	assert_guard_pages(checker_list, full_start, full_size);
 
 	return TestSucceeded;
 }
@@ -404,13 +484,70 @@ test_single_entry_4(
 	vm_region_submap_info_data_64_t info;
 
 	/* test range excludes the start and end of the allocation */
-	assert(size == DEFAULT_ENTRY_SIZE - DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert_allocation_checker_and_entry(checker,
-	    start - DEFAULT_PARTIAL_ENTRY_SIZE / 2, DEFAULT_ENTRY_SIZE, &info);
+	mach_vm_address_t full_start = start - DEFAULT_PARTIAL_ENTRY_SIZE / 2;
+	mach_vm_size_t full_size = size + (start - full_start) + DEFAULT_PARTIAL_ENTRY_SIZE / 2;
+	assert(full_size == DEFAULT_ENTRY_SIZE);
+	assert_allocation_checker_and_entry(checker, full_start, full_size, &info);
+	assert_guard_pages(checker_list, full_start, full_size);
 
 	return TestSucceeded;
 }
 
+static test_result_t
+test_single_entry_nonnull_1(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	test_result_t result = test_single_entry_1(checker_list, start, size);
+	if (result != TestSucceeded) {
+		return result;
+	}
+	assert_nonnull_object(checker_list, start);
+	return result;
+}
+
+static test_result_t
+test_single_entry_nonnull_2(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	test_result_t result = test_single_entry_2(checker_list, start, size);
+	if (result != TestSucceeded) {
+		return result;
+	}
+	assert_nonnull_object(checker_list, start);
+	return result;
+}
+
+static test_result_t
+test_single_entry_nonnull_3(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	test_result_t result = test_single_entry_3(checker_list, start, size);
+	if (result != TestSucceeded) {
+		return result;
+	}
+	assert_nonnull_object(checker_list, start);
+	return result;
+}
+
+static test_result_t
+test_single_entry_nonnull_4(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	test_result_t result = test_single_entry_4(checker_list, start, size);
+	if (result != TestSucceeded) {
+		return result;
+	}
+	assert_nonnull_object(checker_list, start);
+	return result;
+}
 
 static test_result_t
 test_multiple_entries_1(
@@ -421,6 +558,7 @@ test_multiple_entries_1(
 	assert_allocation_and_hole_pattern(checker_list, "##");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 2);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -433,6 +571,7 @@ test_multiple_entries_2(
 	assert_allocation_and_hole_pattern(checker_list, "###");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 3);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -449,6 +588,7 @@ test_multiple_entries_3(
 	    "############");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 4 * 12);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -459,8 +599,11 @@ test_multiple_entries_4(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "###");
-	assert(start == checker_range_start_address(checker_list->entries));
-	assert(size == DEFAULT_ENTRY_SIZE * 3 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 3;
+	assert(start == full_start);
+	assert(size == full_size - DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -471,8 +614,11 @@ test_multiple_entries_5(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "###");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert(size == DEFAULT_ENTRY_SIZE * 3 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 3;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start));
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -483,8 +629,11 @@ test_multiple_entries_6(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "###");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE / 2);
-	assert(size == DEFAULT_ENTRY_SIZE * 3 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 3;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE / 2);
+	assert(size == full_size - (start - full_start) - DEFAULT_PARTIAL_ENTRY_SIZE / 2);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -498,6 +647,7 @@ test_some_holes_1(
 	assert_allocation_and_hole_pattern(checker_list, ".#");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 2);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -510,6 +660,7 @@ test_some_holes_2(
 	assert_allocation_and_hole_pattern(checker_list, ".###");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 4);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -520,8 +671,11 @@ test_some_holes_3(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, ".#");
-	assert(start == checker_range_start_address(checker_list->entries));
-	assert(size == DEFAULT_ENTRY_SIZE * 2 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 2;
+	assert(start == full_start);
+	assert(size == full_size - DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -532,8 +686,11 @@ test_some_holes_4(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, ".###");
-	assert(start == checker_range_start_address(checker_list->entries));
-	assert(size == DEFAULT_ENTRY_SIZE * 4 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 4;
+	assert(start == full_start);
+	assert(size == full_size - DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -546,6 +703,7 @@ test_some_holes_5(
 	assert_allocation_and_hole_pattern(checker_list, "#.");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 2);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -558,6 +716,7 @@ test_some_holes_6(
 	assert_allocation_and_hole_pattern(checker_list, "###.");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 4);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -568,8 +727,11 @@ test_some_holes_7(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "#.");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert(size == DEFAULT_ENTRY_SIZE * 2 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 2;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start));
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -580,8 +742,11 @@ test_some_holes_8(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "###.");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert(size == DEFAULT_ENTRY_SIZE * 4 - DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 4;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start));
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -594,6 +759,7 @@ test_some_holes_9(
 	assert_allocation_and_hole_pattern(checker_list, "#.#");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 3);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -606,6 +772,7 @@ test_some_holes_10(
 	assert_allocation_and_hole_pattern(checker_list, "#.#.#");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 5);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -618,6 +785,7 @@ test_some_holes_11(
 	assert_allocation_and_hole_pattern(checker_list, "##.##.##");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 8);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -630,6 +798,7 @@ test_some_holes_12(
 	assert_allocation_and_hole_pattern(checker_list, "###.###.###");
 	assert(start == checker_range_start_address(checker_list->entries));
 	assert(size == DEFAULT_ENTRY_SIZE * 11);
+	assert_guard_pages(checker_list, start, size);
 	return TestSucceeded;
 }
 
@@ -641,8 +810,11 @@ test_all_holes_1(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "#.#");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_ENTRY_SIZE);
-	assert(size == DEFAULT_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 3;
+	assert(start == full_start + DEFAULT_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start) - DEFAULT_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -653,8 +825,11 @@ test_all_holes_2(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, "#.");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_ENTRY_SIZE);
-	assert(size == DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 2;
+	assert(start == full_start + DEFAULT_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start) - DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -665,8 +840,11 @@ test_all_holes_3(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, ".#");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE);
-	assert(size == DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE * 2;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE);
+	assert(size == full_size - (start - full_start) - DEFAULT_ENTRY_SIZE);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -677,8 +855,11 @@ test_all_holes_4(
 	mach_vm_size_t size)
 {
 	assert_allocation_and_hole_pattern(checker_list, ".");
-	assert(start == checker_range_start_address(checker_list->entries) + DEFAULT_PARTIAL_ENTRY_SIZE / 2);
-	assert(size == DEFAULT_PARTIAL_ENTRY_SIZE);
+	mach_vm_address_t full_start = checker_range_start_address(checker_list->entries);
+	mach_vm_size_t full_size = DEFAULT_ENTRY_SIZE;
+	assert(start == full_start + DEFAULT_PARTIAL_ENTRY_SIZE / 2);
+	assert(size == full_size - (start - full_start) - DEFAULT_PARTIAL_ENTRY_SIZE / 2);
+	assert_guard_pages(checker_list, full_start, full_size);
 	return TestSucceeded;
 }
 
@@ -715,7 +896,7 @@ test_nonresident_entry(
 	assert(info.pages_resident == 0);
 
 	assert(checker->object->object_id != 0);
-	assert(checker->pages_resident == 0);
+	assert(checker_count_vm_region_pages_resident(checker) == 0);
 
 	return TestSucceeded;
 }
@@ -732,7 +913,7 @@ test_resident_entry(
 
 	/* entry has an object and its pages are resident */
 	assert(info.pages_resident == size / PAGE_SIZE);
-	assert(checker->pages_resident == size / PAGE_SIZE);
+	assert(checker_count_vm_region_pages_resident(checker) == size / PAGE_SIZE);
 	assert(checker->object->object_id != 0);
 
 	return TestSucceeded;
@@ -781,14 +962,59 @@ test_one_shared_pair(
 	assert(left_checker->user_tag != right_checker->user_tag);
 }
 
+/*
+ * Asserts that two addresses point to the same shared writeable memory
+ * by writing a byte to each and reading the other.
+ * The original stored value is restored on exit.
+ */
+static void
+assert_locations_are_shared_writeable(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *left_checker,
+	mach_vm_address_t left_addr,
+	vm_entry_checker_t *right_checker,
+	mach_vm_address_t right_addr)
+{
+	uint8_t *left = (uint8_t *)left_addr;
+	uint8_t *right = (uint8_t *)right_addr;
+
+	/* should have same initial value */
+	uint8_t value = *left;
+	assert(*right == value);
+
+	/* write to left, read from right */
+	*left = value + 1;
+	assert(*right == value + 1);
+
+	/* write to right, read from left */
+	*right = value + 2;
+	assert(*left == value + 2);
+
+	/* restore original value */
+	*left = value;
+	assert(*right == value);
+
+	/* update checkers after these faults */
+	checker_fault_address(checker_list, left_checker, left_addr, VM_PROT_WRITE);
+	checker_fault_address(checker_list, right_checker, right_addr, VM_PROT_WRITE);
+}
+
 static test_result_t
 test_shared_entry(
 	checker_list_t *checker_list,
 	mach_vm_address_t start,
 	mach_vm_size_t size)
 {
+	vm_entry_checker_t *left_checker = checker_list_nth(checker_list, 0);
+	vm_entry_checker_t *right_checker = checker_list_nth(checker_list, 1);
+
 	/* entries are both at object offset 0 */
 	test_one_shared_pair(checker_list, start, start + size, size, 0);
+
+	assert_locations_are_shared_writeable(checker_list,
+	    left_checker, start,
+	    right_checker, start + size);
+
 	return TestSucceeded;
 }
 
@@ -803,6 +1029,9 @@ test_shared_entry_discontiguous(
 	 * after the left entry's range ends
 	 */
 	test_one_shared_pair(checker_list, start, start + size, size, DEFAULT_ENTRY_SIZE);
+
+	/* no overlap, can't verify with assert_locations_are_shared_writeable */
+
 	return TestSucceeded;
 }
 
@@ -812,11 +1041,19 @@ test_shared_entry_partial(
 	mach_vm_address_t start,
 	mach_vm_size_t size)
 {
+	vm_entry_checker_t *left_checker = checker_list_nth(checker_list, 0);
+	vm_entry_checker_t *right_checker = checker_list_nth(checker_list, 1);
+
 	/*
 	 * right entry's object offset begins
 	 * inside the left entry's range
 	 */
 	test_one_shared_pair(checker_list, start, start + size, size, DEFAULT_PARTIAL_ENTRY_SIZE);
+
+	assert_locations_are_shared_writeable(checker_list,
+	    left_checker, start + DEFAULT_PARTIAL_ENTRY_SIZE,
+	    right_checker, start + size);
+
 	return TestSucceeded;
 }
 
@@ -830,13 +1067,19 @@ test_shared_entry_pairs(
 	 * two shared pairs
 	 */
 	mach_vm_size_t entry_size = size / 4;
-	mach_vm_address_t one = start;
+	mach_vm_address_t zero = start;
+	mach_vm_address_t one = zero + entry_size;
 	mach_vm_address_t two = one + entry_size;
 	mach_vm_address_t three = two + entry_size;
-	mach_vm_address_t four = three + entry_size;
 
-	test_one_shared_pair(checker_list, one, four, entry_size, 0);
-	test_one_shared_pair(checker_list, two, three, entry_size, 0);
+	test_one_shared_pair(checker_list, zero, three, entry_size, 0);
+	test_one_shared_pair(checker_list, one, two, entry_size, 0);
+	assert_locations_are_shared_writeable(checker_list,
+	    checker_list_nth(checker_list, 0), zero,
+	    checker_list_nth(checker_list, 3), three);
+	assert_locations_are_shared_writeable(checker_list,
+	    checker_list_nth(checker_list, 1), one,
+	    checker_list_nth(checker_list, 2), two);
 
 	return TestSucceeded;
 }
@@ -868,7 +1111,7 @@ test_shared_entry_x1000(
 }
 
 
-/* common code for two-shared-entry tests */
+/* common code for COW entry tests */
 static test_result_t
 test_cow_entry(
 	checker_list_t *checker_list,
@@ -1712,9 +1955,9 @@ assert_protection(
 	assert(info_address == address);
 
 	if (check_max) {
-		T_QUIET; T_ASSERT_EQ(prot, info.max_protection, "entry max protection");
+		assert(prot == info.max_protection);
 	} else {
-		T_QUIET; T_ASSERT_EQ(prot, info.protection, "entry protection");
+		assert(prot == info.protection);
 	}
 }
 
@@ -1726,9 +1969,9 @@ test_protection_single_common(
 {
 	vm_entry_checker_t *checker =
 	    checker_list_find_allocation(checker_list, address);
-	T_QUIET; T_ASSERT_NOTNULL(checker, "checker");
-	T_QUIET; T_ASSERT_EQ(checker->protection, prot, "checker protection");
-	T_QUIET; T_ASSERT_EQ(checker->max_protection, max, "checker max protection");
+	assert(checker != NULL);
+	assert(checker->protection == prot);
+	assert(checker->max_protection == max);
 
 	assert_protection(address, prot, false /* check max */, 0 /* submap depth */);
 	assert_protection(address, max, true /* check max */, 0 /* submap depth */);
@@ -1747,9 +1990,9 @@ test_protection_pair_common(
 	    checker_list_find_allocation(checker_list, address);
 	vm_entry_checker_t *right_checker = left_checker->next;
 
-	T_QUIET; T_ASSERT_NOTNULL(left_checker, "checker");
-	T_QUIET; T_ASSERT_EQ(left_checker->protection, left_prot, "left entry protection");
-	T_QUIET; T_ASSERT_EQ(right_checker->protection, right_prot, "right entry protection");
+	assert(left_checker != NULL);
+	assert(left_checker->protection == left_prot);
+	assert(right_checker->protection == right_prot);
 
 	assert_protection(left_checker->address, left_prot, false /* check max */, 0 /* submap depth */);
 	assert_protection(right_checker->address, right_prot, false /* check max */, 0 /* submap depth */);
@@ -2017,6 +2260,11 @@ T_DECL(test_vm_configurator,
 		.single_entry_2 = test_single_entry_2,
 		.single_entry_3 = test_single_entry_3,
 		.single_entry_4 = test_single_entry_4,
+
+		.single_entry_nonnull_1 = test_single_entry_nonnull_1,
+		.single_entry_nonnull_2 = test_single_entry_nonnull_2,
+		.single_entry_nonnull_3 = test_single_entry_nonnull_3,
+		.single_entry_nonnull_4 = test_single_entry_nonnull_4,
 
 		.multiple_entries_1 = test_multiple_entries_1,
 		.multiple_entries_2 = test_multiple_entries_2,

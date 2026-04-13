@@ -1,10 +1,11 @@
-// Copyright (c) 2018-2023 Apple Inc.  All rights reserved.
+// Copyright (c) 2018-2025 Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
 #include <ktrace/config.h>
 #include <ktrace/session.h>
 #include <inttypes.h>
 #include <libproc.h>
+#include <mach/machine.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <sys/resource.h>
@@ -53,6 +54,24 @@ skip_if_unsupported(void)
 
 	if (!supported) {
 		T_SKIP("PMCs are not supported on this platform");
+	}
+}
+
+static char *
+cpc_get_state(void)
+{
+	size_t state_size = 128 << 10;
+	char *state_str = malloc(state_size);
+	if (!state_str) {
+		return NULL;
+	}
+	int ret = sysctlbyname("kern.cpc.state", state_str, &state_size, NULL, 0);
+	T_EXPECT_POSIX_SUCCESS(ret, "sysctl kern.cpc.state");
+	if (ret == 0) {
+		return state_str;
+	} else {
+		free(state_str);
+		return NULL;
 	}
 }
 
@@ -134,13 +153,19 @@ prepare_kpc(struct machine *mch, unsigned int n, const char *event_name,
 	T_LOG("machine: ncpus = %d, nfixed = %d, nconfig = %d", mch->ncpus,
 	    mch->nfixed, mch->nconfig);
 
-	uint32_t nconfigs = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+	kpc_classmask_t classes = KPC_CLASS_CONFIGURABLE_MASK;
+#if defined(__x86_64__)
+	// Intel includes the fixed counters in those expected to be configured by
+	// KPEP.
+	classes |= KPC_CLASS_FIXED_MASK;
+#endif
+	uint32_t nconfigs = kpc_get_config_count(classes);
 	for (uint32_t i = 0; i < nconfigs; i++) {
 		if (period != 0 && (n == 0 || i == 0)) {
-			ret = kpep_config_add_event_trigger(config, &event, 0,
-			    period + i * 1000, NULL);
+			ret = kpep_config_add_event_trigger(config, &event,
+			    KPEP_EVENT_FLAG_USER, period + i * 1000, NULL);
 		} else {
-			ret = kpep_config_add_event(config, &event, 0, NULL);
+			ret = kpep_config_add_event(config, &event, KPEP_EVENT_FLAG_USER, NULL);
 		}
 		if (ret == KPEP_ERR_CONFIG_CONFLICT) {
 			T_LOG("configured %d counters with %s", i, event_name);
@@ -152,21 +177,21 @@ prepare_kpc(struct machine *mch, unsigned int n, const char *event_name,
 
 	uint64_t *configs = calloc(nconfigs, sizeof(*configs));
 	T_QUIET; T_ASSERT_NOTNULL(configs, "allocated config words");
-	ret = kpep_config_kpc(config, configs, nconfigs * sizeof(*configs));
+	ret = kpep_config_kpc(config, (uint8_t *)configs, nconfigs * sizeof(*configs));
 	_assert_kpep_ok(ret, "get kpc configuration");
 	for (uint32_t i = 0; i < nconfigs; i++) {
 		if (configs[i] != 0) {
-			mch->selector = configs[i];
+			mch->selector = configs[i] & UINT16_MAX;
 			break;
 		}
 	}
 	T_QUIET; T_ASSERT_NE(mch->selector, 0ULL, "found event selector to check");
-	ret = kpc_set_config(KPC_CLASS_CONFIGURABLE_MASK, configs);
+	ret = kpc_set_config(classes, configs);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kpc_set_config");
 
 	ret = kpep_config_kpc_periods(config, configs, nconfigs * sizeof(*configs));
 	_assert_kpep_ok(ret, "get kpc periods");
-	ret = kpc_set_period(KPC_CLASS_CONFIGURABLE_MASK, configs);
+	ret = kpc_set_period(classes, configs);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kpc_set_period");
 
 	free(configs);
@@ -278,9 +303,9 @@ check_tally(unsigned int ncpus, unsigned int nctrs, struct tally *tallies)
 			struct tally *tly = &tallies[ctr];
 
 			T_LOG("CPU %2u PMC %u: nchecks = %llu, last value = %llx, "
-				"delta = %llu, nstuck = %llu", i, j,
+				"delta = %llu, nstuck = %llu, nzero = %llu", i, j,
 			    tly->nchecks, tly->lastvalue, tly->lastvalue - tly->firstvalue,
-			    tly->nstuck);
+			    tly->nstuck, tly->nzero);
 
 			nchecks += tly->nchecks;
 			nstuck += tly->nstuck;
@@ -290,8 +315,10 @@ check_tally(unsigned int ncpus, unsigned int nctrs, struct tally *tallies)
 	}
 
 	T_EXPECT_GT(nchecks, 0ULL, "checked 0x%" PRIx64 " counter values", nchecks);
-	T_EXPECT_EQ(nzero, 0ULL, "found 0x%" PRIx64 " zero values", nzero);
-	T_EXPECT_EQ(nstuck, 0ULL, "found 0x%" PRIx64 " stuck values", nstuck);
+	T_EXPECT_LE(nzero * 100 / nchecks, 1ULL,
+	    "found 0x%" PRIx64 " (%.1g%% < 1%%) zero values", nzero, (double)nzero / (double)nchecks * 100.0);
+	T_EXPECT_LE(nstuck * 100 / nchecks, 1ULL,
+	    "found 0x%" PRIx64 " (%.1g%% < 1%%) stuck values", nstuck, (double)nstuck / (double)nchecks * 100.0);
 	T_EXPECT_EQ(ndecrease, 0ULL,
 	    "found 0x%" PRIx64 " decreasing values", ndecrease);
 }
@@ -302,17 +329,18 @@ T_DECL(kpc_cpu_direct_configurable,
     "test that configurable counters return monotonically increasing values",
     XNU_T_META_SOC_SPECIFIC,
     T_META_BOOTARGS_SET("enable_skstb=1"),
-    T_META_TAG_VM_NOT_ELIGIBLE,
-    T_META_ENABLED(false) /* rdar://134505531 */)
+    T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	skip_if_unsupported();
 
 	struct machine mch = {};
 	prepare_kpc(&mch, 0, "CORE_ACTIVE_CYCLE", 0);
-
 	int until = 0;
 	pthread_t *threads = start_threads(&mch, spin, &until);
 	start_kpc();
+	char *cpc_state = cpc_get_state();
+	T_LOG("CPC BEGIN STATE\n%s", cpc_state);
+	free(cpc_state);
 
 	T_SETUPBEGIN;
 
@@ -341,6 +369,9 @@ T_DECL(kpc_cpu_direct_configurable,
 	}
 
 	check_tally(mch.ncpus, mch.nconfig, tly);
+	cpc_state = cpc_get_state();
+	T_LOG("CPC END STATE\n%s", cpc_state);
+	free(cpc_state);
 
 	until = 1;
 	end_threads(&mch, threads);
@@ -402,6 +433,10 @@ T_DECL(kpc_thread_direct_instrs_cycles,
 
 	free(ctrs_a);
 	free(ctrs_b);
+
+	char *cpc_state = cpc_get_state();
+	T_LOG("CPC STATE\n%s", cpc_state);
+	free(cpc_state);
 }
 
 #define PMI_TEST_DURATION_NS (15 * NSEC_PER_SEC)
@@ -421,8 +456,10 @@ T_DECL(kpc_pmi_configurable,
     "test that PMIs don't interfere with sampling counters in kperf",
     XNU_T_META_SOC_SPECIFIC,
     T_META_BOOTARGS_SET("enable_skstb=1"),
-    T_META_TAG_VM_NOT_ELIGIBLE,
-    T_META_ENABLED(false) /* rdar://134505531 */)
+#if TARGET_OS_BRIDGE
+    T_META_ENABLED(false), // rdar://163266458
+#endif // TARGET_OS_BRIDGE
+    T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	skip_if_unsupported();
 
@@ -584,6 +621,10 @@ T_DECL(kpc_pmi_configurable,
 	ktrace_set_completion_handler(sess, ^{
 		dispatch_cancel(cpu_count_timer);
 
+		char *state = cpc_get_state();
+		T_LOG("CPC: %s", state);
+		free(state);
+
 		check_tally(mch.ncpus, mch.nfixed + mch.nconfig, tly);
 
 		struct rusage_info_v4 post_ru = {};
@@ -665,6 +706,9 @@ T_DECL(kpc_pmi_configurable,
 	T_ASSERT_POSIX_SUCCESS(ret, "kperf_sample_set");
 
 	start_kpc();
+	char *cpc_state = cpc_get_state();
+	T_LOG("CPC STATE\n%s", cpc_state);
+	free(cpc_state);
 
 	int error = ktrace_start(sess, dispatch_get_main_queue());
 	T_ASSERT_POSIX_ZERO(error, "started tracing");
@@ -682,15 +726,18 @@ T_DECL(kpc_pmi_configurable,
 	dispatch_main();
 }
 
+// libdarwintest can't handle `CPU_TYPE_ARM64` in the sysctl requirement:
+// rdar://116323249
 #if defined(__arm64__)
-#define IS_ARM64 true
-#else // defined(__arm64__)
-#define IS_ARM64 false
-#endif // !defined(__arm64__)
+#define IS_ARM64 1
+#else
+#define IS_ARM64 0
+#endif
 
 T_DECL(kpc_pmu_config, "ensure PMU can be configured",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_ENABLED(IS_ARM64), T_META_TAG_VM_NOT_ELIGIBLE)
+    T_META_ENABLED(IS_ARM64),
+    T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	int ret = kpc_force_all_ctrs_set(1);
@@ -698,6 +745,9 @@ T_DECL(kpc_pmu_config, "ensure PMU can be configured",
 			"force all counters to allow raw PMU configuration");
 	uint32_t nconfigs = kpc_get_config_count(KPC_CLASS_RAWPMU_MASK);
 	T_LOG("found %u raw PMU configuration words", nconfigs);
+	T_QUIET;
+	T_ASSERT_GT(nconfigs, 0,
+			"should see non-zero number of configuration words for raw PMU");
 	uint64_t *configs = calloc(nconfigs, sizeof(*configs));
 	T_QUIET; T_ASSERT_NOTNULL(configs, "allocated config words");
 	T_SETUPEND;
@@ -706,9 +756,25 @@ T_DECL(kpc_pmu_config, "ensure PMU can be configured",
 	T_ASSERT_POSIX_SUCCESS(ret, "should set PMU configuration");
 }
 
+T_DECL(kpc_running_to_running, "ensure kpc can transition from running to running",
+    XNU_T_META_SOC_SPECIFIC,
+    T_META_ENABLED(IS_ARM64),
+    T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	start_controlling_ktrace();
+
+	struct machine mch = {};
+	T_SETUPBEGIN;
+	prepare_kpc(&mch, 1, "CORE_ACTIVE_CYCLE", 0);
+	start_kpc();
+	T_SETUPEND;
+	start_kpc();
+}
+
 T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_REQUIRES_SYSCTL_EQ("kpc.pc_capture_supported", 1), T_META_TAG_VM_NOT_ELIGIBLE)
+    T_META_REQUIRES_SYSCTL_EQ("kpc.pc_capture_supported", 1),
+    T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 	struct machine mch = {};
@@ -785,6 +851,9 @@ T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
 
 	ktrace_set_completion_handler(sess, ^{
 		ktrace_session_destroy(sess);
+		char *cpc_state = cpc_get_state();
+		T_LOG("CPC STATE\n%s", cpc_state);
+		free(cpc_state);
 		for (unsigned int i = 0; i < 3; i++) {
 			T_LOG("PMC%u: saw %llu/%llu (%g%%) PMIs with PC capture", i + 5,
 			    pc_captured[i], pmi_event[i],
@@ -799,6 +868,9 @@ T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
 	T_ASSERT_POSIX_SUCCESS(ret, "kperf_sample_set");
 
 	start_kpc();
+	char *cpc_state = cpc_get_state();
+	T_LOG("CPC STATE\n%s", cpc_state);
+	free(cpc_state);
 
 	int error = ktrace_start(sess, dispatch_get_main_queue());
 	T_ASSERT_POSIX_ZERO(error, "started tracing");

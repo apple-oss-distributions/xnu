@@ -1,0 +1,15 @@
+# The symbols in this file are the only symbols exported by the libfuzzer dylib
+_LLVMFuzzerRunDriver
+_LLVMFuzzerMutate
+___sanitizer_cov_8bit_counters_init
+___sanitizer_cov_trace_cmp1
+___sanitizer_cov_trace_cmp2
+___sanitizer_cov_trace_cmp4
+___sanitizer_cov_trace_cmp8
+___sanitizer_cov_trace_const_cmp1
+___sanitizer_cov_trace_const_cmp2
+___sanitizer_cov_trace_const_cmp4
+___sanitizer_cov_trace_const_cmp8
+___sanitizer_cov_trace_div4
+___sanitizer_cov_trace_div8
+___sanitizer_cov_trace_gep 

@@ -40,10 +40,12 @@
 #include <kern/thread.h>
 #include <kern/thread_group.h>
 #include <kern/policy_internal.h>
+#include <kern/processor.h>
 #include <kern/sched_hygiene.h>
 #include <kern/startup.h>
 #include <kern/monotonic.h>
 #include <kern/timeout.h>
+#include <kern/cpc.h>
 #include <machine/config.h>
 #include <machine/atomic.h>
 #include <machine/monotonic.h>
@@ -65,8 +67,8 @@ extern volatile uint32_t debug_enabled;
 extern _Atomic unsigned int cluster_type_num_active_cpus[MAX_CPU_TYPES];
 const char *cluster_type_names[MAX_CPU_TYPES] = {
 	[CLUSTER_TYPE_SMP] = "Standard",
-	[CLUSTER_TYPE_E] = "Efficiency",
 	[CLUSTER_TYPE_P] = "Performance",
+	[CLUSTER_TYPE_E] = "Efficiency",
 };
 
 static int max_cpus_initialized = 0;
@@ -333,10 +335,11 @@ static void
 machine_switch_populate_perfcontrol_cpu_counters(struct perfcontrol_cpu_counters *cpu_counters)
 {
 #if CONFIG_CPU_COUNTERS
-	mt_perfcontrol(&cpu_counters->instructions, &cpu_counters->cycles);
+	struct cpc_cycles_instrs counts = cpc_cycles_instrs_raw_approx();
+	cpu_counters->instructions = counts.instrs;
+	cpu_counters->cycles = counts.cycles;
 #else /* CONFIG_CPU_COUNTERS */
-	cpu_counters->instructions = 0;
-	cpu_counters->cycles = 0;
+	*cpu_counters = (struct perfcontrol_cpu_counters){ 0 };
 #endif /* !CONFIG_CPU_COUNTERS */
 }
 
@@ -347,26 +350,25 @@ static _Atomic uint64_t perfcontrol_callout_count[PERFCONTROL_CALLOUT_MAX];
 #if CONFIG_CPU_COUNTERS
 static inline
 bool
-perfcontrol_callout_counters_begin(uint64_t *counters)
+perfcontrol_callout_counters_begin(struct cpc_cycles_instrs *start)
 {
 	if (!perfcontrol_callout_stats_enabled) {
 		return false;
 	}
-	mt_fixed_counts(counters);
+	*start = cpc_cycles_instrs();
 	return true;
 }
 
 static inline
 void
-perfcontrol_callout_counters_end(uint64_t *start_counters,
+perfcontrol_callout_counters_end(struct cpc_cycles_instrs *start,
     perfcontrol_callout_type_t type)
 {
-	uint64_t end_counters[MT_CORE_NFIXED];
-	mt_fixed_counts(end_counters);
+	struct cpc_cycles_instrs end = cpc_cycles_instrs();
 	os_atomic_add(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_CYCLES],
-	    end_counters[MT_CORE_CYCLES] - start_counters[MT_CORE_CYCLES], relaxed);
+	    end.cycles - start->cycles, relaxed);
 	os_atomic_add(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_INSTRS],
-	    end_counters[MT_CORE_INSTRS] - start_counters[MT_CORE_INSTRS], relaxed);
+	    end.instrs - start->instrs, relaxed);
 	os_atomic_inc(&perfcontrol_callout_count[type], relaxed);
 }
 #endif /* CONFIG_CPU_COUNTERS */
@@ -445,14 +447,14 @@ machine_switch_perfcontrol_context(perfcontrol_event event,
 		uint64_t timeout_ticks = 0;
 
 #if CONFIG_CPU_COUNTERS
-		uint64_t counters[MT_CORE_NFIXED];
-		bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
+		struct cpc_cycles_instrs start;
+		bool ctrs_enabled = perfcontrol_callout_counters_begin(&start);
 #endif /* CONFIG_CPU_COUNTERS */
 		sched_perfcontrol_csw(event, cpu_id, timestamp, flags,
 		    &offcore, &oncore, &cpu_counters, &timeout_ticks);
 #if CONFIG_CPU_COUNTERS
 		if (ctrs_enabled) {
-			perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_CONTEXT);
+			perfcontrol_callout_counters_end(&start, PERFCONTROL_CALLOUT_CONTEXT);
 		}
 #endif /* CONFIG_CPU_COUNTERS */
 
@@ -476,6 +478,17 @@ machine_switch_perfcontrol_state_update(perfcontrol_event event,
     uint32_t flags,
     thread_t thread)
 {
+#if USE_SME_PRIORITY
+	if (event == QUANTUM_EXPIRY) {
+		/*
+		 * The machine thread SME priority will synchronize at context switch.
+		 * In order to bound the case of a long-running thread that hasn't gone
+		 * off core in awhile, we also want to synchronize it here.
+		 */
+		machine_thread_update_sme_priority(thread);
+	}
+#endif /* USE_SME_PRIORITY */
+
 
 	if (sched_perfcontrol_state_update == sched_perfcontrol_state_update_default) {
 		return;
@@ -486,14 +499,14 @@ machine_switch_perfcontrol_state_update(perfcontrol_event event,
 	uint64_t timeout_ticks = 0;
 
 #if CONFIG_CPU_COUNTERS
-	uint64_t counters[MT_CORE_NFIXED];
-	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
+	struct cpc_cycles_instrs start;
+	bool ctrs_enabled = perfcontrol_callout_counters_begin(&start);
 #endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_state_update(event, cpu_id, timestamp, flags,
 	    &data, &timeout_ticks);
 #if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
-		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_STATE_UPDATE);
+		perfcontrol_callout_counters_end(&start, PERFCONTROL_CALLOUT_STATE_UPDATE);
 	}
 #endif /* CONFIG_CPU_COUNTERS */
 
@@ -542,13 +555,13 @@ machine_thread_going_on_core(thread_t   new_thread,
 	on_core.scheduling_latency_at_same_basepri = same_pri_latency;
 
 #if CONFIG_CPU_COUNTERS
-	uint64_t counters[MT_CORE_NFIXED];
-	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
+	struct cpc_cycles_instrs start;
+	bool ctrs_enabled = perfcontrol_callout_counters_begin(&start);
 #endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_oncore(state, &on_core);
 #if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
-		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_ON_CORE);
+		perfcontrol_callout_counters_end(&start, PERFCONTROL_CALLOUT_ON_CORE);
 	}
 #endif /* CONFIG_CPU_COUNTERS */
 }
@@ -573,13 +586,13 @@ machine_thread_going_off_core(thread_t old_thread, boolean_t thread_terminating,
 #endif
 
 #if CONFIG_CPU_COUNTERS
-	uint64_t counters[MT_CORE_NFIXED];
-	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
+	struct cpc_cycles_instrs start;
+	bool ctrs_enabled = perfcontrol_callout_counters_begin(&start);
 #endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_offcore(state, &off_core, thread_terminating);
 #if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
-		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_OFF_CORE);
+		perfcontrol_callout_counters_end(&start, PERFCONTROL_CALLOUT_OFF_CORE);
 	}
 #endif /* CONFIG_CPU_COUNTERS */
 }
@@ -795,7 +808,7 @@ ml_get_current_core_type(void)
 	if (!processor) {
 		return '!';
 	}
-	switch (processor->processor_set->pset_cluster_type) {
+	switch (processor->processor_set->pset_type) {
 	case PSET_AMP_P:
 		return 'P';
 	case PSET_AMP_E:
@@ -902,7 +915,7 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t timeout, int_m
 		for (cpu = 0; cpu <= max_cpu; cpu++) {
 			processor_t processor = cpu_to_processor(cpu);
 			if (processor->is_recommended &&
-			    processor->processor_set->pset_cluster_type == PSET_AMP_P) {
+			    processor->processor_set->pset_type == PSET_AMP_P) {
 				break;
 			}
 		}
@@ -1431,7 +1444,8 @@ ml_get_cluster_number_type(cluster_type_t cluster_type)
 unsigned int
 ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types __unused)
 {
-	unsigned int cpu_number = 0, cluster_types = 0;
+	unsigned int cpu_number = 0;
+	uint64_t cluster_types = 0;
 
 	/*
 	 * Level 0 corresponds to main memory, which is shared across all cores.
@@ -1454,19 +1468,28 @@ ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool inclu
 		return 1;
 	}
 
-	cluster_types = (1 << cluster_type);
+	/* BEGIN IGNORE CODESTYLE */
+	cluster_types = BIT(cluster_type);
+	/* END IGNORE CODESTYLE */
 
 	/*
 	 * Traverse clusters until we find the one(s) of the desired type(s).
 	 */
-	for (int i = 0; i < ml_get_topology_info()->num_clusters; i++) {
-		ml_topology_cluster_t *cluster = &ml_get_topology_info()->clusters[i];
-		if ((1 << cluster->cluster_type) & cluster_types) {
-			cpu_number += cluster->num_cpus;
-			cluster_types &= ~(1 << cluster->cluster_type);
-			if (!cluster_types) {
-				break;
+	const ml_topology_info_t * topo = ml_get_topology_info();
+	for (int i = 0; i < topo->num_clusters; i++) {
+		ml_topology_cluster_t *cluster = &topo->clusters[i];
+		uint64_t found = BIT(cluster->cluster_type);
+		if (bit_test(cluster_types, cluster->cluster_type)) {
+			for (int j = cluster->first_cpu_id; j < cluster->first_cpu_id + cluster->num_cpus; j++) {
+				if (bit_test(cluster_types, topo->cpus[j].cluster_type)) {
+					cpu_number++;
+					bit_set(found, topo->cpus[j].cluster_type);
+				}
 			}
+		}
+		cluster_types &= ~found;
+		if (cluster_types == 0) {
+			break;
 		}
 	}
 

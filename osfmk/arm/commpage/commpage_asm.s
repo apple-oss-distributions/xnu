@@ -27,6 +27,7 @@
  */
 
 #include <machine/asm.h>
+#include <arm64/machine_machdep.h>
 
 /* This section has all the code necessary for the atomic operations supported by
  * OSAtomicFifoEnqueue, OSAtomicFifoDequeue APIs in libplatform.
@@ -57,6 +58,7 @@
  * Functions in PFZ:
  *		Enqueue function
  *		Dequeue function
+ *		Atomic TPIDR_EL0 update
  *
  * Functions not in PFZ:
  *		Backoff function as part of spin loop
@@ -208,10 +210,10 @@
 
 	/* Preemption free functions */
 	.align 2
-_jump_table:				// 32 entry jump table, only 2 are used
+_jump_table:				// 32 entry jump table, only 3 are used
 	b	_pfz_enqueue
 	b	_pfz_dequeue
-	brk #666
+	b	_pfz_tpidr_el0_update
 	brk #666
 	brk #666
 	brk #666
@@ -352,6 +354,34 @@ Ltrylock_dequeue_exit:
 	POP_FRAME
 	ARM64_STACK_EPILOG _pfz_trylock_and_dequeue
 
+/* Non-preemptible helper routine to pft_tpidr_el0_update:
+ * void pfz_do_tpidr_el0_update(uint64_t upper_bits);
+ *
+ * x0 = thread-specific upper TPIDR_EL0 bits to update
+ *
+ * Atomically updates the upper, thread-specific bits in TPIDR_EL0,
+ * keeping the lower, core/cluster-dependent bits intact.
+ *
+ * This function needs to be in the PFZ because there are no atomic
+ * read-modify-write instructions for MSRs like TPIDR_EL0. Doing the
+ * rmw non-atomically would lead into the wrong core/cluster ID being
+ * written back into TPIDR_EL0 if preempted at the wrong time.
+ */
+	.globl	_pfz_do_tpidr_el0_update
+	.align 2
+_pfz_do_tpidr_el0_update:
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+
+	mrs		x1, tpidr_el0
+	lsr		x0, x0, #MACHDEP_TPIDR_CPU_DATA_COUNT
+	bfi		x1, x0, #MACHDEP_TPIDR_CPU_DATA_COUNT, #MACHDEP_TPIDR_THREAD_DATA_COUNT
+	msr		tpidr_el0, x1
+
+	POP_FRAME
+	ARM64_STACK_EPILOG _pfz_do_tpidr_el0_update
+
+
 
 	/* Preemptible functions */
 	.private_extern _commpage_text_preemptible_functions
@@ -468,6 +498,32 @@ Ldequeue_success:
 	POP_FRAME
 	ARM64_STACK_EPILOG _pfz_dequeue
 
+/*
+ * void pfz_tpidr_el0_update(uint64_t upper_bits);
+ *
+ * x0 = thread-specific upper TPIDR_EL0 bits to update
+ *
+ * Atomically updates the upper, thread-specific bits in TPIDR_EL0,
+ * keeping the lower, core/cluster-dependent bits intact.
+ *
+ * This function needs to be in the PFZ because there are no atomic
+ * read-modify-write instructions for MSRs like TPIDR_EL0. Doing the
+ * rmw non-atomically would lead into the wrong core/cluster ID being
+ * written back into TPIDR_EL0 if preempted at the wrong time.
+ */
+	.globl	_pfz_tpidr_el0_update
+	.align 2
+_pfz_tpidr_el0_update:
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+
+	bl		_pfz_do_tpidr_el0_update
+
+	PREEMPT_SELF_THEN Lout
+
+Lout:
+	POP_FRAME
+	ARM64_STACK_EPILOG _pfz_tpidr_el0_update
 
 /* void preempt_self(void)
  *

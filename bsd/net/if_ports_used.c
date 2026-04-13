@@ -37,6 +37,7 @@
 #include <sys/proc.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
+#include <sys/codesign.h>
 
 #include <kern/locks.h>
 #include <kern/zalloc.h>
@@ -47,6 +48,8 @@
 #include <net/if_var.h>
 #include <net/if_ports_used.h>
 #include <net/net_sysctl.h>
+#include <net/dlil.h>
+#include <net/net_kev.h>
 
 #include <netinet/in_pcb.h>
 #include <netinet/ip.h>
@@ -62,10 +65,6 @@
 #endif /* SKYWALK */
 
 #include <stdbool.h>
-
-#include <os/log.h>
-
-#include <IOKit/IOBSD.h>
 
 #include <string.h>
 
@@ -124,10 +123,8 @@ SYSCTL_OPAQUE(_net_link_generic_system_port_used, OID_AUTO, test_wakeuuid,
  * use_fake_lpw is used for testing only
  */
 #define FAKE_LPW_OFF            0 /* fake LPW off */
-#define FAKE_LPW_ON_ONCE        1 /* use fake LPW once */
+#define FAKE_LPW_ON             1 /* use fake LPW until full AP wake */
 #define FAKE_LPW_ALWAYS_ON      2 /* permanent fake LPW mode */
-#define FAKE_LPW_FLIP_ON        3 /* LPW on, then switch to off */
-#define FAKE_LPW_FLIP_OFF       4 /* LPW off, then switch to on */
 
 static int use_fake_lpw = 0;
 static int sysctl_use_fake_lpw SYSCTL_HANDLER_ARGS;
@@ -193,6 +190,12 @@ static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
     wakeuuid_last_update_time, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_wakeuuid_last_update_time, "S,timeval", "");
 
+int ports_used_include_boundif = 0;
+int sysctl_get_ports_used_include_boundif SYSCTL_HANDLER_ARGS;
+static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
+    with_boundif, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_get_ports_used_include_boundif, "I", "");
+
 static bool            last_wake_phy_if_set = false;
 static char            last_wake_phy_if_name[IFNAMSIZ]; /* name + unit */
 static uint32_t        last_wake_phy_if_family;
@@ -204,15 +207,18 @@ static bool            last_wake_phy_if_lpw = false;
 static bool has_notified_wake_pkt = false;
 static bool has_notified_unattributed_wake = false;
 
-static bool is_lpw_mode = false;
+static bool has_requested_full_AP_wake = false;
+
+static uint32_t wake_attribution_gencnt = 0; /* wrapping OK */
 
 static LCK_GRP_DECLARE(net_port_entry_head_lock_group, "net port entry lock");
-static LCK_MTX_DECLARE(net_port_entry_head_lock, &net_port_entry_head_lock_group);
+static LCK_RW_DECLARE(net_port_entry_head_lock, &net_port_entry_head_lock_group);
 
 
 struct net_port_entry {
 	SLIST_ENTRY(net_port_entry)     npe_list_next;
 	TAILQ_ENTRY(net_port_entry)     npe_hash_next;
+	uint32_t                        npe_wake_gencnt;
 	struct net_port_info            npe_npi;
 };
 
@@ -296,6 +302,9 @@ static bool is_wake_pkt_event_delay(uint32_t ifrtype);
 static bool
 _if_need_delayed_wake_pkt_event_inner(struct ifnet *ifp)
 {
+	if (IOPMIsLPWMode()) {
+		return false;
+	}
 	if ((ifp->if_xflags & IFXF_DELAYWAKEPKTEVENT) != 0 ||
 	    is_wake_pkt_event_delay(ifp->if_family)) {
 		return true;
@@ -334,87 +343,164 @@ if_ports_used_init(void)
 		ZALIGN_PTR);
 }
 
-bool
-if_is_lpw_enabled(struct ifnet *ifp)
-{
-	bool old_is_lpw_mode = is_lpw_mode;
+/*
+ * Maximum depth for following delegate interface chain.
+ * In practice, delegation chains should be very short (1-2 levels),
+ * so this limit prevents infinite loops from circular references.
+ */
+#define IF_DELEGATE_MAX_DEPTH 4
 
-	if (ifp == NULL) {
+/*
+ * A NULL ifp is used to check LPW mode -- fake or real -- on any interface
+ */
+static bool
+if_is_lpw_enabled_internal(struct ifnet *ifp, uint32_t depth)
+{
+	/* IOKit may take a while to exit AOT mode */
+	if (has_requested_full_AP_wake == true) {
 		return false;
 	}
 
-	if ((ifp->if_xflags & IFXF_LOW_POWER_WAKE) == 0 && last_wake_phy_if_lpw == false) {
+	/* Prevent infinite recursion from circular delegation */
+	if (depth >= IF_DELEGATE_MAX_DEPTH) {
+		if (if_ports_used_verbose > 0) {
+			os_log(wake_packet_log_handle,
+			    "if_is_lpw_enabled: max delegation depth %u exceeded for %s",
+			    IF_DELEGATE_MAX_DEPTH, IF_XNAME(ifp));
+		}
 		return false;
 	}
 
 #if (DEBUG || DEVELOPMENT)
-	if (use_fake_lpw != FAKE_LPW_OFF) {
-		if (strlcmp(mark_wake_packet_if, IF_XNAME(ifp), IFNAMSIZ) == 0) {
-			fake_lpw_mode_is_set = true;
-
-			switch (use_fake_lpw) {
-			case FAKE_LPW_ON_ONCE:
-				is_lpw_mode = true;
-				use_fake_lpw = FAKE_LPW_OFF;
-				break;
-			case FAKE_LPW_ALWAYS_ON:
-				is_lpw_mode = true;
-				break;
-			case FAKE_LPW_FLIP_ON:
-				is_lpw_mode = true;
-				use_fake_lpw = FAKE_LPW_FLIP_OFF;
-				break;
-			case FAKE_LPW_FLIP_OFF:
-				is_lpw_mode = false;
-				use_fake_lpw = FAKE_LPW_FLIP_ON;
-				break;
-			}
-
-			if (if_ports_used_verbose && is_lpw_mode != old_is_lpw_mode) {
-				os_log(wake_packet_log_handle, "if_is_lpw_enabled %s set LPW to %d",
-				    IF_XNAME(ifp), is_lpw_mode == true ? 1 : 0);
-			}
-
-			return is_lpw_mode;
+	/* This is the fake version of IOPMIsLPWMode */
+	if (__improbable(use_fake_lpw != FAKE_LPW_OFF)) {
+		if (ifp == NULL) {
+			return true;
 		}
+
+		/*
+		 * Ignore packets on interfaces that are not LPW aware
+		 */
+		if ((ifp->if_xflags & IFXF_LOW_POWER_WAKE) == 0) {
+			/*
+			 * Follow the delegate
+			 */
+			if (ifp->if_delegated.ifp != NULL) {
+				return if_is_lpw_enabled_internal(ifp->if_delegated.ifp, depth + 1);
+			}
+			if (if_ports_used_verbose > 0) {
+				os_log(wake_packet_log_handle, "if_is_lpw_enabled %s off", IF_XNAME(ifp));
+			}
+			return false;
+		}
+
+		if (strlcmp(mark_wake_packet_if, IF_XNAME(ifp), IFNAMSIZ) == 0) {
+			return true;
+		}
+
 		/* In fake mode, ignore packets from other interfaces */
 		return false;
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
 
 	if (IOPMIsLPWMode()) {
-		is_lpw_mode = true;
-	} else {
-		is_lpw_mode = false;
-	}
-	if (if_ports_used_verbose && is_lpw_mode != old_is_lpw_mode) {
-		os_log(wake_packet_log_handle, "if_is_lpw_enabled %s set LPW to %d",
-		    IF_XNAME(ifp), is_lpw_mode == true ? 1 : 0);
+		/*
+		 * Ignore packets on interfaces that are not LPW aware
+		 */
+		if (ifp != NULL && (ifp->if_xflags & IFXF_LOW_POWER_WAKE) == 0) {
+			/*
+			 * Follow the delegate
+			 */
+			if (ifp->if_delegated.ifp != NULL) {
+				return if_is_lpw_enabled_internal(ifp->if_delegated.ifp, depth + 1);
+			}
+			if (if_ports_used_verbose > 0) {
+				os_log(wake_packet_log_handle, "if_is_lpw_enabled %s off", IF_XNAME(ifp));
+			}
+			return false;
+		}
+		return true;
 	}
 
-	return is_lpw_mode;
+
+	return false;
 }
 
+/*
+ * We use if_is_lpw_enabled() to know if a packet comes from an interface that
+ * has LPW enable to implement the core LPW packet processing logic.
+ *
+ * IOPMIsLPWMode() simply tells the kernel is in LPW mode and we use if for example
+ * to set the lpw flag in the packet capture metadata. Packets from non-LPW inteface
+ * may be in transit whrn the AP wakes up.
+ *
+ * Passing a NULL ifp is equivalent to calling IOPMIsLPWMode() but also checks fake LPW
+ *
+ * For code clarity one has to use is_net_lpw_mode() instead of NULL to if_is_lpw_enabled()
+ */
+bool
+if_is_lpw_enabled(struct ifnet *ifp)
+{
+	return if_is_lpw_enabled_internal(ifp, 0);
+}
+
+bool
+is_net_lpw_mode(void)
+{
+	return if_is_lpw_enabled_internal(NULL, 0);
+}
+
+__attribute__((noinline))
 void
 if_exit_lpw(struct ifnet *ifp, const char *lpw_exit_reason)
 {
-	if (if_is_lpw_enabled(ifp) == false) {
+	if (ifp == NULL) {
 		return;
 	}
-	is_lpw_mode = false;
+
+#if (DEBUG || DEVELOPMENT)
+	if (use_fake_lpw != 0) {
+		switch (use_fake_lpw) {
+		case FAKE_LPW_ON:
+			use_fake_lpw = FAKE_LPW_OFF;
+			break;
+		case FAKE_LPW_ALWAYS_ON:
+			return;
+		default:
+			break;
+		}
+		if (has_requested_full_AP_wake == true) {
+			return;
+		}
+	}
+#else /* (DEBUG || DEVELOPMENT) */
+	if (has_requested_full_AP_wake == true || !IOPMIsLPWMode()) {
+		return;
+	}
+#endif /* (DEBUG || DEVELOPMENT) */
+
+	has_requested_full_AP_wake = true;
 
 	if_ports_used_stats.ifpu_lpw_to_full_wake++;
 	os_log(wake_packet_log_handle, "if_exit_lpw: LPW to Full Wake requested on %s reason %s",
 	    IF_XNAME(ifp), lpw_exit_reason);
 
-#if (DEVELOPMENT || DEBUG)
-	if (fake_lpw_mode_is_set == true) {
-		/* Let's not mess up with the IO power management subsystem */
-		if (IOPMIsLPWMode() == false) {
-			return;
-		}
+	/* Post kernel event for LPW to full wake transition */
+	struct net_event_data ev_data;
+
+	bzero(&ev_data, sizeof(ev_data));
+	ev_data.if_family = ifp->if_family;
+	ev_data.if_unit = ifp->if_unit;
+	strlcpy(ev_data.if_name, IF_XNAME(ifp), sizeof(ev_data.if_name));
+
+	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_LPW_FULL_WAKE,
+	    &ev_data, sizeof(ev_data), TRUE);
+
+#if (DEBUG || DEVELOPMENT)
+	if (use_fake_lpw == FAKE_LPW_ALWAYS_ON) {
+		return;
 	}
-#endif /* (DEVELOPMENT || DEBUG) */
+#endif /* (DEBUG || DEVELOPMENT) */
 
 	IOPMNetworkStackFullWake(kIOPMNetworkStackFullWakeFlag, "Network.ConnectionNotIdle");
 }
@@ -424,7 +510,7 @@ net_port_entry_list_clear(void)
 {
 	struct net_port_entry *npe;
 
-	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_RW_ASSERT(&net_port_entry_head_lock, LCK_RW_ASSERT_EXCLUSIVE);
 
 	while ((npe = SLIST_FIRST(&net_port_entry_list)) != NULL) {
 		SLIST_REMOVE_HEAD(&net_port_entry_list, npe_list_next);
@@ -468,6 +554,11 @@ is_wakeuuid_set(void)
 	return IOPMCopySleepWakeUUIDKey(NULL, 0);
 }
 
+/*
+ * Called both when transitioning to sleep from:
+ *  - full wake
+ *  - AOT wake (i.e. LPW)
+ */
 static void
 if_ports_reset_wake_attribution_state(void)
 {
@@ -485,10 +576,15 @@ if_ports_reset_wake_attribution_state(void)
 	last_wake_phy_if_delay_wake_pkt = false;
 	last_wake_phy_if_lpw = false;
 
-	is_lpw_mode = false;
+	has_requested_full_AP_wake = false;
+	wake_attribution_gencnt += 1;
+
 #if (DEVELOPMENT || DEBUG)
 	fake_lpw_mode_is_set = false;
 #endif /* (DEVELOPMENT || DEBUG) */
+
+	os_log(wake_packet_log_handle, "if_ports_reset_wake_attribution_state gencnt %u",
+	    wake_attribution_gencnt);
 }
 
 void
@@ -533,7 +629,7 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 		return;
 	}
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_exclusive(&net_port_entry_head_lock);
 	if (uuid_compare(wakeuuid, current_wakeuuid) != 0) {
 		if (last_wake_phy_if_delay_wake_pkt) {
 			if_ports_used_stats.ifpu_delayed_wake_event_undelivered++;
@@ -550,7 +646,7 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 	 * Record the time last checked
 	 */
 	microuptime(&wakeuiid_last_check);
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_exclusive(&net_port_entry_head_lock);
 
 	if (updated && if_ports_used_verbose > 0) {
 		uuid_string_t uuid_str;
@@ -603,7 +699,7 @@ net_port_info_has_entry(const struct net_port_info *npi)
 	bool found = false;
 	int32_t count = 0;
 
-	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_RW_ASSERT(&net_port_entry_head_lock, LCK_RW_ASSERT_HELD);
 
 	TAILQ_FOREACH(npe, NPE_HASH_HEAD(npi->npi_local_port), npe_hash_next) {
 		count += 1;
@@ -615,6 +711,50 @@ net_port_info_has_entry(const struct net_port_info *npi)
 	if_ports_used_stats.ifpu_npi_hash_search_total += count;
 	if (count > if_ports_used_stats.ifpu_npi_hash_search_max) {
 		if_ports_used_stats.ifpu_npi_hash_search_max = count;
+	}
+
+	return found;
+}
+
+/*
+ * Search the port entry list for an entry with the given PID and retrieve
+ * the platform binary flag and optionally the owner UUID.
+ *
+ * Parameters:
+ *   pid: Process ID to search for
+ *   ext_flags: Pointer to ext_flags to update with NPIXF_PLATFORMBINARY if found
+ *   owner_uuid: Optional pointer to uuid_t to copy the owner UUID into (can be NULL)
+ *
+ * Returns:
+ *   true if a matching entry was found, false otherwise
+ *
+ * Must be called with net_port_entry_head_lock held (SHARED or EXCLUSIVE)
+ */
+static bool
+net_port_info_get_pid_info_from_list(pid_t pid, uint16_t *ext_flags, uuid_t *owner_uuid)
+{
+	struct net_port_entry *npe;
+	bool found = false;
+
+	LCK_RW_ASSERT(&net_port_entry_head_lock, LCK_RW_ASSERT_HELD);
+
+	if (pid == 0) {
+		return false;
+	}
+
+	SLIST_FOREACH(npe, &net_port_entry_list, npe_list_next) {
+		if (npe->npe_npi.npi_owner_pid == pid) {
+			/* Copy platform binary flag if set */
+			if (npe->npe_npi.npi_ext_flags & NPIXF_PLATFORMBINARY) {
+				*ext_flags |= NPIXF_PLATFORMBINARY;
+			}
+			/* Copy owner UUID if caller requested it */
+			if (owner_uuid != NULL) {
+				uuid_copy(*owner_uuid, npe->npe_npi.npi_owner_uuid);
+			}
+			found = true;
+			break;
+		}
 	}
 
 	return found;
@@ -671,7 +811,7 @@ net_port_info_add_entry(const struct net_port_info *npi)
 		}
 	}
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_exclusive(&net_port_entry_head_lock);
 
 	if (net_port_info_has_entry(npi) == false) {
 		SLIST_INSERT_HEAD(&net_port_entry_list, npe, npe_list_next);
@@ -709,7 +849,7 @@ net_port_info_add_entry(const struct net_port_info *npi)
 		}
 	}
 
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_exclusive(&net_port_entry_head_lock);
 
 	if (entry_added == false) {
 		zfree(net_port_entry_zone, npe);
@@ -765,6 +905,33 @@ sysctl_clear_test_wakeuuid SYSCTL_HANDLER_ARGS
 }
 
 #endif /* (DEVELOPMENT || DEBUG) */
+
+int
+sysctl_get_ports_used_include_boundif SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error = 0;
+	int val = ports_used_include_boundif;
+
+	if (kauth_cred_issuser(kauth_cred_get()) == 0) {
+		return EPERM;
+	}
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+
+	if (val < 0 || val > 1) {
+		return EINVAL;
+	}
+
+	ports_used_include_boundif = val;
+
+	os_log(wake_packet_log_handle, "ports_used_include_boundif set to %d",
+	    ports_used_include_boundif);
+
+	return error;
+}
 
 static int
 sysctl_timeval(struct sysctl_req *req, const struct timeval *tv)
@@ -832,7 +999,7 @@ sysctl_net_port_info_list SYSCTL_HANDLER_ARGS
 	    PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, 0)) != 0) {
 		return EPERM;
 	}
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_shared(&net_port_entry_head_lock);
 
 	if (req->oldptr == USER_ADDR_NULL) {
 		/* Add a 25% cushion */
@@ -866,7 +1033,7 @@ sysctl_net_port_info_list SYSCTL_HANDLER_ARGS
 		}
 	}
 done:
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_shared(&net_port_entry_head_lock);
 
 	return error;
 }
@@ -921,6 +1088,11 @@ sysctl_get_ports_used SYSCTL_HANDLER_ARGS
 		ifp = ifindex2ifnet[idx];
 	}
 	ifnet_head_done();
+
+	if (ifp == NULL) {
+		error = ENOENT;
+		goto done;
+	}
 
 	error = ifnet_get_local_ports_extended(ifp, protocol, flags, bitfield);
 	if (error != 0) {
@@ -1021,6 +1193,25 @@ if_ports_used_add_inpcb(const uint32_t ifindex, const struct inpcb *inp)
 		proc_name(so->last_pid, npi.npi_owner_pname,
 		    sizeof(npi.npi_owner_pname));
 		uuid_copy(npi.npi_owner_uuid, so->last_uuid);
+
+		/*
+		 * Check if the process is a platform binary.
+		 * First check if we already have an entry in the list for this PID.
+		 */
+		bool found_in_list = false;
+		lck_rw_lock_shared(&net_port_entry_head_lock);
+		found_in_list = net_port_info_get_pid_info_from_list(so->last_pid, &npi.npi_ext_flags, NULL);
+		lck_rw_unlock_shared(&net_port_entry_head_lock);
+
+		if (!found_in_list) {
+			proc_t proc = proc_find(so->last_pid);
+			if (proc != PROC_NULL) {
+				if (csproc_get_platform_binary(proc)) {
+					npi.npi_ext_flags |= NPIXF_PLATFORMBINARY;
+				}
+				proc_rele(proc);
+			}
+		}
 	}
 
 	if (so->so_flags & SOF_DELEGATED) {
@@ -1116,12 +1307,27 @@ if_ports_used_add_flow_entry(const struct flow_entry *fe, const uint32_t ifindex
 
 	/*
 	 * Get the proc UUID from the pid as the the proc UUID is not present
-	 * in the flow_entry
+	 * in the flow_entry.
+	 * Also check if the process is a platform binary.
+	 * First check if we already have an entry in the list for this PID.
+	 * If found, we can get both the platform binary flag AND the UUID
+	 * from the existing entry, avoiding the expensive proc_find() call.
 	 */
-	proc_t proc = proc_find(npi.npi_owner_pid);
-	if (proc != PROC_NULL) {
-		proc_getexecutableuuid(proc, npi.npi_owner_uuid, sizeof(npi.npi_owner_uuid));
-		proc_rele(proc);
+	bool found_in_list = false;
+	lck_rw_lock_shared(&net_port_entry_head_lock);
+	found_in_list = net_port_info_get_pid_info_from_list(npi.npi_owner_pid, &npi.npi_ext_flags, &npi.npi_owner_uuid);
+	lck_rw_unlock_shared(&net_port_entry_head_lock);
+
+	/* Only call proc_find if the PID was not found in the list */
+	if (!found_in_list) {
+		proc_t proc = proc_find(npi.npi_owner_pid);
+		if (proc != PROC_NULL) {
+			proc_getexecutableuuid(proc, npi.npi_owner_uuid, sizeof(npi.npi_owner_uuid));
+			if (csproc_get_platform_binary(proc)) {
+				npi.npi_ext_flags |= NPIXF_PLATFORMBINARY;
+			}
+			proc_rele(proc);
+		}
 	}
 	if (nfi->nfi_effective_pid != -1) {
 		npi.npi_effective_pid = nfi->nfi_effective_pid;
@@ -1281,16 +1487,15 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
  *
  */
 static bool
-net_port_info_find_match(struct net_port_info *in_npi)
+net_port_info_find_match(struct ifnet *ifp, struct net_port_info *in_npi, uint32_t *gencnt)
 {
 	struct net_port_entry *npe;
 	struct net_port_entry * __single best_match = NULL;
+	bool found_match = false;
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_shared(&net_port_entry_head_lock);
 
-	uint32_t count = 0;
 	TAILQ_FOREACH(npe, NPE_HASH_HEAD(in_npi->npi_local_port), npe_hash_next) {
-		count += 1;
 		/*
 		 * Search stop on an exact match
 		 */
@@ -1300,7 +1505,6 @@ net_port_info_find_match(struct net_port_info *in_npi)
 	}
 
 	if (best_match != NULL) {
-		best_match->npe_npi.npi_flags |= NPIF_WAKEPKT;
 		in_npi->npi_flags = best_match->npe_npi.npi_flags;
 		in_npi->npi_owner_pid = best_match->npe_npi.npi_owner_pid;
 		in_npi->npi_effective_pid = best_match->npe_npi.npi_effective_pid;
@@ -1308,18 +1512,39 @@ net_port_info_find_match(struct net_port_info *in_npi)
 		strbufcpy(in_npi->npi_effective_pname, best_match->npe_npi.npi_effective_pname);
 		uuid_copy(in_npi->npi_owner_uuid, best_match->npe_npi.npi_owner_uuid);
 		uuid_copy(in_npi->npi_effective_uuid, best_match->npe_npi.npi_effective_uuid);
+
+		/*
+		 * To avoid issuing duplicate wake packet event within the same wake cycle
+		 * we return the current generation count of the entry and then update it to the
+		 * current wake generation count.
+		 * Use atomic exchange to atomically read old value and write new value.
+		 */
+		*gencnt = os_atomic_xchg(&best_match->npe_wake_gencnt, wake_attribution_gencnt, relaxed);
+		found_match = true;
 	}
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_shared(&net_port_entry_head_lock);
 
 	if (__improbable(net_wake_pkt_debug > 0)) {
-		if (best_match != NULL) {
+		if (found_match) {
 			net_port_info_log_npi("wake packet match", in_npi);
 		} else {
 			net_port_info_log_npi("wake packet no match", in_npi);
 		}
 	}
 
-	return best_match != NULL ? true : false;
+	if (!found_match && ifp->if_delegated.ifp != NULL) {
+		/*
+		 * Follow the interface delegation
+		 */
+		if (if_ports_used_verbose > 0) {
+			os_log(wake_packet_log_handle, "net_port_info_find_match %s check on delegated %s",
+			    ifp->if_xname, ifp->if_delegated.ifp->if_xname);
+		}
+		in_npi->npi_if_index = ifp->if_delegated.ifp->if_index;
+		found_match = net_port_info_find_match(ifp->if_delegated.ifp, in_npi, gencnt);
+	}
+
+	return found_match;
 }
 
 #if (DEBUG || DEVELOPMENT)
@@ -1419,32 +1644,64 @@ if_set_wake_physical_interface(struct ifnet *ifp)
 	 */
 	if (ifp->if_family != IFNET_FAMILY_ETHERNET && ifp->if_family != IFNET_FAMILY_CELLULAR &&
 	    IFNET_IS_COMPANION_LINK_BLUETOOTH(ifp) == false) {
+		if (if_ports_used_verbose > 1) {
+			os_log(wake_packet_log_handle, "if_set_wake_physical_interface %s ignored",
+			    IF_XNAME(ifp));
+		}
 		return 0;
 	}
 
-	/*
-	 * Only handle a wake from a physical interface per wake cycle
-	 */
-	if (last_wake_phy_if_set == true) {
-		if_ports_used_stats.ifpu_wake_pkt_event_error += 1;
-		os_log(wake_packet_log_handle,
-		    "if_set_wake_physical_interface ignored on %s because already set on %s",
-		    IF_XNAME(ifp), last_wake_phy_if_name);
-		return EJUSTRETURN;
+	/* In LPW is is expected to get several wakes so do not suppress successive ones */
+	if (if_is_lpw_enabled(ifp) == false) {
+		/*
+		 * Only handle a wake from a physical interface per wake cycle
+		 */
+		if (last_wake_phy_if_set == true) {
+			if_ports_used_stats.ifpu_wake_pkt_event_error += 1;
+			if (if_ports_used_verbose > 0) {
+				os_log(wake_packet_log_handle,
+				    "if_set_wake_physical_interface ignored on %s because already set on %s",
+				    IF_XNAME(ifp), last_wake_phy_if_name);
+			}
+			return EJUSTRETURN;
+		}
+
+		last_wake_phy_if_set = true;
+
+		if (if_need_delayed_wake_pkt_event(ifp)) {
+			if_ports_used_stats.ifpu_delay_phy_wake_pkt += 1;
+			last_wake_phy_if_delay_wake_pkt = true;
+			if (if_ports_used_verbose > 0) {
+				os_log(wake_packet_log_handle, "if_set_wake_physical_interface %s last_wake_phy_if_delay_wake_pkt set",
+				    IF_XNAME(ifp));
+			}
+		}
 	}
 
-	last_wake_phy_if_set = true;
-	strlcpy(last_wake_phy_if_name, IF_XNAME(ifp), sizeof(last_wake_phy_if_name));
-	last_wake_phy_if_family = ifp->if_family;
-	last_wake_phy_if_subfamily = ifp->if_subfamily;
-	last_wake_phy_if_functional_type = if_functional_type(ifp, true);
+	if (ifp->if_delegated.ifp != NULL) {
+		struct ifnet *delegated_ifp = ifp->if_delegated.ifp;
 
-	if (if_need_delayed_wake_pkt_event(ifp)) {
-		if_ports_used_stats.ifpu_delay_phy_wake_pkt += 1;
-		last_wake_phy_if_delay_wake_pkt = true;
-		os_log(wake_packet_log_handle, "if_set_wake_physical_interface %s last_wake_phy_if_delay_wake_pkt set",
-		    IF_XNAME(ifp));
+		strlcpy(last_wake_phy_if_name, IF_XNAME(delegated_ifp), sizeof(last_wake_phy_if_name));
+		last_wake_phy_if_family = delegated_ifp->if_family;
+		last_wake_phy_if_subfamily = delegated_ifp->if_subfamily;
+		last_wake_phy_if_functional_type = if_functional_type(delegated_ifp, true);
+		if (if_ports_used_verbose > 0) {
+			os_log(wake_packet_log_handle,
+			    "if_set_wake_physical_interface %s delegate of %s",
+			    IF_XNAME(delegated_ifp), IF_XNAME(ifp));
+		}
+	} else {
+		strlcpy(last_wake_phy_if_name, IF_XNAME(ifp), sizeof(last_wake_phy_if_name));
+		last_wake_phy_if_family = ifp->if_family;
+		last_wake_phy_if_subfamily = ifp->if_subfamily;
+		last_wake_phy_if_functional_type = if_functional_type(ifp, true);
+		if (if_ports_used_verbose > 0) {
+			os_log(wake_packet_log_handle,
+			    "if_set_wake_physical_interface %s",
+			    IF_XNAME(ifp));
+		}
 	}
+
 	if ((ifp->if_flags & IFXF_LOW_POWER_WAKE) != 0) {
 		last_wake_phy_if_lpw = true;
 	}
@@ -1559,8 +1816,8 @@ static void
 if_notify_unattributed_wake_common(struct ifnet *ifp, struct net_port_info *npi,
     struct net_port_info_una_wake_event *event_data)
 {
-	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
-	lck_mtx_lock(&net_port_entry_head_lock);
+	LCK_RW_ASSERT(&net_port_entry_head_lock, LCK_RW_ASSERT_NOT_OWNED);
+	lck_rw_lock_exclusive(&net_port_entry_head_lock);
 
 	if (is_unattributed_wake_already_notified(npi) == true) {
 		goto done;
@@ -1587,7 +1844,7 @@ if_notify_unattributed_wake_common(struct ifnet *ifp, struct net_port_info *npi,
 	deliver_unattributed_wake_packet_event(event_data);
 
 done:
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_exclusive(&net_port_entry_head_lock);
 }
 
 static void
@@ -1638,6 +1895,17 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
 		if_ports_used_stats.ifpu_unattributed_wake_event_error += 1;
 		return;
 	}
+
+	strlcpy(event_data.una_wake_pkt_ifname, IF_XNAME(ifp),
+	    sizeof(event_data.una_wake_pkt_ifname));
+	event_data.una_wake_pkt_if_info.npi_if_family = ifp->if_family;
+	event_data.una_wake_pkt_if_info.npi_if_subfamily = ifp->if_subfamily;
+	event_data.una_wake_pkt_if_info.npi_if_functional_type = if_functional_type(ifp, true);
+
+	strbufcpy(event_data.una_wake_pkt_phy_ifname, last_wake_phy_if_name);
+	event_data.una_wake_pkt_phy_if_info.npi_if_family = last_wake_phy_if_family;
+	event_data.una_wake_pkt_phy_if_info.npi_if_subfamily = last_wake_phy_if_subfamily;
+	event_data.una_wake_pkt_phy_if_info.npi_if_functional_type = last_wake_phy_if_functional_type;
 
 	if_notify_unattributed_wake_common(ifp, npi, &event_data);
 }
@@ -1694,9 +1962,9 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 		event_data.wake_pkt_control_flags |= NPICF_NOWAKE;
 	}
 
-	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_RW_ASSERT(&net_port_entry_head_lock, LCK_RW_ASSERT_NOT_OWNED);
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_exclusive(&net_port_entry_head_lock);
 
 	/*
 	 * Always immediately notify attributed wake for idle connections in LPW
@@ -1741,7 +2009,7 @@ deliver:
 
 	deliver_attributed_wake_packet_event(&event_data);
 done:
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_exclusive(&net_port_entry_head_lock);
 }
 
 static bool
@@ -1803,7 +2071,6 @@ log_hexdump(os_log_t log_handle, void *__sized_by(len) data, size_t len)
 	}
 }
 
-__attribute__((noinline))
 static void
 log_wake_mbuf(struct ifnet *ifp, struct mbuf *m)
 {
@@ -1817,6 +2084,7 @@ log_wake_mbuf(struct ifnet *ifp, struct mbuf *m)
 	}
 }
 
+__attribute__((noinline))
 void
 if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, struct mbuf *m)
 {
@@ -1827,6 +2095,7 @@ if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, stru
 	uint32_t pkt_data_len = 0;
 	uint16_t pkt_control_flags = 0;
 	uint16_t pkt_proto = 0;
+	uint32_t gencnt = 0;
 
 	if (ifp == NULL) {
 		os_log(wake_packet_log_handle, "if_ports_used_match_mbuf: receive interface is NULL");
@@ -1834,10 +2103,7 @@ if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, stru
 		return;
 	}
 
-	if ((m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) == 0) {
-		if_ports_used_stats.ifpu_match_wake_pkt_no_flag += 1;
-		os_log_error(wake_packet_log_handle, "if_ports_used_match_mbuf: called PKTF_WAKE_PKT not set from %s",
-		    IF_XNAME(ifp));
+	if ((m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) == 0 && if_is_lpw_enabled(ifp) == false) {
 		return;
 	}
 
@@ -1846,12 +2112,23 @@ if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, stru
 	}
 
 	/*
-	 * Only accept one wake from a physical interface per wake cycle
+	 * Packet received in LPW mode have a special handling as they are
+	 * not necessarily marked as wake packets
+	 */
+	if (if_is_lpw_enabled(ifp) == false) {
+		if ((m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) == 0) {
+			if_ports_used_stats.ifpu_match_wake_pkt_no_flag += 1;
+			os_log_error(wake_packet_log_handle, "if_ports_used_match_mbuf: called PKTF_WAKE_PKT not set from %s",
+			    IF_XNAME(ifp));
+			return;
+		}
+	}
+	/*
+	 * Only accept one wake packet from a physical interface per wake cycle as we
+	 * can get spurious wake packets from some interfaces
 	 */
 	if (if_set_wake_physical_interface(ifp) == EJUSTRETURN) {
-		if (if_is_lpw_enabled(ifp) == false) {
-			m->m_pkthdr.pkt_flags &= ~PKTF_WAKE_PKT;
-		}
+		m->m_pkthdr.pkt_flags &= ~PKTF_WAKE_PKT;
 		return;
 	}
 
@@ -2133,30 +2410,44 @@ if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family, stru
 		goto failed;
 	}
 
-	found = net_port_info_find_match(&npi);
+	found = net_port_info_find_match(ifp, &npi, &gencnt);
 
 failed:
-	if (__improbable(if_is_lpw_enabled(ifp))) {
-		npi.npi_flags |= NPIF_LPW;
-
-		if (found && (npi.npi_flags & NPIF_CONNECTION_IDLE)) {
-			os_log(wake_packet_log_handle, "if_ports_used_match_mbuf: idle connection in LPW on %s",
-			    IF_XNAME(ifp));
-
-			if_ports_used_stats.ifpu_lpw_connection_idle_wake++;
-		} else {
-			os_log(wake_packet_log_handle, "if_ports_used_match_mbuf: not idle connection in LPW on %s",
-			    IF_XNAME(ifp));
-
-			if_ports_used_stats.ifpu_lpw_not_idle_wake++;
+	/*
+	 * Because of LPW, we can receive a train of packet for an idle connection
+	 * in the same wake cycle so use a generation count to prevent the generation
+	 * of duplicate attribute wake packet event. This cover both LPW and non-LPW modes.
+	 *
+	 * Unattributed wake packet events have a zero gencnt
+	 */
+	if (gencnt != wake_attribution_gencnt) {
+		if ((m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) != 0) {
+			npi.npi_flags |= NPIF_WAKEPKT;
 		}
-	}
-	if (found) {
-		if_notify_wake_packet(ifp, &npi,
-		    pkt_total_len, pkt_data_len, pkt_control_flags);
-	} else {
-		if_notify_unattributed_wake_mbuf(ifp, m, &npi,
-		    pkt_total_len, pkt_data_len, pkt_control_flags, pkt_proto);
+
+		if (if_is_lpw_enabled(ifp) == true) {
+			npi.npi_flags |= NPIF_LPW;
+
+			if (found && (npi.npi_flags & NPIF_CONNECTION_IDLE)) {
+				os_log(wake_packet_log_handle, "if_ports_used_match_mbuf: idle connection in LPW on %s",
+				    IF_XNAME(ifp));
+
+				if_ports_used_stats.ifpu_lpw_connection_idle_wake++;
+			} else {
+				os_log(wake_packet_log_handle, "if_ports_used_match_mbuf: not idle connection in LPW on %s",
+				    IF_XNAME(ifp));
+
+				if_ports_used_stats.ifpu_lpw_not_idle_wake++;
+			}
+		}
+
+		if (found) {
+			if_notify_wake_packet(ifp, &npi,
+			    pkt_total_len, pkt_data_len, pkt_control_flags);
+		} else {
+			if_notify_unattributed_wake_mbuf(ifp, m, &npi,
+			    pkt_total_len, pkt_data_len, pkt_control_flags, pkt_proto);
+		}
 	}
 }
 
@@ -2196,7 +2487,6 @@ if_notify_unattributed_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt,
 	if_notify_unattributed_wake_common(ifp, npi, &event_data);
 }
 
-__attribute__((noinline))
 static void
 log_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 {
@@ -2212,6 +2502,7 @@ log_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 	    ifp->if_xname, len);
 }
 
+__attribute__((noinline))
 void
 if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 {
@@ -2221,6 +2512,7 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 	uint32_t pkt_data_len = 0;
 	uint16_t pkt_control_flags = 0;
 	uint16_t pkt_proto = 0;
+	uint32_t gencnt = 0; /* Wake generation count for the entry is not zero if found */
 
 	if (ifp == NULL) {
 		os_log(wake_packet_log_handle, "if_ports_used_match_pkt: receive interface is NULL");
@@ -2228,20 +2520,29 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 		return;
 	}
 
-	if ((pkt->pkt_pflags & PKT_F_WAKE_PKT) == 0) {
-		if_ports_used_stats.ifpu_match_wake_pkt_no_flag += 1;
-		os_log_error(wake_packet_log_handle, "%s: called PKT_F_WAKE_PKT not set from %s",
-		    __func__, IF_XNAME(ifp));
+	if ((pkt->pkt_pflags & PKT_F_WAKE_PKT) == 0 && if_is_lpw_enabled(ifp) == false) {
 		return;
 	}
-
 
 	if (__improbable(net_wake_pkt_debug > 0)) {
 		log_wake_pkt(ifp, pkt);
 	}
 
 	/*
-	 * Only accept one wake from a physical interface per wake cycle
+	 * Packet received in LPW mode have a special handling as they are
+	 * not necessarily wake packets
+	 */
+	if (if_is_lpw_enabled(ifp) == false) {
+		if ((pkt->pkt_pflags & PKT_F_WAKE_PKT) == 0) {
+			if_ports_used_stats.ifpu_match_wake_pkt_no_flag += 1;
+			os_log_error(wake_packet_log_handle, "%s: called PKT_F_WAKE_PKT not set from %s",
+			    __func__, IF_XNAME(ifp));
+			return;
+		}
+	}
+	/*
+	 * Only accept one wake packet from a physical interface per wake cycle as we
+	 * can get spurious wake packets from some interfaces
 	 */
 	if (if_set_wake_physical_interface(ifp) == EJUSTRETURN) {
 		pkt->pkt_pflags &= ~PKT_F_WAKE_PKT;
@@ -2374,31 +2675,46 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 		goto failed;
 	}
 
-	found = net_port_info_find_match(&npi);
+	found = net_port_info_find_match(ifp, &npi, &gencnt);
 
 failed:
-	if (__improbable(if_is_lpw_enabled(ifp))) {
-		npi.npi_flags |= NPIF_LPW;
-
-		if (found && (npi.npi_flags & NPIF_CONNECTION_IDLE)) {
-			os_log(wake_packet_log_handle, "if_ports_used_match_pkt: idle connection in LPW on %s",
-			    IF_XNAME(ifp));
-
-			if_ports_used_stats.ifpu_lpw_connection_idle_wake++;
-		} else {
-			os_log(wake_packet_log_handle, "if_ports_used_match_pkt: not idle connection in LPW on %s",
-			    IF_XNAME(ifp));
-
-			if_ports_used_stats.ifpu_lpw_not_idle_wake++;
+	/*
+	 * Because of LPW, we can receive a train of packet for an idle connection
+	 * in the same wake cycle so use a generation count to prevent the generation
+	 * of duplicate attribute wake packet event. This cover both LPW and non-LPW modes.
+	 *
+	 * Unattributed wake packet events have a zero gencnt
+	 */
+	if (gencnt != wake_attribution_gencnt) {
+		if ((pkt->pkt_pflags & PKT_F_WAKE_PKT) != 0) {
+			npi.npi_flags |= NPIF_WAKEPKT;
 		}
-	}
 
-	if (found) {
-		if_notify_wake_packet(ifp, &npi,
-		    pkt_total_len, pkt_data_len, pkt_control_flags);
-	} else {
-		if_notify_unattributed_wake_pkt(ifp, pkt, &npi,
-		    pkt_total_len, pkt_data_len, pkt_control_flags, pkt_proto);
+		if (if_is_lpw_enabled(ifp) == true) {
+			npi.npi_flags |= NPIF_LPW;
+
+			if (found && (npi.npi_flags & NPIF_CONNECTION_IDLE)) {
+				if (if_ports_used_verbose > 0) {
+					os_log(wake_packet_log_handle, "if_ports_used_match_pkt: idle connection in LPW on %s",
+					    IF_XNAME(ifp));
+				}
+
+				if_ports_used_stats.ifpu_lpw_connection_idle_wake++;
+			} else {
+				os_log(wake_packet_log_handle, "if_ports_used_match_pkt: not idle connection in LPW on %s",
+				    IF_XNAME(ifp));
+
+				if_ports_used_stats.ifpu_lpw_not_idle_wake++;
+			}
+		}
+
+		if (found) {
+			if_notify_wake_packet(ifp, &npi,
+			    pkt_total_len, pkt_data_len, pkt_control_flags);
+		} else {
+			if_notify_unattributed_wake_pkt(ifp, pkt, &npi,
+			    pkt_total_len, pkt_data_len, pkt_control_flags, pkt_proto);
+		}
 	}
 }
 #endif /* SKYWALK */
@@ -2411,11 +2727,11 @@ sysctl_last_attributed_wake_event SYSCTL_HANDLER_ARGS
 	size_t len = sizeof(net_port_info_wake_event);
 	int error;
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_shared(&net_port_entry_head_lock);
 	if (last_wake_pkt_event.npi_wp_code == KEV_POWER_WAKE_PACKET) {
 		memcpy(&net_port_info_wake_event, &last_wake_pkt_event.npi_ev_wake_pkt_attributed, len);
 	}
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_shared(&net_port_entry_head_lock);
 
 	if (req->oldptr != 0) {
 		len = MIN(req->oldlen, len);
@@ -2433,11 +2749,11 @@ sysctl_last_unattributed_wake_event SYSCTL_HANDLER_ARGS
 	size_t len = sizeof(net_port_info_una_wake_event);
 	int error;
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_shared(&net_port_entry_head_lock);
 	if (last_wake_pkt_event.npi_wp_code == KEV_POWER_UNATTRIBUTED_WAKE) {
 		memcpy(&net_port_info_una_wake_event, &last_wake_pkt_event.npi_ev_wake_pkt_unattributed, len);
 	}
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_shared(&net_port_entry_head_lock);
 
 	if (req->oldptr != 0) {
 		len = MIN(req->oldlen, len);
@@ -2487,7 +2803,7 @@ sysctl_wake_pkt_event_notify SYSCTL_HANDLER_ARGS
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
 
-	lck_mtx_lock(&net_port_entry_head_lock);
+	lck_rw_lock_exclusive(&net_port_entry_head_lock);
 
 	if (last_wake_phy_if_delay_wake_pkt == true && val == last_wake_phy_if_family) {
 		last_wake_phy_if_delay_wake_pkt = false;
@@ -2512,7 +2828,7 @@ sysctl_wake_pkt_event_notify SYSCTL_HANDLER_ARGS
 		if_ports_used_stats.ifpu_wake_pkt_event_notify_in_vain += 1;
 		os_log(wake_packet_log_handle, "sysctl_wake_pkt_event_notify in vain");
 	}
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	lck_rw_unlock_exclusive(&net_port_entry_head_lock);
 
 	return 0;
 }
@@ -2575,7 +2891,7 @@ sysctl_wake_pkt_event_delay_if_families SYSCTL_HANDLER_ARGS
 			    (!delay && (ifp->if_xflags & flags) != IFXF_INBAND_WAKE_PKT_TAGGING)) {
 				if_set_delay_wake_flags(ifp, delay);
 
-				if (if_ports_used_verbose || ifp->if_family == IFNET_FAMILY_CELLULAR) {
+				if (if_ports_used_verbose > 0 || ifp->if_family == IFNET_FAMILY_CELLULAR) {
 					os_log(wake_packet_log_handle, "interface %s reset INBAND_WAKE_PKT_TAGGING %d DELAYWAKEPKTEVENT %d",
 					    ifp->if_xname,
 					    ifp->if_xflags & IFXF_INBAND_WAKE_PKT_TAGGING ? 1 : 0,
@@ -2601,7 +2917,7 @@ init_inband_wake_pkt_tagging_for_family(struct ifnet *ifp)
 
 	if_set_delay_wake_flags(ifp, delay);
 
-	if (if_ports_used_verbose || ifp->if_family == IFNET_FAMILY_CELLULAR) {
+	if (if_ports_used_verbose > 0 || ifp->if_family == IFNET_FAMILY_CELLULAR) {
 		os_log(wake_packet_log_handle, "interface %s initialized INBAND_WAKE_PKT_TAGGING %d DELAYWAKEPKTEVENT %d",
 		    ifp->if_xname,
 		    ifp->if_xflags & IFXF_INBAND_WAKE_PKT_TAGGING ? 1 : 0,

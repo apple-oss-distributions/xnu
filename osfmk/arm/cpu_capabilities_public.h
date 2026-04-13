@@ -90,18 +90,14 @@
 #define CAP_BIT_FEAT_SME2           41
 #define CAP_BIT_FEAT_SME_F64F64     42
 #define CAP_BIT_FEAT_SME_I16I64     43
-#if defined(PRIVATE)
 #define CAP_BIT_FEAT_SME2p1         44
 #define CAP_BIT_FEAT_SME_F16F16     45
 #define CAP_BIT_FEAT_SME_B16B16     46
 #define CAP_BIT_FEAT_SME_F8F16      47
 #define CAP_BIT_FEAT_SME_F8F32      48
-#endif /* defined(PRIVATE) */
-
 #define CAP_BIT_AdvSIMD             49
 #define CAP_BIT_AdvSIMD_HPFPCvt     50
 #define CAP_BIT_FEAT_CRC32          51
-
 #define CAP_BIT_SME_F32F32          52
 #define CAP_BIT_SME_BI32I32         53
 #define CAP_BIT_SME_B16F32          54
@@ -113,11 +109,12 @@
 
 #if defined(PRIVATE)
 #define CAP_BIT_UCNORMALMEM         59
+#endif /* defined(PRIVATE) */
+
 #define CAP_BIT_FEAT_MTE            60
 #define CAP_BIT_FEAT_MTE2           61
 #define CAP_BIT_FEAT_MTE3           62
 #define CAP_BIT_FEAT_MTE4           63
-#endif /* defined(PRIVATE) */
 
 #define CAP_BIT_FEAT_HBC            64
 #define CAP_BIT_FEAT_EBF16          65
@@ -125,20 +122,20 @@
 #define CAP_BIT_FEAT_CSSC           67
 #define CAP_BIT_FEAT_FPACCOMBINE    68
 
-#if defined(PRIVATE)
 #define CAP_BIT_FEAT_MTE_ASYNC      69
 #define CAP_BIT_FEAT_MTE_CANONICAL_TAGS 70
 #define CAP_BIT_FEAT_MTE_STORE_ONLY 71
 #define CAP_BIT_FEAT_MTE_NO_ADDRESS_TAGS 72
-#endif /* defined(PRIVATE) */
 
 #define CAP_BIT_FP_SyncExceptions   73
 
+
+#define CAP_BIT_FEAT_SVE_B16B16     91
 
 /* Legacy definitions for backwards compatibility */
 #define CAP_BIT_CRC32               CAP_BIT_FEAT_CRC32
 
 /* Total number of FEAT bits. */
-#define CAP_BIT_NB 80
+#define CAP_BIT_NB 92
 
 #endif /* _ARM_CPU_CAPABILITIES_PUBLIC_H */

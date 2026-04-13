@@ -59,7 +59,7 @@
 #ifndef _KERN_CPU_NUMBER_H_
 #define _KERN_CPU_NUMBER_H_
 
-extern int              master_cpu;
+extern int boot_cpu_id;
 
 #include <machine/cpu_number.h>
 

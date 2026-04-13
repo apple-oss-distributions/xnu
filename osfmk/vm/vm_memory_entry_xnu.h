@@ -40,7 +40,17 @@ extern void mach_memory_entry_port_release(ipc_port_t port);
 extern vm_named_entry_t mach_memory_entry_from_port(ipc_port_t port);
 extern struct vm_named_entry *mach_memory_entry_allocate(ipc_port_t *user_handle_p);
 
+extern memory_object_size_t mach_memory_entry_size(ipc_port_t user_handle);
+
 extern void mach_memory_entry_describe(vm_named_entry_t named_entry, kobject_description_t desc);
+
+extern kern_return_t
+mach_memory_object_control_memory_entry_64(
+	memory_object_control_t control,
+	memory_object_offset_t  offset,
+	memory_object_size_t    size,
+	vm_prot_t               permission,
+	ipc_port_t              *entry_handle);
 
 __END_DECLS
 #endif /* XNU_KERNEL_PRIVATE */

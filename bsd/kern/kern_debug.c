@@ -171,30 +171,17 @@ debug_syscall_rejection_handle(int syscall_mach_trap_number)
 
 void
 rejected_syscall_guard_ast(
-	thread_t t,
+	thread_t __unused t,
 	mach_exception_data_type_t code,
 	mach_exception_data_type_t subcode)
 {
-	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
 	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-
-	int flags = PX_DEBUG_NO_HONOR;
-	exception_info_t info = {
-		.os_reason = OS_REASON_GUARD,
-		.exception_type = EXC_GUARD,
-		.mx_code = code,
-		.mx_subcode = subcode,
-	};
-
-	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-		psignal_uthread(t, SIGSYS);
-	} else {
-		exit_with_mach_exception(current_proc(), info, flags);
-	}
+	exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_GUARD,
+	    EXC_GUARD, code, subcode, PX_FLAGS_NONE);
 }
 
 

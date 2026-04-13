@@ -1207,6 +1207,7 @@ skip_ipsec:
 				break;
 			case EADDRNOTAVAIL:
 				drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
+				OS_FALLTHROUGH;
 			default:
 				break; /* XXX statistics? */
 			}

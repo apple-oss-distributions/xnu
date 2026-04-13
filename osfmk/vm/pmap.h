@@ -483,8 +483,10 @@ extern void pmap_sync_page_attributes_phys(ppnum_t pa);
 extern pmap_paddr_t mte_tag_storage_start;
 extern pmap_paddr_t mte_tag_storage_end;
 extern uint_t       mte_tag_storage_count; /* in number of pages */
+extern uint_t       mte_tag_storage_discarded; /* in number of pages */
 extern ppnum_t      mte_tag_storage_start_pnum;
 
+extern uint_t pmap_tag_storage_in_range_count(void);
 extern void pmap_make_tag_storage_page(ppnum_t);
 extern void pmap_unmake_tag_storage_page(ppnum_t);
 extern ppnum_t map_tag_ppnum_to_first_covered_ppnum(ppnum_t tag_ppnum);
@@ -560,14 +562,6 @@ extern void(pmap_copy)(                         /* Copy range of mappings,
 	vm_map_offset_t dest_va,
 	vm_map_size_t   size,
 	vm_map_offset_t source_va);
-
-extern kern_return_t(pmap_attribute)(           /* Get/Set special memory
-                                                 * attributes */
-	pmap_t          pmap,
-	vm_map_offset_t va,
-	vm_map_size_t   size,
-	vm_machine_attribute_t  attribute,
-	vm_machine_attribute_val_t* value);
 
 /*
  * Routines defined as macros.
@@ -984,7 +978,6 @@ extern void pmap_ledger_verify_size(size_t);
 extern ledger_t pmap_ledger_alloc(void);
 extern void pmap_ledger_free(ledger_t);
 
-extern bool pmap_is_bad_ram(ppnum_t ppn);
 
 extern bool pmap_is_page_restricted(ppnum_t pn);
 

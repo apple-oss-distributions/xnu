@@ -121,7 +121,7 @@ cubic_target(struct tcpcb *tp, uint32_t srtt)
 	}
 
 	if (tp->t_ccstate->cubic_origin_point == 0) {
-		os_log_error(OS_LOG_DEFAULT, "Prague CC: Cubic origin point should be greater than 0");
+		os_log_error(tcp_log_handle, "Prague CC: Cubic origin point should be greater than 0");
 	}
 	/*
 	 * Compute the target window W(t+RTT) for the next RTT using,
@@ -398,7 +398,7 @@ prague_update_alpha(struct tcpcb *tp, uint32_t ack, uint32_t packets_marked,
 {
 	if (!rtt_elapsed(tp->t_ccstate->snd_nxt_alpha, ack)) {
 		/* One RTT hasn't elapsed yet, don't update alpha */
-		os_log(OS_LOG_DEFAULT, "one RTT hasn't elapsed, not updating alpha");
+		os_log(tcp_log_handle, "one RTT hasn't elapsed, not updating alpha");
 		return;
 	}
 
@@ -415,7 +415,7 @@ prague_update_alpha(struct tcpcb *tp, uint32_t ack, uint32_t packets_marked,
 	if (packets_acked > tp->t_ccstate->prague_packets_acked) {
 		newly_acked = packets_acked - tp->t_ccstate->prague_packets_acked;
 	} else {
-		os_log_error(OS_LOG_DEFAULT,
+		os_log_error(tcp_log_handle,
 		    "No new packets were ACK'ed, we shouldn't be called");
 		return;
 	}
@@ -448,7 +448,7 @@ prague_cwr(struct tcpcb *tp)
 {
 	// If we are currently in loss recovery, then do nothing
 	if (tp->t_ccstate->in_loss) {
-		os_log(OS_LOG_DEFAULT, "currently in loss recovery, no need to do CWR");
+		os_log(tcp_log_handle, "currently in loss recovery, no need to do CWR");
 		return false;
 	}
 
@@ -488,7 +488,7 @@ tcp_prague_process_ecn(struct tcpcb *tp, struct tcphdr *th, uint32_t new_bytes_m
 {
 	if (__improbable(packets_marked < tp->t_ccstate->prague_ce_counter ||
 	    packets_acked < tp->t_ccstate->prague_packets_acked)) {
-		os_log_error(OS_LOG_DEFAULT, "new CE count (%u) can't be less than current CE count (%u)"
+		os_log_error(tcp_log_handle, "new CE count (%u) can't be less than current CE count (%u)"
 		    "OR newly ACKed (%u) can't be less that current ACKed (%u)",
 		    packets_marked, tp->t_ccstate->prague_ce_counter,
 		    packets_acked, tp->t_ccstate->prague_packets_acked);
@@ -510,7 +510,7 @@ tcp_prague_process_ecn(struct tcpcb *tp, struct tcphdr *th, uint32_t new_bytes_m
 		return;
 	}
 
-	os_log(OS_LOG_DEFAULT, "%u packets were newly CE marked",
+	os_log(tcp_log_handle, "%u packets were newly CE marked",
 	    packets_marked - tp->t_ccstate->prague_ce_counter);
 	/*
 	 * Received an ACK with new CE counts, subtract CE marked bytes
@@ -531,7 +531,7 @@ tcp_prague_process_ecn(struct tcpcb *tp, struct tcphdr *th, uint32_t new_bytes_m
 
 	if (!rtt_elapsed(tp->t_ccstate->snd_nxt_cwr, th->th_ack)) {
 		/* One RTT hasn't elapsed yet, don't doing CWR */
-		os_log(OS_LOG_DEFAULT, "one RTT hasn't elapsed, not doing CWR");
+		os_log(tcp_log_handle, "one RTT hasn't elapsed, not doing CWR");
 		return;
 	}
 

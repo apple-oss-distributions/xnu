@@ -111,6 +111,7 @@
 #include <kern/misc_protos.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_map_internal.h>
+#include <vm/vm_map_lock_internal.h>
 #include <vm/vm_object_xnu.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_page_internal.h>
@@ -178,59 +179,18 @@ vm_allocate_external(
 	return mach_vm_allocate_external(map, addr, size, flags);
 }
 
-static __attribute__((always_inline, warn_unused_result))
-kern_return_t
-mach_vm_deallocate_sanitize(
-	vm_map_t                map,
-	mach_vm_offset_ut       start_u,
-	mach_vm_size_ut         size_u,
-	mach_vm_offset_t       *start,
-	mach_vm_offset_t       *end,
-	mach_vm_size_t         *size)
-{
-	vm_sanitize_flags_t     flags = VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS;
-
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	flags |= VM_SANITIZE_FLAGS_DENY_NON_CANONICAL_ADDR;
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
-
-	return vm_sanitize_addr_size(start_u, size_u,
-	           VM_SANITIZE_CALLER_VM_DEALLOCATE, map, flags,
-	           start, end, size);
-}
-
 /*
  *	mach_vm_deallocate -
  *	deallocates the specified range of addresses in the
  *	specified address map.
  */
 kern_return_t
-mach_vm_deallocate(
+mach_vm_deallocate_external(
 	vm_map_t                map,
 	mach_vm_offset_ut       start_u,
 	mach_vm_size_ut         size_u)
 {
-	mach_vm_offset_t start, end;
-	mach_vm_size_t   size;
-	kern_return_t    kr;
-
-	if (map == VM_MAP_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	kr = mach_vm_deallocate_sanitize(map,
-	    start_u,
-	    size_u,
-	    &start,
-	    &end,
-	    &size);
-	if (__improbable(kr != KERN_SUCCESS)) {
-		return vm_sanitize_get_kr(kr);
-	}
-
-	return vm_map_remove_guard(map, start, end,
-	           VM_MAP_REMOVE_NO_FLAGS,
-	           KMEM_GUARD_NONE).kmr_return;
+	return mach_vm_deallocate_kernel(map, start_u, size_u);
 }
 
 /*
@@ -245,7 +205,7 @@ vm_deallocate(
 	vm_offset_ut            start,
 	vm_size_ut              size)
 {
-	return mach_vm_deallocate(map, start, size);
+	return mach_vm_deallocate_external(map, start, size);
 }
 
 /*
@@ -676,10 +636,10 @@ mach_vm_update_pointers_with_remote_tags(
 
 #if HAS_MTE
 	/* This API is intended for debuggers, so ensure the target is debugged */
-	vm_map_lock_read(map);
+	vm_map_ilk_lock(map);
 	task_t map_task = map->owning_task;
 	bool is_debugged = map_task && is_address_space_debugged(get_bsdtask_info(map_task));
-	vm_map_unlock_read(map);
+	vm_map_ilk_unlock(map);
 	if (!is_debugged) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -811,6 +771,50 @@ vm_copy(
 }
 
 /*
+ * mach_vm_reallocate -
+ * Reallocate the source range into a (possibly new) range within the same map,
+ * where the destination is of equal or greater size than the source.
+ */
+kern_return_t
+mach_vm_reallocate(
+	vm_map_t                map,
+	mach_vm_address_ut      src,
+	mach_vm_size_ut         src_size,
+	mach_vm_address_ut     *dst_inout,
+	mach_vm_size_ut         dst_size,
+	mach_vm_offset_ut       align_mask,
+	int                     options,
+	int                     flags)
+{
+	if (map == VM_MAP_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	return vm_map_reallocate(map, src, src_size, dst_inout, dst_size, align_mask, options, flags);
+}
+
+kern_return_t
+vm_reallocate(
+	vm_map_t                map,
+	vm_address_ut           src,
+	vm_size_ut              src_size,
+	vm_address_ut          *dst_inout,
+	vm_size_ut              dst_size,
+	vm_offset_ut            align_mask,
+	int                     options,
+	int                     flags)
+{
+	kern_return_t kr;
+	mach_vm_address_ut dst_inout_mach;
+
+	dst_inout_mach = (mach_vm_address_ut)(*dst_inout);
+	kr = mach_vm_reallocate(map, src, src_size, &dst_inout_mach, dst_size, align_mask, options, flags);
+	*dst_inout = (vm_address_ut) dst_inout_mach;
+
+	return kr;
+}
+
+/*
  * mach_vm_map -
  * Map some range of an object into an address space.
  *
@@ -908,8 +912,18 @@ mach_vm_remap_new_external_sanitize(
 
 /*
  * mach_vm_remap_new -
- * Behaves like mach_vm_remap, except that VM_FLAGS_RETURN_DATA_ADDR is always set
- * and {cur,max}_protection are in/out.
+ * Behaves like vm_remap, except
+ * - VM_FLAGS_RETURN_DATA_ADDR is always set (vmf_return_data_addr flag)
+ *      the return address has the same offset-in-page as the input address
+ * - {cur,max}_protection are in/out.
+ *   in legacy mode, protection is an out argument which needs to be initialized
+ *   to PROT_NONE and then gets the minimum protection that was found in the new
+ *   mapping. in new mode, the protection that is requested in these arguments
+ *   is set to the new mapping (mod policies that apply to restrict that)
+ *   and the out arguments receive the protected that was eventually set.
+ * - From the user perspective src can be a task read port (vm_map_read_t)
+ *   to read VM_PROT_READ memory instead of a task control port which is needed
+ *   by legacy vm_remap
  */
 kern_return_t
 mach_vm_remap_new_external(
@@ -997,6 +1011,9 @@ mach_vm_remap_new_external(
  * to another address range within the same task, or
  * over top of itself (with altered permissions and/or
  * as an in-place copy of itself).
+ * @arg cur_protection, max_protection
+ *		IN: must be VM_PROT_NONE
+ *		OUT: The least protection from the newly mapped region
  */
 kern_return_t
 mach_vm_remap_external(
@@ -1041,8 +1058,7 @@ mach_vm_remap_external(
 
 /*
  * vm_remap_new -
- * Behaves like vm_remap, except that VM_FLAGS_RETURN_DATA_ADDR is always set
- * and {cur,max}_protection are in/out.
+ * see: mach_vm_remap_new_external()
  */
 kern_return_t
 vm_remap_new_external(
@@ -1073,14 +1089,7 @@ vm_remap_new_external(
 
 /*
  * vm_remap -
- * Remap a range of memory from one task into another,
- * to another address range within the same task, or
- * over top of itself (with altered permissions and/or
- * as an in-place copy of itself).
- *
- * The addressability of the source and target address
- * range is limited by the size of vm_address_t (in the
- * kernel context).
+ * see: mach_vm_remap_external()
  */
 kern_return_t
 vm_remap_external(
@@ -1258,33 +1267,29 @@ vm_msync(
 }
 
 
-int
-vm_toggle_entry_reuse(int toggle, int *old_value)
+__static_testable int
+vm_map_toggle_entry_reuse(vm_map_t map, int toggle, int *old_value)
 {
-	vm_map_t map = current_map();
+	vm_map_store_rsv_t rsv;
 
 	vmlp_api_start(VM_TOGGLE_ENTRY_REUSE);
-
 	assert(!map->is_nested_map);
+
 	if (toggle == VM_TOGGLE_GETVALUE && old_value != NULL) {
 		*old_value = map->disable_vmentry_reuse;
 	} else if (toggle == VM_TOGGLE_SET) {
-		vm_map_entry_t map_to_entry;
-
-		vm_map_lock(map);
-		vm_map_disable_hole_optimization(map);
-		map->disable_vmentry_reuse = TRUE;
-		__IGNORE_WCASTALIGN(map_to_entry = vm_map_to_entry(map));
-		if (map->first_free == map_to_entry) {
-			map->highest_entry_end = vm_map_min(map);
-		} else {
-			map->highest_entry_end = map->first_free->vme_end;
-		}
-		vm_map_unlock(map);
+		vm_map_ilk_lock(map);
+		vm_map_store_find_space(map,
+		    (struct mach_vm_range){ vm_map_min(map), vm_map_max(map) },
+		    VM_MAP_KERNEL_FLAGS_NONE, PAGE_SIZE_64, PAGE_MASK_64, &rsv);
+		map->disable_vmentry_reuse = true;
+		map->highest_entry_end     = vmsr_start(rsv);
+		vm_map_ilk_unlock(map);
 	} else if (toggle == VM_TOGGLE_CLEAR) {
-		vm_map_lock(map);
-		map->disable_vmentry_reuse = FALSE;
-		vm_map_unlock(map);
+		vm_map_ilk_lock(map);
+		map->disable_vmentry_reuse = false;
+		map->highest_entry_end     = 0;
+		vm_map_ilk_unlock(map);
 	} else {
 		vmlp_api_end(VM_TOGGLE_ENTRY_REUSE, KERN_INVALID_ARGUMENT);
 		return KERN_INVALID_ARGUMENT;
@@ -1292,6 +1297,12 @@ vm_toggle_entry_reuse(int toggle, int *old_value)
 
 	vmlp_api_end(VM_TOGGLE_ENTRY_REUSE, KERN_SUCCESS);
 	return KERN_SUCCESS;
+}
+
+int
+vm_toggle_entry_reuse(int toggle, int *old_value)
+{
+	return vm_map_toggle_entry_reuse(current_map(), toggle, old_value);
 }
 
 
@@ -1332,15 +1343,12 @@ mach_vm_behavior_set_sanitize(
 		align_mask = VM_MAP_PAGE_MASK(map);
 		break;
 	}
-
-	vm_sanitize_flags_t     flags = VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS;
-
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	flags |= VM_SANITIZE_FLAGS_STRIP_ADDR;
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
+#if CONFIG_KERNEL_TAGGING || HAS_MTE_EMULATION_SHIMS
+	start_u = vm_sanitize_canonicalize_ut_addr(map, start_u);
+#endif /* CONFIG_KERNEL_TAGGING || HAS_MTE_EMULATION_SHIMS */
 
 	kr = vm_sanitize_addr_size(start_u, size_u, VM_SANITIZE_CALLER_VM_BEHAVIOR_SET,
-	    align_mask, map, flags, start, end, size);
+	    align_mask, map, VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, start, end, size);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		return kr;
 	}
@@ -1895,12 +1903,7 @@ mach_vm_page_info(
 }
 
 /*
- *	task_wire
- *
- *	Set or clear the map's wiring_required flag.  This flag, if set,
- *	will cause all future virtual memory allocation to allocate
- *	user wired memory.  Unwiring pages wired down as a result of
- *	this routine is done with the vm_wire interface.
+ *	task_wire (Obsolete)
  */
 kern_return_t
 task_wire(
@@ -1925,9 +1928,9 @@ vm_map_exec_lockdown(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_lock(map);
+	vm_map_ilk_lock(map);
 	map->map_disallow_new_exec = TRUE;
-	vm_map_unlock(map);
+	vm_map_ilk_unlock(map);
 
 	vmlp_api_end(VM_MAP_EXEC_LOCKDOWN, KERN_SUCCESS);
 	return KERN_SUCCESS;
@@ -1950,20 +1953,22 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_allocate(
 	task_t           task,
 	mach_vm_address_ut *address,
-	uint64_t *sampling_period,
+	uint64_t *next_deadline,
 	uint32_t initial_capacity,
 	uint32_t max_capacity)
 {
 #if CONFIG_DEFERRED_RECLAIM
 	if (task != current_task()) {
 		/* Remote buffer operations are not supported*/
-		return KERN_INVALID_TASK;
+		return MACH_SEND_INVALID_DEST;
 	}
+
 	struct proc *p = task_get_proc_raw(task);
 	if (proc_is_simulated(p)) {
 		return KERN_NOT_SUPPORTED;
 	}
-	return vm_deferred_reclamation_buffer_allocate_internal(task, address, sampling_period, initial_capacity, max_capacity);
+
+	return vm_deferred_reclamation_buffer_allocate_internal(task, address, next_deadline, initial_capacity, max_capacity);
 #else
 	(void) task;
 	(void) address;
@@ -1976,20 +1981,25 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_flush(
 	task_t task,
 	uint32_t num_entries_to_reclaim,
-	mach_vm_size_ut *bytes_reclaimed_out)
+	uint64_t *bytes_reclaimed_out,
+	uint64_t *next_deadline_out)
 {
 #if CONFIG_DEFERRED_RECLAIM
 	kern_return_t kr;
-	mach_vm_size_t bytes_reclaimed = 0;
+	size_t bytes_reclaimed = 0;
+	uint64_t next_deadline;
+
 	if (task != current_task()) {
 		/* Remote buffer operations are not supported */
-		return KERN_INVALID_TASK;
+		return MACH_SEND_INVALID_DEST;
 	}
-	if (bytes_reclaimed_out == NULL) {
+	if (bytes_reclaimed_out == NULL || next_deadline_out == 0) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	kr = vm_deferred_reclamation_buffer_flush_internal(task, num_entries_to_reclaim, &bytes_reclaimed);
-	*bytes_reclaimed_out = vm_sanitize_wrap_size(bytes_reclaimed);
+
+	kr = vm_deferred_reclamation_buffer_flush_internal(task, num_entries_to_reclaim, &bytes_reclaimed, &next_deadline);
+	*bytes_reclaimed_out = (uint64_t)bytes_reclaimed;
+	*next_deadline_out = next_deadline;
 	return kr;
 #else
 	(void) task;
@@ -2001,22 +2011,25 @@ mach_vm_deferred_reclamation_buffer_flush(
 kern_return_t
 mach_vm_deferred_reclamation_buffer_resize(task_t task,
     uint32_t new_len,
-    mach_vm_size_ut *bytes_reclaimed_out)
+    uint64_t *bytes_reclaimed_out,
+    uint64_t *next_deadline_out)
 {
 #if CONFIG_DEFERRED_RECLAIM
 	mach_error_t err;
-	mach_vm_size_t bytes_reclaimed = 0;
+	size_t bytes_reclaimed = 0;
+	uint64_t next_deadline;
 
 	if (task != current_task()) {
 		/* Remote buffer operations are not supported */
-		return KERN_INVALID_TASK;
+		return MACH_SEND_INVALID_DEST;
 	}
 	if (bytes_reclaimed_out == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	err = vm_deferred_reclamation_buffer_resize_internal(task, new_len, &bytes_reclaimed);
-	*bytes_reclaimed_out = vm_sanitize_wrap_size(bytes_reclaimed);
+	err = vm_deferred_reclamation_buffer_resize_internal(task, new_len, &bytes_reclaimed, &next_deadline);
+	*bytes_reclaimed_out = (uint64_t)bytes_reclaimed;
+	*next_deadline_out = next_deadline;
 	return err;
 #else
 	(void) task;
@@ -2083,15 +2096,24 @@ mach_vm_range_create_v1_sanitize(
 		vm_map_offset_t start, end;
 		vm_map_size_t size;
 		mach_vm_range_ut * range_u = &recipe_u[i].range_u;
+#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
+		kr = vm_sanitize_validate_non_canonical_ut_addr(map, range_u->min_address_u);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+
+		kr = vm_sanitize_validate_non_canonical_ut_addr(map, range_u->max_address_u);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
+
 		kr = vm_sanitize_addr_end(
 			range_u->min_address_u,
 			range_u->max_address_u,
 			VM_SANITIZE_CALLER_MACH_VM_RANGE_CREATE,
 			map,
 			VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-			| VM_SANITIZE_FLAGS_DENY_NON_CANONICAL_ADDR
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_START
 			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE,
 			&start, &end, &size); // Ignore return values
@@ -2108,6 +2130,30 @@ mach_vm_range_create_v1_sanitize(
 	*recipe_p = (mach_vm_range_recipe_v1_t *)recipe_u;
 
 	return KERN_SUCCESS;
+}
+
+bool
+vm_map_in_user_range_voids(
+	vm_map_t                map,
+	vm_address_t            addr,
+	vm_size_t               size)
+{
+	struct mach_vm_range void1 = {
+		.min_address = map->default_range.max_address,
+		.max_address = map->data_range.min_address,
+	};
+	struct mach_vm_range void2 = {
+		.min_address = map->data_range.max_address,
+#if XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT
+		.max_address = MACH_VM_JUMBO_ADDRESS,
+#else /* !XNU_TARGET_OS_IOS || !EXTENDED_USER_VA_SUPPORT */
+		.max_address = vm_map_max(map),
+#endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
+	};
+
+	return map->uses_user_ranges &&
+	       (mach_vm_range_contains(&void1, addr, size) ||
+	       mach_vm_range_contains(&void2, addr, size));
 }
 
 /*!
@@ -2142,19 +2188,6 @@ mach_vm_range_create_v1(
 
 	vmlp_api_start(MACH_VM_RANGE_CREATE_V1);
 
-	struct mach_vm_range void1 = {
-		.min_address = map->default_range.max_address,
-		.max_address = map->data_range.min_address,
-	};
-	struct mach_vm_range void2 = {
-		.min_address = map->data_range.max_address,
-#if XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT
-		.max_address = MACH_VM_JUMBO_ADDRESS,
-#else /* !XNU_TARGET_OS_IOS || !EXTENDED_USER_VA_SUPPORT */
-		.max_address = vm_map_max(map),
-#endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
-	};
-
 	kr = mach_vm_range_create_v1_sanitize(map, recipe_u, new_count, &recipe);
 	if (__improbable(kr != KERN_SUCCESS)) {
 		kr = vm_sanitize_get_kr(kr);
@@ -2188,8 +2221,7 @@ mach_vm_range_create_v1(
 		}
 
 		s = mach_vm_range_size(r);
-		if (!mach_vm_range_contains(&void1, r->min_address, s) &&
-		    !mach_vm_range_contains(&void2, r->min_address, s)) {
+		if (!vm_map_in_user_range_voids(map, r->min_address, s)) {
 			vmlp_api_end(MACH_VM_RANGE_CREATE_V1, KERN_INVALID_ARGUMENT);
 			return KERN_INVALID_ARGUMENT;
 		}
@@ -2201,7 +2233,7 @@ mach_vm_range_create_v1(
 		}
 	}
 
-	vm_map_lock(map);
+	vm_map_ilk_lock(map);
 
 	table = map->extra_ranges;
 	count = map->extra_ranges_count;
@@ -2258,7 +2290,7 @@ mach_vm_range_create_v1(
 	map->extra_ranges = table;
 
 out_unlock:
-	vm_map_unlock(map);
+	vm_map_ilk_unlock(map);
 
 	if (kr == KERN_SUCCESS) {
 		for (size_t i = 0; i < new_count; i++) {

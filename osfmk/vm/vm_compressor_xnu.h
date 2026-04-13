@@ -30,7 +30,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifdef MACH_KERNEL_PRIVATE
+#if MACH_KERNEL_PRIVATE
 
 #include <vm/vm_kern.h>
 #include <vm/vm_page.h>
@@ -191,18 +191,22 @@ struct c_slot {
 #endif
 } __attribute__((packed, aligned(4)));
 
-#define C_IS_EMPTY              0  /* segment was just allocated and is going to start filling */
-#define C_IS_FREE               1  /* segment is unused, went to the free-list, unallocated */
-#define C_IS_FILLING            2
-#define C_ON_AGE_Q              3
-#define C_ON_SWAPOUT_Q          4
-#define C_ON_SWAPPEDOUT_Q       5
-#define C_ON_SWAPPEDOUTSPARSE_Q 6  /* segment is swapped-out but some of its slots were freed */
-#define C_ON_SWAPPEDIN_Q        7
-#define C_ON_MAJORCOMPACT_Q     8  /* we just did major compaction on this segment */
-#define C_ON_BAD_Q              9
-#define C_ON_SWAPIO_Q          10
+__enum_closed_decl(c_state_t, uint8_t, {
+	C_IS_EMPTY = 0,  /* segment was just allocated and is going to start filling */
+	C_IS_FREE = 1,  /* segment is unused, went to the free-list, unallocated */
+	C_IS_FILLING = 2,
+	C_ON_AGE_Q = 3,
+	C_ON_SWAPOUT_Q = 4,
+	C_ON_SWAPPEDOUT_Q = 5,
+	C_ON_SWAPPEDOUTSPARSE_Q = 6,  /* segment is swapped-out but some of its slots were freed */
+	C_ON_SWAPPEDIN_Q = 7,
+	C_ON_MAJORCOMPACT_Q = 8,  /* we just did major compaction on this segment */
+	C_ON_BAD_Q = 9,
+	C_ON_SWAPIO_Q = 10,
+	C_STATE_MAX = C_ON_SWAPIO_Q,
+});
 
+static_assert(C_STATE_MAX < 0x10, "segment state must fit in c_state bits");
 
 struct c_segment {
 	lck_mtx_t       c_lock;
@@ -217,7 +221,7 @@ struct c_segment {
 #define C_SEG_MAX_LIMIT         (UINT_MAX)       /* this needs to track the size of c_mysegno */
 	uint32_t        c_mysegno;  /* my index in c_segments */
 
-	uint32_t        c_creation_ts;  /* time filling the segment has finished, used for checking if segment reached ripe age */
+	uint32_t        c_creation_ts;  /* time (in seconds) filling the segment has finished, used for checking if segment reached ripe age */
 	uint64_t        c_generation_id;  /* a unique id of a single lifetime of a segment */
 
 	int32_t         c_bytes_used;
@@ -249,8 +253,8 @@ struct c_segment {
 #endif /* CHECKSUM_THE_SWAP */
 
 	thread_t        c_busy_for_thread;
-	uint32_t        c_agedin_ts;  /* time the seg got to age_q after being swapped in. used for stats*/
-	uint32_t        c_swappedin_ts;
+	uint32_t        c_agedin_ts;  /* time (in sec) the seg got to age_q after being swapped in. used for stats*/
+	uint32_t        c_swappedin_ts; /* time (in sec) the seg was swapped in */
 	bool            c_swappedin;
 #if TRACK_C_SEGMENT_UTILIZATION
 	uint32_t        c_decompressions_since_swapin;
@@ -272,11 +276,12 @@ struct c_segment {
 	    c_state:4,                          /* what state is the segment in which dictates which q to find it on */
 	    c_overage_swap:1,
 	    c_has_donated_pages:1,
+	    c_swapout_reason:3,                 /* c_swapout_reason_t */
 #if CONFIG_FREEZE
 	    c_has_freezer_pages:1,
-	    c_reserved:21;
+	    c_reserved:18;
 #else /* CONFIG_FREEZE */
-	c_reserved:22;
+	c_reserved:19;
 #endif /* CONFIG_FREEZE */
 
 	int             c_slot_var_array_len;  /* length of the allocated c_slot_var_array */
@@ -318,15 +323,6 @@ extern  int             c_seg_fixed_array_len;
 extern  vm_offset_t     c_buffers;
 extern _Atomic uint64_t c_segment_compressed_bytes;
 
-#define C_SEG_BUFFER_ADDRESS(c_segno)   ((c_buffers + ((uint64_t)c_segno * (uint64_t)c_seg_allocsize)))
-
-#define C_SEG_SLOT_FROM_INDEX(cseg, index)      (index < c_seg_fixed_array_len ? &(cseg->c_slot_fixed_array[index]) : &(cseg->c_slot_var_array[index - c_seg_fixed_array_len]))
-
-#define C_SEG_OFFSET_TO_BYTES(off)      ((off) * (int) sizeof(int32_t))
-#define C_SEG_BYTES_TO_OFFSET(bytes)    ((bytes) / (int) sizeof(int32_t))
-
-#define C_SEG_UNUSED_BYTES(cseg)        (cseg->c_bytes_unused + (C_SEG_OFFSET_TO_BYTES(cseg->c_populated_offset - cseg->c_nextoffset)))
-
 #ifndef __PLATFORM_WKDM_ALIGNMENT_MASK__
 #define C_SEG_OFFSET_ALIGNMENT_MASK     0x3ULL
 #define C_SEG_OFFSET_ALIGNMENT_BOUNDARY 0x4
@@ -339,48 +335,6 @@ extern _Atomic uint64_t c_segment_compressed_bytes;
 #define C_SEG_ROUND_TO_ALIGNMENT(offset) \
 	(((offset) + C_SEG_OFFSET_ALIGNMENT_MASK) & ~C_SEG_OFFSET_ALIGNMENT_MASK)
 
-#define C_SEG_SHOULD_MINORCOMPACT_NOW(cseg)     ((C_SEG_UNUSED_BYTES(cseg) >= (c_seg_bufsize / 4)) ? 1 : 0)
-
-/*
- * the decsion to force a c_seg to be major compacted is based on 2 criteria
- * 1) is the c_seg buffer almost empty (i.e. we have a chance to merge it with another c_seg)
- * 2) are there at least a minimum number of slots unoccupied so that we have a chance
- *    of combining this c_seg with another one.
- */
-#define C_SEG_SHOULD_MAJORCOMPACT_NOW(cseg)                                                                                     \
-	((((cseg->c_bytes_unused + (c_seg_bufsize - C_SEG_OFFSET_TO_BYTES(c_seg->c_nextoffset))) >= (c_seg_bufsize / 8)) &&     \
-	  ((C_SLOT_MAX_INDEX - cseg->c_slots_used) > (c_seg_bufsize / PAGE_SIZE))) \
-	? 1 : 0)
-
-#define C_SEG_ONDISK_IS_SPARSE(cseg)    ((cseg->c_bytes_used < cseg->c_bytes_unused) ? 1 : 0)
-#define C_SEG_IS_ONDISK(cseg)           ((cseg->c_state == C_ON_SWAPPEDOUT_Q || cseg->c_state == C_ON_SWAPPEDOUTSPARSE_Q))
-#define C_SEG_IS_ON_DISK_OR_SOQ(cseg)   ((cseg->c_state == C_ON_SWAPPEDOUT_Q || \
-	                                  cseg->c_state == C_ON_SWAPPEDOUTSPARSE_Q || \
-	                                  cseg->c_state == C_ON_SWAPOUT_Q || \
-	                                  cseg->c_state == C_ON_SWAPIO_Q))
-
-
-#define C_SEG_WAKEUP_DONE(cseg)                         \
-	MACRO_BEGIN                                     \
-	assert((cseg)->c_busy);                         \
-	(cseg)->c_busy = 0;                             \
-	assert((cseg)->c_busy_for_thread != NULL);      \
-	(cseg)->c_busy_for_thread = NULL;               \
-	if ((cseg)->c_wanted) {                         \
-	        (cseg)->c_wanted = 0;                   \
-	        thread_wakeup((event_t) (cseg));        \
-	}                                               \
-	MACRO_END
-
-#define C_SEG_BUSY(cseg)                                \
-	MACRO_BEGIN                                     \
-	assert((cseg)->c_busy == 0);                    \
-	(cseg)->c_busy = 1;                             \
-	assert((cseg)->c_busy_for_thread == NULL);      \
-	(cseg)->c_busy_for_thread = current_thread();   \
-	MACRO_END
-
-
 extern vm_map_t compressor_map;
 
 #if CONFIG_CSEG_MPROTECT
@@ -390,20 +344,22 @@ extern int vm_compressor_test_seg_wp;
 #define C_SEG_MAKE_WRITEABLE(cseg)                      \
 	MACRO_BEGIN                                     \
 	if (write_protect_c_segs) {                     \
-	        vm_map_protect(compressor_map,                  \
+	        kern_return_t krprot = vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
 	                       0, VM_PROT_READ | VM_PROT_WRITE);    \
+	        assert3u(krprot, ==, KERN_SUCCESS);          \
 	}                               \
 	MACRO_END
 
 #define C_SEG_WRITE_PROTECT(cseg)                       \
 	MACRO_BEGIN                                     \
 	if (write_protect_c_segs) {                     \
-	        vm_map_protect(compressor_map,                  \
+	        kern_return_t krprot = vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
 	                       0, VM_PROT_READ);                    \
+	        assert3u(krprot, ==, KERN_SUCCESS);          \
 	}                                                       \
 	if (vm_compressor_test_seg_wp) {                                \
 	        volatile uint32_t vmtstmp = *(volatile uint32_t *)cseg->c_store.c_buffer; \
@@ -423,11 +379,6 @@ void vm_decompressor_lock(void);
 void vm_decompressor_unlock(void);
 void vm_compressor_delay_trim(void);
 void vm_compressor_do_warmup(void);
-
-extern kern_return_t    vm_swap_get(c_segment_t, uint64_t, uint64_t);
-
-extern _Atomic uint64_t compressor_bytes_used;
-extern uint32_t         swapout_target_age;
 
 extern uint32_t vm_compressor_minorcompact_threshold_divisor;
 extern uint32_t vm_compressor_majorcompact_threshold_divisor;
@@ -516,6 +467,25 @@ extern uint64_t compressor_perf_test_pages_processed;
 
 #endif /* MACH_KERNEL_PRIVATE */
 
+__enum_closed_decl(c_swapout_reason_t, uint8_t, {
+	C_SWAPOUT_NONE     = 0x0,
+	C_SWAPOUT_FREEZER  = 0x1,
+	C_SWAPOUT_DONATE   = 0x2,
+	C_SWAPOUT_RIPE     = 0x3,
+	C_SWAPOUT_REG      = 0x4,
+	C_SWAPOUT_DARKWAKE = 0x5,
+	C_SWAPOUT_REASON_MAX = C_SWAPOUT_DARKWAKE,
+});
+
+static_assert(C_SWAPOUT_REASON_MAX < 0x8, "Swapout reason must fit in c_swapout_reason bits");
+
+extern atomic_counter_t c_pages_swapped_by_reason[C_SWAPOUT_REASON_MAX + 1];
+extern atomic_counter_t c_pages_swap_by_reason[C_SWAPOUT_REASON_MAX + 1];
+
+extern _Atomic uint64_t compressor_bytes_used;
+extern uint64_t swapout_target_age;
+extern uint64_t c_segment_ripeness_age_s;
+
 /*
  * @func vm_swap_low_on_space
  *
@@ -543,9 +513,25 @@ extern bool vm_swap_low_on_space(void);
  */
 extern bool vm_swap_out_of_space(void);
 
+/*
+ * @func vm_swapout_wakeup
+ *
+ * @brief Issue a wakeup to the VM_swapout thread.
+ */
+extern void vm_swapout_wakeup(void);
+
+/*
+ * @func vm_swapout_is_running
+ *
+ * @brief Return true iff the VM_swapout thread is already running or has
+ * been issued a wakeup.
+ */
+extern bool vm_swapout_is_running(void);
+
 #define HIBERNATE_FLUSHING_SECS_TO_COMPLETE     120
 
 #if DEVELOPMENT || DEBUG
+int do_cseg_wedge_setup(void);
 int do_cseg_wedge_thread(void);
 int do_cseg_unwedge_thread(void);
 #endif /* DEVELOPMENT || DEBUG */
@@ -565,10 +551,19 @@ uint32_t vm_compressor_fragmentation_level(void);
 uint32_t vm_compressor_incore_fragmentation_wasted_pages(void);
 bool vm_compressor_is_thrashing(void);
 bool vm_compressor_swapout_is_ripe(void);
-uint32_t vm_compressor_pages_compressed(void);
 void vm_compressor_process_special_swapped_in_segments(void);
 uint32_t vm_compressor_get_swapped_segment_count(void);
 
+/*
+ * Return the number of virtual pages which have been compressed. On systems
+ * with the freezer, this includes only in-core pages.
+ */
+extern uint32_t vm_compressor_pages_compressed(void);
+
+/*
+ * Return the number of virtual pages whose data has been swapped to disk.
+ */
+extern uint32_t vm_compressor_pages_swapped(void);
 
 #if DEVELOPMENT || DEBUG
 __enum_closed_decl(vm_c_serialize_add_data_t, uint32_t, {
@@ -579,6 +574,14 @@ __enum_closed_decl(vm_c_serialize_add_data_t, uint32_t, {
 });
 kern_return_t vm_compressor_serialize_segment_debug_info(int segno, char *buf, size_t *size, vm_c_serialize_add_data_t with_data);
 #endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * @func vm_compressor_swapout_conditions_met
+ * @brief Evaluate whether memory conditions are such that the system should
+ * begin swapping to disk
+ * @returns true iff the system should begin swapping
+ */
+extern bool vm_compressor_swapout_conditions_met(void);
 
 extern bool vm_compressor_low_on_space(void);
 extern bool vm_compressor_compressed_pages_nearing_limit(void);

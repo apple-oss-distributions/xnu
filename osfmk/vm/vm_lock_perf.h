@@ -53,6 +53,7 @@ typedef enum __enum_closed {
 	VM_LOCK_PERF_API_EVENT = 1, /* Operations on map lock */
 	VM_LOCK_PERF_LOCK_EVENT,   /* Function start/end */
 	VM_LOCK_PERF_RANGE_EVENT,  /* Reporting a range */
+	VM_LOCK_PERF_CONTENTION_EVENT, /* Abnormal lock contention */
 } vmlp_event_type_t;
 
 #define VMLP_CODE_TYPE_OFFSET (9)
@@ -71,11 +72,11 @@ typedef enum __enum_closed {
 	VMLPAN(FILL_PROCREGIONINFO_ONLYMAPPEDVNODES),
 	VMLPAN(FIND_MAPPING_TO_SLIDE),
 	VMLPAN(GET_VMMAP_ENTRIES),
-	VMLPAN(GET_VMSUBMAP_ENTRIES),
+	VMLPAN(GET_VMSUBMAP_ENTRIES), /* now unused; can be removed on next breaking change */
 	VMLPAN(KDP_LIGHTWEIGHT_FAULT),
 	VMLPAN(KMEM_ALLOC_GUARD_INTERNAL),
 	VMLPAN(KMEM_FREE_GUARD),
-	VMLPAN(KMEM_GET_GOBJ_STATS),
+	VMLPAN(KMEM_GET_GOBJ_STATS), /* now unused; can be removed on next breaking change */
 	VMLPAN(KMEM_POPULATE_META_LOCKED),
 	VMLPAN(KMEM_REALLOC_GUARD),
 	VMLPAN(KMEM_SIZE_GUARD),
@@ -99,13 +100,11 @@ typedef enum __enum_closed {
 	VMLPAN(VM_MAP_COPYOUT_INTERNAL),
 	VMLPAN(VM_MAP_COPY_OVERWRITE),
 	VMLPAN(VM_MAP_COPY_OVERWRITE_ALIGNED),
-	VMLPAN(VM_MAP_COPY_OVERWRITE_NESTED),
-	VMLPAN(VM_MAP_COPY_OVERWRITE_UNALIGNED),
+	VMLPAN(VM_MAP_COPY_OVERWRITE_IMPL),
 	VMLPAN(VM_MAP_CREATE_UPL),
 	VMLPAN(VM_MAP_CS_DEBUGGED_SET),
 	VMLPAN(VM_MAP_CS_ENFORCEMENT_SET),
-	VMLPAN(VM_MAP_DELETE),
-	VMLPAN(VM_MAP_DELETE_SUBMAP_RECURSE),
+	VMLPAN(VM_MAP_DELETE_AND_IUNLOCK),
 	VMLPAN(VM_MAP_DESTROY),
 	VMLPAN(VM_MAP_DISCONNECT_PAGE_MAPPINGS),
 	VMLPAN(VM_MAP_ENTER),
@@ -124,8 +123,6 @@ typedef enum __enum_closed {
 	VMLPAN(VM_MAP_MACHINE_ATTRIBUTE),
 	VMLPAN(VM_MAP_MARK_ALIEN),
 	VMLPAN(VM_MAP_MSYNC),
-	VMLPAN(VM_MAP_NON_ALIGNED_TEST), /* now unused; can be removed on next breaking change */
-	VMLPAN(VM_MAP_OVERWRITE_SUBMAP_RECURSE),
 	VMLPAN(VM_MAP_PAGEOUT),
 	VMLPAN(VM_MAP_PAGE_RANGE_INFO_INTERNAL),
 	VMLPAN(VM_MAP_PARTIAL_REAP),
@@ -138,7 +135,7 @@ typedef enum __enum_closed {
 	VMLPAN(VM_MAP_REGION_RECURSE_64),
 	VMLPAN(VM_MAP_REMAP),
 	VMLPAN(VM_MAP_REMAP_EXTRACT),
-	VMLPAN(VM_MAP_REMOVE_AND_UNLOCK),
+	VMLPAN(VM_MAP_REMOVE_AND_IUNLOCK),
 	VMLPAN(VM_MAP_REMOVE_GUARD),
 	VMLPAN(VM_MAP_REUSABLE_PAGES),
 	VMLPAN(VM_MAP_REUSE_PAGES),
@@ -152,22 +149,22 @@ typedef enum __enum_closed {
 	VMLPAN(VM_MAP_SET_USER_WIRE_LIMIT),
 	VMLPAN(VM_MAP_SHADOW_MAX),
 	VMLPAN(VM_MAP_SIGN),
-	VMLPAN(VM_MAP_SIMPLIFY),
+	VMLPAN(VM_MAP_SIMPLIFY_RANGE),
 	VMLPAN(VM_MAP_SINGLE_JIT),
 	VMLPAN(VM_MAP_SIZES),
 	VMLPAN(VM_MAP_SUBMAP_PMAP_CLEAN),
 	VMLPAN(VM_MAP_SWITCH_PROTECT),
 	VMLPAN(VM_MAP_TERMINATE),
 	VMLPAN(VM_MAP_UNSET_CORPSE_SOURCE),
-	VMLPAN(VM_MAP_UNWIRE_NESTED),
+	VMLPAN(VM_MAP_UNWIRE_IMPL),
 	VMLPAN(VM_MAP_WILLNEED),
-	VMLPAN(VM_MAP_WIRE_NESTED),
+	VMLPAN(VM_MAP_WIRE_IMPL),
 	VMLPAN(VM_MAP_ZERO),
-	VMLPAN(VM_PAGE_DIAGNOSE),
 	VMLPAN(VM_SHARED_REGION_MAP_FILE),
 	VMLPAN(VM_TOGGLE_ENTRY_REUSE),
 	VMLPAN(ZONE_METADATA_INIT),
 	VMLPAN(ZONE_SUBMAP_ALLOC_SEQUESTERED_VA),
+	VMLPAN(VM_MAP_GUARD_OBJECT_CHUNK_UPDATE),
 } vmlp_api_event_t;
 
 #pragma mark Subcodes for Lock events
@@ -270,7 +267,7 @@ __vmlp_api_end(vmlp_api_event_t api, uint64_t kr)
 #pragma mark Lock events
 
 static inline void
-__vmlp_lock_event(vmlp_lock_event_t event, vm_map_t map, unsigned int timestamp)
+__vmlp_lock_event(vmlp_lock_event_t event, vm_map_t map, uint64_t timestamp)
 {
 	(void)event, (void)map, (void)timestamp;
 	KDBG(VMLP_EVENTID(VM_LOCK_PERF_LOCK_EVENT, event, DBG_FUNC_NONE), map, timestamp);
@@ -296,7 +293,7 @@ vmlp_lock_event_locked(vmlp_lock_event_t event, vm_map_t map)
 	 * causally related but end up having the same ktrace-timestamp and
 	 * showing up in reverse order because they occured on different CPUs.
 	 */
-	__vmlp_lock_event(event, map, map->timestamp);
+	__vmlp_lock_event(event, map, map->unlink_timestamp);
 }
 
 #pragma mark Range events
@@ -305,7 +302,7 @@ static inline void
 vmlp_range_event(vm_map_t map, mach_vm_address_t addr, mach_vm_size_t size)
 {
 	(void)map, (void)addr, (void)size;
-	KDBG(VMLP_EVENTID(VM_LOCK_PERF_RANGE_EVENT, VMLP_EVENT_RANGE, DBG_FUNC_NONE), map, map->timestamp, addr, size);
+	KDBG(VMLP_EVENTID(VM_LOCK_PERF_RANGE_EVENT, VMLP_EVENT_RANGE, DBG_FUNC_NONE), map, map->unlink_timestamp, addr, size);
 }
 
 static inline void

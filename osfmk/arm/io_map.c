@@ -60,26 +60,6 @@
 
 extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
 
-#define IO_MAP_SIZE            (8ul << 20)
-
-__startup_data static struct mach_vm_range io_range;
-static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
-KMEM_RANGE_REGISTER_STATIC(io_submap, &io_range, IO_MAP_SIZE);
-
-__startup_func
-static void
-io_map_init(void)
-{
-	vm_map_will_allocate_early_map(&io_submap);
-	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, IO_MAP_SIZE,
-	    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
-	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
-	    VM_KERN_MEMORY_IOKIT).kmr_submap;
-}
-#ifndef __BUILDING_XNU_LIB_UNITTEST__ /* io map is not supported in unit-tests */
-STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init);
-#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
-
 /*
  * Allocate and map memory for devices that may need to be mapped before
  * Mach VM is running. Allows caller to specify mapping protection
@@ -123,16 +103,14 @@ io_map(
 		kasan_notify_address(start + start_offset, size);
 #endif
 	} else {
-		kma_flags_t kmaflags = KMA_NOFAIL | KMA_PAGEABLE;
+		kma_flags_t kmaflags = KMA_NOFAIL | KMA_PAGEABLE | KMA_IO;
 
-		if (unmappable) {
-			kmaflags |= KMA_DATA_SHARED;
-		} else {
+		if (!unmappable) {
 			kmaflags |= KMA_PERMANENT;
 		}
 
-		kmem_alloc(unmappable ? kernel_map : io_submap,
-		    &start, alloc_size, kmaflags, VM_KERN_MEMORY_IOKIT);
+		kmem_alloc(kernel_map, &start, alloc_size, kmaflags,
+		    VM_KERN_MEMORY_IOKIT);
 		pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
 	}
 	return start + start_offset;

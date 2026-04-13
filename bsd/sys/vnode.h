@@ -1706,6 +1706,8 @@ int vnode_getwithvid_drainok(vnode_t, uint32_t);
  *  On success, vnode_getwithref() returns with an iocount held on the vnode; this type of reference is intended to be held only for short periods of time (e.g.
  *  across a function call) and provides a strong guarantee about the life of the vnode. vnodes with positive iocounts cannot be
  *  recycled. An iocount is required for any operation on a vnode.
+ *  @warning vnode_getwithref() should NOT be called with an existing iocount already held by the caller as this can deadlock during vnode reclaim.
+ *
  *  @return 0 for success, ENOENT if the vnode is dead, in the process of being reclaimed, or has been recycled and reused.
  */
 int     vnode_getwithref(vnode_t vp);
@@ -2540,6 +2542,16 @@ int vnode_isauthfs(vnode_t vp);
  */
 int vnode_hasmultipath(vnode_t vp);
 
+/*!
+ *  @function vnode_isshadow
+ *  @abstract Determine if the given vnode is a shadow file
+ *  @discussion This function needs to be called with an iocount held on the
+ *  given vnode.
+ *  @param vp The vnode to examine.
+ *  @result Non-zero to indicate that the vnode is a shadow file. Zero otherwise.
+ */
+int vnode_isshadow(vnode_t vp);
+
 #endif /* KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -2566,7 +2578,6 @@ int     vnode_isstandard(vnode_t);
 int     vnode_makeimode(int, int);
 enum vtype      vnode_iftovt(int);
 int     vnode_vttoif(enum vtype);
-int     vnode_isshadow(vnode_t);
 int     vnode_getfromid(int, uint64_t, vfs_context_t, int, vnode_t *);
 boolean_t vnode_on_reliable_media(vnode_t);
 /*
@@ -2600,11 +2611,15 @@ void vnode_putname_printable(const char *name);
 
 /*!
  *  @function vnode_getbackingvnode
- *  @abstract If the input vnode is a NULLFS mirrored vnode, then return the vnode it wraps.
- *  @Used to un-mirror files, primarily for security purposes. On success, out_vp is always set to a vp with an iocount. The caller must release the iocount.
- *  @param in_vp The vnode being asked about
- *  @param out_vpp A pointer to the output vnode, unchanged on error
- *  @return 0 on Success, ENOENT if in_vp doesn't mirror anything, EINVAL on parameter errors.
+ *  @abstract If the input vnode is a NULLFS mirrored vnode or devfs fdesc vnode, then return the vnode it wraps or references.
+ *  @discussion This function handles two types of vnodes that reference other vnodes:
+ *              1. NULLFS mirrored vnodes - returns the vnode being mirrored
+ *              2. devfs fdesc vnodes - resolves the file descriptor to find the backing vnode
+ *  @Used to un-mirror files and resolve fdesc references, primarily for security purposes. On success, out_vp is always set to a vp with an iocount. The caller must release the iocount.
+ *  @param in_vp The vnode being asked about (must not be NULL)
+ *  @param out_vpp A pointer to the output vnode (must not be NULL), unchanged on error
+ *  @return 0 on Success, ENOENT if in_vp doesn't mirror/reference anything, EINVAL if in_vp or out_vpp is NULL.
+ *          For fdesc vnodes: ESRCH if no current process context is available.
  */
 int vnode_getbackingvnode(vnode_t in_vp, vnode_t* out_vpp);
 
@@ -2714,6 +2729,7 @@ int     cache_lookup_ext(vnode_t dvp, vnode_t *vpp, struct componentname *cnp,
 #endif // KERNEL_PRIVATE
 
 #ifdef XNU_KERNEL_PRIVATE
+ipc_port_t vnode_memoryentry(vnode_t vp, uint64_t offset, uint64_t *size);
 int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
 #endif
 

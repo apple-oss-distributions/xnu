@@ -3,6 +3,15 @@
 #include <net/if.h>
 #include <sys/ioctl.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("rpaulo"),
+	T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED
+	);
+
 static void __unused
 create_interfaces(const char *prefix, int num)
 {

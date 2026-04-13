@@ -46,6 +46,7 @@
 #include <net/pktsched/pktsched_fq_codel.h>
 #include <net/pktsched/pktsched_ops.h>
 #include <net/flowadv.h>
+#include <net/if_ports_used.h>
 
 #include <libkern/libkern.h>
 
@@ -576,6 +577,7 @@ ifclassq_getqstats(struct ifclassq *ifq, u_int8_t gid, u_int32_t qid, void *ubuf
 	}
 
 	ifqs->ifqs_len = IFCQ_LEN(ifq);
+	/* ifqs_maxlen may be overridden by scheduler level stats */
 	ifqs->ifqs_maxlen = IFCQ_MAXLEN(ifq);
 	*(&ifqs->ifqs_xmitcnt) = *(&ifq->ifcq_xmitcnt);
 	*(&ifqs->ifqs_dropcnt) = *(&ifq->ifcq_dropcnt);

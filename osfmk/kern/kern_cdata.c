@@ -150,7 +150,7 @@ kcdata_create_object(
 	}
 
 	obj = zalloc_flags(KCDATA_OBJECT,
-	    Z_ZERO | Z_WAITOK | Z_NOFAIL | Z_SET_NOTEARLY);
+	    Z_ZERO | Z_WAITOK | Z_NOFAIL | Z_SET_NOT_EARLY);
 
 	obj->ko_data = data;
 	obj->ko_flags = flags;

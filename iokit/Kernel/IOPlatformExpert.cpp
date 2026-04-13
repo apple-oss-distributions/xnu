@@ -1211,7 +1211,7 @@ PEReadNVRAMProperty(const char *symbol, void *value,
 	}
 
 	*len  = data->getLength();
-	vlen  = min(vlen, *len);
+	vlen  = IOMin(vlen, *len);
 	if (value && vlen) {
 		memcpy((void *) value, data->getBytesNoCopy(), vlen);
 	}

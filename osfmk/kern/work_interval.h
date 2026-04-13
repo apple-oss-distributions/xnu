@@ -35,7 +35,6 @@
 #include <kern/kern_types.h>
 
 #include <kern/thread_group.h>
-#include <kern/recount.h>
 
 __BEGIN_DECLS
 

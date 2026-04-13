@@ -235,6 +235,10 @@ void vm_purgeable_nonvolatile_owner_update(task_t       owner,
 void vm_purgeable_volatile_owner_update(task_t          owner,
     int             delta);
 
+extern void vm_pageout_scan_handle_reusable_page(
+	vm_page_t m,
+	vm_object_t obj);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

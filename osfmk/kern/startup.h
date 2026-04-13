@@ -68,6 +68,7 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 	STARTUP_SUB_ZALLOC,           /**< initialize zalloc and kalloc        */
 	STARTUP_SUB_KTRACE,           /**< initialize kernel trace             */
 	STARTUP_SUB_PERCPU,           /**< initialize the percpu subsystem     */
+	STARTUP_SUB_SCHED,            /**< initialize scheduler subsystem      */
 	STARTUP_SUB_EVENT,            /**< initiailze the event subsystem      */
 
 	STARTUP_SUB_CODESIGNING,      /**< codesigning subsystem               */
@@ -835,13 +836,21 @@ __BEGIN_DECLS
 	    (typeof(func(a))(*)(const void *))func
 #endif
 
+#ifdef __BUILDING_XNU_LIB_UNITTEST__
+#define __STARTUP_SET_FUNC_NAME(name) .func_name = #name,
+#else
+#define __STARTUP_SET_FUNC_NAME(name)
+#endif
 
-#define __STARTUP1(name, line, subsystem, rank, func, a, b) \
+#define __STARTUP1(name_v, line, subsystem_v, rank_v, func_v, a, b) \
 	__PLACE_IN_SECTION(STARTUP_HOOK_SEGMENT "," STARTUP_HOOK_SECTION) \
 	static const struct startup_entry \
-	__startup_ ## subsystem ## _entry_ ## name ## _ ## line = { \
-	    STARTUP_SUB_ ## subsystem, \
-	    rank, __STARTUP_FUNC_CAST(func, a), b, \
+	__startup_ ## subsystem_v ## _entry_ ## name_v ## _ ## line = { \
+	    .subsystem = STARTUP_SUB_ ## subsystem_v, \
+	    .rank = rank_v, \
+	        .func = __STARTUP_FUNC_CAST(func_v, a),  \
+	        .arg = b, \
+	    __STARTUP_SET_FUNC_NAME(name_v) \
 	}
 
 #define __STARTUP(name, line, subsystem, rank, func) \
@@ -855,6 +864,9 @@ struct startup_entry {
 	startup_rank_t         rank;
 	void                 (*func)(const void *);
 	const void            *arg;
+#ifdef __BUILDING_XNU_LIB_UNITTEST__
+	const char            *func_name;
+#endif
 };
 
 struct startup_tunable_spec {
@@ -907,10 +919,6 @@ extern void kernel_startup_tunable_init(const struct startup_tunable_spec *);
 extern void kernel_startup_tunable_dt_init(const struct startup_tunable_dt_spec *);
 extern void kernel_startup_tunable_dt_source_init(const struct startup_tunable_dt_source_spec *);
 extern void kernel_bootstrap(void);
-
-#ifdef __BUILDING_XNU_LIB_UNITTEST__
-void kernel_startup_initialize_only(startup_subsystem_id_t sysid);
-#endif
 
 /* Initialize machine dependent stuff */
 extern void machine_init(void);

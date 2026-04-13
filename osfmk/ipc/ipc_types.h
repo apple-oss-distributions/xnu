@@ -147,6 +147,7 @@ __options_closed_decl(ipc_space_policy_t, uint32_t, {
 	IPC_SPACE_POLICY_DEFAULT       = 0x0001, /* MACH64_POLICY_DEFAULT */
 	IPC_SPACE_POLICY_ENHANCED      = 0x0002,
 	IPC_SPACE_POLICY_PLATFORM      = 0x0004,
+	IPC_SPACE_POLICY_CONTAINED     = 0x0008,
 	IPC_SPACE_POLICY_KERNEL        = 0x0010,
 
 	/* flags to turn off security */
@@ -171,6 +172,7 @@ __options_closed_decl(ipc_space_policy_t, uint32_t, {
 		IPC_SPACE_POLICY_DEFAULT |
 		IPC_SPACE_POLICY_ENHANCED |
 		IPC_SPACE_POLICY_PLATFORM |
+		IPC_SPACE_POLICY_CONTAINED |
 		IPC_SPACE_POLICY_KERNEL |
 		IPC_SPACE_POLICY_SIMULATED |
 		IPC_SPACE_POLICY_TRANSLATED |
@@ -180,11 +182,13 @@ __options_closed_decl(ipc_space_policy_t, uint32_t, {
 /* platform restrictions Versioning Levels */
 	IPC_SPACE_POLICY_ENHANCED_V0 = 0x100,   /* DEPRECATED - includes macos hardened runtime */
 	IPC_SPACE_POLICY_ENHANCED_V1 = 0x200,   /* ES features exposed to 3P in FY2024 release */
-	IPC_SPACE_POLICY_ENHANCED_V2 = 0x400,   /* ES features exposed to 3P in FY2025 release */
+	IPC_SPACE_POLICY_ENHANCED_V2 = 0x300,   /* ES features exposed to 3P in FY2025 release */
+	IPC_SPACE_POLICY_ENHANCED_V3 = 0x400,   /* ES features exposed to 3P in FY2026 release */
 	IPC_SPACE_POLICY_ENHANCED_VERSION_MASK = (
 		IPC_SPACE_POLICY_ENHANCED_V0 |
 		IPC_SPACE_POLICY_ENHANCED_V1 |
-		IPC_SPACE_POLICY_ENHANCED_V2
+		IPC_SPACE_POLICY_ENHANCED_V2 |
+		IPC_SPACE_POLICY_ENHANCED_V3
 		),
 });
 
@@ -192,6 +196,7 @@ __options_closed_decl(ipc_space_policy_t, uint32_t, {
 	prefix ## _DEFAULT      = IPC_SPACE_POLICY_DEFAULT,                     \
 	prefix ## _ENHANCED     = IPC_SPACE_POLICY_ENHANCED,                    \
 	prefix ## _PLATFORM     = IPC_SPACE_POLICY_PLATFORM,                    \
+	prefix ## _CONTAINED    = IPC_SPACE_POLICY_CONTAINED,                   \
 	prefix ## _KERNEL       = IPC_SPACE_POLICY_KERNEL,                      \
 	prefix ## _SIMULATED    = IPC_SPACE_POLICY_SIMULATED,                   \
 	prefix ## _TRANSLATED   = IPC_SPACE_POLICY_TRANSLATED,                  \
@@ -239,6 +244,7 @@ __enum_decl(ipc_object_type_t, uint8_t, {
 	/*
 	 * Notification ports
 	 */
+	IOT_NOTIFICATION_PORT,
 	IOT_EXCEPTION_PORT,
 	IOT_TIMER_PORT,
 
@@ -247,7 +253,7 @@ __enum_decl(ipc_object_type_t, uint8_t, {
 	 */
 	IOT_REPLY_PORT,
 	IOT_SPECIAL_REPLY_PORT,
-	IOT_PROVISIONAL_REPLY_PORT,
+	IOT_WEAK_REPLY_PORT,
 
 	/*
 	 * IPC Kernel Object types
@@ -261,6 +267,7 @@ __enum_decl(ipc_object_type_t, uint8_t, {
 	IKOT_THREAD_CONTROL = __IKOT_FIRST,
 	IKOT_THREAD_READ,
 	IKOT_THREAD_INSPECT,
+	IKOT_THREAD_RESUME,
 
 	/* task ports */
 	IKOT_TASK_CONTROL,

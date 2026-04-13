@@ -119,10 +119,23 @@ typedef natural_t ipc_space_refs_t;
 #define IS_AT_MAX_LIMIT_NOTIFIED       0x20     /* sent max limit notification */
 
 /* is_telemetry flags */
-__options_decl(is_telemetry_t, uint8_t, {
-	IS_HAS_BOOTSTRAP_PORT_TELEMETRY         = 0x01,     /* space has emitted a bootstrap port telemetry */
-	IS_HAS_CREATE_PRP_TELEMETRY             = 0x02,     /* space has emitted a create provisional reply port telemetry */
-	IS_HAS_MOVE_PRP_TELEMETRY               = 0x04,     /* space has emitted a move provisional reply port telemetry */
+__options_decl(is_telemetry_t, uint16_t, {
+	IS_FUSE_NONE                                 = 0x0000,     /* indicates that this enum is irrelevant in the usage context */
+	IS_FUSE_HAS_MACH_EXC_TSS_TELEMETRY           = 0x0001,     /* space has emitted a mach exception thread set state telemetry */
+	IS_FUSE_HAS_MOVE_WEAK_REPLY_PORT_TELEMETRY   = 0x0002,     /* space has emitted a move weak reply port telemetry */
+	IS_FUSE_EMITTED_INLINE_PORT_DESC_LIMIT       = 0x0004,     /* space has emitted telemetry for too many inline port descriptors */
+	IS_FUSE_EMITTED_VOUCHER_RECIPE_SIZE_LIMIT    = 0x0008,     /* space has emitted telemetry for large voucher recipe size */
+	IS_FUSE_EMITTED_RESTRICTED_VOUCHER_OPERATION = 0x0010,     /* space has emitted telemetry for a restricted voucher operation */
+	IS_FUSE_HAS_MOVE_IOT_PORT_TELEMETRY          = 0x0020,     /* space has emitted a move IOT_PORT telemetry */
+	IS_FUSE_HAS_SERVICE_PORT_EXCEPTION_TELEMETRY = 0x0040,     /* space has emitted a using service port as exception port telemetry */
+	IS_FUSE_HAS_CONTAINED_EXCEPTION_TELEMETRY    = 0x0080,     /* space has emitted a contained process exception port telemetry */
+	IS_FUSE_HAS_EXCEPTION_PORT_NOT_IN_SPACE      = 0x0100,     /* space has emitted an exception port not in space telemetry */
+	IS_FUSE_HAS_BOOTSTRAP_PORT_FOR_NOTIFICATION  = 0x0200,     /* space has emitted a bootstrap port for notification telemetry */
+	IS_FUSE_HAS_CONSTRUCT_LARGE_MSG_QUEUE        = 0x0400,     /* space has emitted a mach_port_construct large msg queue telemetry */
+	IS_FUSE_HAS_LAGRE_MSG_COUNT                  = 0x0800,     /* space has emitted a large msg count telemetry */
+	IS_FUSE_HAS_IMMOVABLE_SEND_RIGHT_TELEMETRY   = 0x1000,     /* space has emitted unblessed copyout immovable send telemetry */
+	IS_FUSE_HAS_REPLY_PORT_MULTIPLE_S0           = 0x2000,     /* space has emitted a reply port multiple send-once right telemetry */
+	IS_FUSE_MAX                                  = 0x2000,     /* keep equal to last and bump when adding new flags */
 });
 
 struct ipc_space {

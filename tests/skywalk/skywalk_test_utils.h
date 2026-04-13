@@ -47,6 +47,7 @@ typedef enum sktu_if_type {
 #define SKTU_IFF_ENABLE_NETIF   0x00000001 // no-netif (txstart bsd interface) by default
 #define SKTU_IFF_NO_ATTACH_FSW  0x00000002 // auto-attach fsw for netif by default
 #define SKTU_IFF_ENABLE_CHANNEL 0x00000004 // auto-attach kpipe
+#define SKTU_IFF_ENABLE_UPP     0x00000008 // enable user packet pool
 typedef uint32_t sktu_if_flag_t;
 
 typedef struct sktc_nexus_handles {
@@ -265,7 +266,7 @@ void sktc_pump_ring_nslots_poll(channel_t channel, channel_ring_t ring, sync_mod
 void sktc_raise_file_limit(int new);
 
 int sktu_create_interface(sktu_if_type_t type, sktu_if_flag_t flags);
-channel_t sktu_create_interface_channel(sktu_if_type_t type, int tunsock);
+channel_t sktu_create_interface_channel(sktu_if_type_t type, int tunsock, bool enable_upp);
 void sktu_get_interface_name(sktu_if_type_t type, int s, char name[IFNAMSIZ]);
 
 void sktu_dump_buffer(FILE *f, const char *title, const void *p, size_t len);

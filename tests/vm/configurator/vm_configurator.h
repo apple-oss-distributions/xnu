@@ -110,6 +110,29 @@
  */
 extern bool Verbose;
 
+static inline bool
+is_new_vm(void)
+{
+	static dispatch_once_t is_new_once;
+	static bool is_new;
+
+	dispatch_once(&is_new_once, ^{
+		int out_value = 0;
+		size_t inout_size = sizeof(out_value);
+		if (sysctlbyname("vm.has_range_locking", &out_value, &inout_size, NULL, 0) != 0) {
+		        T_QUIET; T_ASSERT_POSIX_ERROR(errno, ENOENT, "sysctlbyname(vm.has_range_locking)");
+		        /* unknown sysctl, must be old vm */
+		        is_new = false;
+		} else {
+		        T_QUIET; T_ASSERT_EQ(inout_size, sizeof(out_value), "sysctlbyname(vm.has_range_locking)");
+		        is_new = (bool)out_value;
+		}
+		T_LOG(is_new ? "NEW VM" : "OLD VM");
+	});
+	return is_new;
+}
+
+
 /*
  * Return values from individual test functions.
  * These are ordered from "best" to "worst".
@@ -142,6 +165,18 @@ typedef struct {
 	fill_pattern_mode_t mode;
 	uint64_t pattern;
 } fill_pattern_t;
+
+/* Make a fill_pattern_t that fills copies of a byte. */
+static inline fill_pattern_t
+fill_pattern_from_char(char c)
+{
+	char pat[8] = {c, c, c, c, c, c, c, c};
+	fill_pattern_t result;
+	result.mode = Fill;
+	static_assert(sizeof(pat) == sizeof(result.pattern));
+	memcpy(&result.pattern, pat, sizeof(pat));
+	return result;
+}
 
 /*
  * EndObjects: for END_OBJECTS array terminator
@@ -213,12 +248,14 @@ typedef struct vm_object_template_s {
  * Allocation: an ordinary VM entry
  * Hole: an unallocated range of the address space.
  * Submap: a mapping of a submap
+ * Guard: a guard page added before or after the test memory
  */
 typedef enum {
 	EndEntries = 0,
 	Allocation,
 	Hole,
 	Submap,
+	Guard,
 } vm_entry_template_kind_t;
 
 /*
@@ -483,6 +520,24 @@ typedef enum {
 } object_id_mode_t;
 
 /*
+ * Status of a page in an object.
+ * absent: Page is not available in this object. It may be in a shadow object.
+ * resident: Page is resident and owned by this object.
+ */
+typedef enum : uint8_t {
+	page_is_absent = 0,  /* must be zero */
+	page_is_resident = 1
+} page_status_t;
+
+typedef enum __attribute__((__enum_extensibility__(closed))) : uint32_t {
+	copy_invalid = ~0,
+	copy_none = MEMORY_OBJECT_COPY_NONE,
+	copy_symmetric = MEMORY_OBJECT_COPY_SYMMETRIC,
+	copy_delay = MEMORY_OBJECT_COPY_DELAY,
+	copy_delay_fork = MEMORY_OBJECT_COPY_DELAY_FORK
+} copy_strategy_t;
+
+/*
  * struct vm_object_checker_t
  * Maintain and verify expected state of a VM object.
  */
@@ -492,13 +547,13 @@ typedef struct vm_object_checker_s {
 
 	vm_object_template_kind_t kind;
 	vm_object_attribute_list_t verify;
-	bool deinited;
 
 	uint64_t object_id;
 	object_id_mode_t object_id_mode;
+	copy_strategy_t copy_strategy;
 
 	/*
-	 * This is the count of references to this object specifically.
+	 * self_ref_count is the count of references to this object specifically.
 	 * vm_region's reported ref_count also includes references to
 	 * the shadow chain's objects, minus the shadow chain's references
 	 * to each other.
@@ -508,11 +563,24 @@ typedef struct vm_object_checker_s {
 	fill_pattern_t fill_pattern;
 
 	/*
+	 * Page list.
+	 * These pages use VM's internal page size,
+	 * which may differ from userspace PAGE_SIZE.
+	 * NULL array means the object cannot have pages
+	 * (the null object or a submap object)
+	 */
+	page_status_t *pages;  /* `size / xnu_vm_page_size()` elements */
+
+	/*
 	 * Shadow chain.
-	 * object->shadow moves away from entry.
 	 * object->shadow is refcounted.
+	 * object->vo_copy is not refcounted.
 	 */
 	struct vm_object_checker_s *shadow;
+	struct vm_object_checker_s *vo_copy;
+
+	/* byte offset 0 in this object is `shadow_offset` in object->shadow */
+	mach_vm_address_t shadow_offset;
 
 	/*
 	 * Checkers for submap contents.
@@ -543,6 +611,39 @@ typedef struct vm_object_checker_s {
  */
 extern vm_object_checker_t *
 object_checker_clone(vm_object_checker_t *obj_checker);
+
+/*
+ * Increments an object checker's refcount, mirroring the VM's refcount.
+ */
+extern void
+object_checker_reference(vm_object_checker_t *obj_checker);
+
+/*
+ * Decrements an object checker's refcount, mirroring the VM's refcount.
+ */
+extern void
+object_checker_dereference(vm_object_checker_t *obj_checker);
+
+/*
+ * Returns true if obj_checker refers to a NULL vm_object.
+ * A non-null checker pointer can still refer to a NULL vm_object.
+ */
+extern bool
+object_is_null(vm_object_checker_t *obj_checker);
+
+/*
+ * Convenience function for looping through an object checker's page list.
+ * Returns the number of elements in the page list.
+ * Returns 0 if the page list is NULL.
+ */
+static inline mach_vm_size_t
+object_checker_page_list_count(vm_object_checker_t *obj_checker)
+{
+	if (obj_checker->pages == NULL) {
+		return 0;
+	}
+	return obj_checker->size / PAGE_SIZE;
+}
 
 /*
  * struct vm_entry_checker_t
@@ -578,11 +679,11 @@ typedef struct vm_entry_checker_s {
 	uint16_t user_wired_count;
 	uint8_t user_tag;
 
-	bool is_submap;         /* true when entry is a parent map's submap entry */
+	/* no is_submap field; use kind == Submap instead */
 	uint32_t submap_depth;  /* non-zero when entry is a submap's content */
 
 	uint64_t object_offset;
-	uint32_t pages_resident;  /* TODO: track this in the object checker instead */
+	uint64_t vm_region_object_offset_tweak;
 
 	bool needs_copy;
 
@@ -610,6 +711,14 @@ typedef struct {
 } entry_checker_range_t;
 
 /*
+ * Deallocate a checker.
+ * Also un-references the checker's object.
+ * Don't call this if the checker is linked into any list.
+ */
+extern void
+checker_free(vm_entry_checker_t *checker);
+
+/*
  * Count the number of entries between
  * checker_range->head and checker_range->tail, inclusive.
  */
@@ -635,10 +744,17 @@ extern mach_vm_size_t
 checker_range_size(entry_checker_range_t checker_range);
 
 /*
+ * Link a checker to the end of a checker range.
+ */
+extern void
+checker_range_append(entry_checker_range_t *list, vm_entry_checker_t *inserted);
+
+/*
  * Loop over all checkers between
  * entry_range->head and entry_range->tail, inclusive.
  * Does visit any submap parent entry.
  * Does not descend into submap contents.
+ * Does not visit any guard pages.
  *
  * You may clip_left the current checker. The new left entry is not visited.
  * You may clip_right the current checker. The new right entry is visited next.
@@ -646,7 +762,7 @@ checker_range_size(entry_checker_range_t checker_range);
  */
 #define FOREACH_CHECKER(checker, entry_range)                   \
 	for (vm_entry_checker_t *checker = (entry_range).head;  \
-	     checker != (entry_range).tail->next;               \
+	     checker && checker != (entry_range).tail->next;    \
 	     checker = checker->next)
 
 /*
@@ -661,11 +777,16 @@ checker_range_size(entry_checker_range_t checker_range);
  *
  * submap_slide keeps track of a temporary address offset applied
  * to the contained checkers. This is used for submap contents.
+ *
+ * Guard pages may be allocated before and after the memory being tested.
+ * These are checked using entry checkers, but most other checker list
+ * functions ignore them.
  */
 typedef struct checker_list_s {
 	struct checker_list_s *parent;
 	entry_checker_range_t entries;
 	vm_object_checker_t *objects; /* must be NULL in submaps */
+	entry_checker_range_t guard_pages;
 	uint64_t submap_slide;
 	bool is_slid;
 } checker_list_t;
@@ -801,6 +922,30 @@ checker_list_replace_checker_with_range(
 }
 
 /*
+ * Convenience function to replace several checkers with one checker.
+ * The old and the new must have the same start address and size.
+ */
+static inline void
+checker_list_replace_range_with_checker(
+	checker_list_t *list,
+	entry_checker_range_t old_checkers,
+	vm_entry_checker_t *new_checker)
+{
+	checker_list_replace_range(list,
+	    old_checkers,
+	    (entry_checker_range_t){ new_checker, new_checker });
+}
+
+/*
+ * Insert a checker into a checker list, in address order.
+ * The new checker must not overlap with any existing checker.
+ */
+extern void
+checker_list_insert(
+	checker_list_t *list,
+	vm_entry_checker_t *inserted);
+
+/*
  * Remove a contiguous range of checkers from a checker list.
  * The checkers are freed.
  * The checkers are replaced by a new hole checker.
@@ -843,12 +988,55 @@ checker_contains_address(vm_entry_checker_t *checker, mach_vm_address_t address)
 }
 
 /*
- * Compute the share_mode value of an entry.
+ * Compute the expected share_mode value of an entry.
  * This value is computed from other values in the checker and its object.
  */
 extern uint8_t
 checker_share_mode(
 	vm_entry_checker_t *checker);
+
+/*
+ * Compute the expected pages_resident of an entry.
+ * The returned count is in userspace PAGE_SIZE units, as returned
+ * by vm_region(), which may not match the VM's internal page size.
+ */
+extern uint32_t
+checker_count_vm_region_pages_resident(
+	vm_entry_checker_t *checker);
+
+/*
+ * Compute the pages resident in an entry
+ * that are owned by a specific object in the shadow chain.
+ * The returned count is in userspace PAGE_SIZE units, as returned
+ * by vm_region(), which may not match the VM's internal page size.
+ */
+extern uint32_t
+checker_count_vm_region_pages_resident_owned_by_object(
+	vm_entry_checker_t *checker,
+	vm_object_checker_t *matching_owner);
+
+/*
+ * Returns true if the page at address is resident
+ * and is owned by object matching_owner.
+ * If matching_owner is NULL then any owning object is allowed.
+ */
+extern bool
+checker_page_at_address_is_resident_owned_by_object(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr,
+	vm_object_checker_t *matching_owner);
+
+/*
+ * Returns true if the page at address is resident
+ */
+static inline bool
+checker_page_at_address_is_resident(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr)
+{
+	return checker_page_at_address_is_resident_owned_by_object(
+		checker, addr, NULL /* matching_owner */);
+}
 
 /*
  * Compute the is_submap value of a map entry.
@@ -923,7 +1111,6 @@ clamp_start_end_to_start_end(
 	mach_vm_address_t           limit_start,
 	mach_vm_address_t           limit_end);
 
-
 /*
  * Adjust a address/size so that it does not extend beyond a limit.
  * If address/size falls outside the limit, the output size will
@@ -935,7 +1122,6 @@ clamp_address_size_to_address_size(
 	mach_vm_size_t      * const inout_size,
 	mach_vm_address_t           limit_address,
 	mach_vm_size_t              limit_size);
-
 
 /*
  * Adjust an address range so it does not extend beyond an entry's bounds.
@@ -977,9 +1163,9 @@ extern void
 checker_set_null_object(checker_list_t *list, vm_entry_checker_t *checker);
 
 /*
- * Set an entry's object to a copy of its current object,
- * with the new_object->shadow = old_object.
- * The entry's current object must not be null.
+ * Set checker's object to a new object that shadows its old object, if necessary.
+ * In cases where the new object is not necessary, instead leave the
+ * checker's object alone and change the checker to needs_copy = false.
  */
 extern void
 checker_make_shadow_object(checker_list_t *list, vm_entry_checker_t *checker);
@@ -993,20 +1179,55 @@ checker_resolve_null_vm_object(
 	vm_entry_checker_t *checker);
 
 /*
- * Update an entry's checker as if a fault occurred inside it.
- * Assumes that all pages in the entry were faulted.
- * Aborts if the fault appears to be a copy-on-write fault; this code does
- * not attempt to handle that case.
- *
- * - resolves null objects
- * - sets the resident page count
+ * Clip and resolve COW before wiring.
+ * range_address and range_size are the extent of the entire wire operation.
+ * On exit:
+ * - entry won't be needs_copy
+ * - object won't be copy_symmetric
  */
 extern void
-checker_fault_for_prot_not_cow(
+checker_clip_and_resolve_cow_for_wire(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker,
+	mach_vm_address_t range_address,
+	mach_vm_size_t range_size);
+
+/*
+ * Update an entry's checker as if a fault occurred inside it.
+ * Returns KERN_PROTECTION_FAILURE with no changes if protection would disallow.
+ *
+ * - resolves null objects
+ * - resolves COW
+ * - copies pages from shadow objects, if any
+ * - copies pages to copy object, if any
+ * - sets the resident page count
+ */
+extern kern_return_t
+checker_fault_address(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr,
+	vm_prot_t fault_prot);
+
+/*
+ * Updates an entry's checker as if it were all faulted.
+ * Like checker_fault_address() for every address in it.
+ */
+extern void
+checker_fault_all(
 	checker_list_t *checker_list,
 	vm_entry_checker_t *checker,
 	vm_prot_t fault_prot);
 
+/*
+ * Write to a checker's memory with a randomly-chosen new fill pattern.
+ * This changes the checker's expected state and also writes to the real memory.
+ * Use this to verify that a COW copy does not see writes to its source.
+ */
+extern void
+checker_write_new_fill_pattern(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker);
 
 /*
  * Conditionally unnest one checker in a submap.
@@ -1024,16 +1245,12 @@ checker_fault_for_prot_not_cow(
  * - a readable allocation:
  *     - (unnest_readonly == false) advance past it, same as for unallocated holes
  *     - (unnest_readonly == true) unnest it, same as for writeable allocations
- *
- * Set all_overwritten = true if the newly-unnested memory will
- * be promptly written to (thus resolving null objects and collapsing COW shadow chains).
  */
 extern vm_entry_checker_t *
 checker_list_try_unnest_one_entry_in_submap(
 	checker_list_t *checker_list,
 	vm_entry_checker_t *submap_parent,
 	bool unnest_readonly,
-	bool all_overwritten,
 	mach_vm_address_t * const inout_next_address);
 
 /*
@@ -1072,6 +1289,24 @@ checker_simplify_left(
 	checker_list_t *list,
 	vm_entry_checker_t *right);
 
+/*
+ * Clone a vm entry checker.
+ * The new clone increases its object's refcount.
+ * The new clone is not inserted into the checker list.
+ * All other fields in the new checker are the same as the old.
+ */
+extern vm_entry_checker_t *
+checker_clone(vm_entry_checker_t *old);
+
+/*
+ * Allocate a new checker for a guard page from allocate_with_guards().
+ * Add it to the checker list's guard pages.
+ */
+extern void
+append_checker_for_guard_page(
+	checker_list_t *list,
+	mach_vm_address_t address,
+	mach_vm_size_t size);
 
 /*
  * Build a vm_checker for a newly-created memory region.
@@ -1084,6 +1319,22 @@ make_checker_for_vm_allocate(
 	mach_vm_address_t address,
 	mach_vm_size_t size,
 	int flags_and_tag);
+
+/*
+ * Clone a checker.
+ * Update both checkers as if this were a VM copy operation.
+ * The new checker is not inserted into the checker list.
+ */
+extern vm_entry_checker_t *
+checker_clone_copy(checker_list_t *list, vm_entry_checker_t *src_checker);
+
+/*
+ * Clone a checker.
+ * Update both checkers as if this were a VM share operation.
+ * The new checker is not inserted into the checker list.
+ */
+extern vm_entry_checker_t *
+checker_clone_share(checker_list_t *list, vm_entry_checker_t *src_checker);
 
 /*
  * Create VM entries and VM entry checkers
@@ -1108,6 +1359,7 @@ create_vm_state(
 	const vm_object_template_t object_templates[],
 	unsigned object_template_count,
 	mach_vm_size_t alignment_mask,
+	bool allocate_guard_pages,
 	const char *message);
 
 static inline __attribute__((overloadable))
@@ -1118,7 +1370,7 @@ create_vm_state(
 	mach_vm_size_t alignment_mask)
 {
 	return create_vm_state(templates, count, NULL, 0,
-	           alignment_mask, "create_vm_state");
+	           alignment_mask, true /* guard pages */, "create_vm_state");
 }
 
 /*
@@ -1366,10 +1618,13 @@ extern const char *
 name_for_behavior(vm_behavior_t behavior);
 
 extern const char *
-name_for_bool(boolean_t value);
+name_for_share_mode(uint8_t share_mode);
 
 extern const char *
-name_for_share_mode(uint8_t share_mode);
+name_for_copy_strategy(copy_strategy_t copy_strat);
+
+extern const char *
+name_for_bool(boolean_t value);
 
 /* Convenience macro for compile-time array size */
 #define countof(array)                                                  \
@@ -1422,6 +1677,29 @@ min(mach_vm_address_t a, mach_vm_address_t b)
 	}
 }
 
+/*
+ * Allocate with VM_FLAGS_RANDOM_ADDR and workaround its spurious failures.
+ * T_FAILs if the allocation fails.
+ */
+extern mach_vm_address_t
+allocate_at_random_address(
+	mach_vm_size_t size,
+	mach_vm_size_t alignment_mask,
+	vm_prot_t cur_prot,
+	vm_prot_t max_prot);
+
+/*
+ * Allocate at a random address, with guard pages before and after.
+ * `guard_page_size` may be zero.
+ * T_FAILs if the allocation fails.
+ */
+extern mach_vm_address_t
+allocate_with_guards(
+	mach_vm_size_t size,
+	mach_vm_size_t alignment_mask,
+	mach_vm_size_t guard_page_size,
+	vm_prot_t cur_prot,
+	vm_prot_t max_prot);
 
 /*
  * Call vm_region on an address.
@@ -1518,5 +1796,23 @@ host_priv(void);
 
 extern bool
 host_priv_allowed(void);
+
+/*
+ * Return xnu's internal page size.
+ * The userspace PAGE_SIZE may be smaller (e.g. Rosetta Intel on ARM).
+ */
+static inline uint32_t
+xnu_vm_page_size(void)
+{
+	static dispatch_once_t once;
+	static uint32_t vm_page_size;
+	dispatch_once(&once, ^{
+		size_t len = sizeof(vm_page_size);
+		int err = sysctlbyname("vm.pagesize", &vm_page_size, &len, NULL, 0);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "sysctlbyname('vm.pagesize')");
+		T_QUIET; T_ASSERT_GE(len, sizeof(vm_page_size), "sysctl result size");
+	});
+	return vm_page_size;
+}
 
 #endif  /* VM_CONFIGURATOR_H */

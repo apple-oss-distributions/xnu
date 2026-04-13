@@ -188,7 +188,7 @@ walk_kext_callstack(int (^cb)(uintptr_t))
 
 		if (((retaddr < vm_kernel_builtinkmod_text_end) &&
 		    (retaddr >= vm_kernel_builtinkmod_text)) ||
-		    (retaddr < vm_kernel_stext) || (retaddr > vm_kernel_top)) {
+		    !kernel_text_contains(retaddr)) {
 			if (cb(retaddr) != 0) {
 				return;
 			}

@@ -192,11 +192,11 @@ When keepalive probes are enabled, this option will set the amount of time in se
 .It Dv TCP_KEEPCNT
 .Tn When keepalive probes are enabled, this option will set the number of times a keepalive probe should be repeated if the peer is not responding. After this many probes, the connection will be closed. 
 .It Dv TCP_SENDMOREACKS
-When a stream of 
+When a stream of
 .Tn TCP
-data packets are received, OS X uses an algorithm to reduce the number of acknowlegements by generating a 
+data packets are received, OS X uses an algorithm to reduce the number of acknowledgements by generating a
 .Tn TCP
-acknowlegement for 8 data packets instead of acknowledging every other data packet. When this socket option is enabled, the connection will always send a
+acknowledgement for 8 data packets instead of acknowledging every other data packet. When this socket option is enabled, the connection will always send a
 .Tn TCP
 acknowledgement for every other data packet.
 .It Dv TCP_ENABLE_ECN

@@ -51,13 +51,17 @@
 #include <libkern/section_keywords.h>
 #include <mach/kern_return.h>
 #include <mach/machine/vm_types.h>
-#include <arm64/sptm/pmap/pmap_public.h>
+#include <arm64/sptm/pmap_public.h>
 #include <kern/ast.h>
 #include <mach/arm/thread_status.h>
 #include <os/refcnt.h>
 
 #include <arm64/tlb.h>
 
+
+#if HAS_MTE
+#include <arm64/mte_xnu.h>
+#endif /* HAS_MTE */
 
 /* Shift for 2048 max virtual ASIDs (2048 pmaps). */
 #define ASID_SHIFT (11)
@@ -248,11 +252,6 @@ extern uint64_t get_tcr(void);
 extern void set_tcr(uint64_t);
 extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
 
-#if HAS_MTE
-extern bool is_mte_enabled;
-extern bool panic_on_user_induced_iomd_kernel_faults;
-#endif /* HAS_MTE */
-
 extern pmap_paddr_t get_mmu_ttb(void);
 extern pmap_paddr_t mmu_kvtop(vm_offset_t va);
 extern pmap_paddr_t mmu_kvtop_wpreflight(vm_offset_t va);
@@ -334,8 +333,6 @@ struct pmap {
 	/* Ledger tracking phys mappings */
 	ledger_t ledger;
 
-	decl_lck_rw_data(, rwlock);
-
 	/* Global list of pmaps */
 	queue_chain_t pmaps;
 
@@ -411,6 +408,7 @@ struct pmap {
 
 	bool reserved6;
 
+
 #define PMAP_TYPE_USER 0 /* ordinary pmap */
 #define PMAP_TYPE_KERNEL 1 /* kernel pmap */
 #define PMAP_TYPE_COMMPAGE 2 /* commpage pmap */
@@ -438,15 +436,6 @@ struct pmap {
 
 #define PMAP_VASID(pmap) ((pmap)->asid)
 #define PMAP_HWASID(pmap) ((pmap)->asid & (MAX_HW_ASIDS - 1))
-
-#if VM_DEBUG
-extern int pmap_list_resident_pages(
-	pmap_t pmap,
-	vm_offset_t *listp,
-	int space);
-#else /* VM_DEBUG */
-#define pmap_list_resident_pages(pmap, listp, space) (0)
-#endif /* VM_DEBUG */
 
 extern int copysafe(vm_map_address_t from, vm_map_address_t to, uint32_t cnt, int type, uint32_t *bytes_copied);
 
@@ -489,6 +478,7 @@ extern void pmap_set_tag_check_enabled(pmap_t pmap);
 extern void pmap_set_user_tag_check_faults_disabled(pmap_t pmap);
 #endif /* HAS_MTE */
 
+
 /**
  * Interfaces implemented as macros.
  */
@@ -499,8 +489,6 @@ extern void pmap_set_user_tag_check_faults_disabled(pmap_t pmap);
 
 #define pmap_kernel_va(VA) \
 	(((VA) >= VM_MIN_KERNEL_ADDRESS) && ((VA) <= VM_MAX_KERNEL_ADDRESS))
-
-#define pmap_attribute(pmap, addr, size, attr, value) (KERN_INVALID_ADDRESS)
 
 #define copyinmsg(from, to, cnt) copyin(from, to, cnt)
 #define copyoutmsg(from, to, cnt) copyout(from, to, cnt)
@@ -531,7 +519,7 @@ extern void pmap_map_globals(void);
 extern vm_map_address_t pmap_map_bd_with_options(vm_map_address_t va, vm_offset_t sa, vm_offset_t ea, vm_prot_t prot, int32_t options);
 extern vm_map_address_t pmap_map_bd(vm_map_address_t va, vm_offset_t sa, vm_offset_t ea, vm_prot_t prot);
 
-extern void pmap_init_pte_page(pmap_t, pt_entry_t *, vm_offset_t, unsigned int ttlevel, boolean_t alloc_ptd);
+extern void pmap_init_pte_page(pmap_t, pmap_paddr_t, vm_offset_t, unsigned int ttlevel, boolean_t alloc_ptd);
 
 extern boolean_t pmap_valid_address(pmap_paddr_t addr);
 extern void pmap_disable_NX(pmap_t pmap);
@@ -556,7 +544,6 @@ extern boolean_t pmap_bootloader_page(ppnum_t pn);
 
 extern boolean_t pmap_is_empty(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
 
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
 /*
  * Strip a pointer of all metadata bits based on its pmap.
  * This function will return a pointer that is cleared of any bit that is not part
@@ -564,7 +551,6 @@ extern boolean_t pmap_is_empty(pmap_t pmap, vm_map_offset_t start, vm_map_offset
  * replacing these bits with bit 55 value.
  */
 extern vm_map_address_t pmap_strip_addr(pmap_t pmap, vm_map_address_t ptr);
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 
 #define ARM_PMAP_MAX_OFFSET_DEFAULT 0x01
@@ -629,7 +615,7 @@ void pmap_abandon_measurement(void);
 
 #define PMAP_UPDATE_COMPRESSOR_PAGE_INDEX 55
 #define PMAP_TRIM_INDEX 56
-#define PMAP_LEDGER_VERIFY_SIZE_INDEX 57
+/* was  PMAP_LEDGER_VERIFY_SIZE_INDEX 57 */
 #define PMAP_LEDGER_ALLOC_INDEX 58
 #define PMAP_LEDGER_FREE_INDEX 59
 
@@ -725,19 +711,17 @@ bool pmap_pending_preemption(void); // more complicated, so externally defined
 #define pmap_pending_preemption _pmap_pending_preemption_real
 #endif /* SCHED_HYGIENE_DEBUG && (DEBUG || DEVELOPMENT) */
 
-#define MARK_AS_PMAP_TEXT
-#define MARK_AS_PMAP_DATA
-#define MARK_AS_PMAP_RODATA
-
 extern void pmap_nop(pmap_t);
 
 extern lck_grp_t pmap_lck_grp;
+extern lck_attr_t pmap_lck_attr;
 
 extern void CleanPoC_DcacheRegion_Force_nopreempt_nohid_nobarrier(vm_offset_t va, size_t length);
 
 #define pmap_force_dcache_clean(va, sz) CleanPoC_DcacheRegion_Force(va, sz)
 #define pmap_simple_lock(l)             simple_lock(l, &pmap_lck_grp)
 #define pmap_simple_unlock(l)           simple_unlock(l)
+#define pmap_simple_unlock_nopreempt(l) simple_unlock_nopreempt(l)
 #define pmap_simple_lock_try(l)         simple_lock_try(l, &pmap_lck_grp)
 #define pmap_simple_lock_assert(l, t)   simple_lock_assert(l, t)
 

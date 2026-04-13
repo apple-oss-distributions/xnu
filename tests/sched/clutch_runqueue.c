@@ -238,7 +238,7 @@ SCHED_POLICY_T_DECL(runq_diff_priority,
  *                               ^                       ^ ^ ^        ^
  *                               |                       | | |       (version 4)
  *                  (warp_window_close 12)               | | (cluster_id 6)
- *                                                       | (selection_was_cluster_bound 1)
+ *                                                       | (selection_was_pset_bound 1)
  *                                   (selection_opened_warp_window 1)
  */
 #define CTS_VERSION 1ULL
@@ -246,7 +246,7 @@ SCHED_POLICY_T_DECL(runq_diff_priority,
 #define TRAVERSE_MODE_CHECK_PREEMPT (2ULL << 4)
 #define CLUSTER_ID(id) (id << 7)
 #define SELECTION_WAS_EDF (1ULL << 13)
-#define SELECTION_WAS_CLUSTER_BOUND (1ULL << 14)
+#define SELECTION_WAS_PSET_BOUND (1ULL << 14)
 #define SELECTION_OPENED_STARVATION_AVOIDANCE_WINDOW (1ULL << 15) | SELECTION_WAS_EDF
 #define SELECTION_OPENED_WARP_WINDOW (1ULL << 16)
 #define WINDOW_MASK(bucket, cluster_bound) ( 1ULL << (bucket + cluster_bound * TH_BUCKET_SCHED_MAX) )
@@ -254,7 +254,7 @@ SCHED_POLICY_T_DECL(runq_diff_priority,
 #define WARP_WINDOW_CLOSE(bucket, cluster_bound) (WINDOW_MASK(bucket, cluster_bound) << 29)
 
 /*
- * We test the selection_was_cluster_bound bit and cluster_id field gated
+ * We test the selection_was_pset_bound bit and cluster_id field gated
  * on the Edge version of this test case.
  */
 
@@ -265,7 +265,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 	uint64_t root_bucket_arg;
 	uint64_t bucket_is_bound = false;
 #if CONFIG_SCHED_EDGE
-	init_migration_harness(basic_amp);
+	init_migration_harness(&basic_amp);
 	bucket_is_bound = true;
 #else /* !CONFIG_SCHED_EDGE */
 	init_runqueue_harness();
@@ -282,8 +282,8 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		rev_threads[num_threads - bucket] = threads[bucket - 1];
 		warper_threads[bucket - 1] = create_thread(bucket, same_tg, root_bucket_to_highest_pri[bucket]);
 #if CONFIG_SCHED_EDGE
-		set_thread_cluster_bound(threads[bucket - 1], 0);
-		set_thread_cluster_bound(warper_threads[bucket - 1], 0);
+		set_thread_pset_bound(threads[bucket - 1], 0);
+		set_thread_pset_bound(warper_threads[bucket - 1], 0);
 #endif /* CONFIG_SCHED_EDGE */
 	}
 
@@ -294,7 +294,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		T_QUIET; T_EXPECT_TRUE(ret, "Root bucket %d failed to warp ahead", bucket);
 		root_bucket_arg = SELECTION_WAS_EDF | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-		root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+		root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 		ret = tracepoint_expect(CLUTCH_THREAD_SELECT, (bucket - 1) * 2, 0, bucket, root_bucket_arg);
 		T_QUIET; T_EXPECT_TRUE(ret, "EDF CLUTCH_THREAD_SELECT tracepoint");
@@ -316,7 +316,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		T_QUIET; T_EXPECT_TRUE(ret, "Root bucket %d failed to warp ahead", bucket);
 		root_bucket_arg = (bucket < TH_BUCKET_SHARE_BG ? SELECTION_OPENED_WARP_WINDOW : SELECTION_WAS_EDF) | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-		root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+		root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 		ret = tracepoint_expect(CLUTCH_THREAD_SELECT, bucket * 2 - 1, 0, bucket, root_bucket_arg);
 		T_QUIET; T_EXPECT_TRUE(ret, "Open warp window CLUTCH_THREAD_SELECT tracepoint");
@@ -327,7 +327,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		T_QUIET; T_EXPECT_TRUE(ret, "Root bucket %d's warp window failed to stay open", bucket);
 		root_bucket_arg = (bucket < TH_BUCKET_SHARE_BG ? 0 : SELECTION_WAS_EDF) | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-		root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+		root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 		ret = tracepoint_expect(CLUTCH_THREAD_SELECT, bucket * 2 - 2, 0, bucket, root_bucket_arg);
 		T_QUIET; T_EXPECT_TRUE(ret, "Active warp window CLUTCH_THREAD_SELECT tracepoint");
@@ -349,7 +349,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		T_QUIET; T_EXPECT_TRUE(ret, "Starvation avoidance failed to kick in for bucket %d", bucket);
 		root_bucket_arg = SELECTION_WAS_EDF | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-		root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+		root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 		if (bucket == TH_BUCKET_SHARE_BG) {
 			/* Enough time has passed for the warp windows opened in the last phase to be closed in one go */
@@ -372,7 +372,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 		T_QUIET; T_EXPECT_TRUE(ret, "EDF dequeue for bucket %d", bucket);
 		root_bucket_arg = SELECTION_WAS_EDF | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-		root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+		root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 		if (bucket == TH_BUCKET_SHARE_FG) {
 			/* Enough time has passed for the starvation avoidance windows opened in the last phase to be closed in one go */
@@ -393,7 +393,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 	T_QUIET; T_EXPECT_TRUE(ret, "EDF dequeue current thread for bucket");
 	root_bucket_arg = TRAVERSE_MODE_REMOVE_CONSIDER_CURRENT | SELECTION_WAS_EDF | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-	root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+	root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 	ret = tracepoint_expect(CLUTCH_THREAD_SELECT, 0, 0, TH_BUCKET_SHARE_FG, root_bucket_arg);
 	T_QUIET; T_EXPECT_TRUE(ret, "Current thread EDF CLUTCH_THREAD_SELECT tracepoint");
@@ -401,7 +401,7 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 	T_QUIET; T_EXPECT_TRUE(ret, "Current thread check preempt");
 	root_bucket_arg = TRAVERSE_MODE_CHECK_PREEMPT | SELECTION_WAS_EDF | CTS_VERSION;
 #if CONFIG_SCHED_EDGE
-	root_bucket_arg |= SELECTION_WAS_CLUSTER_BOUND;
+	root_bucket_arg |= SELECTION_WAS_PSET_BOUND;
 #endif /* CONFIG_SCHED_EDGE */
 	ret = tracepoint_expect(CLUTCH_THREAD_SELECT, 0, 0, TH_BUCKET_SHARE_FG, root_bucket_arg);
 	T_QUIET; T_EXPECT_TRUE(ret, "Current thread check preempt CLUTCH_THREAD_SELECT tracepoint");
@@ -409,11 +409,11 @@ SCHED_POLICY_T_DECL(runq_tracepoint_thread_select,
 #if CONFIG_SCHED_EDGE
 	/* Test the cluster_id field */
 	test_thread_t bound_thread = create_thread(TH_BUCKET_SHARE_DF, same_tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
-	set_thread_cluster_bound(bound_thread, 1);
+	set_thread_pset_bound(bound_thread, 1);
 	enqueue_thread(pset_target(1), bound_thread);
 	ret = dequeue_thread_expect(pset_target(1), bound_thread);
 	T_QUIET; T_ASSERT_TRUE(ret, "Dequeue single thread on cluster 1");
-	root_bucket_arg = SELECTION_WAS_EDF | CTS_VERSION | SELECTION_WAS_CLUSTER_BOUND | CLUSTER_ID(1);
+	root_bucket_arg = SELECTION_WAS_EDF | CTS_VERSION | SELECTION_WAS_PSET_BOUND | CLUSTER_ID(1);
 	ret = tracepoint_expect(CLUTCH_THREAD_SELECT, 10, 0, TH_BUCKET_SHARE_DF, root_bucket_arg);
 	T_QUIET; T_EXPECT_TRUE(ret, "Cluster-bound CLUTCH_THREAD_SELECT tracepoint");
 	SCHED_POLICY_PASS("CLUTCH_THREAD_SELECT tracepoint handles non-zero cluster id");

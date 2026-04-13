@@ -676,7 +676,9 @@ IOExclaveLPWUpcallHandler(struct IOExclaveLPWUpcallArgs *args)
 
 	switch (args->type) {
 	case kIOExclaveLPWUpcallTypeCreateAssertion:
-		return IOExclaveLPWCreateAssertion(&args->data.createassertion.id_out, "Exclave LPW assertion");
+		char buf[128];
+		snprintf(buf, sizeof(buf), "LPW(%llx, %llx)", args->data.createassertion.owner, args->data.createassertion.data);
+		return IOExclaveLPWCreateAssertion(&args->data.createassertion.id_out, (const char *) buf);
 	case kIOExclaveLPWUpcallTypeReleaseAssertion:
 		return IOExclaveLPWReleaseAssertion(args->data.releaseassertion.id);
 	case kIOExclaveLPWUpcallTypeRequestRunMode:
@@ -721,6 +723,16 @@ IOExclaveLPWReleaseAssertion(uint64_t id)
 	}
 
 	return rootDomain->releasePMAssertion(id);
+}
+
+void
+IOExclavesFullWake(const char * reason)
+{
+	IOPMrootDomain *rootDomain = IOService::getPMRootDomain();
+	assert(rootDomain);
+	if (rootDomain->isAOTMode() || rootDomain->isLPWMode()) {
+		rootDomain->claimSystemWakeEvent(rootDomain, kIOPMWakeEventAOTExit, reason, NULL);
+	}
 }
 
 /* IOService exclave methods */

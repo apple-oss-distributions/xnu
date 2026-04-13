@@ -81,6 +81,7 @@
 #include <arm/cpu_internal.h>
 #include <arm/rtclock.h>
 #include <machine/commpage.h>
+#include <machine/static_if.h>
 #include <vm/vm_map.h>
 #include <pexpert/arm64/boot.h>
 #include <arm64/machine_machdep.h>
@@ -111,6 +112,8 @@
 #define DECLARE(SYM, VAL) \
 	__asm("DEFINITION__define__" SYM ":\t .ascii \"%0\"" : : "i"  ((u_long)(VAL)))
 
+#define DECLARE_STATIC_IF_METADATA(KEY) \
+	DECLARE(#KEY "_jump_key_INIT_VALUE", __static_if_key_init_value(KEY))
 
 int main(int     argc,
     char ** argv);
@@ -125,6 +128,7 @@ main(int     argc,
 	DECLARE("TH_TXM_THREAD_STACK", offsetof(struct thread, txm_thread_stack));
 #if CONFIG_EXCLAVES
 	DECLARE("TH_EXCLAVES_INTSTATE", offsetof(struct thread, th_exclaves_intstate));
+	DECLARE("TH_EXCLAVES_STATE", offsetof(struct thread, th_exclaves_state));
 	DECLARE("TH_EXCLAVES_EXECUTION", TH_EXCLAVES_EXECUTION);
 #endif /* CONFIG_EXCLAVES */
 #endif /* CONFIG_SPTM */
@@ -419,6 +423,14 @@ main(int     argc,
 	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ELR", offsetof(struct panic_lockdown_initiator_state, elr));
 	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_FAR", offsetof(struct panic_lockdown_initiator_state, far));
 #endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
+
+#if DEVELOPMENT || DEBUG
+	STATIC_IF_KEY_DECLARE_TRUE(static_if_test_key_true); DECLARE_STATIC_IF_METADATA(static_if_test_key_true);
+	STATIC_IF_KEY_DECLARE_TRUE(static_if_test_key_true_to_false); DECLARE_STATIC_IF_METADATA(static_if_test_key_true_to_false);
+	STATIC_IF_KEY_DECLARE_FALSE(static_if_test_key_false); DECLARE_STATIC_IF_METADATA(static_if_test_key_false);
+	STATIC_IF_KEY_DECLARE_FALSE(static_if_test_key_false_to_true); DECLARE_STATIC_IF_METADATA(static_if_test_key_false_to_true);
+#endif
+
 
 	return 0;
 }

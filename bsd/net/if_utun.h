@@ -76,6 +76,7 @@ boolean_t utun_interface_needs_netagent(ifnet_t interface);
 #define UTUN_OPT_ATTACH_FLOWSWITCH                      27      /* Must be set before connecting */
 #define UTUN_OPT_CHANNEL_BIND_UUID                      28      /* Must be set before connecting */
 #define UTUN_OPT_CHANNEL_BIND_PID                       29      /* Must be set before connecting */
+#define UTUN_OPT_USER_PACKET_POOL                       30      /* Must be set before connecting */
 
 /*
  * Flags for by UTUN_OPT_FLAGS

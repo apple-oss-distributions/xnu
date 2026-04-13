@@ -134,13 +134,9 @@ extern bool net_check_compatible_alf(void);
 TUNABLE(uint32_t, kevent_debug_flags, "kevent_debug", 0);
 #endif
 
-/* Enable bound thread support for kqworkloop. */
-static TUNABLE(int, bootarg_thread_bound_kqwl_support_enabled,
-    "enable_thread_bound_kqwl_support", 0);
 SYSCTL_NODE(_kern, OID_AUTO, kern_event, CTLFLAG_RD | CTLFLAG_LOCKED, 0, NULL);
 SYSCTL_INT(_kern_kern_event, OID_AUTO, thread_bound_kqwl_support_enabled,
-    CTLFLAG_RD | CTLFLAG_LOCKED,
-    &bootarg_thread_bound_kqwl_support_enabled, 0,
+    CTLFLAG_RD | CTLFLAG_LOCKED, (int *)NULL, 1,
     "Whether thread bound kqwl support is enabled");
 
 static LCK_GRP_DECLARE(kq_lck_grp, "kqueue");
@@ -4894,10 +4890,6 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 		}
 
 		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD) {
-			if (!bootarg_thread_bound_kqwl_support_enabled) {
-				error = ENOTSUP;
-				break;
-			}
 			trp.trp_flags |= TRP_BOUND_THREAD;
 		}
 
@@ -5937,7 +5929,14 @@ recompute:
 	 * apply the diffs to the servicer
 	 */
 
-	if (!kqr_thread_requested(kqr)) {
+	/*
+	 * During process exit, a permanently bound thread can unbind from its
+	 * thread request. It's not safe for us to enqueue a tr for a permanent
+	 * thread bound kqwl (the threadreq priority queue linkage overlays the
+	 * work interval), so we short circuit here if we find an idle TBKQWL req.
+	 */
+	if (!kqr_thread_requested(kqr) &&
+	    !(kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND)) {
 		/*
 		 * No servicer, nor thread-request
 		 *

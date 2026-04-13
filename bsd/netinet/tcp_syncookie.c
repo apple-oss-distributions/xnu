@@ -192,6 +192,7 @@ syncookie_process_accecn_syn(struct tcpcb *tp, uint32_t ace_flags,
 			 */
 			setup_flags |= SC_ECN_SETUP;
 		}
+		OS_FALLTHROUGH;
 	default:
 		/* Forward Compatibility */
 		/* Accurate ECN */

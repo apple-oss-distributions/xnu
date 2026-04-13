@@ -143,8 +143,6 @@ extern void vector_upl_set_iostate(upl_t, upl_t, upl_offset_t, upl_size_t);
  */
 extern void             vm_pageout(void);
 
-__startup_func extern void             vm_config_init(void);
-
 extern kern_return_t    vm_pageout_internal_start(void);
 
 extern void             vm_pageout_object_terminate(
@@ -319,7 +317,9 @@ struct vm_pageout_state {
 
 	unsigned int vm_pageout_inactive;
 	unsigned int vm_pageout_inactive_used;  /* debugging */
-	unsigned int vm_pageout_inactive_clean; /* debugging */
+
+	unsigned int vm_pageout_clean_no_shadowing; /* debugging */
+	unsigned int vm_pageout_clean_but_shadowing; /* debugging */
 
 	uint32_t vm_page_filecache_min;
 	uint32_t vm_page_filecache_min_divisor;
@@ -356,6 +356,10 @@ struct vm_pageout_vminfo {
 	unsigned long vm_pageout_freed_speculative;
 	unsigned long vm_pageout_freed_external;
 	unsigned long vm_pageout_freed_internal;
+	unsigned long vm_pageout_inactive_clean;
+	unsigned long vm_pageout_inactive_absent;
+	unsigned long vm_pageout_inactive_not_alive;
+	unsigned long vm_pageout_inactive_error;
 	unsigned long vm_pageout_inactive_dirty_internal;
 	unsigned long vm_pageout_inactive_dirty_external;
 	unsigned long vm_pageout_inactive_referenced;
@@ -389,11 +393,42 @@ struct vm_pageout_vminfo {
 	uint64_t vm_compactor_major_compaction_segments_freed;
 	uint64_t vm_compactor_swapouts_queued;
 	uint64_t vm_compactor_swapout_bytes_wasted;
+
+	uint64_t vm_regular_swapouts_queued;
+	uint64_t vm_freezer_swapouts_queued;
+	uint64_t vm_donate_swapouts_queued;
+	uint64_t vm_darkwake_swapouts_queued;
+	uint64_t vm_scavenger_swapouts_queued;
+
+	/* Swapouts in bytes */
+	atomic_counter_t vm_regular_swapouts;
+	atomic_counter_t vm_freezer_swapouts;
+	atomic_counter_t vm_donate_swapouts;
+	atomic_counter_t vm_darkwake_swapouts;
+	atomic_counter_t vm_scavenger_swapouts;
+
+	/* Swapins in bytes */
+	atomic_counter_t vm_regular_swapins;
+	atomic_counter_t vm_freezer_swapins;
+	atomic_counter_t vm_donate_swapins;
+	atomic_counter_t vm_darkwake_swapins;
+	atomic_counter_t vm_scavenger_swapins;
+
+	uint64_t vm_fault_busy_trylock_count;
+	uint64_t vm_fault_busy_retry_count;
+	uint64_t vm_fault_excl_count;
+	uint64_t vm_fault_excl_busy_count;
+	uint64_t vm_fault_page_excl_count;
+	uint64_t vm_fault_page_excl_busy_count;
+	uint64_t vm_fault_page_excl_clean_count;
+	uint64_t vm_fault_page_excl_busy_copy_count;
+	uint64_t vm_fault_page_excl_blocked_obj_count;
+	uint64_t vm_fault_page_excl_pager_not_ready_count;
+	uint64_t vm_fault_copy_busy_trylock_count;
+	uint64_t vm_fault_copy_busy_retry_count;
 };
 
 extern struct vm_pageout_vminfo vm_pageout_vminfo;
-
-extern void vm_swapout_thread(void);
 
 #if DEVELOPMENT || DEBUG
 
@@ -408,9 +443,6 @@ struct vm_pageout_debug {
 	uint32_t vm_pageout_speculative_dirty;
 
 	uint32_t vm_pageout_inactive_busy;
-	uint32_t vm_pageout_inactive_absent;
-	uint32_t vm_pageout_inactive_notalive;
-	uint32_t vm_pageout_inactive_error;
 	uint32_t vm_pageout_inactive_deactivated;
 
 	uint32_t vm_pageout_enqueued_cleaned;

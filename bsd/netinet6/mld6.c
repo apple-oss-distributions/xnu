@@ -1203,10 +1203,13 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		 */
 		MLI_LOCK(mli);
 		mtp.it = mli->mli_v2_timer;
-		MLI_UNLOCK(mli);
-		if (mtp.it == 0 || mtp.it >= timer) {
+		if (mli->mli_version == MLD_VERSION_2 &&
+		    (mtp.it == 0 || mtp.it >= timer)) {
+			MLI_UNLOCK(mli);
 			(void) mld_v2_process_group_query(inm, timer, m, off);
 			mtp.cst = inm->in6m_timer;
+		} else {
+			MLI_UNLOCK(mli);
 		}
 		IN6M_UNLOCK(inm);
 		IN6M_REMREF(inm); /* from IN6_LOOKUP_MULTI */
@@ -1266,11 +1269,34 @@ mld_v2_process_group_query(struct in6_multi *inm, int timer, struct mbuf *m0,
 	 * for this group-specific query.
 	 */
 	if (nsrc == 0) {
+		struct mld_ifinfo *mli;
+
 		if (inm->in6m_state == MLD_G_QUERY_PENDING_MEMBER ||
 		    inm->in6m_state == MLD_SG_QUERY_PENDING_MEMBER) {
 			in6m_clear_recorded(inm);
 			timer = min(inm->in6m_timer, timer);
 		}
+
+		/*
+		 * Re-check MLD version before setting MLDv2-specific state.
+		 * The interface may have been downgraded to MLDv1 after our
+		 * initial version check due to receiving an MLDv1 query.
+		 * Setting MLDv2 states on an MLDv1 interface causes a panic
+		 * in mld_final_leave().
+		 */
+		mli = MLD_IFINFO(inm->in6m_ifp);
+		VERIFY(mli != NULL);
+		MLI_LOCK(mli);
+		if (mli->mli_version != MLD_VERSION_2) {
+			int mli_version = mli->mli_version;
+			MLI_UNLOCK(mli);
+			MLD_PRINTF(("%s: interface downgraded to v%d, "
+			    "ignoring group query\n", __func__,
+			    mli_version));
+			return retval;
+		}
+		MLI_UNLOCK(mli);
+
 		inm->in6m_state = MLD_G_QUERY_PENDING_MEMBER;
 		inm->in6m_timer = MLD_RANDOM_DELAY(timer);
 		return retval;
@@ -1326,8 +1352,32 @@ mld_v2_process_group_query(struct in6_multi *inm, int timer, struct mbuf *m0,
 			}
 		}
 		if (nrecorded > 0) {
+			struct mld_ifinfo *mli;
+
 			MLD_PRINTF(("%s: schedule response to SG query\n",
 			    __func__));
+
+			/*
+			 * Re-check MLD version before setting MLDv2-specific
+			 * state. The interface may have been downgraded to
+			 * MLDv1 after our initial version check due to
+			 * receiving an MLDv1 query. Setting MLDv2 states on
+			 * an MLDv1 interface causes a panic in
+			 * mld_final_leave().
+			 */
+			mli = MLD_IFINFO(inm->in6m_ifp);
+			VERIFY(mli != NULL);
+			MLI_LOCK(mli);
+			if (mli->mli_version != MLD_VERSION_2) {
+				int mli_version = mli->mli_version;
+				MLI_UNLOCK(mli);
+				MLD_PRINTF(("%s: interface downgraded to v%d, "
+				    "ignoring SG query\n", __func__,
+				    mli_version));
+				return retval;
+			}
+			MLI_UNLOCK(mli);
+
 			inm->in6m_state = MLD_SG_QUERY_PENDING_MEMBER;
 			inm->in6m_timer = MLD_RANDOM_DELAY(timer);
 		}

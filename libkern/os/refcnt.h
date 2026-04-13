@@ -285,7 +285,7 @@ extern os_ref_count_t os_pcpu_ref_release(os_pcpu_ref_t ref, struct os_refgrp *g
 
 
 #if XNU_KERNEL_PRIVATE
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*
  * Raw API that uses a plain atomic counter (os_ref_atomic_t) and a separate
@@ -374,7 +374,7 @@ os_ref_release_live_raw_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *
 static void
 os_ref_release_live_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp);
 
-#pragma GCC visibility pop
+__exported_pop
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

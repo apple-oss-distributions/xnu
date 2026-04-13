@@ -708,7 +708,7 @@ rip6_output(
 		} else {
 			off = in6p->in6p_cksum;
 		}
-		if (plen < (unsigned int)(off + 1)) {
+		if (plen < (unsigned int)(off + sizeof(uint16_t))) {
 			error = EINVAL;
 			goto bad;
 		}

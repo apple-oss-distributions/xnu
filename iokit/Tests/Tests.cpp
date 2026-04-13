@@ -2088,6 +2088,12 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 #endif /* HAS_MTE */
 
+	if (changed && (360 == newValue)) {
+		error = IOMemoryDescriptorVNodeTest(newValue);
+		assert(KERN_SUCCESS == error);
+		return error;
+	}
+
 	if (changed && newValue) {
 		error = TestLockForArbitration(newValue);
 		assert(KERN_SUCCESS == error);

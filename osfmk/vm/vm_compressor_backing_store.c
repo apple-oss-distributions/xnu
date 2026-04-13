@@ -34,8 +34,11 @@
 #include <vm/vm_compressor_internal.h>
 #include <vm/vm_iokit.h>
 #include <vm/vm_map_internal.h>
+#include <vm/vm_log.h>
+#include <vm/vm_page_internal.h>
 
 #include <IOKit/IOHibernatePrivate.h>
+#include <kern/counter.h>
 #include <kern/policy_internal.h>
 #include <sys/kern_memorystatus_xnu.h>
 
@@ -55,7 +58,9 @@ boolean_t       vm_swapfile_create_needed = FALSE;
 boolean_t       vm_swapfile_gc_needed = FALSE;
 
 int             vm_swapper_throttle = -1;
-uint64_t        vm_swapout_thread_id;
+SECURITY_READ_ONLY_LATE(thread_t) vm_swapout_thread;
+SECURITY_READ_ONLY_LATE(thread_t) vm_swapfile_create_thread;
+SECURITY_READ_ONLY_LATE(thread_t) vm_swapfile_gc_thread;
 
 uint64_t        vm_swap_put_failures = 0; /* Likely failed I/O. Data is still in memory. */
 uint64_t        vm_swap_get_failures = 0; /* Fatal */
@@ -66,8 +71,7 @@ int             vm_num_pinned_swap_files = 0;
 uint64_t        vm_swap_volume_capacity = 0;
 int             vm_swapout_thread_processed_segments = 0;
 int             vm_swapout_thread_awakened = 0;
-bool            vm_swapout_thread_running = FALSE;
-_Atomic bool    vm_swapout_wake_pending = false;
+sched_cond_atomic_t vm_swapout_cond = SCHED_COND_INIT;
 int             vm_swapfile_create_thread_awakened = 0;
 int             vm_swapfile_create_thread_running = 0;
 int             vm_swapfile_gc_thread_awakened = 0;
@@ -124,13 +128,14 @@ boolean_t               hibernate_in_progress_with_pinned_swap = FALSE;
 
 static void vm_swapout_thread_throttle_adjust(void);
 static void vm_swap_free_now(struct swapfile *swf, uint64_t f_offset);
-static void vm_swapfile_create_thread(void);
-static void vm_swapfile_gc_thread(void);
+static void vm_swapfile_create_thread_continue(void *, wait_result_t);
+static void vm_swapfile_gc_thread_continue(void *, wait_result_t);
 static void vm_swap_defragment(void);
 static void vm_swap_handle_delayed_trims(boolean_t);
 static void vm_swap_do_delayed_trim(struct swapfile *);
 static void vm_swap_wait_on_trim_handling_in_progress(void);
 static void vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_return_t kr);
+static void vm_swapout_thread_continue(void *arg, wait_result_t wr);
 
 extern int vnode_getwithref(struct vnode* vp);
 
@@ -370,7 +375,7 @@ vm_swap_encrypt(c_segment_t c_seg)
 	 * be stolen out from under us in the off chance that the mapping
 	 * gets disconnected while we're actively encrypting.
 	 */
-	PAGE_REPLACEMENT_DISALLOWED(TRUE);
+	c_page_replacement_disallowed_start();
 #if DEVELOPMENT || DEBUG
 	C_SEG_MAKE_WRITEABLE(c_seg);
 #endif
@@ -389,7 +394,7 @@ vm_swap_encrypt(c_segment_t c_seg)
 #if DEVELOPMENT || DEBUG
 	C_SEG_WRITE_PROTECT(c_seg);
 #endif
-	PAGE_REPLACEMENT_DISALLOWED(FALSE);
+	c_page_replacement_disallowed_end();
 }
 
 void
@@ -405,11 +410,11 @@ vm_swap_decrypt(c_segment_t c_seg, bool disallow_page_replacement)
 
 	/*
 	 * See comment in vm_swap_encrypt().
-	 * The master lock may already be held, though, which is why we don't do
-	 * PAGE_REPLACEMENT_DISALLOWED(TRUE) and do a try_lock instead.
+	 * The page replacement lock may already be held, though, which is why we
+	 * don't do c_page_replacement_disallowed_start()  and do a try_lock instead.
 	 */
 	if (disallow_page_replacement) {
-		PAGE_REPLACEMENT_DISALLOWED(TRUE);
+		c_page_replacement_disallowed_start();
 	}
 
 #if DEVELOPMENT || DEBUG
@@ -431,7 +436,7 @@ vm_swap_decrypt(c_segment_t c_seg, bool disallow_page_replacement)
 	C_SEG_WRITE_PROTECT(c_seg);
 #endif
 	if (disallow_page_replacement) {
-		PAGE_REPLACEMENT_DISALLOWED(FALSE);
+		c_page_replacement_disallowed_end();
 	}
 }
 #endif /* ENCRYPTED_SWAP */
@@ -478,45 +483,38 @@ vm_compressor_swap_init_swap_file_limit(void)
 	printf("Maximum number of VM swap files: %d\n", vm_num_swap_files_config);
 }
 
-int vm_swap_enabled = 0;
-void
-vm_compressor_swap_init(void)
+__startup_func
+static void
+vm_swapout_create_threads(void)
 {
-	thread_t        thread = NULL;
-
-	queue_init(&swf_global_queue);
-
-#if !XNU_TARGET_OS_OSX
 	/*
-	 * dummy value until the swap file gets created
-	 * when we drive the first c_segment_t to the
-	 * swapout queue... at that time we will
-	 * know the true size we have to work with
+	 * Create the threads necessary for the swap subsystem. They will be started
+	 * if swap is configured by the pageout daemon.
 	 */
-	c_overage_swapped_limit = 16;
-#endif /* !XNU_TARGET_OS_OSX */
+	thread_t thread;
 
-	compressed_swap_chunk_size = c_seg_bufsize;
-	vm_swapfile_hiwater_segs = (MIN_SWAP_FILE_SIZE / compressed_swap_chunk_size);
-	swapfile_reclaim_threshold_segs = ((17 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
-	swapfile_reclam_minimum_segs = ((13 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
+	vm_log("creating swapout thread\n");
 
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapout_thread, NULL,
+	sched_cond_init(&vm_swapout_cond);
+	if (kernel_thread_create(vm_swapout_thread_continue, NULL,
 	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
 		panic("vm_swapout_thread: create failed");
 	}
 	thread_set_thread_name(thread, "VM_swapout");
-	vm_swapout_thread_id = thread->thread_id;
-	thread_deallocate(thread);
+	vm_swapout_thread = thread;
+	thread = THREAD_NULL;
 
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_create_thread, NULL,
+	vm_log("creating swapfile creation thread\n");
+	if (kernel_thread_create(vm_swapfile_create_thread_continue, NULL,
 	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
 		panic("vm_swapfile_create_thread: create failed");
 	}
 	thread_set_thread_name(thread, "VM_swapfile_create");
-	thread_deallocate(thread);
+	vm_swapfile_create_thread = thread;
+	thread = THREAD_NULL;
 
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_gc_thread, NULL,
+	vm_log("creating swapfile GC thread\n");
+	if (kernel_thread_create(vm_swapfile_gc_thread_continue, NULL,
 	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
 		panic("vm_swapfile_gc_thread: create failed");
 	}
@@ -529,11 +527,43 @@ vm_compressor_swap_init(void)
 	thread_lock(thread);
 	thread->options |= TH_OPT_VMPRIV;
 	thread_unlock(thread);
-	thread_deallocate(thread);
-	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
+	proc_set_thread_policy(thread,
 	    TASK_POLICY_INTERNAL, TASK_POLICY_IO, THROTTLE_LEVEL_COMPRESSOR_TIER2);
-	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
+	proc_set_thread_policy(thread,
 	    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
+
+	vm_swapfile_gc_thread = thread;
+	thread = THREAD_NULL;
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, vm_swapout_create_threads);
+
+int vm_swap_enabled = 0;
+void
+vm_compressor_swap_init(void)
+{
+	vm_log("initializing swap\n");
+
+	queue_init(&swf_global_queue);
+
+	compressed_swap_chunk_size = c_seg_bufsize;
+	vm_swapfile_hiwater_segs = (MIN_SWAP_FILE_SIZE / compressed_swap_chunk_size);
+	swapfile_reclaim_threshold_segs = ((17 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
+	swapfile_reclam_minimum_segs = ((13 * (MAX_SWAP_FILE_SIZE / compressed_swap_chunk_size)) / 10);
+
+	vm_log("starting swapout thread\n");
+	thread_mtx_lock(vm_swapout_thread);
+	thread_start(vm_swapout_thread);
+	thread_mtx_unlock(vm_swapout_thread);
+
+	vm_log("starting swapfile creation thread\n");
+	thread_mtx_lock(vm_swapfile_create_thread);
+	thread_start(vm_swapfile_create_thread);
+	thread_mtx_unlock(vm_swapfile_create_thread);
+
+	vm_log("starting swapfile GC thread\n");
+	thread_mtx_lock(vm_swapfile_gc_thread);
+	thread_start(vm_swapfile_gc_thread);
+	thread_mtx_unlock(vm_swapfile_gc_thread);
 
 	vm_swap_enabled = 1;
 	printf("VM Swap Subsystem is ON\n");
@@ -670,10 +700,10 @@ vm_swap_defragment()
 	c_segment_t     c_seg;
 
 	/*
-	 * have to grab the master lock w/o holding
+	 * have to grab the page replacement lock w/o holding
 	 * any locks in spin mode
 	 */
-	PAGE_REPLACEMENT_DISALLOWED(TRUE);
+	c_page_replacement_disallowed_start();
 
 	lck_mtx_lock_spin_always(c_list_lock);
 
@@ -691,13 +721,13 @@ vm_swap_defragment()
 		if (c_seg->c_busy) {
 			lck_mtx_unlock_always(c_list_lock);
 
-			PAGE_REPLACEMENT_DISALLOWED(FALSE);
+			c_page_replacement_disallowed_end();
 			/*
 			 * c_seg_wait_on_busy consumes c_seg->c_lock
 			 */
-			c_seg_wait_on_busy(c_seg);
+			c_seg_sleep(c_seg);
 
-			PAGE_REPLACEMENT_DISALLOWED(TRUE);
+			c_page_replacement_disallowed_start();
 
 			lck_mtx_lock_spin_always(c_list_lock);
 
@@ -709,7 +739,10 @@ vm_swap_defragment()
 			 * c_seg_free_locked consumes the c_list_lock
 			 * and c_seg->c_lock
 			 */
-			C_SEG_BUSY(c_seg);
+			uint64_t pages_swap = atop_64(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset));
+			VM_COUNTER_ATOMIC_SUB(&vm_page_swap_count, pages_swap);
+			VM_COUNTER_ATOMIC_SUB(&c_pages_swap_by_reason[c_seg->c_swapout_reason], pages_swap);
+			c_seg_mark_busy(c_seg);
 			c_seg_free_locked(c_seg);
 
 			vm_swap_defragment_free++;
@@ -743,29 +776,29 @@ vm_swap_defragment()
 			}
 #endif /* CONFIG_FREEZE */
 			if (c_seg_swapin(c_seg, TRUE, FALSE) == 0) {
-				lck_mtx_unlock_always(&c_seg->c_lock);
 				vmcs_stats.defrag_swapins += (round_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset))) >> PAGE_SHIFT;
+				lck_mtx_unlock_always(&c_seg->c_lock);
 			}
 
 			vm_swap_defragment_swapin++;
 		}
-		PAGE_REPLACEMENT_DISALLOWED(FALSE);
+		c_page_replacement_disallowed_end();
 
 		vm_pageout_io_throttle();
 
 		/*
 		 * because write waiters have privilege over readers,
-		 * dropping and immediately retaking the master lock will
+		 * dropping and immediately retaking the page replacement lock will
 		 * still allow any thread waiting to acquire the
-		 * master lock exclusively an opportunity to take it
+		 * page replacement lock exclusively an opportunity to take it
 		 */
-		PAGE_REPLACEMENT_DISALLOWED(TRUE);
+		c_page_replacement_disallowed_start();
 
 		lck_mtx_lock_spin_always(c_list_lock);
 	}
 	lck_mtx_unlock_always(c_list_lock);
 
-	PAGE_REPLACEMENT_DISALLOWED(FALSE);
+	c_page_replacement_disallowed_end();
 }
 
 TUNABLE(uint64_t, vm_swapfile_creation_delay_ns, "vm_swapfile_creation_delay_ns", 15 * NSEC_PER_SEC);
@@ -783,8 +816,9 @@ vm_swapfile_should_create(uint64_t now)
 
 bool vm_swapfile_create_thread_inited = false;
 
+OS_NORETURN
 static void
-vm_swapfile_create_thread(void)
+vm_swapfile_create_thread_continue(__unused void *arg, __unused wait_result_t wr)
 {
 	uint64_t now;
 
@@ -848,9 +882,8 @@ vm_swapfile_create_thread(void)
 
 	lck_mtx_unlock(&vm_swap_data_lock);
 
-	thread_block((thread_continue_t)vm_swapfile_create_thread);
-
-	/* NOTREACHED */
+	thread_block(vm_swapfile_create_thread_continue);
+	__builtin_unreachable();
 }
 
 
@@ -904,8 +937,10 @@ hibernate_pin_swap(boolean_t start)
 }
 #endif
 bool vm_swapfile_gc_thread_inited = false;
+
+OS_NORETURN
 static void
-vm_swapfile_gc_thread(void)
+vm_swapfile_gc_thread_continue(__unused void *arg, __unused wait_result_t wr)
 {
 	boolean_t       need_defragment;
 	boolean_t       need_reclaim;
@@ -972,9 +1007,8 @@ vm_swapfile_gc_thread(void)
 
 	lck_mtx_unlock(&vm_swap_data_lock);
 
-	thread_block((thread_continue_t)vm_swapfile_gc_thread);
-
-	/* NOTREACHED */
+	thread_block(vm_swapfile_gc_thread_continue);
+	__builtin_unreachable();
 }
 
 
@@ -1009,9 +1043,9 @@ vm_swapout_thread_throttle_adjust(void)
 		vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER2;
 		vm_swapper_entered_T2P++;
 
-		proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+		proc_set_thread_policy(vm_swapout_thread,
 		    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-		proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+		proc_set_thread_policy(vm_swapout_thread,
 		    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 		vm_swapout_limit = VM_SWAPOUT_LIMIT_T2P;
 		vm_swapout_state = VM_SWAPOUT_T2_PASSIVE;
@@ -1024,9 +1058,9 @@ vm_swapout_thread_throttle_adjust(void)
 			vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER0;
 			vm_swapper_entered_T0P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T0P;
 			vm_swapout_state = VM_SWAPOUT_T0_PASSIVE;
@@ -1037,9 +1071,9 @@ vm_swapout_thread_throttle_adjust(void)
 			vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER1;
 			vm_swapper_entered_T1P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T1P;
 			vm_swapout_state = VM_SWAPOUT_T1_PASSIVE;
@@ -1052,9 +1086,9 @@ vm_swapout_thread_throttle_adjust(void)
 			vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER0;
 			vm_swapper_entered_T0P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T0P;
 			vm_swapout_state = VM_SWAPOUT_T0_PASSIVE;
@@ -1065,9 +1099,9 @@ vm_swapout_thread_throttle_adjust(void)
 			vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER2;
 			vm_swapper_entered_T2P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T2P;
 			vm_swapout_state = VM_SWAPOUT_T2_PASSIVE;
@@ -1080,9 +1114,9 @@ vm_swapout_thread_throttle_adjust(void)
 			vm_swapper_throttle = THROTTLE_LEVEL_COMPRESSOR_TIER2;
 			vm_swapper_entered_T2P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_IO, vm_swapper_throttle);
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T2P;
 			vm_swapout_state = VM_SWAPOUT_T2_PASSIVE;
@@ -1092,7 +1126,7 @@ vm_swapout_thread_throttle_adjust(void)
 		if (SWAPPER_NEEDS_TO_CATCHUP()) {
 			vm_swapper_entered_T0++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_DISABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T0;
 			vm_swapout_state = VM_SWAPOUT_T0;
@@ -1104,7 +1138,7 @@ vm_swapout_thread_throttle_adjust(void)
 		if (SWAPPER_HAS_CAUGHTUP()) {
 			vm_swapper_entered_T0P++;
 
-			proc_set_thread_policy_with_tid(kernel_task, vm_swapout_thread_id,
+			proc_set_thread_policy(vm_swapout_thread,
 			    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 			vm_swapout_limit = VM_SWAPOUT_LIMIT_T0P;
 			vm_swapout_state = VM_SWAPOUT_T0_PASSIVE;
@@ -1205,15 +1239,30 @@ should_process_swapout_queue(const queue_head_t *swapout_list_head)
 	return process_queue;
 }
 
+bool
+vm_swapout_is_running(void)
+{
+	sched_cond_t cond = os_atomic_load(&vm_swapout_cond, relaxed);
+	return (cond & (SCHED_COND_WAKEUP | SCHED_COND_ACTIVE)) != 0;
+}
+
 void
-vm_swapout_thread(void)
+vm_swapout_wakeup(void)
+{
+	__assert_only kern_return_t kr;
+	kr = sched_cond_signal(&vm_swapout_cond, vm_swapout_thread);
+	assert3u(kr, ==, KERN_SUCCESS);
+}
+
+OS_NORETURN
+static void
+vm_swapout_thread_continue(__unused void *arg, __unused wait_result_t wr)
 {
 	uint32_t        size = 0;
 	c_segment_t     c_seg = NULL;
 	kern_return_t   kr = KERN_SUCCESS;
 	struct swapout_io_completion *soc;
-	queue_head_t    *swapout_list_head;
-	bool            queues_empty = false;
+	queue_head_t    *swapout_list_head = NULL;
 
 	if (!vm_swapout_thread_inited) {
 #if CONFIG_THREAD_GROUPS
@@ -1221,170 +1270,150 @@ vm_swapout_thread(void)
 #endif /* CONFIG_THREAD_GROUPS */
 		current_thread()->options |= TH_OPT_VMPRIV;
 		vm_swapout_thread_inited = true;
+		sched_cond_wait(&vm_swapout_cond, THREAD_UNINT, vm_swapout_thread_continue);
 	}
 
 	vm_swapout_thread_awakened++;
 
+	sched_cond_ack(&vm_swapout_cond);
+
 	lck_mtx_lock_spin_always(c_list_lock);
 
-	swapout_list_head = &c_early_swapout_list_head;
-	vm_swapout_thread_running = TRUE;
-	os_atomic_store(&vm_swapout_wake_pending, false, relaxed);
-again:
-	while (should_process_swapout_queue(swapout_list_head)) {
-		c_seg = (c_segment_t)queue_first(swapout_list_head);
+	while (true) {
+		if (swapout_list_head == NULL) {
+			swapout_list_head = &c_early_swapout_list_head;
+		}
 
-		lck_mtx_lock_spin_always(&c_seg->c_lock);
+		while (should_process_swapout_queue(swapout_list_head)) {
+			c_seg = (c_segment_t)queue_first(swapout_list_head);
 
-		assert(c_seg->c_state == C_ON_SWAPOUT_Q);
+			lck_mtx_lock_spin_always(&c_seg->c_lock);
 
-		if (c_seg->c_busy) {
+			assert(c_seg->c_state == C_ON_SWAPOUT_Q);
+
+			if (c_seg->c_busy) {
+				lck_mtx_unlock_always(c_list_lock);
+
+				c_seg_sleep(c_seg);
+
+				lck_mtx_lock_spin_always(c_list_lock);
+
+				continue;
+			}
+			vm_swapout_thread_processed_segments++;
+
+			size = round_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset));
+
+			if (size == 0) {
+				assert(c_seg->c_bytes_used == 0);
+
+				/*
+				 * c_seg_free_locked will drop the c_list_lock and
+				 * the c_seg->c_lock.
+				 */
+				c_seg_mark_busy(c_seg);
+				c_seg_free_locked(c_seg);
+				c_seg = NULL;
+
+				vm_swapout_found_empty++;
+				goto c_seg_is_empty;
+			}
+			c_seg_mark_busy(c_seg);
+			c_seg->c_busy_swapping = 1;
+
+			c_seg_switch_state(c_seg, C_ON_SWAPIO_Q, FALSE);
+
 			lck_mtx_unlock_always(c_list_lock);
-
-			c_seg_wait_on_busy(c_seg);
-
-			lck_mtx_lock_spin_always(c_list_lock);
-
-			continue;
-		}
-		vm_swapout_thread_processed_segments++;
-
-		size = round_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset));
-
-		if (size == 0) {
-			assert(c_seg->c_bytes_used == 0);
-
-			/*
-			 * c_seg_free_locked will drop the c_list_lock and
-			 * the c_seg->c_lock.
-			 */
-			C_SEG_BUSY(c_seg);
-			c_seg_free_locked(c_seg);
-			c_seg = NULL;
-
-			vm_swapout_found_empty++;
-			goto c_seg_is_empty;
-		}
-		C_SEG_BUSY(c_seg);
-		c_seg->c_busy_swapping = 1;
-
-		c_seg_switch_state(c_seg, C_ON_SWAPIO_Q, FALSE);
-
-		lck_mtx_unlock_always(c_list_lock);
-		lck_mtx_unlock_always(&c_seg->c_lock);
+			lck_mtx_unlock_always(&c_seg->c_lock);
 
 #if CHECKSUM_THE_SWAP
-		c_seg->cseg_hash = hash_string((char *)c_seg->c_store.c_buffer, (int)size);
-		c_seg->cseg_swap_size = size;
+			c_seg->cseg_hash = hash_string((char *)c_seg->c_store.c_buffer, (int)size);
+			c_seg->cseg_swap_size = size;
 #endif /* CHECKSUM_THE_SWAP */
 
 #if ENCRYPTED_SWAP
-		vm_swap_encrypt(c_seg);
+			vm_swap_encrypt(c_seg);
 #endif /* ENCRYPTED_SWAP */
 
-		soc = vm_swapout_find_free_soc();
-		assert(soc);
+			soc = vm_swapout_find_free_soc();
+			assert(soc);
 
-		soc->swp_upl_ctx.io_context = (void *)soc;
-		soc->swp_upl_ctx.io_done = (void *)vm_swapout_iodone;
-		soc->swp_upl_ctx.io_error = 0;
+			soc->swp_upl_ctx.io_context = (void *)soc;
+			soc->swp_upl_ctx.io_done = (void *)vm_swapout_iodone;
+			soc->swp_upl_ctx.io_error = 0;
 
-		kr = vm_swap_put((vm_offset_t)c_seg->c_store.c_buffer, &soc->swp_f_offset, size, c_seg, soc);
+			kr = vm_swap_put((vm_offset_t)c_seg->c_store.c_buffer, &soc->swp_f_offset, size, c_seg, soc);
 
-		if (kr != KERN_SUCCESS) {
-			if (soc->swp_io_done) {
-				lck_mtx_lock_spin_always(c_list_lock);
+			if (kr != KERN_SUCCESS) {
+				if (soc->swp_io_done) {
+					lck_mtx_lock_spin_always(c_list_lock);
 
-				soc->swp_io_done = 0;
-				vm_swapout_soc_done--;
+					soc->swp_io_done = 0;
+					vm_swapout_soc_done--;
 
-				lck_mtx_unlock_always(c_list_lock);
+					lck_mtx_unlock_always(c_list_lock);
+				}
+				vm_swapout_finish(c_seg, soc->swp_f_offset, size, kr);
+			} else {
+				soc->swp_io_busy = 1;
+				vm_swapout_soc_busy++;
 			}
-			vm_swapout_finish(c_seg, soc->swp_f_offset, size, kr);
-		} else {
-			soc->swp_io_busy = 1;
-			vm_swapout_soc_busy++;
-		}
 
 c_seg_is_empty:
-		if (!(c_early_swapout_count + c_regular_swapout_count + c_late_swapout_count)) {
-			vm_swap_consider_defragmenting(VM_SWAP_FLAGS_NONE);
+			if (!(c_early_swapout_count + c_regular_swapout_count + c_late_swapout_count)) {
+				vm_swap_consider_defragmenting(VM_SWAP_FLAGS_NONE);
+			}
+
+			lck_mtx_lock_spin_always(c_list_lock);
+
+			while ((soc = vm_swapout_find_done_soc())) {
+				vm_swapout_complete_soc(soc);
+			}
+			lck_mtx_unlock_always(c_list_lock);
+
+			vm_swapout_thread_throttle_adjust();
+
+			lck_mtx_lock_spin_always(c_list_lock);
 		}
-
-		lck_mtx_lock_spin_always(c_list_lock);
-
 		while ((soc = vm_swapout_find_done_soc())) {
 			vm_swapout_complete_soc(soc);
 		}
 		lck_mtx_unlock_always(c_list_lock);
 
-		vm_swapout_thread_throttle_adjust();
+		vm_pageout_io_throttle();
 
 		lck_mtx_lock_spin_always(c_list_lock);
-	}
-	while ((soc = vm_swapout_find_done_soc())) {
-		vm_swapout_complete_soc(soc);
-	}
-	lck_mtx_unlock_always(c_list_lock);
 
-	vm_pageout_io_throttle();
+		/*
+		 * Recheck if we have some c_segs to wakeup
+		 * post throttle. And, check to see if we
+		 * have any more swapouts needed.
+		 */
+		if (vm_swapout_soc_done) {
+			continue;
+		}
 
-	lck_mtx_lock_spin_always(c_list_lock);
-
-	/*
-	 * Recheck if we have some c_segs to wakeup
-	 * post throttle. And, check to see if we
-	 * have any more swapouts needed.
-	 */
-	if (vm_swapout_soc_done) {
-		goto again;
-	}
-
-#if XNU_TARGET_OS_OSX
-	queues_empty = queue_empty(&c_early_swapout_list_head) && queue_empty(&c_regular_swapout_list_head) && queue_empty(&c_late_swapout_list_head);
-#else /* XNU_TARGET_OS_OSX */
-	queues_empty = queue_empty(&c_early_swapout_list_head) && queue_empty(&c_late_swapout_list_head);
-#endif /* XNU_TARGET_OS_OSX */
-
-	if (!queues_empty) {
 		swapout_list_head = NULL;
 		if (!queue_empty(&c_early_swapout_list_head)) {
 			swapout_list_head = &c_early_swapout_list_head;
-		} else {
-#if XNU_TARGET_OS_OSX
-			/*
-			 * On macOS we _always_ processs all swapout queues.
-			 */
-			if (!queue_empty(&c_regular_swapout_list_head)) {
-				swapout_list_head = &c_regular_swapout_list_head;
-			} else {
-				swapout_list_head = &c_late_swapout_list_head;
-			}
-#else /* XNU_TARGET_OS_OSX */
-			/*
-			 * On non-macOS swap-capable platforms, we might want to
-			 * processs just the early queue (Freezer) or process both
-			 * early and late queues (app swap). We processed the early
-			 * queue up above. The late Q will only be processed if the
-			 * checks in should_process_swapout_queue give the go-ahead.
-			 */
+		} else if (!queue_empty(&c_regular_swapout_list_head)) {
+			swapout_list_head = &c_regular_swapout_list_head;
+		} else if (!queue_empty(&c_late_swapout_list_head)) {
 			swapout_list_head = &c_late_swapout_list_head;
-#endif /* XNU_TARGET_OS_OSX */
 		}
+
 		if (swapout_list_head && should_process_swapout_queue(swapout_list_head)) {
-			goto again;
+			continue;
 		}
+		swapout_list_head = NULL;
+
+		lck_mtx_unlock_always(c_list_lock);
+
+		sched_cond_wait(&vm_swapout_cond, THREAD_UNINT, vm_swapout_thread_continue);
+
+		lck_mtx_lock_spin_always(c_list_lock);
 	}
-
-	assert_wait((event_t)&vm_swapout_thread, THREAD_UNINT);
-
-	vm_swapout_thread_running = FALSE;
-
-	lck_mtx_unlock_always(c_list_lock);
-
-	thread_block((thread_continue_t)vm_swapout_thread);
-
-	/* NOTREACHED */
+	__builtin_unreachable();
 }
 
 
@@ -1401,9 +1430,7 @@ vm_swapout_iodone(void *io_context, int error)
 	soc->swp_io_error = error;
 	vm_swapout_soc_done++;
 
-	if (!vm_swapout_thread_running) {
-		thread_wakeup((event_t)&vm_swapout_thread);
-	}
+	vm_swapout_wakeup();
 
 	lck_mtx_unlock_always(c_list_lock);
 }
@@ -1412,7 +1439,7 @@ vm_swapout_iodone(void *io_context, int error)
 static void
 vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_return_t kr)
 {
-	PAGE_REPLACEMENT_DISALLOWED(TRUE);
+	c_page_replacement_disallowed_start();
 
 	if (kr == KERN_SUCCESS) {
 		kernel_memory_depopulate((vm_offset_t)c_seg->c_store.c_buffer, size,
@@ -1443,28 +1470,51 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 
 		c_seg->c_store.c_swap_handle = f_offset;
 
-		counter_add(&vm_statistics_swapouts, size >> PAGE_SHIFT);
-		__assert_only unsigned int new_swapped_count = os_atomic_add(
-			&vm_page_swapped_count, c_seg->c_slots_used, relaxed);
-		/* Detect overflow */
-		assert3u(new_swapped_count, >=, c_seg->c_slots_used);
+		uint64_t size_pages = atop_64(size);
+		counter_add(&vm_statistics_swapouts, size_pages);
+		VM_COUNTER_ATOMIC_ADD(&vm_page_swap_count, size_pages);
+		VM_COUNTER_ATOMIC_ADD(&vm_page_swapped_count, c_seg->c_slots_used);
+		VM_COUNTER_ATOMIC_ADD(&c_pages_swapped_by_reason[c_seg->c_swapout_reason], c_seg->c_slots_used);
+		VM_COUNTER_ATOMIC_ADD(&c_pages_swap_by_reason[c_seg->c_swapout_reason], size_pages);
+
+		switch (c_seg->c_swapout_reason) {
+		case C_SWAPOUT_REG:
+			counter_add(&vm_pageout_vminfo.vm_regular_swapouts, size_pages);
+			break;
+		case C_SWAPOUT_FREEZER:
+			counter_add(&vm_pageout_vminfo.vm_freezer_swapouts, size_pages);
+			break;
+		case C_SWAPOUT_DARKWAKE:
+			counter_add(&vm_pageout_vminfo.vm_darkwake_swapouts, size_pages);
+			break;
+		case C_SWAPOUT_DONATE:
+			counter_add(&vm_pageout_vminfo.vm_donate_swapouts, size_pages);
+			break;
+		case C_SWAPOUT_RIPE:
+			counter_add(&vm_pageout_vminfo.vm_scavenger_swapouts, size_pages);
+			break;
+		case C_SWAPOUT_NONE:
+#if MACH_ASSERT
+			panic("swapped outd segment with unknown swapout reason %u",
+			    c_seg->c_swapout_reason);
+#else
+			break;
+#endif
+		}
 
 		c_seg->c_swappedin = false;
 
 		if (c_seg->c_bytes_used) {
-			os_atomic_sub(&compressor_bytes_used, c_seg->c_bytes_used, relaxed);
+			VM_COUNTER_ATOMIC_SUB(&compressor_bytes_used, c_seg->c_bytes_used);
 		}
 
-#if CONFIG_FREEZE
 		/*
 		 * Successful swapout. Decrement the in-core compressed pages count.
 		 */
-		os_atomic_sub(&c_segment_pages_compressed_incore, c_seg->c_slots_used, relaxed);
-		assertf(c_segment_pages_compressed_incore >= 0, "-ve incore count %p 0x%x", c_seg, c_segment_pages_compressed_incore);
+		VM_COUNTER_ATOMIC_SUB(&c_segment_pages_compressed_incore, c_seg->c_slots_used);
 		if (c_seg->c_has_donated_pages) {
-			os_atomic_sub(&c_segment_pages_compressed_incore_late_swapout, (c_seg->c_slots_used), relaxed);
+			VM_COUNTER_ATOMIC_SUB(&c_segment_pages_compressed_incore_late_swapout, c_seg->c_slots_used);
 		}
-#endif /* CONFIG_FREEZE */
 	} else {
 		if (c_seg->c_overage_swap == TRUE) {
 			c_seg->c_overage_swap = FALSE;
@@ -1504,10 +1554,10 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 	c_seg->c_busy_swapping = 0;
 	lck_mtx_unlock_always(c_list_lock);
 
-	C_SEG_WAKEUP_DONE(c_seg);
+	c_seg_wakeup_done(c_seg);
 	lck_mtx_unlock_always(&c_seg->c_lock);
 
-	PAGE_REPLACEMENT_DISALLOWED(FALSE);
+	c_page_replacement_disallowed_end();
 }
 
 
@@ -1629,15 +1679,6 @@ vm_swap_create_file()
 			lck_mtx_unlock(&vm_swap_data_lock);
 
 			thread_wakeup((event_t) &vm_num_swap_files);
-#if !XNU_TARGET_OS_OSX
-			if (vm_num_swap_files == 1) {
-				c_overage_swapped_limit = (uint32_t)size / c_seg_bufsize;
-
-				if (VM_CONFIG_FREEZER_SWAP_IS_ACTIVE) {
-					c_overage_swapped_limit /= 2;
-				}
-			}
-#endif /* !XNU_TARGET_OS_OSX */
 			break;
 		} else {
 			size = size / 2;
@@ -2228,14 +2269,10 @@ ReTry_for_cseg:
 			 * at that point, we re-look up the swap state which will now indicate that
 			 * this c_segment no longer exists.
 			 */
-			c_seg->c_wanted = 1;
-
-			assert_wait((event_t) (c_seg), THREAD_UNINT);
-			lck_mtx_unlock_always(&c_seg->c_lock);
-
 			lck_mtx_unlock(&vm_swap_data_lock);
 
-			thread_block(THREAD_CONTINUE_NULL);
+			/* Consumes c_seg->c_lock */
+			c_seg_sleep(c_seg);
 
 			lck_mtx_lock(&vm_swap_data_lock);
 
@@ -2255,7 +2292,7 @@ ReTry_for_cseg:
 
 		assert(C_SEG_IS_ONDISK(c_seg));
 
-		C_SEG_BUSY(c_seg);
+		c_seg_mark_busy(c_seg);
 		c_seg->c_busy_swapping = 1;
 #if !CHECKSUM_THE_SWAP
 		c_seg_trim_tail(c_seg);
@@ -2332,8 +2369,7 @@ ReTry_for_cseg:
 		assert(c_seg->c_busy_swapping);
 		c_seg->c_busy_swapping = 0;
 swap_io_failed:
-		assert(c_seg->c_busy);
-		C_SEG_WAKEUP_DONE(c_seg);
+		c_seg_wakeup_done(c_seg);
 
 		lck_mtx_unlock_always(&c_seg->c_lock);
 		lck_mtx_lock(&vm_swap_data_lock);

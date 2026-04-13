@@ -554,6 +554,17 @@ try_sme_b16b16(void)
         );
 }
 
+__attribute__((target("sve-b16b16")))
+static void
+try_sve_b16b16(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "bfclamp { z0.h-z1.h }, z2.h, z3.h"      "\n"
+               "smstop"                                 "\n"
+        );
+}
+
 
 static void
 try_fpexcp(void)
@@ -712,6 +723,7 @@ T_DECL(cpu_capabilities, "Verify ARM CPU capabilities", T_META_TAG_VM_NOT_ELIGIB
 	test_cpu_capability("SME_I16I64", 0, "hw.optional.arm.FEAT_SME_I16I64", CAP_BIT_FEAT_SME_I16I64, try_sme_i16i64);
 	test_cpu_capability("SME_F16F16", 0, "hw.optional.arm.FEAT_SME_F16F16", CAP_BIT_FEAT_SME_F16F16, try_sme_f16f16);
 	test_cpu_capability("SME_B16B16", 0, "hw.optional.arm.FEAT_SME_B16B16", CAP_BIT_FEAT_SME_B16B16, try_sme_b16b16);
+	test_cpu_capability("SVE_B16B16", 0, "hw.optional.arm.FEAT_SVE_B16B16", CAP_BIT_FEAT_SVE_B16B16, try_sve_b16b16);
 
 	// The following features do not add instructions or registers to test for the presence of
 	test_deprecated_sysctl("PACIMP", kHasArmv8GPI, "hw.optional.armv8_gpi");

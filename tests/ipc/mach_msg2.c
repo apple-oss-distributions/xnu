@@ -288,7 +288,6 @@ T_DECL(mach_msg2_interop, "Test mach_msg2 inter-operability")
 {
 	inline_message_t msg;
 	aux_buffer_t aux;
-	mach_msg_option64_t options;
 	struct msg_rcv_args args;
 	pthread_t servicer;
 	kern_return_t kr;
@@ -326,7 +325,6 @@ T_DECL(mach_msg2_interop, "Test mach_msg2 inter-operability")
 
 	aux.header.msgdh_size = sizeof(aux_buffer_t);
 	memcpy(aux.string, buf_string, sizeof(aux.string));
-	options = MACH64_MSG_VECTOR;
 
 	/*
 	 * Simple Vector (SV): Vector message without auxiliary data

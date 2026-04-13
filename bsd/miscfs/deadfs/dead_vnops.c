@@ -176,9 +176,9 @@ dead_read(struct vnop_read_args *ap)
 		panic("dead_read: lock");
 	}
 	/*
-	 * Return EOF for character devices, EIO for others
+	 * Return EOF for terminal devices (tty), EIO for others
 	 */
-	if (ap->a_vp->v_type != VCHR) {
+	if (!vnode_istty(ap->a_vp)) {
 		return EIO;
 	}
 	return 0;

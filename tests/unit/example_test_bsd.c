@@ -27,15 +27,16 @@
  */
 
 #include <darwintest.h>
-#include "mocks/unit_test_utils.h"
+#include "mocks/osfmk/unit_test_utils.h"
 #include <sys/proc_internal.h>
 
 #define UT_MODULE bsd
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.example_test_bsd"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("misc"),
 	T_META_OWNER("s_shalom"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RUN_CONCURRENTLY(true)
 	);
 
 // If this test fails to build or run to success it means that something broke

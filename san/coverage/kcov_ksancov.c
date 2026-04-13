@@ -1103,9 +1103,8 @@ ksancov_testcases_map(ksancov_dev_t d, uintptr_t *bufp, size_t *sizep)
 	return 0;
 }
 
-extern void console_write_unbuffered(char);
-extern void (*PE_kputc)(char c);
-void
+extern void serial_putc_options(char c, bool poll);
+extern void
 _doprnt(
 	const char     *fmt,
 	va_list        *argp,
@@ -1116,35 +1115,42 @@ _doprnt(
  * Print directly to the serial if enabled. If not, do nothing.
  * ksancov_on_panic_log must print only on serial upon panic to avoid overflowing the debug buffer.
  */
-static int
+int
 ksancov_can_print_serial(void)
 {
-	/*
-	 * PE_kputc is the serial by default, if the serial is enabled, and fallback to console_write_unbuffered otherwise (video console).
-	 * We do not care about the serial settings for the panic log testcases, always send to serial if DB_PRT is in the debug boot arg (debug=0x2)
-	 */
-	return PE_kputc != NULL && PE_kputc != console_write_unbuffered && disable_serial_output == false;
+	return !disable_serial_output;
+}
+
+static void
+ksancov_serial_putc_unbuffered(char c)
+{
+	if (c == '\n') {
+		serial_putc_options('\r', true);
+	}
+	serial_putc_options(c, true); // poll on serial instead of going to sleep, assume we execute during a panic log
 }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
-static int
+
+int
 ksancov_serial_print(const char *fmt, ...)
 {
 	va_list listp;
 	va_start(listp, fmt);
-	_doprnt(fmt, &listp, PE_kputc, 16);
+	_doprnt(fmt, &listp, ksancov_serial_putc_unbuffered, 16);
 	va_end(listp);
 
 	return 0;
 }
+
 #pragma clang diagnostic pop
 
 static void
 ksancov_base64_serial_print(const uint8_t *buffer, size_t len)
 {
-	#define BASE64_TMP_BUFFER_LEN 1024
-	char tmp_buffer[BASE64_TMP_BUFFER_LEN + 1];
+	#define BASE64_TMP_BUFFER_LEN 256
+	char tmp_buffer[BASE64_TMP_BUFFER_LEN + 2]; // room for \n\x00
 	size_t tmp_buffer_index = 0;
 	size_t i = 0;
 
@@ -1166,7 +1172,8 @@ ksancov_base64_serial_print(const uint8_t *buffer, size_t len)
 		encoded_block[3] = (block_len > 2) ? base64_chars[block[2] & 0x3F] : '=';
 
 		if (tmp_buffer_index + 4 > BASE64_TMP_BUFFER_LEN) {
-			tmp_buffer[tmp_buffer_index] = '\0';
+			tmp_buffer[tmp_buffer_index] = '\n';
+			tmp_buffer[tmp_buffer_index + 1] = '\0';
 			ksancov_serial_print("%s", tmp_buffer);
 			tmp_buffer_index = 0;
 		}
@@ -1177,7 +1184,8 @@ ksancov_base64_serial_print(const uint8_t *buffer, size_t len)
 	}
 
 	if (tmp_buffer_index > 0) {
-		tmp_buffer[tmp_buffer_index] = '\0';
+		tmp_buffer[tmp_buffer_index] = '\n';
+		tmp_buffer[tmp_buffer_index + 1] = '\0';
 		ksancov_serial_print("%s", tmp_buffer);
 	}
 }
@@ -1213,15 +1221,14 @@ ksancov_testcases_serial_log(bool take_locks)
 			ksancov_serial_print("Begin ksancov testcases dump\n");
 		}
 
-		ksancov_serial_print("Device %d head %d inner_index %lu attached %d\n", dev_idx, dev->testcases->head, dev->testcases->inner_index, dev->thread ? 1 : 0);
+		ksancov_serial_print("Device %d head %d inner_index %u attached %d\n", dev_idx, dev->testcases->head, dev->testcases->inner_index, dev->thread ? 1 : 0);
 		for (int idx = 0; idx < dev->testcases_count; idx++) {
 			size_t testcase_idx =  (dev->testcases->head - 1 - idx + dev->testcases_count) % dev->testcases_count;
 			ksancov_serialized_testcase_t *testcase = &dev->testcases->list[testcase_idx];
 			size_t size = testcase->size % KSANCOV_SERIALIZED_TESTCASE_BYTES;
 
-			ksancov_serial_print("Testcase %d size %llu\n", testcase_idx, size);
+			ksancov_serial_print("Testcase %lu size %lu\n", testcase_idx, size);
 			ksancov_base64_serial_print(testcase->buffer, size);
-			ksancov_serial_print("\n");
 		}
 
 		if (take_locks) {

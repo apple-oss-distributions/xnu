@@ -85,6 +85,7 @@
 #include <kern/misc_protos.h>
 #include <kern/ux_handler.h>
 #include <kern/task_ident.h>
+#include <kern/exception_policy.h>
 
 #include <vm/vm_map_xnu.h>
 #include <vm/vm_map.h>
@@ -128,7 +129,6 @@ kern_return_t bsd_exception(
 #endif /* MACH_BSD */
 
 #ifdef MACH_BSD
-extern bool proc_is_traced(void *p);
 extern int      proc_selfpid(void);
 extern char     *proc_name_address(struct proc *p);
 #endif /* MACH_BSD */
@@ -206,6 +206,7 @@ exception_deliver(
 	kern_return_t           kr = KERN_FAILURE;
 	task_t task;
 	task_id_token_t task_token;
+	audit_token_t audit_token;
 	ipc_port_t thread_port = IPC_PORT_NULL,
 	    task_port = IPC_PORT_NULL,
 	    task_token_port = IPC_PORT_NULL;
@@ -288,6 +289,11 @@ exception_deliver(
 	}
 #endif
 
+	if (!ipc_exception_send_allowed(exc_port)) {
+		kr = KERN_DENIED;
+		goto out_release_right;
+	}
+
 	thread->options |= TH_IN_MACH_EXCEPTION;
 
 	switch (behavior) {
@@ -321,21 +327,24 @@ exception_deliver(
 				    codeCnt,
 				    &flavor,
 				    old_state, old_state_cnt,
-				    new_state, &new_state_cnt);
+				    new_state, &new_state_cnt,
+				    &audit_token);
 			} else {
 				kr = exception_raise_state(exc_port, exception,
 				    small_code,
 				    codeCnt,
 				    &flavor,
 				    old_state, old_state_cnt,
-				    new_state, &new_state_cnt);
+				    new_state, &new_state_cnt,
+				    &audit_token);
 			}
 			if (kr == KERN_SUCCESS) {
 				if (exception != EXC_CORPSE_NOTIFY) {
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
 					    (thread_state_t)old_state, old_state_cnt,
-					    set_flags);
+					    set_flags,
+					    &audit_token);
 				}
 				goto out_release_right;
 			}
@@ -370,14 +379,16 @@ exception_deliver(
 			    task_port,
 			    exception,
 			    code,
-			    codeCnt);
+			    codeCnt,
+			    &audit_token);
 		} else {
 			kr = exception_raise(exc_port,
 			    thread_port,
 			    task_port,
 			    exception,
 			    small_code,
-			    codeCnt);
+			    codeCnt,
+			    &audit_token);
 		}
 
 		goto out_release_right;
@@ -403,7 +414,8 @@ exception_deliver(
 			    task_token_port,
 			    exception,
 			    code,
-			    codeCnt);
+			    codeCnt,
+			    &audit_token);
 		} else {
 			panic("mach_exception_raise_identity_protected() must be code64");
 		}
@@ -466,7 +478,8 @@ exception_deliver(
 				    codeCnt,
 				    &flavor,
 				    old_state, old_state_cnt,
-				    new_state, &new_state_cnt);
+				    new_state, &new_state_cnt,
+				    &audit_token);
 			} else {
 				panic("mach_exception_raise_state_identity_protected() must be code64");
 			}
@@ -475,7 +488,8 @@ exception_deliver(
 				if (exception != EXC_CORPSE_NOTIFY) {
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
-					    (thread_state_t)old_state, old_state_cnt, set_flags);
+					    (thread_state_t)old_state, old_state_cnt, set_flags,
+					    &audit_token);
 				}
 				goto out_release_right;
 			}
@@ -535,7 +549,8 @@ exception_deliver(
 					codeCnt,
 					&flavor,
 					old_state, old_state_cnt,
-					new_state, &new_state_cnt);
+					new_state, &new_state_cnt,
+					&audit_token);
 			} else {
 				kr = exception_raise_state_identity(exc_port,
 				    thread_port,
@@ -545,7 +560,8 @@ exception_deliver(
 				    codeCnt,
 				    &flavor,
 				    old_state, old_state_cnt,
-				    new_state, &new_state_cnt);
+				    new_state, &new_state_cnt,
+				    &audit_token);
 			}
 
 			if (kr == KERN_SUCCESS) {
@@ -553,7 +569,8 @@ exception_deliver(
 				    ip_type(thread_port) == IKOT_THREAD_CONTROL) {
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
-					    (thread_state_t)old_state, old_state_cnt, set_flags);
+					    (thread_state_t)old_state, old_state_cnt, set_flags,
+					    &audit_token);
 				}
 				goto out_release_right;
 			}
@@ -616,6 +633,7 @@ exception_deliver_backtrace(
 	kern_return_t kr;
 	mach_exception_data_type_t code[EXCEPTION_CODE_MAX];
 	ipc_port_t target_port, bt_obj_port;
+	audit_token_t audit_token;
 
 	assert(exception == EXC_GUARD);
 
@@ -641,6 +659,10 @@ exception_deliver_backtrace(
 			continue;
 		}
 
+		if (!ipc_exception_send_allowed(target_port)) {
+			continue;
+		}
+
 		ip_mq_lock(target_port);
 		if (!ip_active(target_port)) {
 			ip_mq_unlock(target_port);
@@ -652,7 +674,8 @@ exception_deliver_backtrace(
 		    bt_obj_port,
 		    EXC_CORPSE_NOTIFY,
 		    code,
-		    EXCEPTION_CODE_MAX);
+		    EXCEPTION_CODE_MAX,
+		    &audit_token);
 
 		if (kr == KERN_SUCCESS || kr == MACH_RCV_PORT_DIED) {
 			/* Exception is handled at this level */
@@ -792,20 +815,11 @@ out:
 }
 
 #if __has_feature(ptrauth_calls)
-static TUNABLE(bool, pac_exception_telemetry, "-pac_exception_telemetry", false);
-
-CA_EVENT(pac_exception_event,
-    CA_INT, exception,
-    CA_INT, exception_code_0,
-    CA_INT, exception_code_1,
-    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name);
-
 static void
 pac_exception_triage(
 	exception_type_t        exception,
 	mach_exception_data_t   code)
 {
-	boolean_t traced_flag = FALSE;
 	task_t task = current_task();
 	void *proc = get_bsdtask_info(task);
 	char *proc_name = (char *) "unknown";
@@ -814,38 +828,22 @@ pac_exception_triage(
 #ifdef MACH_BSD
 	pid = proc_selfpid();
 	if (proc) {
-		traced_flag = proc_is_traced(proc);
 		/* Should only be called on current proc */
 		proc_name = proc_name_address(proc);
 
 		/*
-		 * For a ptrauth violation, check if process isn't being ptraced and
-		 * the task has the TFRO_PAC_EXC_FATAL flag set. If both conditions are true,
-		 * terminate the task via exit_with_reason
+		 * For a ptrauth violation, check if the task has the
+		 * TFRO_PAC_EXC_FATAL flag set.
 		 */
-		if (!traced_flag) {
-			if (pac_exception_telemetry) {
-				ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_exception_event);
-				CA_EVENT_TYPE(pac_exception_event) * pexc_event = ca_event->data;
-				pexc_event->exception = exception;
-				pexc_event->exception_code_0 = code[0];
-				pexc_event->exception_code_1 = code[1];
-				strlcpy(pexc_event->proc_name, proc_name, CA_PROCNAME_LEN);
-				CA_EVENT_SEND(ca_event);
-			}
-			if (task_is_pac_exception_fatal(task)) {
-				os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n", __func__, proc_name, pid);
+		if (task_is_pac_exception_fatal(task)) {
+			os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n",
+			    __func__, proc_name, pid);
 
-				exception_info_t info = {
-					.os_reason = OS_REASON_PAC_EXCEPTION,
-					.exception_type = exception,
-					.mx_code = code[0],
-					.mx_subcode = code[1]
-				};
-				exit_with_mach_exception(proc, info, PX_FLAGS_NONE);
-				thread_exception_return();
-				/* NOT_REACHABLE */
-			}
+			/* Perform fatal exception logic. */
+			exit_with_fatal_exception_and_notify(proc, OS_REASON_PAC_EXCEPTION,
+			    exception, code[0], code[1], PX_FLAGS_NONE);
+			thread_exception_return();
+			/* NOT_REACHABLE */
 		}
 	}
 #endif /* MACH_BSD */
@@ -896,6 +894,8 @@ maybe_unrecoverable_exception_triage(
 		.mx_code = code[0],
 		.mx_subcode = code[1]
 	};
+
+	/* kill the task, unconditionally and fatally */
 	exit_with_mach_exception(proc, info, PX_FLAGS_NONE);
 	thread_exception_return();
 	/* NOT_REACHABLE */
@@ -1011,6 +1011,12 @@ task_exception_notify(exception_type_t exception,
 		return KERN_DENIED;
 	}
 
+	/*
+	 * At this point, we have to deliver the exception to userspace.
+	 *
+	 * exception_triage handles that, and returns a value
+	 * that indicates if any handler handled the exception.
+	 */
 	code[0] = exccode;
 	code[1] = excsubcode;
 

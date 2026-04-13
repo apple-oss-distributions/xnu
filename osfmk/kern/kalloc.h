@@ -111,7 +111,7 @@ typedef struct kalloc_heap {
 	extern struct kalloc_heap var[1]
 
 /**
- * @const KHEAP_DATA_BUFFERS
+ * @const KHEAP_DATA_PRIVATE
  *
  * @brief
  * The builtin heap for bags of pure bytes.
@@ -133,7 +133,7 @@ typedef struct kalloc_heap {
  * - Time of alloc and free (lifetime)
  * - Size of allocation
  */
-KALLOC_HEAP_DECLARE(KHEAP_DATA_BUFFERS);
+KALLOC_HEAP_DECLARE(KHEAP_DATA_PRIVATE);
 
 /**
  * @const KHEAP_DATA_SHARED
@@ -148,7 +148,7 @@ KALLOC_HEAP_DECLARE(KHEAP_DATA_BUFFERS);
  * and user or kernel and coprocessors (DMA). These allocations cannot
  * sustain the security XNU_KERNEL_RESTRICTED checks, therefore we isolate
  * them in a separated heap, to further increase the security guarantees
- * around KHEAP_DATA_BUFFERS.
+ * around KHEAP_DATA_PRIVATE.
  */
 KALLOC_HEAP_DECLARE(KHEAP_DATA_SHARED);
 
@@ -184,7 +184,7 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
  *
  * @discussion
  * Kalloc heaps are views over one of the pre-defined builtin heaps
- * (such as @c KHEAP_DATA_BUFFERS or @c KHEAP_DEFAULT). Instantiating
+ * (such as @c KHEAP_DATA_PRIVATE or @c KHEAP_DEFAULT). Instantiating
  * a new one allows for accounting of allocations through this view.
  *
  * Kalloc heap views are initialized during the @c STARTUP_SUB_ZALLOC phase,
@@ -202,12 +202,6 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
 	} }; \
 	STARTUP_ARG(ZALLOC, STARTUP_RANK_MIDDLE, kheap_startup_init, var)
 
-
-STATIC_IF_KEY_DECLARE_TRUE(kexts_enroll_data_shared);
-
-#define GET_KEXT_KHEAP_DATA() \
-	static_if(kexts_enroll_data_shared) ? KHEAP_DATA_SHARED : KHEAP_DATA_BUFFERS
-
 /*
  * Helper functions to query the status of security policies
  * regarding data allocations. This has consequences for things
@@ -215,7 +209,6 @@ STATIC_IF_KEY_DECLARE_TRUE(kexts_enroll_data_shared);
  */
 extern bool kalloc_is_restricted_data_mode_telemetry(void);
 extern bool kalloc_is_restricted_data_mode_enforced(void);
-extern bool kmem_needs_data_share_range(void);
 
 /*
  * Allocations of type SO_NAME are known to not have pointers for
@@ -224,7 +217,7 @@ extern bool kmem_needs_data_share_range(void);
 #if XNU_TARGET_OS_OSX
 #define KHEAP_SONAME KHEAP_DEFAULT
 #else /* XNU_TARGET_OS_OSX */
-#define KHEAP_SONAME KHEAP_DATA_BUFFERS
+#define KHEAP_SONAME KHEAP_DATA_PRIVATE
 #endif /* XNU_TARGET_OS_OSX */
 
 #endif /* XNU_KERNEL_PRIVATE */
@@ -280,7 +273,7 @@ extern bool kmem_needs_data_share_range(void);
  * This flags will force the callsite to bypass the early (shared) zone and
  * directly allocate from the assigned zone. This can only be used
  * with KT_PRIV_ACCT right now. If you still require this behavior
- * but don't want private stats use Z_SET_NOTEARLY at the allocation
+ * but don't want private stats use Z_SET_NOT_EARLY at the allocation
  * callsite instead.
  *
  * @const KT_SLID
@@ -539,22 +532,40 @@ typedef struct kalloc_type_var_view *kalloc_type_var_view_t;
  * do not contain any pointers
  */
 #define kalloc_data_tag(size, flags, itag) \
-	kheap_alloc_tag(GET_KEXT_KHEAP_DATA(), size, flags, itag)
+	kheap_alloc_tag(KHEAP_DATA_PRIVATE, size, flags, itag)
 #define kalloc_data(size, flags) \
-	kheap_alloc(GET_KEXT_KHEAP_DATA(), size, flags)
+	kheap_alloc(KHEAP_DATA_PRIVATE, size, flags)
+
+#define kalloc_shared_data_tag(size, flags, itag) \
+	kheap_alloc_tag(KHEAP_DATA_SHARED, size, flags, itag)
+#define kalloc_shared_data(size, flags) \
+	kheap_alloc(KHEAP_DATA_SHARED, size, flags)
 
 #define krealloc_data_tag(elem, old_size, new_size, flags, itag) \
-	__kheap_realloc(GET_KEXT_KHEAP_DATA(), elem, old_size, new_size, \
+	__kheap_realloc(KHEAP_DATA_PRIVATE, elem, old_size, new_size, \
 	    __zone_flags_mix_tag(flags, itag), NULL)
 #define krealloc_data(elem, old_size, new_size, flags) \
 	krealloc_data_tag(elem, old_size, new_size, flags, \
 	    VM_ALLOC_SITE_TAG())
 
+#define krealloc_shared_data_tag(elem, old_size, new_size, flags, itag) \
+	__kheap_realloc(KHEAP_DATA_SHARED, elem, old_size, new_size, \
+	    __zone_flags_mix_tag(flags, itag), NULL)
+#define krealloc_shared_data(elem, old_size, new_size, flags) \
+	krealloc_shared_data_tag(elem, old_size, new_size, flags, \
+	    VM_ALLOC_SITE_TAG())
+
 #define kfree_data(elem, size) \
-	kheap_free(GET_KEXT_KHEAP_DATA(), elem, size);
+	kheap_free(KHEAP_DATA_PRIVATE, elem, size);
 
 #define kfree_data_addr(elem) \
-	kheap_free_addr(GET_KEXT_KHEAP_DATA(), elem);
+	kheap_free_addr(KHEAP_DATA_PRIVATE, elem);
+
+#define kfree_shared_data(elem, size) \
+	kheap_free(KHEAP_DATA_SHARED, elem, size);
+
+#define kfree_shared_data_addr(elem) \
+	kheap_free_addr(KHEAP_DATA_SHARED, elem);
 
 extern void kheap_free_bounded(
 	kalloc_heap_t heap,
@@ -570,7 +581,7 @@ extern void kalloc_non_data_require(
 	void         *data __unsafe_indexable,
 	vm_size_t     size);
 
-extern bool kalloc_is_data_buffers(
+extern bool kalloc_is_data_private(
 	void         *addr,
 	vm_size_t    size);
 
@@ -580,6 +591,10 @@ extern void *__sized_by(size) kalloc(
 	vm_size_t           size) __attribute__((malloc, alloc_size(1)));
 
 extern void *__unsafe_indexable kalloc_data(
+	vm_size_t           size,
+	zalloc_flags_t      flags);
+
+extern void *__unsafe_indexable kalloc_shared_data(
 	vm_size_t           size,
 	zalloc_flags_t      flags);
 
@@ -595,9 +610,29 @@ __kalloc_data(vm_size_t size, zalloc_flags_t flags)
 	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, size) : NULL;
 }
 
+__attribute__((malloc, alloc_size(1)))
+static inline void *
+__sized_by(size)
+__kalloc_shared_data(vm_size_t size, zalloc_flags_t flags)
+{
+	void *__unsafe_indexable addr = (kalloc_shared_data)(size, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, size) : NULL;
+}
+
 #define kalloc_data(size, fl) __kalloc_data(size, fl)
 
+#define kalloc_shared_data(size, fl) __kalloc_shared_data(size, fl)
+
 extern void *__unsafe_indexable krealloc_data(
+	void               *ptr __unsafe_indexable,
+	vm_size_t           old_size,
+	vm_size_t           new_size,
+	zalloc_flags_t      flags);
+
+extern void *__unsafe_indexable krealloc_shared_data(
 	void               *ptr __unsafe_indexable,
 	vm_size_t           old_size,
 	vm_size_t           new_size,
@@ -619,8 +654,27 @@ __krealloc_data(
 	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, new_size) : NULL;
 }
 
+__attribute__((malloc, alloc_size(3)))
+static inline void *
+__sized_by(new_size)
+__krealloc_shared_data(
+	void               *ptr __sized_by(old_size),
+	vm_size_t           old_size,
+	vm_size_t           new_size,
+	zalloc_flags_t      flags)
+{
+	void *__unsafe_indexable addr = (krealloc_shared_data)(ptr, old_size, new_size, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, new_size) : NULL;
+}
+
 #define krealloc_data(ptr, old_size, new_size, fl) \
 	__krealloc_data(ptr, old_size, new_size, fl)
+
+#define krealloc_shared_data(ptr, old_size, new_size, fl) \
+	__krealloc_shared_data(ptr, old_size, new_size, fl)
 
 extern void kfree(
 	void               *data __unsafe_indexable,
@@ -631,6 +685,13 @@ extern void kfree_data(
 	vm_size_t           size);
 
 extern void kfree_data_addr(
+	void               *ptr __unsafe_indexable);
+
+extern void kfree_shared_data(
+	void               *ptr __unsafe_indexable,
+	vm_size_t           size);
+
+extern void kfree_shared_data_addr(
 	void               *ptr __unsafe_indexable);
 
 #endif /* !XNU_KERNEL_PRIVATE */
@@ -1451,6 +1512,14 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 
 #define kfree_data_addr(elem) \
 	(kfree_data_addr)((void *)os_ptr_load_and_erase(elem))
+
+#define kfree_shared_data(elem, size) ({                                    \
+	__auto_type __kfree_size = (size);                                      \
+	(kfree_shared_data)((void *)os_ptr_load_and_erase(elem), __kfree_size); \
+})
+
+#define kfree_shared_data_addr(elem) \
+	(kfree_shared_data_addr)((void *)os_ptr_load_and_erase(elem))
 
 #endif /* !XNU_KERNEL_PRIVATE */
 

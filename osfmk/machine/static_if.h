@@ -63,7 +63,7 @@ __BEGIN_DECLS
  * Declare/define a static jump key
  *
  * STATIC_IF_KEY_{DECLARE,DEFINE}_TRUE
- *     the static jump key initial enablement count is positive,
+ *     the static jump key initial enablement count is non-negative,
  *     and the key enabled.
  *
  * STATIC_IF_KEY_{DECLARE,DEFINE}_FALSE
@@ -166,7 +166,7 @@ __l:                                                            \
  * Increases the key enablement count.
  *
  * @discussion
- * The key becomes disabled when its enablement count becomes positive.
+ * The key becomes enabled when its enablement count becomes non-negative.
  * This function can only be called from the context of a STATIC_IF_INIT()
  * callout.
  */
@@ -219,7 +219,7 @@ __l:                                                            \
  * Parses a boot-arg within a STATIC_IF_INIT() function.
  *
  * @discussion
- * PE_parse_boot_argn() can't be used that early on SPTM devices,
+ * PE_parse_boot_argn() can't be used that early on arm64 devices,
  * and TUNABLES() aren't parsed yet.
  */
 extern uint64_t static_if_boot_arg_uint64(

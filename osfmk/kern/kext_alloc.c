@@ -107,9 +107,9 @@ kext_alloc_init(void)
 	/* Allocate the sub block of the kernel map */
 	vm_map_will_allocate_early_map(&g_kext_map);
 	g_kext_map = kmem_suballoc(kernel_map, &kext_alloc_base,
-	    kext_alloc_size, VM_MAP_CREATE_PAGEABLE,
+	    kext_alloc_size, VM_MAP_CREATE_DEFAULT,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    KMS_PERMANENT | KMS_NOFAIL, VM_KERN_MEMORY_KEXT).kmr_submap;
+	    KMS_NOFAIL, VM_KERN_MEMORY_KEXT).kmr_submap;
 
 	if ((kext_alloc_base + kext_alloc_size) > kext_alloc_max) {
 		panic("kext_alloc_init: failed to get first 2GB");
@@ -240,7 +240,7 @@ kext_free(vm_offset_t addr, vm_size_t size)
 {
 	kern_return_t rval;
 
-	rval = mach_vm_deallocate(g_kext_map, addr, size);
+	rval = mach_vm_deallocate_kernel(g_kext_map, addr, size);
 	assert(rval == KERN_SUCCESS);
 }
 

@@ -46,16 +46,19 @@ T_GLOBAL_META(
 	T_META_ALL_VALID_ARCHS(true)
 	);
 
-/*
- * rdar://143341561 mmap(FIXED) overwrite sometimes provokes EXC_GUARD
- * Remove this when that bug is fixed.
- *
- * normal workaround: run mmap(FIXED) with the EXC_GUARD catcher in place
- *     when the test is expected to hit rdar://143341561
- * Rosetta workaround: EXC_GUARD catcher doesn't work on Rosetta, so don't run
- *     mmap(FIXED) when the test is expected to hit rdar://143341561
- */
-#define workaround_rdar_143341561 1
+static int
+overwrite_permanent_errno(void)
+{
+	switch (overwrite_permanent_error()) {
+	case KERN_PROTECTION_FAILURE:
+		return EACCES;
+	case KERN_NO_SPACE:
+		return ENOMEM;
+	default:
+		T_FAIL("unrecognized value from overwrite_permanent_error()");
+		T_END;
+	}
+}
 
 static void
 checker_perform_successful_mmap_anon(
@@ -87,7 +90,7 @@ successful_mmap_anon_fixed(
 	    MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
 	mach_vm_address_t allocated = (mach_vm_address_t)ret;
 	if (ret == MAP_FAILED) {
-		T_EXPECT_POSIX_SUCCESS(ret, "mmap(ANON | FIXED)");
+		T_WITH_ERRNO; T_FAIL("mmap(ANON | FIXED)");
 		return TestFailed;
 	}
 	if (allocated != start) {
@@ -111,7 +114,7 @@ successful_mmap_anon_fixed_with_tag(
 	    MAP_PRIVATE | MAP_ANON | MAP_FIXED, VM_MAKE_TAG(tag), 0);
 	mach_vm_address_t allocated = (mach_vm_address_t)ret;
 	if (ret == MAP_FAILED) {
-		T_EXPECT_POSIX_SUCCESS(ret, "mmap(ANON | FIXED, tag)");
+		T_WITH_ERRNO; T_FAIL("mmap(ANON | FIXED, tag)");
 		return TestFailed;
 	}
 	if (allocated != start) {
@@ -155,33 +158,95 @@ successful_mmap_anon_fixed_with_neighbor_tags(
 }
 
 static bool
-call_mmap_anon_fixed_and_expect_ENOMEM(
+call_mmap_anon_fixed_overwriting_permanent(
 	mach_vm_address_t start,
 	mach_vm_size_t size,
 	uint16_t tag)
 {
 #if workaround_rdar_143341561
 	__block void *ret;
+	__block int saved_errno;
 	exc_guard_helper_info_t exc_info;
-	bool caught_exception =
-	    block_raised_exc_guard_of_type(GUARD_TYPE_VIRT_MEMORY, &exc_info, ^{
+	/* BEGIN IGNORE CODESTYLE */
+	bool caught_exception = block_raised_exc_guard_of_type(GUARD_TYPE_VIRT_MEMORY, &exc_info, ^{
 		ret = mmap((void *)start, size, PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_ANON | MAP_FIXED, VM_MAKE_TAG(tag), 0);
+		    MAP_PRIVATE | MAP_ANON | MAP_FIXED, VM_MAKE_TAG(tag), 0);
+		    saved_errno = errno;
 	});
+	/* END IGNORE CODESTYLE */
 	if (caught_exception) {
 		T_LOG("warning: rdar://143341561 mmap(fixed) should work "
 		    "regardless of whether a mapping exists at the addr");
 	}
+	errno = saved_errno;
 #else  /* not workaround_rdar_143341561 */
 	void *ret = mmap((void *)start, size, PROT_READ | PROT_WRITE,
 	    MAP_PRIVATE | MAP_ANON | MAP_FIXED, VM_MAKE_TAG(tag), 0);
 #endif /* not workaround_rdar_143341561 */
 
-	if (ret != MAP_FAILED) {
-		T_EXPECT_POSIX_ERROR(ret, ENOMEM, "mmap(ANON | FIXED, tag)");
-		return false;
+	T_EXPECT_POSIX_FAILURE((uintptr_t)ret, overwrite_permanent_errno(), "mmap");
+	return ret == MAP_FAILED && errno == overwrite_permanent_errno();
+}
+
+
+static test_result_t
+test_permanent_entry_fixed_rangelocked(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	assert(is_new_vm());
+
+#if workaround_rdar_143341561
+	if (isRosetta()) {
+		T_LOG("warning: can't work around rdar://143341561 on Rosetta; just passing instead");
+		return TestSucceeded;
 	}
-	return true;
+#endif
+
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
+		return TestFailed;
+	}
+
+	/*
+	 * No checker updates. Any fixed|overwrite atop a permanent entry
+	 * fails during preflight.
+	 */
+
+	return verify_vm_state(checker_list, "after mmap(ANON | FIXED)");
+}
+
+static test_result_t
+test_permanent_entry_fixed_with_neighbor_tags_rangelocked(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	assert(is_new_vm());
+
+#if workaround_rdar_143341561
+	if (isRosetta()) {
+		T_LOG("warning: can't work around rdar://143341561 on Rosetta; just passing instead");
+		return TestSucceeded;
+	}
+#endif
+
+	uint16_t tag;
+
+	/*
+	 * Allocate with a tag matching the entry to the left,
+	 */
+	tag = get_user_tag_for_address(start - 1);
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
+		return TestFailed;
+	}
+
+	/*
+	 * No checker updates. Any fixed|overwrite atop a permanent entry
+	 * fails during preflight.
+	 */
+
+	return verify_vm_state(checker_list, "after mmap(ANON | FIXED)");
 }
 
 
@@ -198,7 +263,7 @@ test_permanent_entry_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -221,7 +286,7 @@ test_permanent_before_permanent_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -245,7 +310,7 @@ test_permanent_before_allocation_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -272,16 +337,21 @@ test_permanent_before_allocation_fixed_rdar144128567(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
 	/*
-	 * one permanent entry, becomes inaccessible
-	 * one nonpermanent allocation, becomes deallocated (rdar://144128567)
+	 * old vm:
+	 *   one permanent entry, becomes inaccessible
+	 *   one nonpermanent allocation, becomes deallocated (rdar://144128567)
+	 * new vm:
+	 *   rejected by preflight, everything untouched
 	 */
-	checker_perform_vm_deallocate_permanent(checker_list, start, size / 2);
-	checker_perform_successful_vm_deallocate(checker_list, start + size / 2, size / 2);
+	if (!is_new_vm()) {
+		checker_perform_vm_deallocate_permanent(checker_list, start, size / 2);
+		checker_perform_successful_vm_deallocate(checker_list, start + size / 2, size / 2);
+	}
 
 	return verify_vm_state(checker_list, "after mmap(ANON | FIXED)");
 }
@@ -299,7 +369,7 @@ test_permanent_before_hole_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -326,7 +396,7 @@ test_permanent_after_allocation_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -353,7 +423,7 @@ test_permanent_after_hole_fixed(
 	}
 #endif
 
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, 0)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, 0)) {
 		return TestFailed;
 	}
 
@@ -387,7 +457,7 @@ test_permanent_entry_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -416,7 +486,7 @@ test_permanent_before_permanent_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -446,7 +516,7 @@ test_permanent_before_allocation_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -479,16 +549,21 @@ test_permanent_before_allocation_fixed_with_neighbor_tags_rdar144128567(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
 	/*
-	 * one permanent entry, becomes inaccessible
-	 * one nonpermanent allocation, becomes deallocated (rdar://144128567)
+	 * old vm:
+	 *   one permanent entry, becomes inaccessible
+	 *   one nonpermanent allocation, becomes deallocated (rdar://144128567)
+	 * new vm:
+	 *   rejected by preflight, everything untouched
 	 */
-	checker_perform_vm_deallocate_permanent(checker_list, start, size / 2);
-	checker_perform_successful_vm_deallocate(checker_list, start + size / 2, size / 2);
+	if (!is_new_vm()) {
+		checker_perform_vm_deallocate_permanent(checker_list, start, size / 2);
+		checker_perform_successful_vm_deallocate(checker_list, start + size / 2, size / 2);
+	}
 
 	return verify_vm_state(checker_list, "after mmap(ANON | FIXED)");
 }
@@ -512,7 +587,7 @@ test_permanent_before_hole_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -545,7 +620,7 @@ test_permanent_after_allocation_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -578,7 +653,7 @@ test_permanent_after_hole_fixed_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_mmap_anon_fixed_and_expect_ENOMEM(start, size, tag)) {
+	if (!call_mmap_anon_fixed_overwriting_permanent(start, size, tag)) {
 		return TestFailed;
 	}
 
@@ -605,6 +680,11 @@ T_DECL(mmap_anon_fixed,
 		.single_entry_2 = successful_mmap_anon_fixed,
 		.single_entry_3 = successful_mmap_anon_fixed,
 		.single_entry_4 = successful_mmap_anon_fixed,
+
+		.single_entry_nonnull_1 = successful_mmap_anon_fixed,
+		.single_entry_nonnull_2 = successful_mmap_anon_fixed,
+		.single_entry_nonnull_3 = successful_mmap_anon_fixed,
+		.single_entry_nonnull_4 = successful_mmap_anon_fixed,
 
 		.multiple_entries_1 = successful_mmap_anon_fixed,
 		.multiple_entries_2 = successful_mmap_anon_fixed,
@@ -648,13 +728,13 @@ T_DECL(mmap_anon_fixed,
 		.cow_unreadable = successful_mmap_anon_fixed,
 		.cow_unwriteable = successful_mmap_anon_fixed,
 
-		.permanent_entry = test_permanent_entry_fixed,
-		.permanent_before_permanent = test_permanent_before_permanent_fixed,
-		.permanent_before_allocation = test_permanent_before_allocation_fixed,
-		.permanent_before_allocation_2 = test_permanent_before_allocation_fixed_rdar144128567,
-		.permanent_before_hole = test_permanent_before_hole_fixed,
-		.permanent_after_allocation = test_permanent_after_allocation_fixed,
-		.permanent_after_hole = test_permanent_after_hole_fixed,
+		.permanent_entry = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_entry_fixed,
+		.permanent_before_permanent = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_before_permanent_fixed,
+		.permanent_before_allocation = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_before_allocation_fixed,
+		.permanent_before_allocation_2 = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_before_allocation_fixed_rdar144128567,
+		.permanent_before_hole = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_before_hole_fixed,
+		.permanent_after_allocation = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_after_allocation_fixed,
+		.permanent_after_hole = is_new_vm() ? test_permanent_entry_fixed_rangelocked : test_permanent_after_hole_fixed,
 
 		.single_submap_single_entry = successful_mmap_anon_fixed,
 		.single_submap_single_entry_first_pages = successful_mmap_anon_fixed,
@@ -726,6 +806,11 @@ T_DECL(mmap_anon_fixed_with_neighbor_tags,
 		.single_entry_3 = successful_mmap_anon_fixed_with_neighbor_tags,
 		.single_entry_4 = successful_mmap_anon_fixed_with_neighbor_tags,
 
+		.single_entry_nonnull_1 = successful_mmap_anon_fixed_with_neighbor_tags,
+		.single_entry_nonnull_2 = successful_mmap_anon_fixed_with_neighbor_tags,
+		.single_entry_nonnull_3 = successful_mmap_anon_fixed_with_neighbor_tags,
+		.single_entry_nonnull_4 = successful_mmap_anon_fixed_with_neighbor_tags,
+
 		.multiple_entries_1 = successful_mmap_anon_fixed_with_neighbor_tags,
 		.multiple_entries_2 = successful_mmap_anon_fixed_with_neighbor_tags,
 		.multiple_entries_3 = successful_mmap_anon_fixed_with_neighbor_tags,
@@ -768,13 +853,13 @@ T_DECL(mmap_anon_fixed_with_neighbor_tags,
 		.cow_unreadable = successful_mmap_anon_fixed_with_neighbor_tags,
 		.cow_unwriteable = successful_mmap_anon_fixed_with_neighbor_tags,
 
-		.permanent_entry = test_permanent_entry_fixed_with_neighbor_tags,
-		.permanent_before_permanent = test_permanent_before_permanent_fixed_with_neighbor_tags,
-		.permanent_before_allocation = test_permanent_before_allocation_fixed_with_neighbor_tags,
-		.permanent_before_allocation_2 = test_permanent_before_allocation_fixed_with_neighbor_tags_rdar144128567,
-		.permanent_before_hole = test_permanent_before_hole_fixed_with_neighbor_tags,
-		.permanent_after_allocation = test_permanent_after_allocation_fixed_with_neighbor_tags,
-		.permanent_after_hole = test_permanent_after_hole_fixed_with_neighbor_tags,
+		.permanent_entry = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_entry_fixed_with_neighbor_tags,
+		.permanent_before_permanent = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_before_permanent_fixed_with_neighbor_tags,
+		.permanent_before_allocation = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_before_allocation_fixed_with_neighbor_tags,
+		.permanent_before_allocation_2 = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_before_allocation_fixed_with_neighbor_tags_rdar144128567,
+		.permanent_before_hole = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_before_hole_fixed_with_neighbor_tags,
+		.permanent_after_allocation = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_after_allocation_fixed_with_neighbor_tags,
+		.permanent_after_hole = is_new_vm() ? test_permanent_entry_fixed_with_neighbor_tags_rangelocked : test_permanent_after_hole_fixed_with_neighbor_tags,
 
 		.single_submap_single_entry = successful_mmap_anon_fixed_with_neighbor_tags,
 		.single_submap_single_entry_first_pages = successful_mmap_anon_fixed_with_neighbor_tags,

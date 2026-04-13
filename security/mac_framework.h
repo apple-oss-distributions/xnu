@@ -482,6 +482,8 @@ int     mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
     struct componentname *cnp) __result_use_check;
 int     mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
     const char *path, size_t pathlen) __result_use_check;
+int     mac_vnode_check_lookup_postflight(vfs_context_t ctx, struct vnode *vp,
+    uint32_t resolve_flags) __result_use_check;
 #ifdef KERNEL_PRIVATE
 int     mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp,
     int acc_mode) __result_use_check;

@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-/* compile: xcrun -sdk macosx.internal clang -ldarwintest -o resolve_namespace resolve_namespace.c -g -Weverything */
+/* compile: xcrun -sdk macosx.internal clang -arch arm64e -arch x86_64 -ldarwintest -o resolve_namespace resolve_namespace.c */
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -34,6 +34,8 @@
 #include <sys/xattr.h>
 #include <sys/paths.h>
 #include <sys/syslimits.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 
 #include <darwintest.h>
 #include <darwintest/utils.h>
@@ -42,30 +44,6 @@ static char template[MAXPATHLEN];
 static char testdir_path[MAXPATHLEN + 1];
 static char *testdir = NULL;
 static int testdir_fd = -1, test_fd = -1;
-
-#ifndef ENOTCAPABLE
-#define ENOTCAPABLE            107
-#endif
-
-#ifndef RESOLVE_NOFOLLOW_ANY
-#define RESOLVE_NOFOLLOW_ANY   0x00000001
-#endif
-
-#ifndef RESOLVE_NODOTDOT
-#define RESOLVE_NODOTDOT       0x00000002
-#endif
-
-#ifndef RESOLVE_NODEVFS
-#define RESOLVE_NODEVFS        0x00000008
-#endif
-
-#ifndef RESOLVE_UNIQUE
-#define RESOLVE_UNIQUE         0x00000020
-#endif
-
-#ifndef RESOLVE_NOXATTRS
-#define RESOLVE_NOXATTRS       0x00000040
-#endif
 
 #define TEST_DIR       "test_dir"
 #define FILE           "test_dir/file.txt"
@@ -324,4 +302,76 @@ T_DECL(resolve_namespace_noxattrs,
 	T_EXPECT_POSIX_SUCCESS((fd = open(file_rfork, O_RDONLY)), "Opening %s -> Should PASS", file_rfork);
 	close(fd);
 	T_EXPECT_POSIX_FAILURE((fd = open(file_noxattrs_rfork, O_RDONLY)), ENOTCAPABLE, "Opening %s -> Should fail with ENOTCAPABLE", file_noxattrs_rfork);
+}
+
+T_DECL(resolve_namespace_nounion,
+    "Test the RESOLVE_NOUNION prefix-path prevents traversal to covered filesystem",
+    T_META_ENABLED(TARGET_OS_OSX))
+{
+	int fd;
+	struct stat statbuf;
+	char union_mount_path[PATH_MAX];
+	char base_file_path[PATH_MAX];
+	char union_file_path[PATH_MAX];
+	char union_file_nounion[PATH_MAX];
+	char nonexistent_file[PATH_MAX];
+	char nonexistent_nounion[PATH_MAX];
+
+	T_SETUPBEGIN;
+
+	T_ATEND(cleanup);
+	setup("resolve_namespace_nounion");
+
+	/* Create union mount directory structure */
+	snprintf(union_mount_path, sizeof(union_mount_path), "%s/union_mount", testdir_path);
+	snprintf(base_file_path, sizeof(base_file_path), "%s/base_file.txt", union_mount_path);
+	snprintf(union_file_path, sizeof(union_file_path), "%s/union_file.txt", union_mount_path);
+	snprintf(union_file_nounion, sizeof(union_file_nounion), "/.resolve/%d/%s/union_file.txt", RESOLVE_NOUNION, union_mount_path);
+	snprintf(nonexistent_file, sizeof(nonexistent_file), "%s/nonexistent.txt", union_mount_path);
+	snprintf(nonexistent_nounion, sizeof(nonexistent_nounion), "/.resolve/%d/%s/nonexistent.txt", RESOLVE_NOUNION, union_mount_path);
+
+	T_ASSERT_POSIX_SUCCESS(mkdir(union_mount_path, 0777), "Creating union mount directory %s", union_mount_path);
+
+	/* Create files in the base directory before mounting */
+	T_ASSERT_POSIX_SUCCESS((fd = open(base_file_path, O_CREAT | O_RDWR, 0777)), "Creating base file %s", base_file_path);
+	write(fd, "base content", 12);
+	close(fd);
+
+	/* Create the union file in the base directory before mounting */
+	T_ASSERT_POSIX_SUCCESS((fd = open(union_file_path, O_CREAT | O_RDWR, 0777)), "Creating union file in base directory %s", union_file_path);
+	write(fd, "base union content", 18);
+	close(fd);
+
+	/* Create union mount: Mount devfs with union flag */
+	T_ASSERT_POSIX_SUCCESS(mount("devfs", union_mount_path, MNT_UNION, NULL), "Mounting devfs with union flag at %s", union_mount_path);
+
+	/* The union_file.txt now exists in the base layer and should be accessible through the union mount */
+
+	T_SETUPEND;
+
+	/* Test 1: Normal stat() access to union file should work */
+	T_EXPECT_POSIX_SUCCESS((stat(union_file_path, &statbuf)), "Calling stat() for union file %s -> Should PASS", union_file_path);
+
+	/* Test 2: stat() with RESOLVE_NOUNION should prevent traversal to covered filesystem */
+	T_EXPECT_POSIX_FAILURE((stat(union_file_nounion, &statbuf)), ENOENT, "Calling stat() for union file with RESOLVE_NOUNION %s -> Should fail with ENOENT", union_file_nounion);
+
+	/* Test 3: Test union traversal behavior - stat() nonexistent file */
+	/* Without RESOLVE_NOUNION, this might traverse to covered filesystem looking for the file */
+	T_EXPECT_POSIX_FAILURE((stat(nonexistent_file, &statbuf)), ENOENT, "Calling stat() for nonexistent file %s -> Should fail with ENOENT", nonexistent_file);
+
+	/* Test 4: With RESOLVE_NOUNION, traversal to covered filesystem should be prevented */
+	T_EXPECT_POSIX_FAILURE((stat(nonexistent_nounion, &statbuf)), ENOENT, "Calling stat() for nonexistent file with RESOLVE_NOUNION %s -> Should fail with ENOENT (traversal to covered filesystem prevented)", nonexistent_nounion);
+
+	/* Test 5: Verify that open() also prevents traversal to covered filesystem with RESOLVE_NOUNION */
+	T_EXPECT_POSIX_FAILURE((fd = open(union_file_nounion, O_RDONLY)), ENOENT, "Opening union file with RESOLVE_NOUNION %s -> Should fail with ENOENT", union_file_nounion);
+
+	/* Clean up union mount */
+	unmount(union_mount_path, MNT_FORCE);  /* Remove devfs union mount */
+
+	/* Remove the files and directory */
+	unlink(union_file_path);  /* Remove union file from base directory */
+	unlink(base_file_path);   /* Remove base file */
+	rmdir(union_mount_path);  /* Remove directory */
+
+	T_LOG("RESOLVE_NOUNION flag test completed - prevents traversal from union filesystem to covered filesystem");
 }

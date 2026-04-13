@@ -67,7 +67,7 @@ catch_mach_exception_raise(
 	mach_port_t thread,
 	mach_port_t task,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count);
 
 extern kern_return_t
@@ -91,7 +91,7 @@ extern kern_return_t
 catch_mach_exception_raise_state(
 	mach_port_t exception_port,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count,
 	int *flavor,
 	thread_state_t in_state,
@@ -105,7 +105,7 @@ catch_mach_exception_raise_state_identity(
 	mach_port_t thread,
 	mach_port_t task,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count,
 	int *flavor,
 	thread_state_t in_state,
@@ -116,13 +116,61 @@ catch_mach_exception_raise_state_identity(
 /* Thread-local storage for exception server threads. */
 
 struct exc_handler_callbacks {
-	exc_handler_callback_t state_callback;
+	exc_handler_callback_t state_identity_callback;
+	exc_handler_state_callback_t state_callback;
 	exc_handler_protected_callback_t protected_callback;
 	exc_handler_state_protected_callback_t state_protected_callback;
 	exc_handler_backtrace_callback_t backtrace_callback;
 };
 
 static __thread struct exc_handler_callbacks tls_callbacks;
+
+/*
+ * T_FAIL if exc_helpers does not support this exception behavior.
+ * Ignores configuration bits from MACH_EXCEPTION_MASK.
+ */
+static void
+assert_supported_behavior(exception_behavior_t behavior)
+{
+	switch ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) {
+	case EXCEPTION_STATE:
+	case EXCEPTION_STATE_IDENTITY:
+	case EXCEPTION_STATE_IDENTITY_PROTECTED:
+	case EXCEPTION_IDENTITY_PROTECTED:
+		/* supported */
+		return;
+	default:
+		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
+	}
+}
+
+static void
+assert_exception_codes(
+	exception_type_t type,
+	mach_exception_data_t codes,
+	mach_msg_type_number_t code_count)
+{
+	/* There should only be two code values. */
+	T_QUIET; T_ASSERT_EQ(code_count, 2, "Two code values were provided with the mach exception");
+
+	/**
+	 * The code values should be 64-bit since MACH_EXCEPTION_CODES was specified
+	 * when setting the exception port.
+	 */
+	LOG_VERBOSE("Mach exception type %d, codes[0]: %#llx, codes[1]: %#llx\n",
+	    type, codes[0], codes[1]);
+}
+
+static void
+assert_thread_state_flavor(
+	int flavor,
+	mach_msg_type_number_t in_state_count)
+{
+	T_QUIET; T_ASSERT_EQ(flavor, EXCEPTION_THREAD_STATE,
+	    "The thread state flavor is EXCEPTION_THREAD_STATE");
+	T_QUIET; T_ASSERT_EQ(in_state_count, EXCEPTION_THREAD_STATE_COUNT,
+	    "The thread state count is EXCEPTION_THREAD_STATE_COUNT");
+}
 
 /*
  * Return the (ptrauth-stripped) PC from the
@@ -171,6 +219,30 @@ advance_exception_pc(
 #endif
 }
 
+/*
+ * Update thread state after handling an exception.
+ * First, copy in_state to out_state.
+ * Second, add advance_pc bytes to out_state's PC.
+ */
+static void
+update_thread_state(
+	thread_state_t in_state,
+	mach_msg_type_number_t in_state_count,
+	thread_state_t out_state,
+	mach_msg_type_number_t *out_state_count,
+	size_t advance_pc)
+{
+	*out_state_count = in_state_count; /* size of state object in 32-bit words */
+	memcpy(out_state, in_state, in_state_count * 4);
+	if (advance_pc != 0) {
+		advance_exception_pc(advance_pc, out_state);
+		LOG_VERBOSE("Continuing after exception at a new PC");
+	} else {
+		LOG_VERBOSE("Continuing after exception");
+	}
+}
+
+
 /**
  * This has to be defined for linking purposes, but it's unused.
  */
@@ -180,7 +252,7 @@ catch_mach_exception_raise(
 	mach_port_t thread,
 	mach_port_t task,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count)
 {
 #pragma unused(exception_port, thread, task, type, codes, code_count)
@@ -194,7 +266,7 @@ catch_mach_exception_raise_state_identity_protected(
 	uint64_t                  thread_id,
 	mach_port_t               task_id_token,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count,
 	int *flavor,
 	thread_state_t in_state,
@@ -202,28 +274,15 @@ catch_mach_exception_raise_state_identity_protected(
 	thread_state_t out_state,
 	mach_msg_type_number_t *out_state_count)
 {
-	LOG_VERBOSE("Caught a mach exception!\n");
-
-	/* There should only be two code values. */
-	T_QUIET; T_ASSERT_EQ(code_count, 2, "Two code values were provided with the mach exception");
-
-	/**
-	 * The code values should be 64-bit since MACH_EXCEPTION_CODES was specified
-	 * when setting the exception port.
-	 */
-	mach_exception_data_t codes_64 = (mach_exception_data_t)(void *)codes;
-	LOG_VERBOSE("Mach exception type %d, codes[0]: %#llx, codes[1]: %#llx\n",
-	    type, codes_64[0], codes_64[1]);
-
-	/* Verify that we're receiving the expected thread state flavor. */
-	T_QUIET; T_ASSERT_EQ(*flavor, EXCEPTION_THREAD_STATE, "The thread state flavor is EXCEPTION_THREAD_STATE");
-	T_QUIET; T_ASSERT_EQ(in_state_count, EXCEPTION_THREAD_STATE_COUNT, "The thread state count is EXCEPTION_THREAD_STATE_COUNT");
+	LOG_VERBOSE("Caught a mach exception! (EXCEPTION_STATE_IDENTITY_PROTECTED)\n");
+	assert_exception_codes(type, codes, code_count);
+	assert_thread_state_flavor(*flavor, in_state_count);
 
 	*out_state_count = in_state_count; /* size of state object in 32-bit words */
 	memcpy((void*)out_state, (void*)in_state, in_state_count * 4);
 
 	size_t advance_pc = tls_callbacks.state_protected_callback(
-		task_id_token, thread_id, type, codes_64, in_state,
+		task_id_token, thread_id, type, codes, in_state,
 		in_state_count, out_state, out_state_count);
 
 	if (advance_pc == EXC_HELPER_HALT) {
@@ -233,8 +292,10 @@ catch_mach_exception_raise_state_identity_protected(
 	}
 
 	if (advance_pc != 0) {
-		T_FAIL("unimplemented PC change from EXCEPTION_STATE_IDENTITY_PROTECTED callback");
-		return KERN_FAILURE;
+		advance_exception_pc(advance_pc, out_state);
+		LOG_VERBOSE("Continuing after exception at a new PC");
+	} else {
+		LOG_VERBOSE("Continuing after exception");
 	}
 
 	/* Return KERN_SUCCESS to tell the kernel to keep running the victim thread. */
@@ -247,25 +308,15 @@ catch_mach_exception_raise_identity_protected(
 	__unused mach_port_t      exception_port,
 	uint64_t                  thread_id,
 	mach_port_t               task_id_token,
-	exception_type_t          exception,
+	exception_type_t          type,
 	mach_exception_data_t     codes,
-	mach_msg_type_number_t    codeCnt)
+	mach_msg_type_number_t    code_count)
 {
-	LOG_VERBOSE("Caught a mach exception!\n");
-
-	/* There should only be two code values. */
-	T_QUIET; T_ASSERT_EQ(codeCnt, 2, "Two code values were provided with the mach exception");
-
-	/**
-	 * The code values should be 64-bit since MACH_EXCEPTION_CODES was specified
-	 * when setting the exception port.
-	 */
-	mach_exception_data_t codes_64 = (mach_exception_data_t)(void *)codes;
-	LOG_VERBOSE("Mach exception type %d, codes[0]: %#llx, codes[1]: %#llx\n",
-	    exception, codes_64[0], codes_64[1]);
+	LOG_VERBOSE("Caught a mach exception! (EXCEPTION_IDENTITY_PROTECTED)\n");
+	assert_exception_codes(type, codes, code_count);
 
 	size_t advance_pc = tls_callbacks.protected_callback(
-		task_id_token, thread_id, exception, codes_64);
+		task_id_token, thread_id, type, codes);
 
 	if (advance_pc == EXC_HELPER_HALT) {
 		/* Exception handler callback says we can't continue. */
@@ -283,26 +334,6 @@ catch_mach_exception_raise_identity_protected(
 }
 
 /**
- * This has to be defined for linking purposes, but it's unused.
- */
-kern_return_t
-catch_mach_exception_raise_state(
-	mach_port_t exception_port,
-	exception_type_t type,
-	exception_data_t codes,
-	mach_msg_type_number_t code_count,
-	int *flavor,
-	thread_state_t in_state,
-	mach_msg_type_number_t in_state_count,
-	thread_state_t out_state,
-	mach_msg_type_number_t *out_state_count)
-{
-#pragma unused(exception_port, type, codes, code_count, flavor, in_state, in_state_count, out_state, out_state_count)
-	T_FAIL("Triggered catch_mach_exception_raise_state() which shouldn't happen...");
-	__builtin_unreachable();
-}
-
-/**
  * Called by mach_exc_server() to handle the exception. This will call the
  * test's exception-handler callback and will then modify
  * the thread state to move to the next instruction.
@@ -313,7 +344,7 @@ catch_mach_exception_raise_state_identity(
 	mach_port_t thread,
 	mach_port_t task,
 	exception_type_t type,
-	exception_data_t codes,
+	mach_exception_data_t codes,
 	mach_msg_type_number_t code_count,
 	int *flavor,
 	thread_state_t in_state,
@@ -321,27 +352,14 @@ catch_mach_exception_raise_state_identity(
 	thread_state_t out_state,
 	mach_msg_type_number_t *out_state_count)
 {
-	LOG_VERBOSE("Caught a mach exception!\n");
-
-	/* There should only be two code values. */
-	T_QUIET; T_ASSERT_EQ(code_count, 2, "Two code values were provided with the mach exception");
-
-	/**
-	 * The code values should be 64-bit since MACH_EXCEPTION_CODES was specified
-	 * when setting the exception port.
-	 */
-	mach_exception_data_t codes_64 = (mach_exception_data_t)(void *)codes;
-	LOG_VERBOSE("Mach exception type %d, codes[0]: %#llx, codes[1]: %#llx\n",
-	    type, codes_64[0], codes_64[1]);
-
-	/* Verify that we're receiving the expected thread state flavor. */
-	T_QUIET; T_ASSERT_EQ(*flavor, EXCEPTION_THREAD_STATE, "The thread state flavor is EXCEPTION_THREAD_STATE");
-	T_QUIET; T_ASSERT_EQ(in_state_count, EXCEPTION_THREAD_STATE_COUNT, "The thread state count is EXCEPTION_THREAD_STATE_COUNT");
+	LOG_VERBOSE("Caught a mach exception! (EXCEPTION_STATE_IDENTITY)\n");
+	assert_exception_codes(type, codes, code_count);
+	assert_thread_state_flavor(*flavor, in_state_count);
 
 	uint64_t exception_pc = get_exception_pc(in_state);
 
-	size_t advance_pc = tls_callbacks.state_callback(
-		task, thread, type, codes_64, exception_pc);
+	size_t advance_pc = tls_callbacks.state_identity_callback(
+		task, thread, type, codes, exception_pc);
 
 	if (advance_pc == EXC_HELPER_HALT) {
 		/* Exception handler callback says we can't continue. */
@@ -349,19 +367,45 @@ catch_mach_exception_raise_state_identity(
 		return KERN_FAILURE;
 	}
 
-	/**
-	 * Copy in_state to out_state, then increment the PC by the requested
-	 * amount so the thread doesn't cause another exception when it resumes.
-	 */
-	*out_state_count = in_state_count; /* size of state object in 32-bit words */
-	memcpy((void*)out_state, (void*)in_state, in_state_count * 4);
-	assert(0 == memcmp(in_state, out_state, in_state_count * 4));
-	if (advance_pc != 0) {
-		advance_exception_pc(advance_pc, out_state);
-		LOG_VERBOSE("Continuing after exception at a new PC");
-	} else {
-		LOG_VERBOSE("Continuing after exception");
+	update_thread_state(in_state, in_state_count, out_state, out_state_count, advance_pc);
+
+	/* Return KERN_SUCCESS to tell the kernel to keep running the victim thread. */
+	return KERN_SUCCESS;
+}
+
+/**
+ * Called by mach_exc_server() to handle the exception. This will call the
+ * test's exception-handler callback and will then modify
+ * the thread state to move to the next instruction.
+ */
+kern_return_t
+catch_mach_exception_raise_state(
+	mach_port_t exception_port __unused,
+	exception_type_t type,
+	mach_exception_data_t codes,
+	mach_msg_type_number_t code_count,
+	int *flavor,
+	thread_state_t in_state,
+	mach_msg_type_number_t in_state_count,
+	thread_state_t out_state,
+	mach_msg_type_number_t *out_state_count)
+{
+	LOG_VERBOSE("Caught a mach exception! (EXCEPTION_STATE)\n");
+	assert_exception_codes(type, codes, code_count);
+	assert_thread_state_flavor(*flavor, in_state_count);
+
+	uint64_t exception_pc = get_exception_pc(in_state);
+
+	size_t advance_pc = tls_callbacks.state_callback(
+		type, codes, exception_pc, in_state, in_state_count);
+
+	if (advance_pc == EXC_HELPER_HALT) {
+		/* Exception handler callback says we can't continue. */
+		LOG_VERBOSE("Halting after exception");
+		return KERN_FAILURE;
 	}
+
+	update_thread_state(in_state, in_state_count, out_state, out_state_count, advance_pc);
 
 	/* Return KERN_SUCCESS to tell the kernel to keep running the victim thread. */
 	return KERN_SUCCESS;
@@ -396,11 +440,7 @@ set_thread_exception_port_behavior64(exception_port_t exc_port, exception_mask_t
 	mach_port_t thread = mach_thread_self();
 	kern_return_t kr;
 
-	if (((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY &&
-	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED) {
-		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
-	}
-
+	assert_supported_behavior(behavior);
 	behavior |= MACH_EXCEPTION_CODES;
 
 	/* Tell the kernel what port to send exceptions to. */
@@ -408,7 +448,7 @@ set_thread_exception_port_behavior64(exception_port_t exc_port, exception_mask_t
 		thread,
 		exception_mask,
 		exc_port,
-		(exception_behavior_t)((unsigned int)behavior),
+		behavior,
 		EXCEPTION_THREAD_STATE);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "Set the exception port to my custom handler");
 }
@@ -482,8 +522,13 @@ exc_server_thread(void *arg)
 	__builtin_unreachable();
 }
 
-static void
-_run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *callback, bool run_once, exception_behavior_t behavior)
+void
+run_exception_handler_behavior64(
+	mach_port_t exc_port,
+	const void *preferred_callback,
+	const void *callback,
+	exception_behavior_t behavior,
+	bool run_once)
 {
 	/* Set parameters for the exception server's thread. */
 	struct thread_params *params = calloc(1, sizeof(*params));
@@ -497,9 +542,13 @@ _run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *cal
 
 	behavior &= ~MACH_EXCEPTION_MASK;
 
+	assert_supported_behavior(behavior);
 	switch (behavior) {
+	case EXCEPTION_STATE:
+		params->callbacks.state_callback = (exc_handler_state_callback_t)callback;
+		break;
 	case EXCEPTION_STATE_IDENTITY:
-		params->callbacks.state_callback = (exc_handler_callback_t)callback;
+		params->callbacks.state_identity_callback = (exc_handler_callback_t)callback;
 		break;
 	case EXCEPTION_STATE_IDENTITY_PROTECTED:
 		params->callbacks.state_protected_callback = (exc_handler_state_protected_callback_t)callback;
@@ -524,24 +573,17 @@ _run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *cal
 void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback)
 {
-	run_exception_handler_behavior64(exc_port, NULL, (void *)callback, EXCEPTION_STATE_IDENTITY, true);
-}
-
-void
-run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback,
-    void *callback, exception_behavior_t behavior, bool run_once)
-{
-	if (((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY &&
-	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED &&
-	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY_PROTECTED) {
-		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
-	}
-
-	_run_exception_handler(exc_port, (void *)preferred_callback, (void *)callback, run_once, behavior);
+	run_exception_handler_behavior64(exc_port, NULL, callback, EXCEPTION_STATE_IDENTITY, true /* run_once */);
 }
 
 void
 repeat_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback)
 {
-	_run_exception_handler(exc_port, NULL, (void *)callback, false, EXCEPTION_STATE_IDENTITY);
+	repeat_exception_handler_behavior64(exc_port, callback, EXCEPTION_STATE_IDENTITY);
+}
+
+void
+repeat_exception_handler_behavior64(mach_port_t exc_port, const void *callback, exception_behavior_t behavior)
+{
+	run_exception_handler_behavior64(exc_port, NULL, callback, behavior, false /* run_once */);
 }

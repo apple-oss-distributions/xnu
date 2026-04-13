@@ -79,6 +79,7 @@
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
 #include <machine/pal_routines.h>
+#include <machine/machine_cpc.h>
 #include <i386/fpu.h>
 #include <i386/pmap.h>
 #include <i386/misc_protos.h>
@@ -778,7 +779,7 @@ vstart(vm_offset_t boot_args_start)
 #endif
 
 #if CONFIG_CPU_COUNTERS
-		mt_early_init();
+		cpc_early_init();
 #endif /* CONFIG_CPU_COUNTERS */
 
 		first_avail = (vm_offset_t)ID_MAP_VTOP(physfree);
@@ -858,7 +859,7 @@ i386_init(void)
 	mca_cpu_init();
 #endif
 
-	master_cpu = 0;
+	boot_cpu_id = 0;
 
 	kernel_debug_string_early("kernel_startup_bootstrap");
 	kernel_startup_bootstrap();
@@ -1010,7 +1011,8 @@ i386_init(void)
 	xcpm_bootstrap();
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_up(cpu_datap(0));
+	cpc_cpu_transition(CPC_CPU_EARLY_INIT, cpu_datap(0));
+	cpc_cpu_transition(CPC_CPU_ONLINE, cpu_datap(0));
 #endif /* CONFIG_CPU_COUNTERS */
 
 	processor_bootstrap();
@@ -1067,6 +1069,9 @@ do_init_slave(boolean_t fast_restart)
 
 		/* Enable LBRs on non-boot CPUs */
 		i386_lbr_init(cpuid_info(), false);
+#if CONFIG_CPU_COUNTERS
+		cpc_cpu_transition(CPC_CPU_EARLY_INIT, current_cpu_datap());
+#endif /* CONFIG_CPU_COUNTERS */
 	} else {
 		init_param = FAST_SLAVE_INIT;
 	}
@@ -1088,7 +1093,7 @@ do_init_slave(boolean_t fast_restart)
 
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_up(current_cpu_datap());
+	cpc_cpu_transition(CPC_CPU_ONLINE, current_cpu_datap());
 #endif /* CONFIG_CPU_COUNTERS */
 
 #if KPERF

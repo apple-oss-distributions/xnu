@@ -47,7 +47,7 @@ kdp_serial_out(unsigned char byte, void (*outFunc)(char))
 	//need to escape '\n' because the kernel serial output turns it into a cr/lf
 	if (byte == SKDP_START_CHAR || byte == SKDP_END_CHAR || byte == SKDP_ESC_CHAR || byte == '\n') {
 		outFunc(SKDP_ESC_CHAR);
-		byte = ~byte;
+		byte = (unsigned char)~byte;
 	}
 	outFunc((char)byte);
 }
@@ -127,7 +127,7 @@ kdp_unserialize_packet(unsigned char byte, unsigned int *len)
 		break;
 	case DS_ESCAPED:
 //			printf("unescaping %02x to %02x\n", byte, ~byte);
-		dsBuffer[dsPos++] = ~byte;
+		dsBuffer[dsPos++] = (unsigned char)~byte;
 		dsState = DS_READING;
 		*len = SERIALIZE_READING;
 		break;

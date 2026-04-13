@@ -66,21 +66,23 @@ struct mach_vm_reclaim_ring_s {
 	mach_vm_reclaim_count_t max_len;
 	/* no longer used () */
 	struct mach_vm_reclaim_indices_s indices;
-	/* The minimum period of time between kernel accounting updates */
+	/* UNUSED */
 	uint64_t sampling_period_abs;
 	/* timestamp (MAS) of the last kernel accounting update */
 	uint64_t last_sample_abs;
+	/* The deadline (MAS) for the next kernel accounting update */
+	_Atomic uint64_t next_sample_deadline_abs;
 	/*
 	 * An estimate for the number of reclaimable bytes currently in the ring. This
 	 * is updating atomically after entering a new reclaimable region, after
 	 * successfully cancelling a region, and after reclaiming regions.
 	 */
-	_Atomic uint64_t reclaimable_bytes;
+	_Atomic mach_vm_size_t reclaimable_bytes;
 	/*
 	 * The minimum amount of reclaimable memory in this buffer for the current
 	 * sampling interval.
 	 */
-	_Atomic uint64_t reclaimable_bytes_min;
+	_Atomic mach_vm_size_t reclaimable_bytes_min;
 	/* Marks IDs which have been reclaimed */
 	_Atomic mach_vm_reclaim_id_t head;
 	/* Marks IDs which are in the process of being reclaimed */
@@ -89,6 +91,7 @@ struct mach_vm_reclaim_ring_s {
 	_Atomic mach_vm_reclaim_id_t tail;
 	/* Pad to a multiple of the entry size */
 	uint64_t _unused;
+	uint64_t _unused2;
 	/*
 	 * The ringbuffer entries themselves populate the remainder of this
 	 * buffer's vm allocation.

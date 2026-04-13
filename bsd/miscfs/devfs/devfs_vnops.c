@@ -1466,6 +1466,8 @@ devfs_readdir(struct vnop_readdir_args *ap)
 	nodenumber = 0;
 
 	while ((name_node || (nodenumber < 2)) && (uio_resid(uio) > 0)) {
+		bzero(&dirent, sizeof(struct dirent));
+
 		switch (nodenumber) {
 		case    0:
 			dirent.d_fileno = dir_node->dn_ino;

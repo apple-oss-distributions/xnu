@@ -1,7 +1,7 @@
 from core.cvalue import sizeof, value
 from enum import Enum
-from memory import GetLedgerEntryWithName, Memstats
-from process import GetProcName, GetProcPID, GetTaskFromProc, GetTaskSummary, ledger_limit_infinity
+from memory import Memstats
+from process import GetProcName, GetProcPID, GetTaskFromProc, GetLedgerEntryWithName, GetTaskSummary, ledger_limit_infinity
 from scheduler import GetRecentTimestamp
 from utils import Cast
 from xnu import header, kern, lldb_command, unsigned
@@ -56,11 +56,10 @@ def GetMemoryStatusNode(proc):
         return ''
 
     task_ledgerp = task_val.ledger
-    ledger_template = kern.globals.task_ledger_template
 
-    task_physmem_footprint_ledger_entry = GetLedgerEntryWithName(ledger_template, task_ledgerp, 'phys_mem')
-    task_iokit_footprint_ledger_entry = GetLedgerEntryWithName(ledger_template, task_ledgerp, 'iokit_mapped')
-    task_phys_footprint_ledger_entry = GetLedgerEntryWithName(ledger_template, task_ledgerp, 'phys_footprint')
+    task_physmem_footprint_ledger_entry = GetLedgerEntryWithName(task_ledgerp, 'phys_mem')
+    task_iokit_footprint_ledger_entry = GetLedgerEntryWithName(task_ledgerp, 'iokit_mapped')
+    task_phys_footprint_ledger_entry = GetLedgerEntryWithName(task_ledgerp, 'phys_footprint')
     page_size = kern.globals.page_size
 
     phys_mem_footprint = task_physmem_footprint_ledger_entry['balance'] // 1024

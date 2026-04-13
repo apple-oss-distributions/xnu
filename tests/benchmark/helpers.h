@@ -9,9 +9,17 @@
 #include <stdbool.h>
 
 /*
- * mmap an anonymous chunk of memory.
+ * Allocate an anonymous chunk of memory.
  */
 unsigned char *map_buffer(size_t size, int flags);
+
+/*
+ * Creates a file-backed buffer and returns a pointer to it.
+ * Returns via out-parameter a stream with the file open; the file is
+ * automatically unlinked and will be deleted when the stream is closed.
+ */
+unsigned char *map_file_backed_buffer(size_t size, FILE **file_out);
+
 /*
  * Returns a - b in microseconds.
  * NB: a must be >= b

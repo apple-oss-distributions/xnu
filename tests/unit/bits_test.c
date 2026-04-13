@@ -27,7 +27,7 @@
  */
 
 #include <darwintest.h>
-#include "mocks/unit_test_utils.h"
+#include "mocks/osfmk/unit_test_utils.h"
 #include <kern/bits.h>
 
 #define UT_MODULE osfmk
@@ -35,6 +35,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.scheduler"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("scheduler"),
+	T_META_RUN_CONCURRENTLY(true),
 	T_META_TAG_VM_PREFERRED
 	);
 
@@ -47,8 +48,8 @@ T_DECL(xnu_bits, "snapshot tests for bit manipulation routines")
 		T_EXPECT_EQ(bit_first(BIT(i)), i, "bit_first");
 		T_EXPECT_EQ(lsb_first(BIT(i)), i, "lsb_first");
 
-		T_EXPECT_EQ(bit_first(mask(i)), i - 1, "bit_first");
-		T_EXPECT_EQ(lsb_first(mask(i)), i > 0 ? 0 : -1, "lsb_first");
+		T_EXPECT_EQ(bit_first(bits_mask(i)), i - 1, "bit_first");
+		T_EXPECT_EQ(lsb_first(bits_mask(i)), i > 0 ? 0 : -1, "lsb_first");
 
 		T_EXPECT_EQ(bit_next(0ULL, i), -1, "bit_next");
 		T_EXPECT_EQ(lsb_next(0ULL, i), -1, "lsb_next");

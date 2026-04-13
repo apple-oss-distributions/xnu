@@ -250,7 +250,11 @@ public:
  * if they have same length and if their
  * byte buffers hold the same contents.
  */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wunnecessary-virtual-specifier"
 	virtual bool isEqualTo(const OSValueObject * inValueObject) const;
+#pragma clang diagnostic pop
 
 
 /*!
@@ -266,7 +270,11 @@ public:
  * <code>true</code> if the values' data are equal,
  * <code>false</code> otherwise.
  */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wunnecessary-virtual-specifier"
 	virtual bool isEqualTo(const T& value) const;
+#pragma clang diagnostic pop
 
 
 /*!

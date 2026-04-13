@@ -456,6 +456,7 @@ struct nx_flow_req {
 #define NXFLOWREQF_AOP_OFFLOAD            0x00008000  /* AOP2 offload flow */
 #define NXFLOWREQF_CONNECTION_IDLE        0x00010000  /* connection is idle */
 #define NXFLOWREQF_CONNECTION_REUSED      0x00020000  /* connection is reused */
+#define NXFLOWREQF_DISABLED               0x00040000  /* flow disabled (content filter) */
 
 #define NXFLOWREQF_BITS                                                   \
 	"\020\01TRACK\02QOS_MARKING\03FILTER\04CUSTOM_ETHER\05IPV6_ULA"   \

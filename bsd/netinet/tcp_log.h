@@ -105,7 +105,7 @@ extern void tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp
 extern void tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
 extern void tcp_log_state_change(const char *func_name, int line_no, struct tcpcb *tp, int new_state);
 extern void tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
-extern void tcp_log_bind(struct inpcb *inp, const char *event, int error);
+extern void tcp_log_bind(struct tcpcb *tp, int error);
 
 
 #define IN6_IS_ADDR_V4MAPPED_LOOPBACK(a) \
@@ -242,7 +242,7 @@ tcp_log_summary_needed(struct tcpcb *tp)
     tcp_log_output(__func__, __LINE__, tp, format, ## __VA_ARGS__)
 
 #define TCP_LOG_BIND(tp, error) if (tcp_is_log_enabled(tp, TLEF_BIND)) \
-    tcp_log_connection((tp), "bind", (error))
+    tcp_log_bind((tp), (error))
 
 #endif /* BSD_KERNEL_PRIVATE */
 

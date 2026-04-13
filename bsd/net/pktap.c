@@ -1302,7 +1302,7 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 				}
 
 				/* Need to check the packet flag in case full wake has been requested */
-				if (m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW || if_is_lpw_enabled(ifp)) {
+				if ((m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW) != 0 || is_net_lpw_mode()) {
 					hdr->pth_flags |= PTH_FLAG_LPW;
 				}
 				if (outgoing != 0) {
@@ -1457,7 +1457,7 @@ pktap_bpf_tap_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
 	}
 
 	/* Need to check the packet flag in case full wake has been requested */
-	if (kern_packet_get_lpw_flag(pkt) || if_is_lpw_enabled(ifp)) {
+	if (kern_packet_get_lpw_flag(pkt) || is_net_lpw_mode()) {
 		hdr->pth_flags |= PTH_FLAG_LPW;
 	}
 	kern_packet_get_compression_generation_count(pkt, &hdr->pth_comp_gencnt);

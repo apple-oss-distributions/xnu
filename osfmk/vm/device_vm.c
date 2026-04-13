@@ -167,6 +167,7 @@ device_pager_setup(
 	if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 	}
+	assert(vm_object_has_been_permanently_shared(object));
 	vm_object_unlock(object);
 
 	return (memory_object_t)device_object;

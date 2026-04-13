@@ -71,7 +71,8 @@ uint8_t last_hwaccess_type = 0;
 uint8_t last_hwaccess_size = 0;
 uint64_t last_hwaccess_paddr = 0;
 char     gTargetTypeBuffer[16];
-char     gModelTypeBuffer[32];
+char     gUniqueDeviceTargetTypeBuffer[16];   /* Holds "sub-product-type" from product entry */
+char     gUniqueDeviceModelTypeBuffer[32];    /* Holds "unique-model" from product entry */
 
 /* Clock Frequency Info */
 clock_frequency_info_t gPEClockFrequencyInfo;
@@ -104,6 +105,25 @@ static SECURITY_READ_ONLY_LATE(vm_size_t) socd_trace_ram_size = 0;
 extern uint32_t crc32(uint32_t crc, const void *buf, size_t size);
 
 void PE_slide_devicetree(vm_offset_t);
+
+static void
+pe_init_fill_buffer_from_property(DTEntry entry, const char *property_name, char *buffer, size_t buffer_size)
+{
+	void const *prop;
+	unsigned int size;
+
+	buffer[0] = '\0';  // Initialize buffer to empty string
+
+	if (kSuccess == SecureDTGetProperty(entry, property_name, &prop, &size)) {
+		if (size > buffer_size) {
+			size = buffer_size;
+		}
+		if (size > 0) {
+			bcopy(prop, buffer, size);
+			buffer[size - 1] = '\0';
+		}
+	}
+}
 
 static void
 check_for_panic_log(void)
@@ -191,6 +211,7 @@ check_for_panic_log(void)
 	}
 
 	/* Clear panic region */
+	CleanPoC_DcacheRegion_Force(gPanicBase, gPanicSize);
 	bzero((void *)gPanicBase, gPanicSize);
 }
 
@@ -297,6 +318,9 @@ PE_init_iokit(void)
 		show_progress = FALSE;
 	}
 	if (PE_parse_boot_argn("-noprogress", &notused, sizeof(notused))) {
+		show_progress = FALSE;
+	}
+	if (PE_parse_boot_argn("-noprogressonce", &notused, sizeof(notused))) {
 		show_progress = FALSE;
 	}
 #else
@@ -449,24 +473,11 @@ PE_init_platform(boolean_t vm_initialized, void *args)
 
 	if (!vm_initialized) {
 		if (kSuccess == (SecureDTFindEntry("name", "device-tree", &entry))) {
-			if (kSuccess == SecureDTGetProperty(entry, "target-type",
-			    (void const **)&prop, &size)) {
-				if (size > sizeof(gTargetTypeBuffer)) {
-					size = sizeof(gTargetTypeBuffer);
-				}
-				bcopy(prop, gTargetTypeBuffer, size);
-				gTargetTypeBuffer[size - 1] = '\0';
-			}
+			pe_init_fill_buffer_from_property(entry, "target-type", gTargetTypeBuffer, sizeof(gTargetTypeBuffer));
 		}
-		if (kSuccess == (SecureDTFindEntry("name", "device-tree", &entry))) {
-			if (kSuccess == SecureDTGetProperty(entry, "model",
-			    (void const **)&prop, &size)) {
-				if (size > sizeof(gModelTypeBuffer)) {
-					size = sizeof(gModelTypeBuffer);
-				}
-				bcopy(prop, gModelTypeBuffer, size);
-				gModelTypeBuffer[size - 1] = '\0';
-			}
+		if (kSuccess == (SecureDTFindEntry("name", "product", &entry))) {
+			pe_init_fill_buffer_from_property(entry, "unique-model", gUniqueDeviceTargetTypeBuffer, sizeof(gUniqueDeviceTargetTypeBuffer));
+			pe_init_fill_buffer_from_property(entry, "sub-product-type", gUniqueDeviceModelTypeBuffer, sizeof(gUniqueDeviceModelTypeBuffer));
 		}
 		if (kSuccess == SecureDTLookupEntry(NULL, "/chosen", &entry)) {
 			if (kSuccess == SecureDTGetProperty(entry, "debug-enabled",
@@ -788,7 +799,9 @@ PE_sync_panic_buffers(void)
 	 * the platform reset handler will flush any L3.
 	 */
 	if (gPanicBase) {
+		#if !HAS_UCNORMAL_MEM
 		CleanPoC_DcacheRegion_Force(gPanicBase, gPanicSize);
+		#endif
 	}
 }
 
@@ -863,6 +876,14 @@ PE_init_socd_client(void)
 	uintptr_t const *reg_prop;
 	unsigned int size;
 
+	/*
+	 * Our one and only chance to initialize is in cold boot. Post lockdown we cannot
+	 * continue with initialization since the page tables are read-only.
+	 */
+	if (startup_phase >= STARTUP_SUB_EARLY_BOOT) {
+		return 0;
+	}
+
 	if (kSuccess != SecureDTLookupEntry(0, "socd-trace-ram", &entry)) {
 		return 0;
 	}
@@ -930,4 +951,10 @@ PE_write_socd_client_buffer(vm_offset_t offset, const void *in_buff, vm_size_t s
 	for (vm_size_t i = 0; i < len; i++) {
 		client_buff[i] = ((const uint32_t *)in_buff)[i];
 	}
+}
+
+boolean_t
+PE_device_is_simulated(void)
+{
+	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
 }

@@ -156,6 +156,7 @@ void serverAck(IOUserServer * server);
 bool serverSlept(void);
 void systemHalt(int howto);
 bool checkPMReady(void);
+OSArray * servicesWithPowerState(bool state);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -197,7 +198,7 @@ public:
 	 *
 	 * Returns a IOUserServer instance if one was found, or a token to track the pending dext launch. If both are NULL, then launching the dext failed.
 	 */
-	static  IOUserServer * launchUserServer(IOService * provider, OSString * bundleID, const OSSymbol * serverName, OSNumber * serverTag, bool reuseIfExists, IOUserServerCheckInToken ** token, OSData *serverDUI);
+	static  IOUserServer * launchUserServer(IOService * provider, IOService * service, OSString * bundleID, const OSSymbol * serverName, OSNumber * serverTag, bool reuseIfExists, OSData *serverDUI);
 	static  IOUserClient * withTask(task_t owningTask);
 	virtual IOReturn       clientClose(void) APPLE_KEXT_OVERRIDE;
 	virtual bool           finalize(IOOptionBits options) APPLE_KEXT_OVERRIDE;
@@ -231,7 +232,9 @@ public:
 	    uint32_t type, OSDictionary * properties, OSSharedPtr<IOUserClient>& handler);
 	IOReturn               exit(const char * reason);
 	IOReturn               kill(const char * reason);
+	void                   emergencyPanicCoreDumpEnable(void);
 	void                   serverAck(void);
+	OSArray                * servicesWithPowerState(bool state);
 
 	bool                   serviceMatchesCheckInToken(IOUserServerCheckInToken *token);
 	bool                   checkEntitlements(IOService * provider, IOService * dext);

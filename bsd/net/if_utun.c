@@ -111,9 +111,14 @@ static errno_t utun_proto_pre_output(ifnet_t interface, protocol_family_t protoc
     char *frame_type, char *link_layer_dest);
 
 #if UTUN_NEXUS
-static nexus_controller_t utun_ncd;
-static int utun_ncd_refcount;
-static uuid_t utun_kpipe_uuid;
+static struct utun_pipe_nexus_controller_info {
+	nexus_controller_t utun_ncd;
+	int utun_ncd_refcount;
+	uuid_t utun_kpipe_uuid;
+} utun_pipe_controller_info[2];
+#define PIPE_CONTROLLER_INFO_IDX_UPP_ENABLED 0  // see utun_pipe_controller_set()
+#define PIPE_CONTROLLER_INFO_IDX_UPP_DISABLED 1
+
 static uuid_t utun_nx_dom_prov;
 
 typedef struct utun_nx {
@@ -239,6 +244,7 @@ struct utun_pcb {
 	lck_mtx_t               utun_input_chain_lock;
 
 #if UTUN_NEXUS
+	struct utun_pipe_nexus_controller_info *utun_pipe_controller;
 	// lock to protect utun_pcb_data_move & utun_pcb_drainers
 	decl_lck_mtx_data(, utun_pcb_data_move_lock);
 	u_int32_t               utun_pcb_data_move; /* number of data moving contexts */
@@ -272,6 +278,7 @@ struct utun_pcb {
 	bool                    utun_netif_connected;
 	bool                    utun_use_netif;
 	bool                    utun_needs_netagent;
+	bool                    utun_use_upp;
 #endif // UTUN_NEXUS
 };
 
@@ -737,6 +744,31 @@ utun_netif_tx_doorbell(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	utun_data_move_end(pcb);
 	return ret;
 }
+
+static void
+consume_pkts(struct __kern_channel_ring *kring, kern_channel_slot_t slot_end)
+{
+	slot_idx_t end = KR_SLOT_INDEX(kring, slot_end);
+	slot_idx_t idx = kring->ckr_khead;
+	uint32_t nfree = 0;
+
+	for (;;) {
+		struct __kern_slot_desc *ksd = KR_KSD(kring, idx);
+		struct __kern_quantum *kqum = ksd->sd_qum;
+
+		KR_SLOT_DETACH_METADATA(kring, ksd);
+		ASSERT(nfree < kring->ckr_num_slots);
+		kring->ckr_scratch[nfree++] = (uint64_t)kqum;
+		if (idx == end) {
+			break;
+		}
+		idx = SLOT_NEXT(idx, kring->ckr_lim);
+	}
+
+	pp_free_packet_batch(kring->ckr_pp,
+	    &kring->ckr_scratch[0], nfree);
+}
+
 static errno_t
 utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
     kern_channel_ring_t rx_ring, uint32_t flags)
@@ -990,6 +1022,9 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 done:
 		if (tx_pslot) {
+			if (pcb->utun_use_upp) {
+				consume_pkts(tx_ring, tx_pslot);
+			}
 			kern_channel_advance_slot(tx_ring, tx_pslot);
 			kern_channel_increment_ring_net_stats(tx_ring, pcb->utun_ifp, &tx_ring_stats);
 			(void)kern_channel_reclaim(tx_ring);
@@ -1348,19 +1383,44 @@ failed:
 	return err;
 }
 
+static bool
+utun_pipe_controller_isset(struct utun_pcb *pcb)
+{
+	LCK_RW_ASSERT(&pcb->utun_pcb_lock, LCK_RW_TYPE_EXCLUSIVE);
+	return pcb->utun_pipe_controller != NULL;
+}
+
+static void
+utun_pipe_controller_set(struct utun_pcb *pcb)
+{
+	// Set and verify of set of controller is done under pcb lock.
+	// controller refcnt is done under utun_lock
+	lck_rw_lock_exclusive(&pcb->utun_pcb_lock);
+	// This is only called once on connect()
+	VERIFY(!utun_pipe_controller_isset(pcb));
+	if (pcb->utun_use_upp) {
+		pcb->utun_pipe_controller = &utun_pipe_controller_info[PIPE_CONTROLLER_INFO_IDX_UPP_ENABLED];
+	} else {
+		pcb->utun_pipe_controller = &utun_pipe_controller_info[PIPE_CONTROLLER_INFO_IDX_UPP_DISABLED];
+	}
+	lck_rw_unlock_exclusive(&pcb->utun_pcb_lock);
+}
+
 static errno_t
 utun_register_kernel_pipe_nexus(struct utun_pcb *pcb)
 {
 	nexus_attr_t __single nxa = NULL;
 	errno_t result;
 
+	utun_pipe_controller_set(pcb);
+
 	lck_mtx_lock(&utun_lock);
-	if (utun_ncd_refcount++) {
+	if (pcb->utun_pipe_controller->utun_ncd_refcount++) {
 		lck_mtx_unlock(&utun_lock);
 		return 0;
 	}
 
-	result = kern_nexus_controller_create(&utun_ncd);
+	result = kern_nexus_controller_create(&pcb->utun_pipe_controller->utun_ncd);
 	if (result) {
 		os_log_error(OS_LOG_DEFAULT, "%s: kern_nexus_controller_create failed: %d\n",
 		    __FUNCTION__, result);
@@ -1416,15 +1476,20 @@ utun_register_kernel_pipe_nexus(struct utun_pcb *pcb)
 	result = kern_nexus_attr_set(nxa, NEXUS_ATTR_RX_SLOTS, ring_size);
 	VERIFY(result == 0);
 
+	if (pcb->utun_use_upp) {
+		result = kern_nexus_attr_set(nxa, NEXUS_ATTR_USER_PACKET_POOL, 1);
+		VERIFY(result == 0);
+	}
+
 	nexus_domain_provider_name_t domain_provider_name = "com.apple.nexus.utun.kpipe";
 
-	result = kern_nexus_controller_register_provider(utun_ncd,
+	result = kern_nexus_controller_register_provider(pcb->utun_pipe_controller->utun_ncd,
 	    dom_prov,
 	    domain_provider_name,
 	    &prov_init,
 	    sizeof(prov_init),
 	    nxa,
-	    &utun_kpipe_uuid);
+	    &pcb->utun_pipe_controller->utun_kpipe_uuid);
 	if (result) {
 		os_log_error(OS_LOG_DEFAULT, "%s: kern_nexus_controller_register_provider failed: %d\n",
 		    __FUNCTION__, result);
@@ -1437,11 +1502,11 @@ done:
 	}
 
 	if (result) {
-		if (utun_ncd) {
-			kern_nexus_controller_destroy(utun_ncd);
-			utun_ncd = NULL;
+		if (pcb->utun_pipe_controller->utun_ncd != NULL) {
+			kern_nexus_controller_destroy(pcb->utun_pipe_controller->utun_ncd);
+			pcb->utun_pipe_controller->utun_ncd = NULL;
 		}
-		utun_ncd_refcount = 0;
+		pcb->utun_pipe_controller->utun_ncd_refcount = 0;
 	}
 
 	lck_mtx_unlock(&utun_lock);
@@ -1450,15 +1515,15 @@ done:
 }
 
 static void
-utun_unregister_kernel_pipe_nexus(void)
+utun_unregister_kernel_pipe_nexus(struct utun_pcb *pcb)
 {
 	lck_mtx_lock(&utun_lock);
 
-	VERIFY(utun_ncd_refcount > 0);
+	VERIFY(pcb->utun_pipe_controller->utun_ncd_refcount > 0);
 
-	if (--utun_ncd_refcount == 0) {
-		kern_nexus_controller_destroy(utun_ncd);
-		utun_ncd = NULL;
+	if (--pcb->utun_pipe_controller->utun_ncd_refcount == 0) {
+		kern_nexus_controller_destroy(pcb->utun_pipe_controller->utun_ncd);
+		pcb->utun_pipe_controller->utun_ncd = NULL;
 	}
 
 	lck_mtx_unlock(&utun_lock);
@@ -1514,7 +1579,7 @@ utun_detach_channels(struct utun_pcb *pcb, struct utun_detached_channels *dc)
 }
 
 static void
-utun_free_channels(struct utun_detached_channels *dc)
+utun_free_channels(struct utun_pcb *pcb, struct utun_detached_channels *dc)
 {
 	if (!dc->count) {
 		return;
@@ -1522,7 +1587,7 @@ utun_free_channels(struct utun_detached_channels *dc)
 
 	for (int i = 0; i < dc->count; i++) {
 		errno_t result;
-		result = kern_nexus_controller_free_provider_instance(utun_ncd,
+		result = kern_nexus_controller_free_provider_instance(pcb->utun_pipe_controller->utun_ncd,
 		    dc->uuids[i]);
 		VERIFY(!result);
 	}
@@ -1530,7 +1595,7 @@ utun_free_channels(struct utun_detached_channels *dc)
 	VERIFY(dc->pp);
 	kern_pbufpool_destroy(dc->pp);
 
-	utun_unregister_kernel_pipe_nexus();
+	utun_unregister_kernel_pipe_nexus(pcb);
 
 	memset(dc, 0, sizeof(*dc));
 }
@@ -1556,7 +1621,7 @@ utun_enable_channel(struct utun_pcb *pcb, struct proc *proc)
 		return result;
 	}
 
-	VERIFY(utun_ncd);
+	VERIFY(pcb->utun_pipe_controller->utun_ncd);
 
 	lck_rw_lock_exclusive(&pcb->utun_pcb_lock);
 
@@ -1596,8 +1661,8 @@ utun_enable_channel(struct utun_pcb *pcb, struct proc *proc)
 
 	for (unsigned int i = 0; i < pcb->utun_kpipe_count; i++) {
 		VERIFY(uuid_is_null(pcb->utun_kpipe_uuid[i]));
-		result = kern_nexus_controller_alloc_provider_instance(utun_ncd,
-		    utun_kpipe_uuid, pcb, NULL, &pcb->utun_kpipe_uuid[i], &init);
+		result = kern_nexus_controller_alloc_provider_instance(pcb->utun_pipe_controller->utun_ncd,
+		    pcb->utun_pipe_controller->utun_kpipe_uuid, pcb, NULL, &pcb->utun_kpipe_uuid[i], &init);
 
 		if (result == 0) {
 			nexus_port_t port = NEXUS_PORT_KERNEL_PIPE_CLIENT;
@@ -1607,7 +1672,7 @@ utun_enable_channel(struct utun_pcb *pcb, struct proc *proc)
 			if (!pid && !has_proc_uuid) {
 				pid = proc_pid(proc);
 			}
-			result = kern_nexus_controller_bind_provider_instance(utun_ncd,
+			result = kern_nexus_controller_bind_provider_instance(pcb->utun_pipe_controller->utun_ncd,
 			    pcb->utun_kpipe_uuid[i], &port,
 			    pid, has_proc_uuid ? pcb->utun_kpipe_proc_uuid : uuid_null, NULL,
 			    0, has_proc_uuid ? NEXUS_BIND_EXEC_UUID : NEXUS_BIND_PID);
@@ -1617,7 +1682,7 @@ utun_enable_channel(struct utun_pcb *pcb, struct proc *proc)
 			/* Unwind all of them on error */
 			for (int j = 0; j < UTUN_IF_MAX_RING_COUNT; j++) {
 				if (!uuid_is_null(pcb->utun_kpipe_uuid[j])) {
-					kern_nexus_controller_free_provider_instance(utun_ncd,
+					kern_nexus_controller_free_provider_instance(pcb->utun_pipe_controller->utun_ncd,
 					    pcb->utun_kpipe_uuid[j]);
 					uuid_clear(pcb->utun_kpipe_uuid[j]);
 				}
@@ -1634,7 +1699,7 @@ done:
 			kern_pbufpool_destroy(pcb->utun_kpipe_pp);
 			pcb->utun_kpipe_pp = NULL;
 		}
-		utun_unregister_kernel_pipe_nexus();
+		utun_unregister_kernel_pipe_nexus(pcb);
 	} else {
 		utun_flag_set(pcb, UTUN_FLAGS_KPIPE_ALLOCATED);
 	}
@@ -2212,7 +2277,7 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 
 			lck_rw_unlock_exclusive(&pcb->utun_pcb_lock);
 
-			utun_free_channels(&dc);
+			utun_free_channels(pcb, &dc);
 			utun_nexus_detach(pcb);
 
 			/* Decrement refcnt added by ifnet_datamov_suspend_and_drain(). */
@@ -2223,7 +2288,7 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 			lck_rw_unlock_exclusive(&pcb->utun_pcb_lock);
 
 #if UTUN_NEXUS
-			utun_free_channels(&dc);
+			utun_free_channels(pcb, &dc);
 #endif // UTUN_NEXUS
 
 			/*
@@ -2614,6 +2679,30 @@ utun_ctl_setopt(__unused kern_ctl_ref kctlref,
 		pcb->utun_kpipe_rx_ring_size = ring_size;
 		break;
 	}
+
+	case UTUN_OPT_USER_PACKET_POOL: {
+		if (len != sizeof(int)) {
+			result = EMSGSIZE;
+			break;
+		}
+		if (pcb->utun_ifp != NULL) {
+			// Only can set before connecting
+			result = EINVAL;
+			break;
+		}
+		lck_rw_lock_exclusive(&pcb->utun_pcb_lock);
+		// utun_use_ppp is used to determine which pipe controller we use
+		// since they'll have different attribites to enable / disable upp.
+		// Once it's set, it needs to stay in sync with utun_use_upp.
+		if (utun_pipe_controller_isset(pcb)) {
+			// connect() in progress
+			result = EINPROGRESS;
+		} else {
+			pcb->utun_use_upp = *(int *)data != 0;
+		}
+		lck_rw_unlock_exclusive(&pcb->utun_pcb_lock);
+		break;
+	}
 #endif // UTUN_NEXUS
 	default: {
 		result = ENOPROTOOPT;
@@ -2787,6 +2876,16 @@ utun_ctl_getopt(__unused kern_ctl_ref kctlref,
 			result = EMSGSIZE;
 		} else {
 			*(u_int32_t *)data = pcb->utun_kpipe_rx_ring_size;
+		}
+		break;
+	}
+	case UTUN_OPT_USER_PACKET_POOL: {
+		if (*len != sizeof(int)) {
+			result = EMSGSIZE;
+		} else {
+			lck_rw_lock_shared(&pcb->utun_pcb_lock);
+			*(int *)data = pcb->utun_use_upp ? 1 : 0;
+			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
 		}
 		break;
 	}

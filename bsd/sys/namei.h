@@ -125,6 +125,9 @@ struct nameidata {
 	struct componentname ni_cnd;
 	int32_t ni_flag;
 	int ni_ncgeneration;            /* For a batched vnop, grab generation beforehand */
+
+	/* arguments to namei */
+	int ni_atfd;
 };
 
 #define NAMEI_CONTLOOKUP        0x002    /* Continue processing a lookup which was partially processed in a compound VNOP */
@@ -154,6 +157,10 @@ struct nameidata {
 #define NAMEI_NOXATTRS          0x80000 /* prevent a path lookup on named streams */
 
 #define NAMEI_UNIQUE            0x100000 /* prevent a path lookup from succeeding on a vnode with multiple links */
+#define NAMEI_NOUNION           0x200000 /* prevent a path lookup on filesystem with MNT_UNION from traversing to covered filesystem */
+#define NAMEI_ATFD              0x400000 /* use the fd passed as the starting directory for lookup */
+
+#define NAMEI_FIRMLINK_FOLLOWED 0x800000 /* Firmlink followed since last root encounter */
 
 #ifdef KERNEL
 /*
@@ -224,6 +231,7 @@ struct nameidata {
 	(ndp)->ni_cnd.cn_context = ctx; \
 	(ndp)->ni_flag = 0; \
 	(ndp)->ni_cnd.cn_ndp = (ndp); \
+	(ndp)->ni_atfd = -2; \
 }
 
 #endif /* KERNEL */
@@ -277,6 +285,7 @@ boolean_t       vnode_cache_is_stale(vnode_t vp);
 boolean_t       vnode_cache_is_authorized(vnode_t vp, vfs_context_t context, kauth_action_t action);
 int             lookup_validate_creation_path(struct nameidata *ndp);
 int             namei_compound_available(vnode_t dp, struct nameidata *ndp);
+bool            mount_skip_rsrc_lookup(mount_t mp);
 
 #endif /* KERNEL */
 

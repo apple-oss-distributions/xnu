@@ -87,7 +87,7 @@ skip; /* processor_set_destroy */
 skip; /* processor_set_max_priority */
 skip; /* processor_set_policy_enable */
 skip; /* processor_set_policy_disable */
-#else
+#else /* !KERNEL_SERVER */
 routine processor_set_destroy(
 		set		: processor_set_t);
 
@@ -104,7 +104,7 @@ routine processor_set_policy_disable(
 		processor_set	: processor_set_t;
 		policy		: int;
 		change_threads	: boolean_t);
-#endif
+#endif /* !KERNEL_SERVER */
 
 /*
  *	List all tasks in processor set.
@@ -114,31 +114,21 @@ routine processor_set_tasks(
 	out	task_list	: task_array_t);
 
 /*
- *	List all threads in processor set.
- */
-routine processor_set_threads(
-		processor_set	: processor_set_t;
-	out	thread_list	: thread_act_array_t);
-
-/*
  * OBSOLETE interfaces, removed from kernel
  */
 #if KERNEL_SERVER
+skip; /* processor_set_threads */
 skip; /* processor_set_policy_control */
-#else
+skip; /* processor_set_stack_usage */
+#else /* !KERNEL_SERVER */
+routine processor_set_threads(
+		processor_set	: processor_set_t;
+	out	thread_list	: thread_act_array_t);
 routine processor_set_policy_control(
 	pset			: processor_set_t;
 	flavor			: processor_set_flavor_t;
 	policy_info		: processor_set_info_t;
 	change			: boolean_t);
-#endif
-
-
-/*
- *	Debug Info
- *      This call is only valid on DEVELOPMENT kernels.
- *      Otherwise, KERN_FAILURE is returned.
- */
 routine processor_set_stack_usage(
 		pset		: processor_set_t;
 	out	ltotal		: unsigned;
@@ -146,6 +136,7 @@ routine processor_set_stack_usage(
 	out	resident	: vm_size_t;
 	out	maxusage	: vm_size_t;
 	out	maxstack	: vm_offset_t);
+#endif /* !KERNEL_SERVER */
 
 /*
  *      Get information about processor set.

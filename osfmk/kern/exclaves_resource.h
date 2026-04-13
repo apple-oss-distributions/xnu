@@ -106,6 +106,7 @@ typedef enum __attribute__((flag_enum)) {
 typedef struct {
 	uint64_t aoei_serviceid;
 	uint8_t aoei_message_count;
+	uint8_t aoei_messenger_count;
 	uint8_t aoei_work_count;
 	uint8_t aoei_worker_count;
 	bool aoei_associated;
@@ -113,8 +114,11 @@ typedef struct {
 	uint64_t aoei_assertion_id;
 } aoe_item_t;
 
-/* The highest service identifier in any conclave. */
-#define CONCLAVE_SERVICE_MAX 256
+/* The highest service identifier in any conclave. Needs to be raised together
+ * with the number of IDs in xnuproxy_exclaves_t on
+ * xnu-proxy/xnu_proxy_endpoints_defs.h in ExclaveCoreBundle
+ */
+#define CONCLAVE_SERVICE_MAX 768
 
 typedef struct {
 	conclave_state_t       c_state;
@@ -131,6 +135,7 @@ typedef struct {
 	 * Always-On Exclaves specific.
 	 */
 	queue_head_t           c_aoe_q;
+	bool                   c_aoe_using_free_agents;
 } conclave_resource_t;
 
 typedef struct {
@@ -145,11 +150,35 @@ typedef struct {
 	/* how many times *this* sensor resource handle has been
 	 * used to call sensor_start */
 	uint64_t s_startcount;
+	bool s_initialised;
 } sensor_resource_t;
 
+/*
+ * Notification resource structure for kqueue-based notifications.
+ * Used with XNUPROXY_RESOURCETYPE_NOTIFICATION.
+ * One resource per notification ID, indexed in kernel domain's ID table for
+ * upcall lookup, but accessible by name from multiple domains' name tables.
+ */
 typedef struct {
-	struct klist notification_klist;
+	struct klist notification_klist;        /* List of knotes for kqueue-based notifications */
 } exclaves_notification_t;
+
+/* Port list entry for daemon notifications */
+typedef struct daemon_notification_port_entry {
+	queue_chain_t link;                      /* Queue linkage */
+	ipc_port_t    port;                      /* Send right for mach port-based Daemon notification */
+} daemon_notification_port_entry_t;
+
+/*
+ * Daemon notification resource structure for Mach message-based notifications.
+ * Used with XNUPROXY_RESOURCETYPE_DAEMONNOTIFICATION.
+ * One resource per notification ID, indexed in kernel domain's ID table for
+ * upcall lookup, but accessible by name from multiple domains' name tables,
+ * where each listener needs to have a registration.
+ */
+typedef struct {
+	queue_head_t registered_ports; /* Queue of daemon_notification_port_entry_t (wrapping ipc_port_t) */
+} exclaves_daemon_notification_resource_t;
 
 /*
  * Every resource has an associated name and some other common state.
@@ -167,10 +196,11 @@ typedef struct exclaves_resource {
 	bool                r_connected;
 
 	union {
-		conclave_resource_t     r_conclave;
-		sensor_resource_t       r_sensor;
-		exclaves_notification_t r_notification;
-		shared_memory_resource_t r_shared_memory;
+		conclave_resource_t                      r_conclave;
+		sensor_resource_t                        r_sensor;
+		exclaves_notification_t                  r_notification;
+		exclaves_daemon_notification_resource_t  r_daemon_notification;
+		shared_memory_resource_t                 r_shared_memory;
 	};
 } exclaves_resource_t;
 
@@ -710,6 +740,21 @@ exclaves_notification_create(const char *domain, const char *name,
 extern kern_return_t
 exclaves_notification_signal(exclaves_resource_t *resource, long event_mask);
 
+/*!
+ * @function exclaves_daemon_notification_signal
+ *
+ * @abstract
+ * To be called to send a mach message notification to a registered daemon port.
+ *
+ * @param resource
+ * Notification resource.
+ *
+ * @return
+ * KERN_SUCCESS on success, error code otherwise.
+ */
+extern kern_return_t
+exclaves_daemon_notification_signal(exclaves_resource_t *resource);
+
 
 /*!
  * @function exclaves_notificatione_lookup_by_id
@@ -872,19 +917,24 @@ exclaves_resource_shared_memory_get_buffer(exclaves_resource_t *resource,
     size_t *buffer_len);
 
 /* -------------------------------------------------------------------------- */
-#pragma mark Arbitrated Audio Memory
+#pragma mark Arbitrated Memory
 
 /*!
- * @function exclaves_resource_audio_memory_map
+ * @function exclaves_resource_arbitrated_memory_map
  *
  * @abstract
- * Map an audio memory resource.
+ * Map an arbitrated memory resource.
+ *
+ * @param type
+ * The resourcetype being mapped, supported types:
+ * XNUPROXY_RESOURCETYPE_ARBITRATEDMEMORY,
+ * XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY
  *
  * @param domain
  * The domain to search.
  *
  * @param name
- * The name of audio memory resource.
+ * The name of the arbitrated memory resource.
  *
  * @param size
  * Size of named buffer region to map.
@@ -900,32 +950,33 @@ exclaves_resource_shared_memory_get_buffer(exclaves_resource_t *resource,
  * exclaves_resource_release().
  */
 extern kern_return_t
-exclaves_resource_audio_memory_map(const char *domain, const char *name, size_t size,
+exclaves_resource_arbitrated_memory_map(xnuproxy_resourcetype_s type,
+    const char *domain, const char *name, size_t size,
     exclaves_resource_t **resource);
 
 /*!
- * @function exclaves_resource_audio_memory_copyout
+ * @function exclaves_resource_arbitrated_memory_copyout
  *
  * @abstract
- * Copy user data into a audio memory.
+ * Copyout from an arbitrated memory resource buffer into user memory
  *
  * @param resource
- * audio memory resource.
+ * Arbitrated memory resource.
  *
  * @param ubuffer
- * Destination to copy data to.
+ * Destination to copy data out to.
  *
- * @param usize1
+ * @param usize
  * Size of data to copy.
  *
- * @param uoffset1
- * Offset into the audio memory.
+ * @param uoffset
+ * Start copy offset in the arbitrated buffer.
  *
- * @param usize2
- * Size of 2nd range of data to copy (can be 0).
+ * @param uparam1
+ * Additional user param.
  *
- * @param uoffset2
- * Offset of 2nd range into the audio memory.
+ * @param uparam2
+ * Additional user param.
  *
  * @param ustatus
  * Destination to copy status to.
@@ -934,10 +985,9 @@ exclaves_resource_audio_memory_map(const char *domain, const char *name, size_t 
  * KERN_SUCCESS or error code on failure.
  */
 extern kern_return_t
-exclaves_resource_audio_memory_copyout(exclaves_resource_t *resource,
-    user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
-    mach_vm_size_t usize2, mach_vm_size_t uoffset2, user_addr_t ustatus);
-
+exclaves_resource_arbitrated_memory_copyout(exclaves_resource_t *resource,
+    user_addr_t ubuffer, mach_vm_size_t usize, mach_vm_size_t uoffset,
+    uint64_t uparam1, uint64_t uparam2, user_addr_t ustatus);
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Always-On Exclaves Services
@@ -964,6 +1014,10 @@ exclaves_resource_aoeservice_iterate(const char *domain,
 
 extern exclaves_resource_t *
 exclaves_resource_lookup_by_name(const char *domain_name, const char *name,
+    xnuproxy_resourcetype_s type);
+
+extern exclaves_resource_t *
+exclaves_resource_lookup_by_id(const char *domain_name, uint64_t id,
     xnuproxy_resourcetype_s type);
 
 __END_DECLS

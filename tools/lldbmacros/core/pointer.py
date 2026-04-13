@@ -77,65 +77,16 @@ class PointerPolicy(object, metaclass=ABCMeta):
         """ Returns pointer value that debugger should operate on. """
 
 
-# Pointers need to have their TBI byte stripped if in use. TBI KASan,
-# for instance, tags pointers to detect improper memory accesses. Reading
-# values from such tagged pointers fails.
-#
-# Stripping the pointers requires to learn whether TBI is in use or not.
-# We do that by checking presence of 'kasan_tbi_enabled' symbol which only
-# exists on the TBI KASan variant. Since KASan is one of more TBI
-# consumers (along with PAC or Sandbox) this is not an ideal approach.
-# Inspecting respective CPU state would be more appropriate.
-
-
 class NativePointer(PointerPolicy, metaclass=Singleton):
     """ Policy for native pointers.
-
-        Strips top bits of a pointer if TBI is in use. Otherwise
-        pointer is used as-is.
 
         Native pointers do not have any per-pointer attributes so this policy
         can be singleton instance.
     """
 
-    @staticmethod
-    @cache_statically
-    def isTagged(target=None):
-        """ Pointer stripping isn't required as of recent lldb changes that fixed ignoring
-        non-addresable bits.
-        Due to performance degredation on relevant coredumps, stripping is being
-        as a quick remedy.
-        Depending on future debugging needs, it'll be removed completely, or improved
-        to have acceptable performance.
-        """
-        is_tagged = False
-
-        """ Returns true on TBI KASan targets, false otherwise. """
-        # is_tagged = target.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
-        return is_tagged
-
-    def __init__(self):
-        if self.isTagged():
-            self._stripPtr = self.stripPtr
-        else:
-            self._stripPtr = lambda val: val
-
     @classmethod
     def match(cls, sbvalue):
         return cls() if sbvalue.GetType().IsPointerType() else None
 
-    @staticmethod
-    def stripPtr(sbvalue: lldb.SBValue):
-        """ Strips the TBI byte value. Since the value is not a plain value but
-            represents a value of a variable, a register or an expression the
-            conversion is performed by (re-)creating the value through expression.
-        """
-        if sbvalue.GetValueAsAddress() != sbvalue.GetValueAsUnsigned():
-            addr = sbvalue.GetValueAsAddress()
-            sbv_new = sbvalue.CreateValueFromExpression(None, '(void *)' + str(addr))
-            return sbv_new.Cast(sbvalue.GetType())
-
-        return sbvalue
-
     def GetPointerSBValue(self, sbvalue):
-        return self._stripPtr(sbvalue)
+        return sbvalue

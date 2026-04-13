@@ -123,7 +123,7 @@
 #define kMultiUserCurrentUserMask       0x3fffffff      // the current user UID of the multiuser device
 
 #ifndef __ASSEMBLER__
-#include <sys/commpage.h>
+#include <sys/commpage_private.h>
 
 __BEGIN_DECLS
 extern uint64_t _get_cpu_capabilities( void );
@@ -398,6 +398,7 @@ _Static_assert((_COMM_PAGE64_BASE_ADDRESS >= _COMM_PAGE64_NESTING_START) &&
  * address to text comm page is from apple array */
 #define _COMM_PAGE_TEXT_ATOMIC_ENQUEUE                  (0x0)
 #define _COMM_PAGE_TEXT_ATOMIC_DEQUEUE                  (0x4)
+#define _COMM_PAGE_TEXT_ATOMIC_TPIDR_EL0                (0x8)
 
 #else /* __LP64__ */
 /* No 32 bit text region */

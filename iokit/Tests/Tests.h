@@ -43,6 +43,7 @@ extern int IOMemoryDescriptorCreateMTEMappingInThisMapTest(void);
 extern int IOMemoryDescriptorCreateMTEMappingInOtherMapTest(void);
 extern int IOMemoryDescriptorCreateMTEMappingInKernelMapTest(void);
 #endif /* HAS_MTE */
+IOReturn IOMemoryDescriptorVNodeTest(int arg);
 
 #define kIOServiceTestServiceManagementEntitlementKey "com.apple.iokit.test-service-management"
 

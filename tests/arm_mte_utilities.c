@@ -291,7 +291,7 @@ allocate_tagged_memory(
 		mach_task_self(),
 		&addr,
 		size,
-		VM_FLAGS_ANYWHERE | VM_FLAGS_MTE);
+		VM_FLAGS_ANYWHERE | VM_FLAGS_MTE | VM_FLAGS_RANDOM_ADDR);
 	T_ASSERT_MACH_SUCCESS(kr, "Allocated tagged page");
 	T_QUIET; T_ASSERT_NE_ULLONG(0ULL, addr, "Allocated address is not null");
 
@@ -395,7 +395,7 @@ allocate_untagged_memory(mach_vm_size_t size)
 		mach_task_self(),
 		&addr,
 		size,
-		VM_FLAGS_ANYWHERE );
+		VM_FLAGS_ANYWHERE | VM_FLAGS_RANDOM_ADDR);
 	T_ASSERT_MACH_SUCCESS(kr, "Allocated untagged page");
 	T_QUIET; T_ASSERT_NE_ULLONG(0ULL, addr, "Allocated address is not null");
 

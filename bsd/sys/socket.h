@@ -827,7 +827,7 @@ __END_DECLS
 #include <sys/kpi_socket.h>
 #endif
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/socket_private.h>
 #endif
 

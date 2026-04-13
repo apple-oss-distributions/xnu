@@ -37,6 +37,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
+#include <mach/vm_types.h>
 
 __BEGIN_DECLS
 
@@ -58,7 +59,6 @@ __enum_decl(mach_vm_reclaim_state_t, uint32_t, {
 	VM_RECLAIM_BUSY        = 4,
 });
 
-#define err_vm_reclaim(e) (err_vm | err_sub(1) | e)
 
 __enum_decl(mach_vm_reclaim_error_t, mach_error_t, {
 	VM_RECLAIM_SUCCESS             = ERR_SUCCESS,

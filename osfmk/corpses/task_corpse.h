@@ -129,9 +129,12 @@ extern kern_return_t current_thread_collect_backtrace_info(
 	void *reason);
 
 extern void task_add_to_corpse_task_list(task_t corpse_task);
-void task_remove_from_corpse_task_list(task_t corpse_task);
-void task_purge_all_corpses(void);
-kern_return_t find_corpse_task_by_uniqueid_grp(uint64_t uid, task_t *target, task_grp_t grp);
+extern void task_remove_from_corpse_task_list(task_t corpse_task);
+extern void task_purge_all_corpses(void);
+extern kern_return_t find_corpse_task_by_uniqueid_grp(
+	uint64_t uid,
+	task_t *target,
+	task_grp_t grp);
 extern uint64_t task_corpse_get_crashed_thread_id(task_t corpse_task);
 
 #endif /* XNU_KERNEL_PRIVATE */

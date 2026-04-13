@@ -501,4 +501,18 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
 	inout	max_protection	: vm_prot_t;
 		inheritance	: vm_inherit_t);
 
+/*
+ * Relocate the pages of the source range of the specified map to a new range
+ * of the given size in bytes within the same map.
+ */
+routine PREFIX(vm_reallocate) (
+			target_task		: vm_map_t;
+			src				: vm_address_t;
+			src_size		: vm_size_t;
+	inout	dst				: vm_address_t;
+  			dst_size 		: vm_size_t;
+			align_mask		: vm_offset_t;
+			options		    : int;
+			flags			: int);
+
 /* vim: set ft=c : */

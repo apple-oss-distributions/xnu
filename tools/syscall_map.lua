@@ -502,6 +502,12 @@ local syscalls = {
         'void *p6',
       },
     },
+
+    { number = 108, name = 'thread_set_x86_64_compat',
+      arguments = {
+        'uint32_t enable',
+      },
+    },
   },
 }
 

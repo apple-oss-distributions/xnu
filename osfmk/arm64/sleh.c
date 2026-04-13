@@ -35,7 +35,7 @@
 #include <arm/trap_internal.h> /* for IS_ARM_GDB_TRAP() et al */
 #include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
-#include <arm64/monotonic.h>
+#include <kern/cpc.h>
 #include <arm64/instructions.h>
 
 #include <kern/debug.h>
@@ -52,6 +52,7 @@
 
 #include <machine/atomic.h>
 #include <machine/limits.h>
+#include <machine/machine_cpc.h>
 
 #include <pexpert/arm/protos.h>
 #include <pexpert/arm64/apple_arm64_cpu.h>
@@ -94,6 +95,7 @@
 #if HAS_MTE
 #include <arm64/mte_xnu.h>
 #endif /* HAS_MTE */
+
 
 
 #ifndef __arm64__
@@ -508,8 +510,9 @@ tag_check_fault_type(pmap_t pmap, vm_map_address_t fault_address)
 #endif /* HAS_MTE */
 
 
+
 static inline int
-is_servicible_fault(fault_status_t status, uint64_t esr)
+is_servicible_fault(fault_status_t status, uint64_t esr, vm_offset_t fault_addr, pmap_t pmap)
 {
 #if HAS_MTE
 	if (is_tag_check_fault(status)) {
@@ -537,6 +540,9 @@ is_servicible_fault(fault_status_t status, uint64_t esr)
 #else
 #pragma unused(esr)
 #endif
+
+#pragma unused(fault_addr, pmap)
+
 	return is_vm_fault(status);
 }
 
@@ -686,7 +692,7 @@ sleh_synchronous_sp1(arm_context_t *context, uint64_t esr, vm_offset_t far __unu
 
 __attribute__((noreturn))
 void
-thread_exception_return()
+thread_exception_return(void)
 {
 	thread_t thread = current_thread();
 	if (thread->machine.exception_trace_code != 0) {
@@ -695,9 +701,7 @@ thread_exception_return()
 		thread->machine.exception_trace_code = 0;
 	}
 
-#if HAS_MTE
 	thread->machine.el0_synchronous_trap = false;
-#endif /* HAS_MTE */
 
 #if KASAN_TBI
 	kasan_unpoison_curstack(true);
@@ -928,11 +932,9 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		ml_set_interrupts_enabled(TRUE);
 	}
 
-#if HAS_MTE
 	if (is_user) {
 		thread->machine.el0_synchronous_trap = true;
 	}
-#endif
 
 	switch (class) {
 	case ESR_EC_SVC_64:
@@ -1170,11 +1172,9 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 	}
 #endif
 
-#if HAS_MTE
 	if (is_user) {
 		thread->machine.el0_synchronous_trap = false;
 	}
-#endif
 }
 
 /*
@@ -1924,6 +1924,8 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	mach_exception_data_type_t codes[2];
 	mach_msg_type_number_t     numcodes = 2;
 	thread_t                   thread   = current_thread();
+	vm_map_t                   map      = thread->map;
+	pmap_t                     pmap     = map->pmap;
 
 	(void)expected_fault_handler;
 
@@ -1933,7 +1935,7 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 
 	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling abort from userspace */
 
-	if (!is_servicible_fault(fault_code, esr) &&
+	if (!is_servicible_fault(fault_code, esr, fault_addr, pmap) &&
 	    thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
 		thread_reset_pcs_done_faulting(thread);
 	}
@@ -1947,7 +1949,6 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	} else
 #endif
 	if (is_vm_fault(fault_code)) {
-		vm_map_t        map = thread->map;
 		vm_offset_t     vm_fault_addr = fault_addr;
 		kern_return_t   result = KERN_FAILURE;
 
@@ -1959,7 +1960,7 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 
 		/* check to see if it is just a pmap ref/modify fault */
 		if (!is_translation_fault(fault_code)) {
-			result = arm_fast_fault(map->pmap,
+			result = arm_fast_fault(pmap,
 			    vm_fault_addr,
 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
 		}
@@ -1977,6 +1978,19 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 		}
 		if (result == KERN_SUCCESS || result == KERN_ABORTED) {
 			return;
+		}
+
+		if (result == KERN_INVALID_GUARD_OBJECT_SLOT) {
+			/*
+			 * use OS_REASON_MTE_FAIL even for guard objects,
+			 * launchd(1) doesn't get the exception_type through
+			 * libproc, so it's easier to use that namespace
+			 * for all Memory Integrity Enforcement features.
+			 */
+			exit_with_fatal_exception_and_notify(current_proc(),
+			    OS_REASON_MTE_FAIL, exc, result, fault_addr, PX_KTRIAGE);
+			thread_exception_return();
+			__builtin_unreachable();
 		}
 
 		/*
@@ -2068,14 +2082,6 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	const self_restrict_mode_t self_restrict_mode = user_fault_in_self_restrict_mode(thread);
 	if ((self_restrict_mode != SELF_RESTRICT_NONE) &&
 	    task_is_jit_exception_fatal(get_threadtask(thread))) {
-		int flags = PX_KTRIAGE;
-		exception_info_t info = {
-			.os_reason = OS_REASON_SELF_RESTRICT,
-			.exception_type = exc,
-			.mx_code = codes[0],
-			.mx_subcode = codes[1]
-		};
-
 #if MACH_ASSERT
 		/*
 		 * Case: panic_on_jit_guard=1. Catch an early process creation TPRO issue causing
@@ -2108,7 +2114,11 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 		}
 #endif /* MACH_ASSERT */
 
-		exit_with_mach_exception(current_proc(), info, flags);
+		/* Perform fatal exception logic. */
+		exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_SELF_RESTRICT,
+		    exc, codes[0], codes[1], PX_KTRIAGE);
+		thread_exception_return();
+		__builtin_unreachable();
 	}
 
 #if HAS_MTE
@@ -2129,15 +2139,16 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 			thread_exception_return();
 		}
 
-		/* Hard-mode: */
-		int flags = PX_KTRIAGE;
-		exception_info_t info = {
-			.os_reason = OS_REASON_MTE_FAIL,
-			.exception_type = exc,
-			.mx_code = codes[0],
-			.mx_subcode = codes[1]
-		};
-		exit_with_mach_exception(current_proc(), info, flags);
+		if (is_address_space_debugged(current_proc())) {
+			exception_triage(exc, codes, numcodes);
+			__builtin_unreachable();
+		}
+
+		/* Hard-mode: Perform fatal exception logic. */
+		exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_MTE_FAIL,
+		    exc, codes[0], codes[1], PX_KTRIAGE);
+		thread_exception_return();
+		__builtin_unreachable();
 	}
 #endif /* HAS_MTE */
 
@@ -2234,6 +2245,63 @@ handle_kernel_abort_recover(
 	handle_kernel_abort_recover_with_error_code(state, esr, fault_addr, thread, recover, EFAULT);
 }
 
+static void
+record_async_map_fault_address(
+	vm_map_t                map,
+	uint64_t                code,
+	vm_map_address_t        fault_address)
+{
+	vm_map_async_fault_t fault = {
+		.code    = code,
+		.address = fault_address,
+	};
+
+	/*
+	 * Attempt to report the faulting address. If this fails, we know that
+	 * a faulting address has already been reported. Accordingly, we can
+	 * just ignore the failure and continue on since we never send more than
+	 * one async fault guard exception per task anyway.
+	 */
+
+	(void)os_atomic_cmpxchg(&map->async_fault,
+	    (vm_map_async_fault_t){ }, fault, relaxed);
+
+	/*
+	 * We cannot set the AST here, as we'd need to take a task lock and we
+	 * may deadlock. On exit from the switched map operation or on return
+	 * from the IOMD read/writeBytes path, the caller will check whether
+	 * an exception happened by inspecting `async_fault.code` and
+	 * act accordingly.
+	 */
+}
+
+/*
+ * We took a fault accessing a userspace address, while in a kernel thread that
+ * temporarily switched to the user map in order to do work on behalf of the
+ * target process.  Record onto the map the faulting address.
+ *
+ * This is essentially a thin layer over record_async_map_fault_address(),
+ * just adding a bunch of sanity checks that we don't start hitting unexpected
+ * faults.
+ */
+static void
+record_async_kernel_interposed_map_fault_address(
+	uint64_t                code,
+	vm_map_address_t        fault_addr)
+{
+	vm_map_t map = current_map();
+
+	assert(vm_kernel_map_is_kernel(current_task()->map));
+	assert(!vm_kernel_map_is_kernel(map));
+
+	if (!map->owning_task && !map->terminated) {
+		panic("Kernel tag-check fault on %p @ %#llx prior to vm_map_setup",
+		    map, map->async_fault.address);
+	}
+
+	record_async_map_fault_address(map, code, fault_addr);
+}
+
 #if HAS_MTE
 static void
 mte_send_sync_soft_mode_exception(thread_t thread, vm_map_address_t address, mach_exception_data_type_t mx_code)
@@ -2241,7 +2309,7 @@ mte_send_sync_soft_mode_exception(thread_t thread, vm_map_address_t address, mac
 	uint64_t code = mx_code | kGUARD_EXC_MTE_SOFT_MODE;
 	EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
 	EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_SYNC_FAULT);
-	thread_guard_violation(thread, code, address, /* fatal */ false);
+	thread_guard_violation(thread, code, address, /* sticky */ false);
 }
 
 /*
@@ -2278,76 +2346,20 @@ mte_send_sync_kernel_on_user_fault(thread_t thread, vm_map_address_t fault_addr,
  * thread_guard_violation()->thread_ast_mach_exception().
  *
  * @param thread current thread.
- * @param mx_code must be either a TAG CHECK FAIL or a CANONICAL (TAG CHECK) FAIL.
+ * @param code must be either a TAG CHECK FAIL or a CANONICAL (TAG CHECK) FAIL.
  * @param fault_addr the address that the fault was taken on.
  */
 static void
-mte_send_async_ast_fault(thread_t thread, mach_exception_data_type_t mx_code, vm_map_address_t fault_addr)
+mte_send_async_ast_fault(thread_t thread, mach_exception_data_type_t code, vm_map_address_t fault_addr)
 {
-	assert(mx_code == EXC_ARM_MTE_TAGCHECK_FAIL || mx_code == EXC_ARM_MTE_CANONICAL_FAIL);
-	uint64_t code = mx_code;
 	bool soft_mode = task_has_sec_soft_mode(get_threadtask(thread));
 
+	assert(EXC_GUARD_DECODE_GUARD_TARGET(code) == EXC_ARM_MTE_TAGCHECK_FAIL ||
+	    EXC_GUARD_DECODE_GUARD_TARGET(code) == EXC_ARM_MTE_CANONICAL_FAIL);
 	if (soft_mode) {
 		code |= kGUARD_EXC_MTE_SOFT_MODE;
 	}
-
-	EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
-	EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_USER_FAULT);
-
-	thread_guard_violation(thread, code, fault_addr, /* not fatal in soft_mode */ !soft_mode);
-}
-
-static void
-mte_record_async_tag_check_fault_address(vm_map_t map, vm_map_address_t fault_address)
-{
-	/*
-	 * Verify the address being reported (and the min address of the map) don't
-	 * conflict with any of the magic values used by this mechanism. These
-	 * asserts should not fire currently as the first page of VA is not mappable
-	 * in user maps today.
-	 */
-	assert(fault_address >= VM_ASYNC_TAG_FAULT_MIN_VALID_ADDR);
-	assert(vm_map_min(map) >= VM_ASYNC_TAG_FAULT_MIN_VALID_ADDR);
-
-	/*
-	 * Attempt to report the faulting address. If this fails, we know that a
-	 * faulting address has already been reported. Accordingly, we can just
-	 * ignore the failure and continue on since we never send more than one MTE
-	 * guard exception per task anyway.
-	 */
-	(void)os_atomic_cmpxchg(&map->async_tag_fault_address, 0, fault_address, relaxed);
-
-	/*
-	 * We cannot set the AST here, as we'd need to take a task lock and we may
-	 * deadlock. On exit from the switched map operation or on return from
-	 * the IOMD read/writeBytes path, the caller will check whether an exception
-	 * happened by inspecting `async_tag_fault_address` and act accordingly.
-	 */
-}
-
-/*
- * We took a fault accessing a userspace address, while in a kernel thread that
- * temporarily switched to the user map in order to do work on behalf of the target process.
- * Record onto the map the faulting address.
- *
- * This is essentially a thin layer over mte_record_async_tag_check_fault(), just adding
- * a bunch of sanity checks that we don't start hitting unexpected faults.
- */
-static void
-mte_record_async_kernel_interposed_map_fault_address(vm_map_address_t fault_addr)
-{
-	vm_map_t map = current_map();
-
-	assert(vm_kernel_map_is_kernel(current_task()->map));
-	assert(!vm_kernel_map_is_kernel(map));
-
-	if (!map->owning_task && !map->terminated) {
-		panic("Kernel tag-check fault on %p @ %#llx prior to vm_map_setup",
-		    map, map->async_tag_fault_address);
-	}
-
-	mte_record_async_tag_check_fault_address(map, fault_addr);
+	thread_guard_violation(thread, code, fault_addr, /* not sticky in soft_mode */ !soft_mode);
 }
 
 static void
@@ -2388,6 +2400,10 @@ handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_
 	 * Recovery step will differ depending on whether we faulted on a user or kernel address.
 	 */
 	if (recover) {
+		mach_exception_data_type_t code;
+
+		code = tag_check_fault_type(current_map()->pmap, fault_addr);
+
 		if (is_user_addr) {
 			uint64_t error_code = EFAULT;
 			task_t owning_task = current_task();
@@ -2396,10 +2412,9 @@ handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_
 
 			if (in_el0_sync_trap) {
 				/* "Synchronous" software exception. */
-				mach_exception_data_type_t code = tag_check_fault_type(current_map()->pmap, fault_addr);
 				mte_send_sync_kernel_on_user_fault(thread, fault_addr, code);
 			} else {
-				/* "Asynchrnous" software exception */
+				/* "Asynchronous" software exception */
 #if DEVELOPMENT || DEBUG
 				if (mte_panic_on_async_fault()) {
 					panic_with_thread_kernel_state("Kernel AST tag check fault accessing user space", state);
@@ -2408,16 +2423,22 @@ handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_
 
 				if (is_kernel_thread) {
 					/* kernel thread executes with switched map. */
-					mte_record_async_kernel_interposed_map_fault_address(fault_addr);
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_KERN_FAULT);
+					record_async_kernel_interposed_map_fault_address(code, fault_addr);
 					owning_task = current_map()->owning_task;
 				} else {
 					/* Asynchronous but within current_thread() */
-					mach_exception_data_type_t code = tag_check_fault_type(current_map()->pmap, fault_addr);
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_USER_FAULT);
 					mte_send_async_ast_fault(thread, code, fault_addr);
 				}
 			}
-			/* If in soft-mode, retry with tag checking disabled. */
-			if (task_has_sec_soft_mode(owning_task)) {
+			/*
+			 * If in soft-mode, retry with tag checking disabled. If the map was terminated,
+			 * we raced down here killing the task, so the soft-mode check is moot.
+			 */
+			if (owning_task && task_has_sec_soft_mode(owning_task)) {
 				mte_disable_user_checking(owning_task);
 				error_code = EAGAIN;
 			}
@@ -2438,13 +2459,17 @@ handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_
 				task_t task_providing_faultable_buffer = current_thread_get_iomd_faultable_access_buffer_provider();
 				if (task_providing_faultable_buffer != NULL) {
 					/* Same drill as the kernel thread case above: record here the required information. */
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_KERN_FAULT);
 #if DEVELOPMENT || DEBUG
-					mte_record_async_tag_check_fault_address(task_providing_faultable_buffer->map, fault_addr);
+					record_async_map_fault_address(task_providing_faultable_buffer->map,
+					    code, fault_addr);
 					if (mte_panic_on_async_fault()) {
 						panic_with_thread_kernel_state("Kernel AST tag check fault accessing physmap", state);
 					}
 #else /* DEVELOPMENT || DEBUG */
-					mte_record_async_tag_check_fault_address(task_providing_faultable_buffer->map, 0xdeadbeef);
+					record_async_map_fault_address(task_providing_faultable_buffer->map,
+					    code, 0xdeadbeef);
 #endif /* DEVELOPMENT || DEBUG */
 				}
 
@@ -2471,6 +2496,47 @@ handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_
 #undef MSG_FMT
 }
 #endif /* HAS_MTE */
+
+static void
+handle_kernel_guard_object_fault(vm_offset_t fault_addr, thread_t thread)
+{
+	exception_info_t info = {
+		.mx_code    = KERN_INVALID_GUARD_OBJECT_SLOT,
+		.mx_subcode = fault_addr,
+	};
+	task_t task = get_threadtask(thread);
+
+	assert((fault_addr & TTBR_SELECTOR) == 0);
+
+	if (thread->machine.el0_synchronous_trap &&
+	    current_cpu_datap()->cpu_int_state == NULL) {
+		/*
+		 * Case 1: "synchronous" software exception, just exit
+		 */
+		set_saved_state_far(thread->machine.upcb, fault_addr);
+		info.os_reason      = OS_REASON_MTE_FAIL;
+		info.exception_type = EXC_BAD_ACCESS;
+		exit_with_mach_exception_using_ast(info, PX_KTRIAGE,
+		    task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL);
+	} else if (task == kernel_task) {
+		/*
+		 * Case 2: asynchronous exception in kernel context
+		 */
+		EXC_GUARD_ENCODE_TYPE(info.mx_code, GUARD_TYPE_VIRT_MEMORY);
+		EXC_GUARD_ENCODE_FLAVOR(info.mx_code, kGUARD_EXC_GUARD_OBJECT_ASYNC_KERN_FAULT);
+		record_async_kernel_interposed_map_fault_address(info.mx_code, fault_addr);
+	} else {
+		/*
+		 * Case 3: asynchronous exception in current_thread() context
+		 */
+		info.os_reason      = OS_REASON_GUARD;
+		info.exception_type = EXC_GUARD;
+		EXC_GUARD_ENCODE_TYPE(info.mx_code, GUARD_TYPE_VIRT_MEMORY);
+		EXC_GUARD_ENCODE_FLAVOR(info.mx_code, kGUARD_EXC_GUARD_OBJECT_ASYNC_USER_FAULT);
+		exit_with_mach_exception_using_ast(info, PX_KTRIAGE,
+		    task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL);
+	}
+}
 
 static void
 handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
@@ -2626,10 +2692,25 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 			}
 		}
 
-		/*
-		 *  If we have a recover handler, invoke it now.
-		 */
 		if (recover) {
+			/*
+			 *  Handle guard object faults during copyio() routines
+			 */
+			if ((fault_addr & TTBR_SELECTOR) == 0) {
+#if CONFIG_MAP_RANGES
+				if (result == KERN_INVALID_ADDRESS &&
+				    vm_map_in_user_range_voids(map, fault_addr, 1)) {
+					result = KERN_INVALID_GUARD_OBJECT_SLOT;
+				}
+#endif /* CONFIG_MAP_RANGES */
+				if (result == KERN_INVALID_GUARD_OBJECT_SLOT) {
+					handle_kernel_guard_object_fault(fault_addr, thread);
+				}
+			}
+
+			/*
+			 *  If we have a recover handler, invoke it now.
+			 */
 			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
 			return;
 		}
@@ -2958,9 +3039,10 @@ sleh_fiq(arm_saved_state_t *state)
 	int preemption_level = sleh_get_preemption_level();
 #endif
 
-#if MONOTONIC_FIQ
+#if CONFIG_CPU_COUNTERS && !CPMU_AIC_PMI
+#define FIQ_PMI 1
 	uint64_t pmcr0 = 0, upmsr = 0;
-#endif /* MONOTONIC_FIQ */
+#endif /* CONFIG_CPU_COUNTERS && !CPMU_AIC_PMI */
 
 #if defined(HAS_IPI)
 	boolean_t    is_ipi = FALSE;
@@ -2981,14 +3063,13 @@ sleh_fiq(arm_saved_state_t *state)
 	if (ml_get_timer_pending()) {
 		type = DBG_INTR_TYPE_TIMER;
 	}
-#if MONOTONIC_FIQ
-	/* Consult the PMI sysregs last, after IPI/timer
-	 * classification.
+#if FIQ_PMI
+	/* Consult the PMI sysregs after IPI/timer classification.
 	 */
-	else if (mt_pmi_pending(&pmcr0, &upmsr)) {
+	else if (cpc_pmi_pending(&pmcr0, &upmsr)) {
 		type = DBG_INTR_TYPE_PMI;
 	}
-#endif /* MONOTONIC_FIQ */
+#endif /* FIQ_PMI */
 
 	sleh_interrupt_handler_prologue(state, type);
 
@@ -3011,13 +3092,13 @@ sleh_fiq(arm_saved_state_t *state)
 		cpu_signal_handler();
 	} else
 #endif /* defined(HAS_IPI) */
-#if MONOTONIC_FIQ
+#if FIQ_PMI
 	if (type == DBG_INTR_TYPE_PMI) {
-		ml_interrupt_masked_debug_start(mt_fiq, DBG_INTR_TYPE_PMI);
-		mt_fiq(getCpuDatap(), pmcr0, upmsr);
+		ml_interrupt_masked_debug_start(cpc_fiq, DBG_INTR_TYPE_PMI);
+		cpc_fiq(getCpuDatap(), pmcr0, upmsr);
 		ml_interrupt_masked_debug_end();
 	} else
-#endif /* MONOTONIC_FIQ */
+#endif /* FIQ_PMI */
 	{
 		/*
 		 * We don't know that this is a timer, but we don't have insight into
@@ -3300,13 +3381,6 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
 		 * Heuristic: if FAR != XPAC(FAR), the pointer was likely corrupted
 		 * due to PAC.
 		 */
-#if HAS_MTE
-		/*
-		 * This heuristic can misfire for TBCF/CPA2 poisoning, but
-		 * triggering a lockdown for these failures in the kernel is fine
-		 * since they are not recoverable.
-		 */
-#endif /* HAS_MTE */
 		const uint64_t far_stripped =
 		    (uint64_t)ptrauth_strip((void *)far, ptrauth_key_asda);
 

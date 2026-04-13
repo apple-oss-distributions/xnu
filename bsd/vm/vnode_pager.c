@@ -65,6 +65,7 @@
 #include <vm/vm_kern.h>
 #include <kern/zalloc.h>
 #include <libkern/libkern.h>
+#include <kern/telemetry.h>
 
 #include <vm/vnode_pager.h>
 #include <vm/vm_pageout.h>
@@ -583,6 +584,29 @@ ktriage_encode_v_tag_and_error(vnode_t vp, int error)
 	return tag << 32 | ktriage_error;
 }
 
+int
+vnode_get_ids(struct vnode *vp, uint64_t *fsid_out, uint64_t *fsobj_id_out);
+int
+vnode_get_ids(struct vnode *vp, uint64_t *fsid_out, uint64_t *fsobj_id_out)
+{
+	struct vnode_attr *attr = kalloc_type(struct vnode_attr, Z_WAITOK | Z_ZERO);
+	if (!attr) {
+		return ENOMEM;
+	}
+
+	VATTR_INIT(attr);
+	VATTR_WANTED(attr, va_fsid64);
+	VATTR_WANTED(attr, va_fsid);
+	VATTR_WANTED(attr, va_fileid);
+	int error = vnode_getattr(vp, attr, vfs_context_current());
+	if (error == 0) {
+		*fsid_out = vnode_get_va_fsid(attr);
+		*fsobj_id_out = attr->va_fileid;
+	}
+	kfree_type(struct vnode_attr, attr);
+	return error;
+}
+
 
 pager_return_t
 vnode_pagein(
@@ -601,17 +625,8 @@ vnode_pagein(
 	int             start_pg;
 	int             last_pg;
 	int             first_pg;
-	int             xsize;
-	int             must_commit = 1;
-	int             ignore_valid_page_check = 0;
-
-	if (flags & UPL_NOCOMMIT) {
-		must_commit = 0;
-	}
-
-	if (flags & UPL_IGNORE_VALID_PAGE_CHECK) {
-		ignore_valid_page_check = 1;
-	}
+	bool            must_commit = !(flags & UPL_NOCOMMIT);
+	bool const      ignore_valid_page_check = flags & UPL_IGNORE_VALID_PAGE_CHECK;
 
 	/*
 	 * This call is non-blocking and does not ever fail but it can
@@ -640,8 +655,9 @@ vnode_pagein(
 			ubc_upl_abort_range(upl, upl_offset, size, UPL_ABORT_FREE_ON_EMPTY | UPL_ABORT_ERROR);
 		}
 
-		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UBCINFO),
-		    ktriage_encode_v_tag_and_error(vp, 0) /* arg */);
+		ktriage_record(thread_tid(current_thread()),
+		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UBCINFO),
+		    ktriage_encode_v_tag_and_error(vp, 0));
 		goto out;
 	}
 	if (upl == (upl_t)NULL) {
@@ -668,8 +684,9 @@ vnode_pagein(
 			if ((error = VNOP_PAGEIN(vp, NULL, upl_offset, (off_t)f_offset,
 			    size, flags, vfs_context_current()))) {
 				set_thread_pagein_error(current_thread(), error);
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
-				    ktriage_encode_v_tag_and_error(vp, error) /* arg */);
+				ktriage_record(thread_tid(current_thread()),
+				    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
+				    ktriage_encode_v_tag_and_error(vp, error));
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
 			}
@@ -680,8 +697,9 @@ vnode_pagein(
 		if (upl == (upl_t)NULL) {
 			result =  PAGER_ABSENT;
 			error = PAGER_ABSENT;
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL),
-			    ktriage_encode_v_tag_and_error(vp, 0) /* arg */);
+			ktriage_record(thread_tid(current_thread()),
+			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL),
+			    ktriage_encode_v_tag_and_error(vp, 0));
 			goto out;
 		}
 		ubc_upl_range_needed(upl, upl_offset / PAGE_SIZE, 1);
@@ -694,7 +712,7 @@ vnode_pagein(
 		 * are responsible for commiting/aborting it
 		 * regardless of what the caller has passed in
 		 */
-		must_commit = 1;
+		must_commit = true;
 	} else {
 		pl = ubc_upl_pageinfo(upl);
 		first_pg = upl_offset / PAGE_SIZE;
@@ -734,7 +752,7 @@ vnode_pagein(
 			}
 		}
 
-		if (ignore_valid_page_check == 1) {
+		if (ignore_valid_page_check) {
 			start_pg = last_pg;
 		} else {
 			/*
@@ -754,7 +772,7 @@ vnode_pagein(
 			 * commit this range of pages back to the
 			 * cache unchanged
 			 */
-			xsize = (last_pg - start_pg) * PAGE_SIZE;
+			int xsize = (last_pg - start_pg) * PAGE_SIZE;
 
 			if (must_commit) {
 				ubc_upl_abort_range(upl, start_pg * PAGE_SIZE, xsize, UPL_ABORT_FREE_ON_EMPTY);
@@ -791,7 +809,7 @@ vnode_pagein(
 		}
 		if (last_pg > start_pg) {
 			int xoff;
-			xsize = (last_pg - start_pg) * PAGE_SIZE;
+			int xsize = (last_pg - start_pg) * PAGE_SIZE;
 			xoff  = start_pg * PAGE_SIZE;
 
 			if ((error = VNOP_PAGEIN(vp, upl, (upl_offset_t) xoff,
@@ -816,8 +834,9 @@ vnode_pagein(
 					}
 				}
 				set_thread_pagein_error(current_thread(), error);
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
-				    ktriage_encode_v_tag_and_error(vp, error) /* arg */);
+				ktriage_record(thread_tid(current_thread()),
+				    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
+				    ktriage_encode_v_tag_and_error(vp, error));
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
 			}

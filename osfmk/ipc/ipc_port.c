@@ -747,6 +747,8 @@ ipc_port_mark_in_limbo(
 
 	port->ip_receiver_name = MACH_PORT_NULL;
 	port->ip_receiver = IS_NULL;
+	/* Ensure that ip_destination is null-signed */
+	port->ip_destination = MACH_PORT_NULL;
 
 	label->io_state = IO_STATE_IN_LIMBO;
 	io_label_set_and_put(&port->ip_object, label);
@@ -768,6 +770,8 @@ ipc_port_mark_in_limbo_pd(
 
 	port->ip_receiver_name = MACH_PORT_NULL;
 	port->ip_receiver = IS_NULL;
+	/* Ensure that ip_destination is null-signed */
+	port->ip_destination = MACH_PORT_NULL;
 
 	label->io_state = IO_STATE_IN_LIMBO_PD;
 	io_label_set_and_put(&port->ip_object, label);
@@ -856,6 +860,12 @@ ipc_port_init(
 
 	port->ip_kernel_qos_override = THREAD_QOS_UNSPECIFIED;
 	port->ip_kernel_iotier_override = THROTTLE_LEVEL_END;
+
+	/* carefully zero-init the ip_pdrequest part of the union */
+	if (!ip_is_special_reply_port(port)) {
+		release_assert(!port->ip_has_watchport);
+		port->ip_pdrequest = IP_NULL;
+	}
 
 	ipc_mqueue_init(&port->ip_messages);
 #if MACH_ASSERT
@@ -2979,8 +2989,18 @@ ipc_port_copyout_send_pinned(
 	ipc_port_t      sright, /* can be invalid */
 	ipc_space_t     space)
 {
+	/* Pinned ports can definitely be marked immovable-send */
 	return ipc_port_copyout_send_internal(sright, space,
-	           IPC_OBJECT_COPYOUT_FLAGS_PINNED);
+	           IPC_OBJECT_COPYOUT_FLAGS_PINNED | IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND);
+}
+
+mach_port_name_t
+ipc_port_copyout_send_allow_immovable(
+	ipc_port_t      sright, /* can be invalid */
+	ipc_space_t     space)
+{
+	return ipc_port_copyout_send_internal(sright, space,
+	           IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND);
 }
 
 /*
@@ -3288,9 +3308,10 @@ kdp_mqueue_send_find_owner(
 			waitinfo->wait_type = kThreadWaitPortSendInTransit;
 			waitinfo->owner = VM_KERNEL_UNSLIDE_OR_PERM(port->ip_destination);
 		}
-		if (ip_is_any_service_port(port) ||
-		    ip_is_bootstrap_port(port)) {
+		if (ip_is_any_service_port(port)) {
 			*isplp = ip_label_peek_kdp(port).iol_service;
+		} else if (ip_is_bootstrap_port(port)) {
+			waitinfo->wait_flags |= STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP;
 		}
 	}
 }
@@ -3351,8 +3372,9 @@ kdp_mqueue_recv_find_owner(
 			}
 			if (ip_is_special_reply_port(port)) {
 				waitinfo->wait_flags |= STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY;
-			} else if (ip_is_any_service_port(port) ||
-			    ip_is_bootstrap_port(port)) {
+			} else if (ip_is_bootstrap_port(port)) {
+				waitinfo->wait_flags |= STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP;
+			} else if (ip_is_any_service_port(port)) {
 				*isplp = ip_label_peek_kdp(port).iol_service;
 			}
 		}

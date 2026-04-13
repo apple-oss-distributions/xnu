@@ -52,14 +52,26 @@ typedef unsigned int                    uint;
 
 #define BIT(b)                          (1ULL << (b))
 
-#define mask(width)                     (width >= 64 ? -1ULL : (BIT(width) - 1))
-#define extract(x, shift, width)        ((((uint64_t)(x)) >> (shift)) & mask(width))
-#define bits(x, hi, lo)                 extract((x), (lo), (hi) - (lo) + 1)
+#define bits_mask(width)                ((width) >= 64 ? -1ULL : (BIT(width) - 1))
+#define bits_extract(x, shift, width)   ((((uint64_t)(x)) >> (shift)) & bits_mask(width))
+#define bits(x, hi, lo)                 bits_extract((x), (lo), (hi) - (lo) + 1)
 
 #define bit_assign(x, b, e)             ((x) = (((x) & ~BIT(b))) | ((((uint64_t) (!!(e)))) << (b)))
 #define bit_set(x, b)                   ((x) |= BIT(b))
 #define bit_clear(x, b)                 ((x) &= ~BIT(b))
 #define bit_test(x, b)                  ((bool)((x) & BIT(b)))
+
+/*
+ * FIXME(rdar://154775164): Deprecate `mask` and `extract` in kern/bits.h
+ *
+ * These macros have been deprecated.
+ */
+#define mask(width) \
+	_Pragma("message \"mask has been deprecated. Please use bits_mask instead.\"") \
+	bits_mask(width)
+#define extract(x, shift, width) \
+	_Pragma("message \"extract has been deprecated. Please use bits_extract instead.\"") \
+	bits_extract(x, shift, width)
 
 inline static uint64_t
 bit_ror64(uint64_t bitmap, uint n)
@@ -109,7 +121,7 @@ bit_first(uint64_t bitmap)
 inline static int
 __bit_next(uint64_t bitmap, int previous_bit)
 {
-	uint64_t mask = previous_bit ? mask(previous_bit) : ~0ULL;
+	uint64_t mask = previous_bit ? bits_mask(previous_bit) : ~0ULL;
 
 	return bit_first(bitmap & mask);
 }
@@ -141,7 +153,7 @@ lsb_first(uint64_t bitmap)
 inline static int
 lsb_next(uint64_t bitmap, int previous_bit)
 {
-	uint64_t mask = mask(previous_bit + 1);
+	uint64_t mask = bits_mask(previous_bit + 1);
 
 	return lsb_first(bitmap & ~mask);
 }
@@ -191,6 +203,21 @@ atomic_bit_clear(_Atomic bitmap_t *__single map, int n, int mem_order)
 	return bit_test(prev, n);
 }
 
+inline static bool
+atomic_bit_test(_Atomic bitmap_t *__single map, int n, int mem_order)
+{
+	bitmap_t prev;
+	prev = __c11_atomic_load(map, mem_order);
+	return bit_test(prev, n);
+}
+
+inline static int
+atomic_bit_count(_Atomic bitmap_t *__single map, int mem_order)
+{
+	bitmap_t prev;
+	prev = __c11_atomic_load(map, mem_order);
+	return bit_count(prev);
+}
 
 #define BITMAP_LEN(n)   (((uint)(n) + 63) >> 6)         /* Round to 64bit bitmap_t */
 #define BITMAP_SIZE(n)  (size_t)(BITMAP_LEN(n) << 3)            /* Round to 64bit bitmap_t, then convert to bytes */
@@ -216,7 +243,7 @@ bitmap_full(bitmap_t *__header_indexable map, uint nbits)
 	uint nbits_filled = i * 64;
 
 	if (nbits > nbits_filled) {
-		map[i] = mask(nbits - nbits_filled);
+		map[i] = bits_mask(nbits - nbits_filled);
 	}
 
 	return map;
@@ -248,7 +275,7 @@ bitmap_is_full(bitmap_t *__header_indexable map, uint nbits)
 	uint nbits_filled = i * 64;
 
 	if (nbits > nbits_filled) {
-		return map[i] == mask(nbits - nbits_filled);
+		return map[i] == bits_mask(nbits - nbits_filled);
 	}
 
 	return true;
@@ -326,7 +353,7 @@ bitmap_not(
 	uint nbits_complete = i * 64;
 
 	if (nbits > nbits_complete) {
-		out[i] = ~in[i] & mask(nbits - nbits_complete);
+		out[i] = ~in[i] & bits_mask(nbits - nbits_complete);
 	}
 }
 
@@ -458,5 +485,16 @@ bitmap_lsb_next(const bitmap_t *__header_indexable map, uint nbits, uint prev)
 
 	return -1;
 }
+
+inline static uint
+bitmap_count(const bitmap_t *__header_indexable map, uint nbits)
+{
+	uint res = 0;
+	for (uint i = 0; i <= bitmap_index(nbits - 1); i++) {
+		res += (uint)bit_count(map[i]);
+	}
+	return res;
+}
+
 
 #endif

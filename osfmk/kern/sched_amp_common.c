@@ -83,7 +83,7 @@ sched_amp_init(void)
 inline int
 sched_amp_get_pset_load_average(processor_set_t pset, __unused sched_bucket_t sched_bucket)
 {
-	return (int)pset->load_average >> (PSET_LOAD_NUMERATOR_SHIFT - PSET_LOAD_FRACTIONAL_SHIFT);
+	return pset->load_average >> (PSET_LOAD_NUMERATOR_SHIFT - PSET_LOAD_FRACTIONAL_SHIFT);
 }
 
 void
@@ -91,14 +91,14 @@ sched_amp_update_pset_load_average(processor_set_t pset, __unused uint64_t curti
 {
 	int non_rt_load = pset->pset_runq.count;
 	int load = ((bit_count(pset->cpu_state_map[PROCESSOR_RUNNING]) + non_rt_load + rt_runq_count(pset)) << PSET_LOAD_NUMERATOR_SHIFT);
-	int new_load_average = ((int)pset->load_average + load) >> 1;
+	int new_load_average = (pset->load_average + load) >> 1;
 
 	pset->load_average = new_load_average;
 #if (DEVELOPMENT || DEBUG)
-	if (pset->pset_cluster_type == PSET_AMP_P) {
+	if (pset->pset_type == PSET_AMP_P) {
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PSET_LOAD_AVERAGE) | DBG_FUNC_NONE, sched_amp_get_pset_load_average(pset, 0), (bit_count(pset->cpu_state_map[PROCESSOR_RUNNING]) + pset->pset_runq.count + rt_runq_count(pset)));
 	}
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 }
 
 /* Spill threshold load average is ncpus in pset + (sched_amp_spill_count/(1 << PSET_LOAD_FRACTIONAL_SHIFT) */
@@ -153,10 +153,7 @@ pset_signal_spill(processor_set_t pset, int spilled_thread_priority)
 
 			if (processor == current_processor()) {
 				pset_update_processor_state(pset, processor, PROCESSOR_DISPATCHING);
-				if (bit_set_if_clear(pset->pending_AST_URGENT_cpu_mask, processor->cpu_id)) {
-					KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PENDING_AST_URGENT) | DBG_FUNC_START,
-					    processor->cpu_id, pset->pending_AST_URGENT_cpu_mask, 0, 6);
-				}
+				processor_set_pending_AST_URGENT(pset, processor, NULL, SCHED_AST_URGENT_SET_REASON_AMP_SPILL);
 			} else {
 				ipi_type = sched_ipi_action(processor, NULL, SCHED_IPI_EVENT_SPILL);
 			}
@@ -249,7 +246,7 @@ pset_should_accept_spilled_thread(processor_set_t pset, int spilled_thread_prior
 bool
 should_spill_to_ecores(processor_set_t nset, thread_t thread)
 {
-	if (nset->pset_cluster_type == PSET_AMP_E) {
+	if (nset->pset_type == PSET_AMP_E) {
 		/* Not relevant if ecores already preferred */
 		return false;
 	}
@@ -259,7 +256,7 @@ should_spill_to_ecores(processor_set_t nset, thread_t thread)
 		return false;
 	}
 
-	if (thread->th_bound_cluster_id == pcore_set->pset_id) {
+	if (thread->th_bound_pset_id == pcore_set->pset_id) {
 		/* Thread bound to the P-cluster */
 		return false;
 	}
@@ -323,7 +320,7 @@ sched_amp_steal_threshold(processor_set_t pset, bool spill_pending)
 bool
 sched_amp_steal_thread_enabled(processor_set_t pset)
 {
-	return (pset->pset_cluster_type == PSET_AMP_E) && (pcore_set != NULL) && (pcore_set->online_processor_count > 0);
+	return (pset->pset_type == PSET_AMP_E) && (pcore_set != NULL) && (pcore_set->online_processor_count > 0);
 }
 
 /*
@@ -338,7 +335,7 @@ sched_amp_balance(processor_t cprocessor, processor_set_t cpset)
 
 	pset_unlock(cpset);
 
-	if (!ecore_set || cpset->pset_cluster_type == PSET_AMP_E || !cprocessor->is_recommended) {
+	if (!ecore_set || cpset->pset_type == PSET_AMP_E || !cprocessor->is_recommended) {
 		return false;
 	}
 
@@ -391,7 +388,7 @@ sched_amp_bounce_thread_group_from_ecores(processor_set_t pset, struct thread_gr
 		return;
 	}
 
-	assert(pset->pset_cluster_type == PSET_AMP_E);
+	assert(pset->pset_type == PSET_AMP_E);
 	uint64_t ast_processor_map = 0;
 	sched_ipi_type_t ipi_type[MAX_CPUS] = {SCHED_IPI_NONE};
 
@@ -407,7 +404,7 @@ sched_amp_bounce_thread_group_from_ecores(processor_set_t pset, struct thread_gr
 				bit_set(ast_processor_map, eprocessor->cpu_id);
 			} else if (eprocessor == current_processor()) {
 				ast_on(AST_PREEMPT);
-				bit_set(pset->pending_AST_PREEMPT_cpu_mask, eprocessor->cpu_id);
+				atomic_bit_set(&pset->pending_AST_PREEMPT_cpu_mask, eprocessor->cpu_id, memory_order_relaxed);
 			}
 		}
 	}
@@ -515,9 +512,9 @@ sched_amp_qos_max_parallelism(int qos, uint64_t options)
 pset_node_t
 sched_amp_choose_node(thread_t thread)
 {
-	pset_cluster_type_t pset_cluster_type = (recommended_pset_type(thread) == PSET_AMP_P) ? PSET_AMP_P : PSET_AMP_E;
-	pset_node_t node = pset_node_for_pset_cluster_type(pset_cluster_type);
-	return ((node != NULL) && (node->pset_map != 0)) ? node : &pset_node0;
+	pset_type_t pset_type = (recommended_pset_type(thread) == PSET_AMP_P) ? PSET_AMP_P : PSET_AMP_E;
+	pset_node_t node = pset_node_for_pset_type(pset_type);
+	return ((node != NULL) && (node->pset_map != 0)) ? node : sched_boot_pset_node;
 }
 #endif /* !CONFIG_SCHED_EDGE */
 #endif /* __AMP__ */

@@ -1728,6 +1728,7 @@ LEXT(arm64_force_wfi_clock_gate)
 	PUSH_FRAME
 	nop
 	POP_FRAME
+	ret
 
 #endif /* defined(APPLE_ARM64_ARCH_FAMILY) */
 
@@ -1850,8 +1851,14 @@ LEXT(monitor_call)
 .macro CHECK_THREAD_STATE_INTERRUPTS tmp
 	mrs		\tmp, DAIF
 	tbz		\tmp, #DAIF_IRQF_SHIFT, Lintr_enabled_panic
+#if !CONFIG_SPTM
+	/*
+	 * SPTM kernels do not need to switch to SP1 as they have Panic Lockdown to
+	 * protect them. As such, we only should check on non-SPTM kernels.
+	 */
 	mrs		\tmp, SPSel
 	tbz		\tmp, #0, Lintr_enabled_panic
+#endif /* !CONFIG_SPTM */
 .endm
 
 /**
@@ -2114,6 +2121,20 @@ Lsign_ret:
 	ARM64_STACK_EPILOG EXT(ptrauth_utils_sign_blob_generic)
 
 #endif // defined(HAS_APPLE_PAC)
+
+#if CONFIG_EXCLAVES && NEEDS_MTE_IRG_RESEED
+	.text
+	.align 2
+	.globl EXT(ml_mte_irg_reseed)
+LEXT(ml_mte_irg_reseed)
+	mrs		x0, DAIF
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)
+
+	PACGA_IRG_RESEED x1, x2, x3
+
+	msr		DAIF, x0
+	ret
+#endif /* CONFIG_EXCLAVES && NEEDS_MTE_IRG_RESEED */
 
     /* THIS MUST STAY LAST IN THIS FILE */
 	COPYIO_RECOVER_TABLE_SYM	copyio_recover_table_end

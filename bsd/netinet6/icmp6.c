@@ -458,7 +458,7 @@ freeit:
 	/*
 	 * If we can't tell whether or not we can generate ICMP6, free it.
 	 */
-	m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_ICMP_DROP, NULL, 0);
+	m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_ICMP_DROP, NULL, 0);
 }
 
 /*
@@ -2187,6 +2187,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 					if (ret != 0) {
 						m_freem(n);
 						m_freem(opts);
+						opts = NULL;
 						last = in6p;
 						continue;
 					}
@@ -3011,6 +3012,7 @@ nolladdropt:;
 				/* pad if easy enough, truncate if not */
 				if (8 - extra <= M_TRAILINGSPACE(m0)) {
 					/* pad */
+					bzero(m_mtod_end(m0), 8 - extra);
 					m0->m_len += (8 - extra);
 					m0->m_pkthdr.len += (8 - extra);
 				} else {

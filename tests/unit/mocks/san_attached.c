@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include "dt_proxy.h"
+#include "mocks/dt_proxy.h"
 #include <mach/mach_types.h>
 
 #define NOT_MOCKED(name) PT_FAIL(#name ": this function should never be called since it is mocked by the mocks dylib")

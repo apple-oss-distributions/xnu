@@ -463,7 +463,7 @@ netif_gso_ipv4_tcp_internal(struct netif_gso_ip_tcp_state *state,
 	partial += htons(state->tcp_hlen + IPPROTO_TCP + payload_len);
 	partial += state->psuedo_hdr_csum;
 	ADDCARRY(partial);
-	state->tcp->th_sum = ~(uint16_t)partial;
+	state->tcp->th_sum = (unsigned short)(~(uint16_t)partial);
 	/*
 	 * Update tcp sequence number in gso state
 	 */
@@ -544,7 +544,7 @@ netif_gso_ipv6_tcp_internal(struct netif_gso_ip_tcp_state *state,
 	partial += htonl(state->tcp_hlen + IPPROTO_TCP + payload_len);
 	partial += state->psuedo_hdr_csum;
 	ADDCARRY(partial);
-	state->tcp->th_sum = ~(uint16_t)partial;
+	state->tcp->th_sum = (unsigned short)(~(uint16_t)partial);
 	/*
 	 * Update tcp sequence number
 	 */

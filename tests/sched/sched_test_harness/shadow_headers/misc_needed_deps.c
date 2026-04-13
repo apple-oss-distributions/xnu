@@ -43,9 +43,10 @@ panic(char *msg, ...)
 #define KDBG(a1, a2, a3, a4, a5) clutch_impl_log_tracepoint(a1, a2, a3, a4, a5)
 #define KDBG_RELEASE(...) (void)0
 #define kalloc_type(x, y, z) calloc((size_t)y, sizeof(x))
-#define kfree_type(x, y, z) free(z)
+#define kfree_type(x, y, z) do { free(z); (void)(y); } while (0)
 #define PE_parse_boot_argn(x, y, z) FALSE
 #define kprintf(...) printf(__VA_ARGS__)
+#define ml_get_interrupts_enabled() (true)
 
 /* Mock locks */
 typedef void *lck_ticket_t;
@@ -149,10 +150,10 @@ struct thread {
 	struct priority_queue_entry_sched       th_clutch_pri_link;
 	queue_chain_t                           th_clutch_timeshare_link;
 	uint32_t                sched_flags;            /* current flag bits */
-#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
-	uint32_t                 th_bound_cluster_id;
+#define THREAD_BOUND_PSET_NONE       PSET_ID_INVALID
+	pset_id_t                 th_bound_pset_id;
 #if CONFIG_SCHED_EDGE
-	bool            th_bound_cluster_enqueued;
+	bool            th_bound_pset_enqueued;
 	bool            th_shared_rsrc_enqueued[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 	bool            th_shared_rsrc_heavy_user[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 	bool            th_shared_rsrc_heavy_perf_control[CLUSTER_SHARED_RSRC_TYPE_COUNT];
@@ -260,6 +261,12 @@ thread_group_get(thread_t t)
 	return t->thread_group;
 }
 
+inline boolean_t
+thread_group_uses_immediate_ipi(struct thread_group *tg)
+{
+	return FALSE;
+}
+
 #if CONFIG_SCHED_EDGE
 
 bool
@@ -269,3 +276,6 @@ thread_shared_rsrc_policy_get(thread_t thread, cluster_shared_rsrc_type_t type)
 }
 
 #endif /* CONFIG_SCHED_EDGE */
+
+/* From osfmk/arm64/machine_routines.c */
+bool cpu_config_modified = false;

@@ -16,7 +16,13 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("IPC"));
 
-T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+struct voucher_recipe_with_content {
+	mach_voucher_attr_recipe_data_t recipe;
+	uint64_t content;
+};
+
+/* (Restricted to macOS because we use MACH_VOUCHER_ATTR_USER_DATA_STORE which is only available there) */
+T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true), T_META_ENABLED(TARGET_OS_OSX))
 {
 	kern_return_t kr        = KERN_SUCCESS;
 	mach_voucher_t voucher  = MACH_VOUCHER_NULL;
@@ -26,19 +32,22 @@ T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VAL
 	};
 
 	/*
-	 * The bank voucher already exists in this process, so using it doesn't
-	 * actually test the problem. Use an importance voucher instead.
+	 * Use a user data voucher with unique content to ensure we get
+	 * a fresh voucher that doesn't already exist in this process.
 	 */
-	mach_voucher_attr_recipe_data_t recipe = {
-		.key                = MACH_VOUCHER_ATTR_KEY_IMPORTANCE,
-		.command            = MACH_VOUCHER_ATTR_IMPORTANCE_SELF,
-		.previous_voucher   = MACH_VOUCHER_NULL,
-		.content_size       = 0,
+	struct voucher_recipe_with_content recipe_data = {
+		.recipe = {
+			.key                = MACH_VOUCHER_ATTR_KEY_USER_DATA,
+			.command            = MACH_VOUCHER_ATTR_USER_DATA_STORE,
+			.previous_voucher   = MACH_VOUCHER_NULL,
+			.content_size       = sizeof(uint64_t),
+		},
+		.content = 0xdeadbeefcafebeefULL,
 	};
 
 	kr = host_create_mach_voucher(mach_host_self(),
-	    (mach_voucher_attr_raw_recipe_array_t)&recipe,
-	    sizeof(recipe), &voucher);
+	    (mach_voucher_attr_raw_recipe_array_t)&recipe_data,
+	    sizeof(recipe_data), &voucher);
 
 	T_ASSERT_MACH_SUCCESS(kr, "host_create_mach_voucher");
 

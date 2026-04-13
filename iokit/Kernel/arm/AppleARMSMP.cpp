@@ -33,6 +33,7 @@ extern "C" {
 };
 
 #include <kern/bits.h>
+#include <kern/cpu_number.h>
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kperf/kperf.h>
@@ -61,9 +62,6 @@ static IOPMGR *gPMGR;
 static IOInterruptController *gAIC;
 static bool aic_ipis = false;
 static const ml_topology_info *topology_info;
-
-// cpu_id of the boot processor
-static unsigned int boot_cpu;
 
 // array index is a cpu_id (so some elements may be NULL)
 static processor_t *machProcessors;
@@ -145,7 +143,7 @@ register_aic_handlers(const ml_topology_cpu *cpu_info,
 	}
 
 	// Conditional, because on Skye and later, we use an FIQ instead of an external IRQ.
-	if (pmi_handler && irqcount == 1) {
+	if (pmi_handler && irqcount > 1) {
 		if (cpu->registerInterrupt(1, NULL, (IOInterruptAction)(void (*)(void))pmi_handler, NULL) != kIOReturnSuccess ||
 		    cpu->enableInterrupt(1) != kIOReturnSuccess) {
 			panic("Error registering PMI");
@@ -219,12 +217,12 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 	 * handler before other processors could start sending it IPIs.
 	 */
 
-	processor_boot(machProcessors[boot_cpu]);
+	processor_boot(machProcessors[boot_cpu_id]);
 
 	for (unsigned int cpu = 0; cpu < topology_info->num_cpus; cpu++) {
 		const ml_topology_cpu *cpu_info = &topology_info->cpus[cpu];
 		const unsigned int cpu_id = cpu_info->cpu_id;
-		if (cpu_id != boot_cpu) {
+		if (cpu_id != boot_cpu_id) {
 			processor_boot(machProcessors[cpu_id]);
 		}
 	}
@@ -238,8 +236,6 @@ void
 IOCPUInitialize(void)
 {
 	topology_info = ml_get_topology_info();
-	boot_cpu = topology_info->boot_cpu->cpu_id;
-
 	for (unsigned int i = 0; i < topology_info->num_clusters; i++) {
 		bit_set(all_clusters_mask, topology_info->clusters[i].cluster_id);
 	}
@@ -294,7 +290,7 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 {
 	unsigned int cpu_id = target_to_cpu_id(target);
 
-	if (!bootb && cpu_id == boot_cpu && ml_is_quiescing()) {
+	if (!bootb && cpu_id == boot_cpu_id && ml_is_quiescing()) {
 		IOCPURunPlatformActiveActions();
 	}
 
@@ -312,7 +308,7 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 		 * processor_cpu_reinit.
 		 */
 		assert(bootb);
-		assert3u(cpu_id, ==, boot_cpu);
+		assert3u(cpu_id, ==, boot_cpu_id);
 		ml_wait_for_cpu_signal_to_enable();
 		assert_ml_cpu_signal_is_enabled(true);
 		ml_cpu_up();
@@ -367,7 +363,7 @@ PE_cpu_machine_quiesce(cpu_id_t target)
 {
 	unsigned int cpu_id = target_to_cpu_id(target);
 
-	if (cpu_id == boot_cpu) {
+	if (cpu_id == boot_cpu_id) {
 		IOCPURunPlatformQuiesceActions();
 	} else {
 		gPMGR->disableCPUCore(cpu_id);
@@ -399,7 +395,7 @@ PE_cpu_down(cpu_id_t target)
 {
 	unsigned int cpu_id = target_to_cpu_id(target);
 	if (ml_is_quiescing()) {
-		assert(cpu_id != boot_cpu);
+		assert(cpu_id != boot_cpu_id);
 	}
 	gPMGR->disableCPUCore(cpu_id);
 	ml_broadcast_cpu_event(CPU_DOWN, cpu_id);
@@ -417,7 +413,7 @@ PE_cpu_power_disable(int cpu_id)
 {
 	assert(bit_test(cpu_power_state_mask, cpu_id));
 
-	if (cpu_id == boot_cpu && ml_is_quiescing()) {
+	if (cpu_id == boot_cpu_id && ml_is_quiescing()) {
 		return;
 	}
 
@@ -457,7 +453,7 @@ PE_cpu_power_enable(int cpu_id)
 {
 	assert(!bit_test(cpu_power_state_mask, cpu_id));
 
-	if (cpu_id == boot_cpu && ml_is_quiescing()) {
+	if (cpu_id == boot_cpu_id && ml_is_quiescing()) {
 		return;
 	}
 
@@ -507,7 +503,7 @@ IOCPUSleepKernel(void)
 	ml_set_is_quiescing(true);
 	for (i = 0; i < topology_info->num_cpus; i++) {
 		unsigned int cpu_id = topology_info->cpus[i].cpu_id;
-		if (cpu_id != boot_cpu) {
+		if (cpu_id != boot_cpu_id) {
 			processor_sleep(machProcessors[cpu_id]);
 		}
 	}
@@ -521,7 +517,7 @@ IOCPUSleepKernel(void)
 	 * Now sleep the boot CPU, including calling the kQueueQuiesce actions.
 	 * The system sleeps here.
 	 */
-	processor_sleep(machProcessors[boot_cpu]);
+	processor_sleep(machProcessors[boot_cpu_id]);
 
 	/*
 	 * The system is now coming back from sleep on the boot CPU.
@@ -541,7 +537,7 @@ IOCPUSleepKernel(void)
 
 	for (i = 0; i < topology_info->num_cpus; i++) {
 		unsigned int cpu_id = topology_info->cpus[i].cpu_id;
-		if (cpu_id != boot_cpu) {
+		if (cpu_id != boot_cpu_id) {
 			processor_wake(machProcessors[cpu_id]);
 		}
 	}

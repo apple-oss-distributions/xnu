@@ -295,9 +295,10 @@ extern lck_grp_t vm_page_lck_grp_bucket;
  *
  *   [C.1 inline] is performed by @c mteinfo_tag_storage_claimable_refill()
  *   from the context of any @c mteinfo_free_queue_grab() (tagged or regular).
- *   The path will opportunistically determine that there are enough pages
- *   on the @c mte_claimable_queue that amortizing the cost of taking
- *   the spinlock protecting the per-cpu queue is worth it.
+ *   The path relies on @c mteinfo_tag_storage_claimable_should_refill() to
+ *   opportunistically determine whether there are sufficiently many inactive
+ *   tag storage pages eligible to be claimed that amortizing the cost of taking
+ *   the spinlock which protects the per-cpu queue is worth it.
  *
  *   It is done unconditionally otherwise, as the reclaim thread can steal
  *   from these queues. The @c vm_page_grab_options() fastpath knows how
@@ -503,6 +504,15 @@ static TUNABLE(bool, vm_mte_enable_tag_storage_grab, "mte_ts_grab", true);
 TUNABLE(uint32_t, vm_page_tag_storage_reserved, "mte_ts_grab_rsv", 100);
 
 /*
+ * Boot-arg controlling how many inactive tag storage pages the system needs to
+ * have before we'll allow inactive tag storage pages to be claimed regardless
+ * of how many free pages they cover.
+ */
+TUNABLE_DT_DEV_WRITEABLE(uint32_t, vm_page_tag_storage_inactive_target,
+    "/defaults", "kern.mte_tag_storage_inactive_target", "mte_ts_nctv_tgt",
+    24576, TUNABLE_DT_NONE); /* 1/32 of 12GB, in pages */
+
+/*
  * Boot-arg to enable/disable grabbing tag storage pages for the compressor
  * pool.
  */
@@ -514,12 +524,21 @@ TUNABLE(bool, vm_mte_tag_storage_for_compressor, "mte_ts_compressor", true);
  * Note that the string length was somewhat arbitrarily chosen, so if the use
  * case arises, we may need to bump that up...
  *
- * Currently, we allow allocations with VM tags of VM_MEMORY_MALLOC_SMALL (2),
- * VM_MEMORY_MALLOC_TINY (7), and VM_MEMORY_MALLOC_NANO (11) to use tag storage
- * pages. See vm_statistics.h for other potential candidates.
- * In particular, VM_MEMORY_STACK (30) is promising.
+ * We currently allow allocations with the following VM tags to use tag storage:
+ *  - VM_MEMORY_MALLOC_SMALL  (2)
+ *  - VM_MEMORY_MALLOC_TINY   (7)
+ *  - VM_MEMORY_MALLOC_NANO   (11)
+ *  - VM_MEMORY_STACK         (30)
+ *  - VM_MEMORY_TCMALLOC      (53)
+ *  - APPLICATION_SPECIFIC_14 (253)
+ *  - APPLICATION_SPECIFIC_16 (255)
+ *
+ * These tags were chosen because they have been observed to rarely ever become
+ * wired on real systems.
+ *
+ * See vm_statistics.h for other potential candidates.
  */
-static TUNABLE_STR(vm_mte_tag_storage_for_vm_tags, 256, "mte_ts_vmtag", "2,7,11");
+static TUNABLE_STR(vm_mte_tag_storage_for_vm_tags, 256, "mte_ts_vmtag", "2,7,11,30,53,253,255,");
 #endif /* VM_MTE_FF_VERIFY */
 
 #pragma mark Counters and Globals
@@ -538,9 +557,11 @@ static SECURITY_READ_ONLY_LATE(thread_t) vm_mte_fill_thread = THREAD_NULL;
 static thread_t vm_mte_activator = THREAD_NULL;
 static bool vm_mte_activator_waiters = false;
 
-struct mte_pcpu PERCPU_DATA(mte_pcpu);
 SCALABLE_COUNTER_DEFINE(vm_cpu_free_tagged_count);
 SCALABLE_COUNTER_DEFINE(vm_cpu_free_claimed_count);
+SCALABLE_COUNTER_DEFINE(vm_mte_tagged_pages_grabbed);
+SCALABLE_COUNTER_DEFINE(vm_mte_tagged_pages_grabbed_for_untagged);
+SCALABLE_COUNTER_DEFINE(vm_mte_inline_ts_activated_count);
 #endif
 
 /*
@@ -553,6 +574,13 @@ uint32_t vm_page_free_unmanaged_tag_storage_count;
 uint32_t vm_page_tagged_count; /* Total tagged covered pages. */
 uint32_t vm_page_free_wanted_tagged = 0;
 uint32_t vm_page_free_wanted_tagged_privileged = 0;
+
+/*
+ * Statistics exposed through MEMINFO tracepoints.
+ */
+uint32_t vm_mte_refill_ts_considered_count = 0;
+uint64_t vm_mte_refill_ts_activated_count = 0;
+uint64_t vm_mte_refill_ts_deactivated_count = 0;
 
 /*
  * Counters for tag storage pages we will just give to the system permanently
@@ -753,9 +781,9 @@ cell_queue_remove(cell_t *cell)
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  * When a tag storage page has no associated free covered pages, no page is
- * enqueued on the mte free queue. However when a tag storage page has one or
- * more free covered pages associated then there is one and only one of these
- * pages enqueued on the mte free queues.
+ * enqueued on the MTE free queue. However when a tag storage page has one or
+ * more free covered pages, then there is exactly one of those pages is enqueued
+ * on the MTE free queues.
  *
  * The chosen representative for the cell is remembered on the cell of the
  * associated tag storage @c cell_t::enqueue_pos value.
@@ -780,12 +808,12 @@ cell_queue_remove(cell_t *cell)
  * Allocation stability and bucket selection
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
- * The free queues are in that order:
+ * The free queues are ordered as follows:
  *
  *   {claimed/disabled} -> {inactive_0, inactive_1} ->
  *   {active_0, active_1, active_2, active_3} -> {activating}
  *
- * This is selected carefully to have the following crucial properties:
+ * This order is carefully selected to have the following crucial properties:
  *
  * - allocating untagged pages chooses buckets "left to right"
  *   (in increasing free queue index order).
@@ -802,7 +830,7 @@ cell_queue_remove(cell_t *cell)
  *   indices order.
  *
  * This is important and allows for a nice optimization: if a tag storage page
- * was found to be a good candidate for a given grab operation, it always will
+ * was found to be a good candidate for a given grab operation, it will always
  * stay a "best" candidate until it has no free pages left, which allows for
  * allocations of contiguous spans of pages at once
  * (@see mteinfo_free_queue_grab()).
@@ -815,26 +843,34 @@ cell_queue_remove(cell_t *cell)
  * Tag Storage Free queue
  * ~~~~~~~~~~~~~~~~~~~~~~
  *
- * Tag storage pages can only be claimed if they are inactive with the [C.1]
- * transition. Getting pages to inactive is done via the Deactivation [D.*].
+ * Tag storage pages can only be claimed if they are inactive, via the [C.1]
+ * transition. Pages become inactive via Deactivation [D.*].
  *
- * However, as we mentioned the MTE free queue is only about covered pages
- * proper, and do not contain the tag storage pages. Another point is that
- * we do not want to claim pages too aggressively as it could get in the way
- * of the Activation [A.*] transition when tagged pages are required.
+ * However, as we mentioned, the MTE free queues only contain covered pages, and
+ * not their associated tag storage pages. We do not want to claim tag storage
+ * pages too aggressively, as doing so could obstruct the Activation [A.*]
+ * transition when tagged pages are required.
  *
- * To solve this tension, the @c mte_claimable_queue holds inactive tag storage
- * pages that have 8 free pages or less at any given time. These are unlikely
- * to be profitable activation candidates, but also demonstrate that there is
- * enough untagged memory pressure on the system that we have clusters of
- * covered pages in use.
+ * Usually, in situations with memory pressure, this tradeoff is balanced by
+ * restricting the [C.1] transition to inactive tag storage pages covering at
+ * most 8 free pages. These pages are unlikely to be profitable activation
+ * candidates, and their lack of free covered pages demonstrates the existence
+ * of untagged memory pressure on the system.
+ *
+ * However, *all* inactive tag storage pages may be claimed via [C.1] when the
+ * system is determined to have an excess of inactive tag storage pages. The
+ * definition of "excess" is controlled by the "mte_ts_nctv_tgt" boot-arg.
+ *
+ * Tag storage pages are always claimed from the lowest index non-empty inactive
+ * bucket (i.e., in order of fewest-to-most free covered pages). Thus, those tag
+ * storage pages with <= 8 free covered pages will always be claimed first, even
+ * when the inactive target is exceeded.
  *
  * The @c mteinfo_free_queue_grab() code will promote these to a per-cpu
  * free queue that in turn the @c vm_page_grab_options() fastpath can tap into
  * as another opportunistic source of pages.
  */
 struct vm_page_free_queue mte_free_queues[MTE_FREE_NOT_QUEUED];
-struct vm_page_free_queue mte_claimable_queue;
 static uint32_t mte_free_queue_mask;
 
 /*!
@@ -1028,26 +1064,14 @@ cell_list_bucket(const cell_t cell)
 	return 0;
 }
 
-__pure2
-static inline bool
-cell_on_claimable_queue(const cell_t cell)
-{
-	if (cell.state == MTE_STATE_INACTIVE) {
-		return cell_list_bucket(cell) <= MTE_BUCKET_1_8;
-	}
-	return false;
-}
-
 __attribute__((noinline))
 static void
 cell_list_requeue(
 	cell_t                 *cell,
-	vm_page_t               tag_page,
 	mte_cell_list_idx_t     oidx,
 	mte_cell_bucket_t       obucket,
 	mte_cell_list_idx_t     nidx,
-	mte_cell_bucket_t       nbucket,
-	int                     claim_requeue)
+	mte_cell_bucket_t       nbucket)
 {
 	mte_cell_list_t olist = &mte_info_lists[oidx];
 	mte_cell_list_t nlist = &mte_info_lists[nidx];
@@ -1067,41 +1091,17 @@ cell_list_requeue(
 		olist->count--;
 		nlist->count++;
 	}
-
-	if (claim_requeue) {
-#ifndef VM_MTE_FF_VERIFY
-		uint32_t        color = VM_PAGE_GET_COLOR(tag_page);
-		vm_page_queue_t queue;
-
-		queue = &mte_claimable_queue.vmpfq_queues[color].qhead;
-		if (claim_requeue > 0) {
-			vm_page_queue_enter(queue, tag_page, vmp_pageq);
-		} else {
-			vm_page_queue_remove(queue, tag_page, vmp_pageq);
-		}
-		VM_COUNTER_DELTA(&mte_claimable_queue.vmpfq_count, claim_requeue);
-#endif /* VM_MTE_FF_VERIFY */
-	}
 }
 
-/*!
- * @abstract
- * Find a page in the last non-empty bucket that is larger than the
- * specified bucket index.
- *
- * @param lidx          The list index to scan.
- * @param min_bucket    The minimum bucket index to consider.
- * @param tag_page      The tag page associated with the returned cell.
- * @returns             The cell that was found or NULL.
- */
 static cell_t *
-cell_list_find_last_page(
+cell_list_find_page_internal(
 	mte_cell_list_idx_t     lidx,
-	mte_cell_bucket_t       min_bucket,
-	vm_page_t              *tag_page)
+	mte_cell_bucket_t       bucket,
+	vm_page_t              *tag_page,
+	bool                    first_page /* otherwise, last page. */)
 {
 	mte_cell_list_t  list = &mte_info_lists[lidx];
-	uint32_t         mask = list->mask & ~mask(min_bucket);
+	uint32_t         mask = list->mask & (first_page ? bits_mask(bucket + 1) : ~bits_mask(bucket));
 	mte_cell_queue_t queue;
 
 	if (__improbable(mask == 0)) {
@@ -1109,9 +1109,48 @@ cell_list_find_last_page(
 		return NULL;
 	}
 
-	queue = &list->buckets[fls(mask) - 1];
+	queue = &list->buckets[(first_page ? ffs(mask) : fls(mask)) - 1];
 	*tag_page = vm_tag_storage_page_get(cell_queue_first_idx(queue));
+
 	return cell_queue_first(queue);
+}
+
+/*!
+ * @abstract
+ * Find a page in the first non-empty bucket that is smaller than the
+ * specified bucket index. The page is taken from the head of the bucket.
+ *
+ * @param lidx          The list index to scan.
+ * @param max_bucket    The maximum bucket index to consider (inclusive).
+ * @param tag_page      The tag page associated with the returned cell.
+ * @returns             The cell that was found or NULL.
+ */
+static inline cell_t *
+cell_list_find_first_page(
+	mte_cell_list_idx_t     lidx,
+	mte_cell_bucket_t       max_bucket,
+	vm_page_t              *tag_page)
+{
+	return cell_list_find_page_internal(lidx, max_bucket, tag_page, true);
+}
+
+/*!
+ * @abstract
+ * Find a page in the last non-empty bucket that is larger than the
+ * specified bucket index. The page is taken from the head of the bucket.
+ *
+ * @param lidx          The list index to scan.
+ * @param min_bucket    The minimum bucket index to consider (inclusive).
+ * @param tag_page      The tag page associated with the returned cell.
+ * @returns             The cell that was found or NULL.
+ */
+static inline cell_t *
+cell_list_find_last_page(
+	mte_cell_list_idx_t     lidx,
+	mte_cell_bucket_t       min_bucket,
+	vm_page_t              *tag_page)
+{
+	return cell_list_find_page_internal(lidx, min_bucket, tag_page, false);
 }
 
 
@@ -1133,41 +1172,36 @@ cell_list_find_last_page(
  *   // Preflights and asserts here
  *   assert_cell_state(cell_var, ...);
  *
- *   CELL_UPDATE(cell_var, tag_page, cleared_bit, {
+ *   CELL_UPDATE(cell_var, cleared_bit, {
  *       // Mutations of cell_var here
  *       cell_var->state = ...;
  *   });
  * </code>
  *
  * @param cell          The cell to update.
- * @param tag_page      The tag page corresponding to @c cell.
  * @param cleared_bit   The bit that was cleared or -1
  * @param mut           Code that mutates its argument, and performs the
  *                      required update.
  */
-#define CELL_UPDATE(cell, tag_page, cleared_bit, ...)  ({                       \
+#define CELL_UPDATE(cell, cleared_bit, ...)  ({                             \
 	mte_cell_list_idx_t  __ol, __nl;                                        \
 	mte_cell_bucket_t    __ob, __nb;                                        \
 	mte_free_queue_idx_t __oi, __ni;                                        \
-	int                  __ocq, __ncq;                                      \
 	cell_t              *__cell = (cell);                                   \
 	cell_t               __orig = *__cell;                                  \
-                                                                                \
+                                                                            \
 	__ol  = cell_list_idx(__orig);                                          \
 	__ob  = cell_list_bucket(__orig);                                       \
-	__ocq = cell_on_claimable_queue(__orig);                                \
 	__oi  = mteinfo_free_queue_idx(__orig);                                 \
-                                                                                \
+                                                                            \
 	__VA_ARGS__;                                                            \
-                                                                                \
+                                                                            \
 	__nl  = cell_list_idx(*__cell);                                         \
 	__nb  = cell_list_bucket(*__cell);                                      \
-	__ncq = cell_on_claimable_queue(*__cell);                               \
 	__ni  = mteinfo_free_queue_idx(*__cell);                                \
-                                                                                \
+                                                                            \
 	if (__ol != __nl || __ob != __nb) {                                     \
-	        cell_list_requeue(__cell, tag_page, __ol, __ob, __nl, __nb,     \
-	            __ncq - __ocq);                                             \
+	        cell_list_requeue(__cell, __ol, __ob, __nl, __nb);              \
 	}                                                                       \
 	if (__oi != __ni || (cleared_bit)) {                                    \
 	        mteinfo_free_queue_requeue(__cell, __orig, __oi, __ni);         \
@@ -1238,7 +1272,7 @@ mteinfo_tag_storage_set_active(vm_page_t tag_page, uint32_t mte_count, bool init
 	VM_COUNTER_ADD(&vm_page_free_taggable_count, free_page_count);
 	vm_page_tag_storage_activation_count++;
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_ACTIVE;
 		cell->mte_page_count = mte_count;
 	});
@@ -1271,7 +1305,7 @@ mteinfo_tag_storage_set_retired(vm_page_t tag_page)
 
 	VM_COUNTER_INC(&vm_page_retired_tag_storage_count);
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_DISABLED;
 	});
 }
@@ -1303,7 +1337,7 @@ mteinfo_tag_storage_set_unmanaged(cell_t *cell, vm_page_t tag_page)
 
 	VM_COUNTER_INC(&vm_page_unmanaged_tag_storage_count);
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_DISABLED;
 	});
 
@@ -1340,7 +1374,7 @@ mteinfo_tag_storage_set_inactive(vm_page_t tag_page, bool init)
 	}
 #endif /* VM_MTE_FF_VERIFY */
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_INACTIVE;
 	});
 }
@@ -1361,7 +1395,7 @@ mteinfo_tag_storage_set_claimed(vm_page_t tag_page)
 	}
 #endif /* VM_MTE_FF_VERIFY */
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_CLAIMED;
 	});
 }
@@ -1376,15 +1410,14 @@ mteinfo_tag_storage_set_claimed(vm_page_t tag_page)
  * The tag storage page must be claimed.
  *
  * @param cell          The cell to mark as reclaiming
- * @param tag_page      The tag page corresponding to @c cell.
  */
 static void
-mteinfo_tag_storage_set_reclaiming(cell_t *cell, vm_page_t tag_page)
+mteinfo_tag_storage_set_reclaiming(cell_t *cell)
 {
 	assert(cell->mte_page_count == 0);
 	assert_cell_state(cell, /* [R.1] */ MTE_MASK_CLAIMED);
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_RECLAIMING;
 	});
 
@@ -1408,11 +1441,10 @@ mteinfo_tag_storage_flush_reclaiming(void)
 
 	while (cell_queue_count(queue) > 0) {
 		cell_idx_t idx      = cell_queue_first_idx(queue);
-		vm_page_t  tag_page = vm_tag_storage_page_get(idx);
 		cell_t    *cell     = cell_from_idx(idx);
 
 		assert_cell_state(cell, /* [R.x] */ MTE_MASK_RECLAIMING);
-		CELL_UPDATE(cell, tag_page, false, {
+		CELL_UPDATE(cell, false, {
 			cell->state = MTE_STATE_CLAIMED;
 		});
 
@@ -1445,7 +1477,7 @@ mteinfo_tag_storage_wakeup(vm_page_t tag_page, bool fq_locked)
 	tag_page->vmp_ts_wanted = false;
 
 	assert_cell_state(cell, /* [B.2] */ MTE_MASK_PINNED);
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_CLAIMED;
 	});
 
@@ -1488,7 +1520,7 @@ mteinfo_covered_page_set_free(ppnum_t pnum, bool tagged)
 		VM_COUNTER_DEC(&vm_page_tagged_count);
 	}
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->mte_page_count -= tagged;
 		bit_set(cell->free_mask, bit);
 	});
@@ -1512,7 +1544,7 @@ mteinfo_covered_page_set_used(ppnum_t pnum, bool tagged)
 		VM_COUNTER_INC(&vm_page_tagged_count);
 	}
 
-	CELL_UPDATE(cell, tag_page, true, {
+	CELL_UPDATE(cell, true, {
 		bit_clear(cell->free_mask, bit);
 		cell->mte_page_count += tagged;
 	});
@@ -1528,7 +1560,7 @@ mteinfo_covered_page_set_stolen_tagged(ppnum_t pnum)
 	assert(cell->mte_page_count < MTE_PAGES_PER_TAG_PAGE);
 	assert(!bit_test(cell->free_mask, pnum % MTE_PAGES_PER_TAG_PAGE));
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->mte_page_count++;
 	});
 }
@@ -1542,7 +1574,7 @@ mteinfo_covered_page_clear_tagged(ppnum_t pnum)
 	assert(cell->mte_page_count > 0);
 	assert(!bit_test(cell->free_mask, pnum % MTE_PAGES_PER_TAG_PAGE));
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->mte_page_count--;
 	});
 }
@@ -1599,12 +1631,7 @@ mteinfo_tag_storage_wire_locked(vm_page_t tag_page)
 	    /* Don't check memory status. */ FALSE);
 
 	vm_page_insert_internal(tag_page, mte_tags_object, page_addr,
-	    VM_KERN_MEMORY_MTAG,
-	    /* We already hold the queue locks. */ TRUE,
-	    /* Add this page to the hash. */ TRUE,
-	    /* Don't bother batching pmap operations. */ FALSE,
-	    /* Don't bother batching accounting. */ FALSE,
-	    /* Don't bother with delayed ledger updates. */ NULL);
+	    VM_KERN_MEMORY_MTAG, VMPI_Q_LOCKED, NULL);
 }
 
 /*!
@@ -1648,7 +1675,7 @@ mteinfo_tag_storage_select_activating(uint32_t target, mte_cell_bucket_t bucket)
 		}
 
 		assert_cell_state(cell, /* [A.1] */ MTE_MASK_INACTIVE);
-		CELL_UPDATE(cell, tag_page, false, {
+		CELL_UPDATE(cell, false, {
 			cell->state = MTE_STATE_ACTIVATING;
 		});
 
@@ -1858,7 +1885,7 @@ mteinfo_tag_storage_should_drain(bool for_wakeup)
 		return false;
 	}
 
-	if (mte_claimable_queue.vmpfq_count >= vm_free_magazine_refill_limit) {
+	if (mteinfo_claimable_count() >= vm_free_magazine_refill_limit) {
 		return false;
 	}
 
@@ -1885,11 +1912,11 @@ mteinfo_tag_storage_should_drain(bool for_wakeup)
 static void
 mteinfo_tag_storage_deactivate_barrier(void)
 {
-	mte_pcpu_t this_cpu = PERCPU_GET(mte_pcpu);
+	vm_page_pcpu_t this_cpu = PERCPU_GET(vm_page_pcpu);
 
 	assert(get_preemption_level() > 0);
 
-	percpu_foreach(it, mte_pcpu) {
+	percpu_foreach(it, vm_page_pcpu) {
 		if (it == this_cpu) {
 			/*
 			 * A thread is allowed to both have pending untagging
@@ -1948,8 +1975,7 @@ mteinfo_tag_storage_drain_flush(vm_page_list_t list)
 		NEXT_PAGE(tag_page) = VM_PAGE_NULL;
 		vm_page_unwire(tag_page,
 		    /* Don't put the page into aging queues. */ FALSE);
-		vm_page_remove(tag_page,
-		    /* Remove the page from the hash. */ TRUE);
+		vm_page_remove(tag_page);
 		NEXT_PAGE(tag_page) = save_next;
 	}
 
@@ -2001,7 +2027,7 @@ mteinfo_tag_storage_drain(void)
 
 		assert(cell->free_mask == 0);
 		assert_cell_state(cell, /* [D.1] */ MTE_MASK_ACTIVE);
-		CELL_UPDATE(cell, tag_page, false, {
+		CELL_UPDATE(cell, false, {
 			cell->state = MTE_STATE_DEACTIVATING;
 		});
 
@@ -2012,6 +2038,8 @@ mteinfo_tag_storage_drain(void)
 			mteinfo_tag_storage_drain_flush(list);
 			list   = (vm_page_list_t){ };
 		}
+
+		vm_mte_refill_ts_deactivated_count++;
 	}
 
 	if (list.vmpl_count) {
@@ -2040,17 +2068,17 @@ mteinfo_tag_storage_drain(void)
 static bool
 mteinfo_reclaim_tag_storage_page_try_pcpu(vm_page_t tag_page)
 {
-	mte_pcpu_t mte_pcpu;
-	uint16_t   cpu;
+	vm_page_pcpu_t vmp_pcpu;
+	uint16_t       cpu;
 
 	cpu      = os_atomic_load(&tag_page->vmp_local_id, relaxed);
-	mte_pcpu = PERCPU_GET_WITH_BASE(other_percpu_base(cpu), mte_pcpu);
+	vmp_pcpu = PERCPU_GET_WITH_BASE(other_percpu_base(cpu), vm_page_pcpu);
 
-	lck_ticket_lock(&mte_pcpu->free_claimed_lock, &vm_page_lck_grp_bucket);
+	lck_ticket_lock(&vmp_pcpu->free_claimed_lock, &vm_page_lck_grp_bucket);
 
 	if (tag_page->vmp_q_state == VM_PAGE_ON_FREE_LOCAL_Q &&
 	    tag_page->vmp_local_id == cpu) {
-		vm_page_queue_remove(&mte_pcpu->free_claimed_pages,
+		vm_page_queue_remove(&vmp_pcpu->free_claimed_pages,
 		    tag_page, vmp_pageq);
 		tag_page->vmp_q_state  = VM_PAGE_NOT_ON_Q;
 		tag_page->vmp_local_id = 0;
@@ -2059,7 +2087,7 @@ mteinfo_reclaim_tag_storage_page_try_pcpu(vm_page_t tag_page)
 		tag_page = VM_PAGE_NULL;
 	}
 
-	lck_ticket_unlock(&mte_pcpu->free_claimed_lock);
+	lck_ticket_unlock(&vmp_pcpu->free_claimed_lock);
 
 	return tag_page != VM_PAGE_NULL;
 }
@@ -2115,7 +2143,7 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 	bool vm_object_trylock_failed = false;
 
 	/* We need to try and reclaim the tag storage page. */
-	mteinfo_tag_storage_set_reclaiming(cell, tag_page);
+	mteinfo_tag_storage_set_reclaiming(cell);
 
 	if (tag_page->vmp_q_state == VM_PAGE_ON_FREE_LOCAL_Q &&
 	    mteinfo_reclaim_tag_storage_page_try_pcpu(tag_page)) {
@@ -2134,7 +2162,7 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 	/*
 	 * Snoop the vmp_q_state. If the page is currently used by the compressor
 	 * (VM_PAGE_USED_BY_COMPRESSOR), we'll grab the global compressor lock
-	 * for write (PAGE_REPLACEMENT_ALLOWED(TRUE)) and the compressor
+	 * for write (c_page_replacement_allowed_start()) and the compressor
 	 * object lock.
 	 *
 	 * Typically, we can't know that the object will be stable
@@ -2150,7 +2178,7 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 	 */
 	if (tag_page->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
 		assert(vm_mte_tag_storage_for_compressor);
-		PAGE_REPLACEMENT_ALLOWED(TRUE);
+		c_page_replacement_allowed_start();
 		vm_object_lock(compressor_object);
 		compressor_locked = true;
 
@@ -2164,7 +2192,7 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 			 * in any state now, but it's probably free and unusable. Give up.
 			 */
 			vm_object_unlock(compressor_object);
-			PAGE_REPLACEMENT_ALLOWED(FALSE);
+			c_page_replacement_allowed_end();
 			compressor_locked = false;
 			vm_free_page_lock_spin();
 			kr = KERN_FAILURE;
@@ -2263,13 +2291,13 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 		vm_object_unlock(object);
 		vm_page_unlock_queues();
 		if (compressor_locked) {
-			PAGE_REPLACEMENT_ALLOWED(FALSE);
+			c_page_replacement_allowed_end();
 			compressor_locked = false;
 		}
 
 		if (kr == KERN_ABORTED) {
 			assert_cell_state(cell, /* [B.1] */ MTE_MASK_RECLAIMING);
-			CELL_UPDATE(cell, tag_page, false, {
+			CELL_UPDATE(cell, false, {
 				cell->state = MTE_STATE_PINNED;
 			});
 			if (tag_page->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
@@ -2307,7 +2335,7 @@ mteinfo_reclaim_tag_storage_page(vm_page_t tag_page)
 
 release_locks:
 	if (compressor_locked) {
-		PAGE_REPLACEMENT_ALLOWED(FALSE);
+		c_page_replacement_allowed_end();
 	}
 	vm_page_unlock_queues();
 	if (vm_object_trylock_failed && vm_object_lock_avoid(object)) {
@@ -2351,7 +2379,7 @@ locks_acquired:
 			 * threads having performed [F.2 inline] followed
 			 * by [C.1 inline], possibly multiple times.
 			 */
-			mteinfo_tag_storage_set_reclaiming(cell, tag_page);
+			mteinfo_tag_storage_set_reclaiming(cell);
 		}
 
 		KDBG(VMDBG_CODE(DBG_VM_TAG_PAGE_CLAIMED) | DBG_FUNC_NONE,
@@ -2441,6 +2469,7 @@ mteinfo_tag_storage_active_refill(uint32_t *taggablep)
 	mte_cell_list_t  inactive_list = &mte_info_lists[MTE_LIST_INACTIVE_IDX];
 	uint32_t         taggable      = 0;
 	uint32_t         activated     = 0;
+	uint32_t         considered    = 0;
 
 	LCK_MTX_ASSERT(&vm_page_queue_free_lock, LCK_MTX_ASSERT_OWNED);
 
@@ -2504,6 +2533,8 @@ mteinfo_tag_storage_active_refill(uint32_t *taggablep)
 			break;
 		}
 
+		considered += list.vmpl_count;
+
 		if (kr == KERN_SUCCESS) {
 			activated += list.vmpl_count;
 			taggable += mteinfo_tag_storage_activate_locked(list,
@@ -2550,6 +2581,7 @@ mteinfo_tag_storage_active_refill(uint32_t *taggablep)
 	mteinfo_tag_storage_flush_reclaiming();
 
 	*taggablep += taggable;
+	vm_mte_refill_ts_considered_count += considered;
 	return activated;
 }
 
@@ -2626,13 +2658,43 @@ mteinfo_fill_continue(void *param __unused, wait_result_t wr __unused)
 void
 mteinfo_wake_fill_thread(void)
 {
-	if (is_mte_enabled) {
+	if (mte_enabled()) {
 		sched_cond_signal(&fill_thread_cond, vm_mte_fill_thread);
 	}
 }
 
 
 #pragma mark Alloc
+
+/*!
+ * @abstract
+ * Compute the current number of claimable tag storage pages.
+ *
+ * @discussion
+ * All inactive pages are theoretically claimable when there's an excessive
+ * (defined in terms of vm_page_tag_storage_inactive_target) number of
+ * inactive tag storage pages. Additionally, inactive pages covering <= 8 free
+ * pages are always claimable.
+ *
+ * Because pages are always claimed in sorted order (fewest to most free covered
+ * pages), the maximum of these two counts is used to avoid double-counting.
+ */
+inline uint32_t
+mteinfo_claimable_count(void)
+{
+	mte_cell_list_t inactive_list = &mte_info_lists[MTE_LIST_INACTIVE_IDX];
+	if (inactive_list->buckets == NULL) {
+		return 0;
+	}
+	uint32_t excess_count =
+	    inactive_list->count > vm_page_tag_storage_inactive_target ?
+	    inactive_list->count - vm_page_tag_storage_inactive_target : 0;
+	uint32_t regular_count =
+	    inactive_list->buckets[MTE_BUCKET_1_8].head.cell_count +
+	    inactive_list->buckets[MTE_BUCKET_0].head.cell_count;
+
+	return MAX(regular_count, excess_count);
+}
 
 /*!
  * @abstract
@@ -2648,20 +2710,20 @@ mteinfo_wake_fill_thread(void)
  *
  * The function must be called with preemption disabled.
  *
- * @param mte_pcpu      The current CPU's mte_pcpu_t data structure.
+ * @param vmp_pcpu      The per-cpu vm page structure for the current CPU.
  */
 static bool
-mteinfo_tag_storage_claimable_should_refill(mte_pcpu_t mte_pcpu)
+mteinfo_tag_storage_claimable_should_refill(vm_page_pcpu_t vmp_pcpu)
 {
 	if (__improbable(!vm_mte_enable_tag_storage_grab)) {
 		return false;
 	}
 
-	if (!vm_page_queue_empty(&mte_pcpu->free_claimed_pages)) {
+	if (!vm_page_queue_empty(&vmp_pcpu->free_claimed_pages)) {
 		return false;
 	}
 
-	return mte_claimable_queue.vmpfq_count >= VMP_FREE_BATCH_SIZE;
+	return mteinfo_claimable_count() >= VMP_FREE_BATCH_SIZE;
 }
 
 /*!
@@ -2670,47 +2732,40 @@ mteinfo_tag_storage_claimable_should_refill(mte_pcpu_t mte_pcpu)
  *
  * @discussion
  * This is done opportunistically by @c mteinfo_free_queue_grab()
- * When it notices that it should refill the claimable queue
+ * When it notices that it should refill the per-CPU claimable queue
  * (see @mteinfo_tag_storage_claimable_should_refill()).
  *
  * The function must be called with preemption disabled.
  *
- * @param mte_pcpu      The current CPU's mte_pcpu_t data structure.
+ * @param vmp_pcpu      The per-cpu vm page structure for the current CPU.
  * @param target        The number of tag storage pages to grab.
- * @param colorp        A pointer to the current color selector.
  */
 static void
 mteinfo_tag_storage_claimable_refill(
-	mte_pcpu_t              mte_pcpu,
-	uint32_t                target,
-	uint32_t               *colorp)
+	vm_page_pcpu_t          vmp_pcpu,
+	uint32_t                target)
 {
 	const int       cpu = cpu_number();
-	vm_page_queue_t queue;
-	ppnum_t         pnum;
 	vm_page_t       mem;
 
-	lck_ticket_lock_nopreempt(&mte_pcpu->free_claimed_lock,
+	lck_ticket_lock_nopreempt(&vmp_pcpu->free_claimed_lock,
 	    &vm_page_lck_grp_bucket);
 
 	for (uint32_t i = target; i-- > 0;) {
-		queue = &mte_claimable_queue.vmpfq_queues[*colorp].qhead;
-		while (vm_page_queue_empty(queue)) {
-			*colorp = (*colorp + 1) & vm_color_mask;
-			queue = &mte_claimable_queue.vmpfq_queues[*colorp].qhead;
-		}
-
-		mem  = (vm_page_t)vm_page_queue_first(queue);
-		pnum = VM_PAGE_GET_PHYS_PAGE(mem);
+		/*
+		 * Use the inactive tag storage page with the fewest free covered pages.
+		 */
+		(void) cell_list_find_first_page(MTE_LIST_INACTIVE_IDX, MTE_BUCKET_25_32, &mem);
+		assert(mem != VM_PAGE_NULL);
 
 		assert(mem->vmp_q_state == VM_PAGE_ON_FREE_Q);
 		mteinfo_tag_storage_set_claimed(mem);
 		mem->vmp_q_state = VM_PAGE_ON_FREE_LOCAL_Q;
 		mem->vmp_local_id = (uint16_t)cpu;
-		vm_page_queue_enter(&mte_pcpu->free_claimed_pages, mem, vmp_pageq);
+		vm_page_queue_enter(&vmp_pcpu->free_claimed_pages, mem, vmp_pageq);
 	}
 
-	lck_ticket_unlock_nopreempt(&mte_pcpu->free_claimed_lock);
+	lck_ticket_unlock_nopreempt(&vmp_pcpu->free_claimed_lock);
 
 	counter_add_preemption_disabled(&vm_cpu_free_claimed_count,
 	    target);
@@ -2718,18 +2773,17 @@ mteinfo_tag_storage_claimable_refill(
 
 vm_page_list_t
 mteinfo_free_queue_grab(
+	vm_page_pcpu_t          vmp_pcpu,
 	vm_grab_options_t       options,
 	vm_memory_class_t       class,
 	unsigned int            num_pages,
 	vm_page_q_state_t       q_state)
 {
-	mte_pcpu_t           mte_pcpu = PERCPU_GET(mte_pcpu);
-	unsigned int        *colorp;
 	unsigned int         color;
 	vm_page_list_t       list = { };
 	mte_free_queue_idx_t idx;
 
-	assert(!mte_pcpu->deactivate_suspend && get_preemption_level() > 0);
+	assert(!vmp_pcpu->deactivate_suspend && get_preemption_level() > 0);
 
 	if (class == VM_MEMORY_CLASS_REGULAR) {
 		/*
@@ -2742,7 +2796,7 @@ mteinfo_free_queue_grab(
 		 * always safely wire them.
 		 */
 		if (vm_page_queue_free.vmpfq_count) {
-			list = vm_page_free_queue_grab(options,
+			list = vm_page_free_queue_grab(vmp_pcpu, options,
 			    VM_MEMORY_CLASS_DEAD_TAG_STORAGE,
 			    MIN(vm_free_magazine_refill_limit / 2,
 			    vm_page_queue_free.vmpfq_count), q_state);
@@ -2753,12 +2807,10 @@ mteinfo_free_queue_grab(
 		assert(num_pages <= vm_page_free_taggable_count);
 	}
 
-	colorp = PERCPU_GET(start_color);
-	color  = *colorp;
+	color  = vmp_pcpu->start_color;
 
-	if (mteinfo_tag_storage_claimable_should_refill(mte_pcpu)) {
-		mteinfo_tag_storage_claimable_refill(mte_pcpu,
-		    VMP_FREE_BATCH_SIZE, &color);
+	if (mteinfo_tag_storage_claimable_should_refill(vmp_pcpu)) {
+		mteinfo_tag_storage_claimable_refill(vmp_pcpu, VMP_FREE_BATCH_SIZE);
 	}
 
 	while (list.vmpl_count < num_pages) {
@@ -2864,18 +2916,16 @@ mteinfo_free_queue_grab(
 
 		if (cell_list_idx(orig) != cell_list_idx(*cell) ||
 		    cell_list_bucket(orig) != cell_list_bucket(*cell)) {
-			cell_list_requeue(cell, tag_page,
+			cell_list_requeue(cell,
 			    cell_list_idx(orig), cell_list_bucket(orig),
-			    cell_list_idx(*cell), cell_list_bucket(*cell),
-			    (int)cell_on_claimable_queue(*cell) -
-			    (int)cell_on_claimable_queue(orig));
+			    cell_list_idx(*cell), cell_list_bucket(*cell));
 		}
 
 		mteinfo_free_queue_requeue(cell, orig, MTE_FREE_NOT_QUEUED,
 		    mteinfo_free_queue_idx(*cell));
 	}
 
-	*colorp = color;
+	vmp_pcpu->start_color = color;
 
 	/*
 	 * Some existing driver/IOKit code deals badly with getting physically
@@ -2918,7 +2968,7 @@ mteinfo_free_queue_grab(
 		 * mteinfo_tag_storage_deactivate_barrier() is called by any
 		 * path performing a deactivation to synchronize with this.
 		 */
-		os_atomic_store(&mte_pcpu->deactivate_suspend, 1,
+		os_atomic_store(&vmp_pcpu->deactivate_suspend, 1,
 		    compiler_acquire);
 	}
 
@@ -2945,7 +2995,7 @@ mteinfo_page_list_fix_tagging(vm_memory_class_t class, vm_page_list_t *list)
 		.page_slist = list->vmpl_head,
 		.type = UNIFIED_PAGE_LIST_TYPE_VM_PAGE_LIST,
 	};
-	mte_pcpu_t mte_pcpu = PERCPU_GET(mte_pcpu);
+	vm_page_pcpu_t vmp_pcpu = PERCPU_GET(vm_page_pcpu);
 	vm_page_t mem;
 
 	assert(get_preemption_level() > 0);
@@ -2960,7 +3010,7 @@ mteinfo_page_list_fix_tagging(vm_memory_class_t class, vm_page_list_t *list)
 		 * Invariants related to tagged pages are resolved,
 		 * we can allow deactivations again.
 		 */
-		os_atomic_store(&mte_pcpu->deactivate_suspend, 0, release);
+		os_atomic_store(&vmp_pcpu->deactivate_suspend, 0, release);
 	}
 
 	if (class == VM_MEMORY_CLASS_TAGGED && list->vmpl_has_untagged) {
@@ -2970,7 +3020,7 @@ mteinfo_page_list_fix_tagging(vm_memory_class_t class, vm_page_list_t *list)
 		}
 	}
 
-	assert(!mte_pcpu->deactivate_suspend);
+	assert(!vmp_pcpu->deactivate_suspend);
 }
 
 #endif /* VM_MTE_FF_VERIFY */
@@ -3056,10 +3106,6 @@ mteinfo_init(uint32_t num_tag_pages)
 			vm_page_queue_init(mteinfo_free_queue_head(idx, i));
 		}
 	}
-
-#ifndef VM_MTE_FF_VERIFY
-	vm_page_free_queue_init(&mte_claimable_queue);
-#endif /* VM_MTE_FF_VERIFY */
 }
 
 #if HIBERNATION
@@ -3099,6 +3145,7 @@ mteinfo_tag_storage_release_startup(vm_page_t tag_page)
 	vm_memory_class_t class      = VM_MEMORY_CLASS_TAG_STORAGE;
 	bool              deactivate = true;
 	uint32_t          mte_count  = 0;
+	uint32_t          desired_active = (mte_tag_storage_count - mte_tag_storage_discarded) / 8;
 
 	/*
 	 * If this is a tag storage page we won't even classify as tag
@@ -3131,7 +3178,7 @@ mteinfo_tag_storage_release_startup(vm_page_t tag_page)
 		}
 
 		if (cell_free_page_count(*cell) == MTE_PAGES_PER_TAG_PAGE &&
-		    mteinfo_tag_storage_active(true) < mte_tag_storage_count / 8) {
+		    mteinfo_tag_storage_active(true) < desired_active) {
 			deactivate = false;
 		} else if (mte_count) {
 			deactivate = false;
@@ -3191,10 +3238,10 @@ __startup_func
 static void
 mteinfo_tag_storage_lock_init(void)
 {
-	percpu_foreach(mte_pcpu, mte_pcpu) {
-		lck_ticket_init(&mte_pcpu->free_claimed_lock,
+	percpu_foreach(vmp_pcpu, vm_page_pcpu) {
+		lck_ticket_init(&vmp_pcpu->free_claimed_lock,
 		    &vm_page_lck_grp_bucket);
-		vm_page_queue_init(&mte_pcpu->free_claimed_pages);
+		vm_page_queue_init(&vmp_pcpu->free_claimed_pages);
 	}
 }
 STARTUP(PERCPU, STARTUP_RANK_MIDDLE, mteinfo_tag_storage_lock_init);
@@ -3211,7 +3258,7 @@ mteinfo_init_fill_thread(void)
 {
 	kern_return_t result;
 
-	if (!is_mte_enabled) {
+	if (!mte_enabled()) {
 		return;
 	}
 
@@ -3281,7 +3328,7 @@ mteinfo_tag_storage_unmanaged_discover(void)
 	cell_idx_t cur_idx = 0;
 	ppnum_t    pnum;
 
-	if (!is_mte_enabled) {
+	if (!mte_enabled()) {
 		return;
 	}
 

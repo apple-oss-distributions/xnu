@@ -777,7 +777,7 @@ keyWithGuidAndCString(const uuid_t guid, const char * cstring)
 
 	length = sizeof(uuid_string_t) - 1 + sizeof(':') + strlen(cstring) + 1;
 
-	canonicalString = (char *) IOMallocData(length);
+	canonicalString = (char *) IOMallocZeroData(length);
 	if (canonicalString == nullptr) {
 		return NULL;
 	}
@@ -957,7 +957,7 @@ private:
 
 public:
 	bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
-	void logVariable(NVRAMPartitionType region, IONVRAMOperation op, const char *name, void *data);
+	void logVariable(NVRAMPartitionType region, IONVRAMOperation op, const char *name, void *data = nullptr, void *offset = nullptr);
 };
 
 OSDefineMetaClassAndStructors(IODTNVRAMDiags, IOService)
@@ -994,21 +994,22 @@ error:
 }
 
 void
-IODTNVRAMDiags::logVariable(NVRAMPartitionType region, IONVRAMOperation op, const char *name, void *data)
+IODTNVRAMDiags::logVariable(NVRAMPartitionType region, IONVRAMOperation op, const char *name, void *data, void *offset)
 {
 	// "Stats"        : OSDictionary
 	// - "XX:varName" : OSDictionary, XX is the region value prefix to distinguish which dictionary the variable is in
-	//   - "Init"     : OSBoolean True/present if variable present at initialization
+	//   - "Init"     : OSNumber variable offset (in the proxy image passed via EDT) if variable is present at initialization (unserialize)
 	//   - "Read"     : OSNumber count
 	//   - "Write"    : OSNumber count
 	//   - "Delete"   : OSNumber count
-	//   - "Size"     : OSNumber size, latest size from either init or write
+	//   - "Size"     : OSNumber data size, latest size from either init or write
 	//   - "Present"  : OSBoolean True/False if variable is present or not
 	char                      *entryKey;
 	size_t                    entryKeySize;
 	OSSharedPtr<OSDictionary> existingEntry;
 	OSSharedPtr<OSNumber>     currentCount;
 	OSSharedPtr<OSNumber>     varSize;
+	OSSharedPtr<OSNumber>     varOffset;
 	const char                *opCountKey = nullptr;
 
 	entryKeySize = strlen("XX:") + strlen(name) +  1;
@@ -1045,7 +1046,8 @@ IODTNVRAMDiags::logVariable(NVRAMPartitionType region, IONVRAMOperation op, cons
 		break;
 	case kIONVRAMOperationInit:
 		varSize = OSNumber::withNumber((size_t)data, 64);
-		existingEntry->setObject(kIODTNVRAMDiagsInitKey, varSize);
+		varOffset = OSNumber::withNumber((size_t)offset, 64);
+		existingEntry->setObject(kIODTNVRAMDiagsInitKey, varOffset);
 		existingEntry->setObject(kIODTNVRAMDiagsSizeKey, varSize);
 		existingEntry->setObject(kIODTNVRAMDiagsPresentKey, kOSBooleanTrue);
 		break;
@@ -1857,7 +1859,7 @@ IODTNVRAM::copyPropertyWithGUIDAndName(const uuid_t guid, const char *name) cons
 	theObject.reset(localVarDict->getObject(canonicalKey.get()), OSRetain);
 
 	if (_diags) {
-		_diags->logVariable(getPartitionTypeForGUID(newGuid), kIONVRAMOperationRead, name, NULL);
+		_diags->logVariable(getPartitionTypeForGUID(newGuid), kIONVRAMOperationRead, name);
 	}
 
 	if (theObject != nullptr) {

@@ -409,7 +409,7 @@ __btlib_grow(bt_library_t btl)
 		addr = btl->btl_slabs[slab] + btl->btl_faulted_pos;
 
 		kr = kernel_memory_populate(addr, PAGE_SIZE,
-		    KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN, VM_KERN_MEMORY_DIAG);
+		    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 	}
 
 done:
@@ -875,12 +875,17 @@ __btlib_get(bt_library_t btl, void *fp, btref_get_flags_t flags)
 		if (needle.bts_hash < bts->bts_hash) {
 			break;
 		}
-		if (__btstack_same(&needle, bts) &&
-		    (ref = __btstack_try_retain(ref, bts, flags))) {
-			smr_leave(&bt_library_smr);
-			return ref;
+		if (__btstack_same(&needle, bts)) {
+			if (flags & BTREF_GET_NEW_ONLY) {
+				smr_leave(&bt_library_smr);
+				return BTREF_NULL;
+			}
+			ref = __btstack_try_retain(ref, bts, flags);
+			if (ref) {
+				smr_leave(&bt_library_smr);
+				return ref;
+			}
 		}
-
 		ref = smr_entered_load(&bts->bts_next);
 	}
 
@@ -1363,7 +1368,7 @@ btlog_create(btlog_type_t type, uint32_t count, uint32_t sample)
 	btlogu_t btlu;
 
 	kr = kmem_alloc(kernel_map, &btlu.bta, pair.btsp_size,
-	    KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN, VM_KERN_MEMORY_DIAG);
+	    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 
 	if (kr != KERN_SUCCESS) {
 		return NULL;
@@ -1431,7 +1436,7 @@ btlog_enable(btlogu_t btlu)
 	size = __btlog_size(btlu).btsp_size;
 	if (size > PAGE_SIZE) {
 		kr = kernel_memory_populate(btlu.bta + PAGE_SIZE,
-		    size - PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN,
+		    size - PAGE_SIZE, KMA_KOBJECT | KMA_ZERO,
 		    VM_KERN_MEMORY_DIAG);
 	}
 
@@ -1618,7 +1623,7 @@ btlog_get_records(
 
 	for (;;) {
 		kr = kmem_alloc(ipc_kernel_map, &addr, size,
-		    KMA_DATA, VM_KERN_MEMORY_IPC);
+		    KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 		if (kr == KERN_SUCCESS) {
 			break;
 		}

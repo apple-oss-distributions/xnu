@@ -38,6 +38,8 @@
 #include <kern/percpu.h>
 #include <kern/thread.h>
 #include <kern/timer_queue.h>
+#include <kern/cpc.h>
+#include <kern/monotonic.h>
 #include <arm/cpu_data.h>
 #include <arm/cpuid.h>
 #include <arm/caches_internal.h>
@@ -55,15 +57,9 @@
 #include <pexpert/device_tree.h>
 #include <sys/kdebug.h>
 #include <arm/machine_routines.h>
-
 #include <machine/atomic.h>
-
+#include <machine/machine_cpc.h>
 #include <san/kasan.h>
-
-#include <kern/kpc.h>
-#if CONFIG_CPU_COUNTERS
-#include <kern/monotonic.h>
-#endif /* CONFIG_CPU_COUNTERS */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -220,6 +216,10 @@ arm64_ipi_test()
 		return;
 	}
 
+	if (timeout_ms == 0) {
+		return;
+	}
+
 	const unsigned int max_cpu_id = ml_get_max_cpu_number();
 	for (unsigned int i = 0; i <= max_cpu_id; ++i) {
 		ipi_test_data = &arm64_ipi_test_data[i];
@@ -329,8 +329,7 @@ cpu_sleep(void)
 	}
 
 #if CONFIG_CPU_COUNTERS
-	kpc_idle();
-	mt_cpu_down(cpu_data_ptr);
+	cpc_cpu_transition(CPC_CPU_OFFLINE, cpu_data_ptr);
 #endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
@@ -485,9 +484,6 @@ cpu_idle(void)
 	processor_t     processor = current_processor();
 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
 	bool idle_disallowed = false;
-	/* Read and reset the next_idle_short flag */
-	bool next_idle_short = processor->next_idle_short;
-	processor->next_idle_short = false;
 
 	if (__improbable((!idle_enable))) {
 		idle_disallowed = true;
@@ -501,8 +497,8 @@ cpu_idle(void)
 
 	bool ipending = false;
 	uint32_t cid = cpu_data_ptr->cpu_cluster_id;
-	bool check_cluster_recommendation = true;
 	uint64_t wfe_timeout = 0;
+	uint64_t ctime_for_deadline = mach_absolute_time();
 
 	if (idle_proximate_io_wfe_masked == 1) {
 		/* Check for an active perf. controller generated
@@ -511,24 +507,40 @@ cpu_idle(void)
 		wfe_timeout = ml_cluster_wfe_timeout(cid);
 	}
 
-	if (next_idle_short && expecting_ipi_wfe_timeout_mt > wfe_timeout) {
-		/* In this case we should WFE because a response IPI
-		 * is expected soon.
+	bool arm_next_idle_short_wfe = processor->next_idle_short;
+	if (arm_next_idle_short_wfe) {
+		/* We are WFE-ing because a response IPI is expected soon.
+		 * This timeout overrides the perf. controller
+		 * recommended timeout because either a thread will arrive
+		 * to this CPU before the timeout expires, or we are going
+		 * to break out to thread_select() to reevaluate scheduler
+		 * rebalancing anyways.
+		 * Note that a prior interrupt could have prevented us from
+		 * reaching cpu_idle() to arm this timeout, and an interrupt
+		 * later could cause us to re-arm and extend the timeout,
+		 * which is undesired. rdar://161593206
 		 */
 		wfe_timeout = expecting_ipi_wfe_timeout_mt;
-		check_cluster_recommendation = false;
+		processor->next_idle_short_wfe_deadline = ctime_for_deadline + expecting_ipi_wfe_timeout_mt;
+	} else {
+		processor->next_idle_short_wfe_deadline = UINT64_MAX;
 	}
 
 	if (wfe_timeout != 0) {
-		uint64_t wfe_deadline = mach_absolute_time() + wfe_timeout;
+		uint64_t wfe_deadline = ctime_for_deadline + wfe_timeout;
 		/* Poll issuing event-bounded WFEs until an interrupt
 		 * arrives or the WFE recommendation expires
 		 */
-		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, wfe_timeout, !check_cluster_recommendation);
-		ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false, check_cluster_recommendation);
-		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline);
-		if (ipending == true) {
-			/* Back to machine_idle() */
+		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, cpu_data_ptr->wfe_count, wfe_timeout, arm_next_idle_short_wfe);
+		ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false, !arm_next_idle_short_wfe);
+		KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline, arm_next_idle_short_wfe);
+		if (ipending || arm_next_idle_short_wfe) {
+			/*
+			 * Either we received an interrupt, or we expired the
+			 * "next_idle_short" WFE deadline and thus should
+			 * reevaluate scheduler rebalance.
+			 * Back to machine_idle()
+			 */
 			Idle_load_context();
 		}
 	}
@@ -543,6 +555,7 @@ cpu_idle(void)
 			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, ~0ULL);
 			assert(ipending == true);
 		}
+		/* Back to machine_idle() */
 		Idle_load_context();
 	}
 
@@ -569,13 +582,17 @@ cpu_idle(void)
 	}
 
 #if CONFIG_CPU_COUNTERS
-	kpc_idle();
-	mt_cpu_idle(cpu_data_ptr);
+	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
 #endif /* CONFIG_CPU_COUNTERS */
 
 	if (wfi) {
 #if !defined(APPLE_ARM64_ARCH_FAMILY)
 		platform_cache_idle_enter();
+#endif
+
+#if HAS_MTE
+		/* Preserve MTE tag generator state across S2R and hibernation */
+		cpu_data_ptr->mte_rgsr_el1_seed = __builtin_arm_rsr64("RGSR_EL1");
 #endif
 
 #if DEVELOPMENT || DEBUG
@@ -650,8 +667,8 @@ cpu_idle_exit(boolean_t from_reset)
 	}
 
 #if CONFIG_CPU_COUNTERS
-	kpc_idle_exit();
-	mt_cpu_run(cpu_data_ptr);
+	cpc_cpu_transition(from_reset ? CPC_CPU_ACTIVE_COLD : CPC_CPU_ACTIVE_WARM,
+	    cpu_data_ptr);
 #endif /* CONFIG_CPU_COUNTERS */
 
 	if (wfi && (cpu_data_ptr->cpu_idle_notify != NULL)) {
@@ -724,6 +741,9 @@ cpu_init(void)
 		}
 
 		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
+#if CONFIG_CPU_COUNTERS
+		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
+#endif /* CONFIG_CPU_COUNTERS */
 	}
 	cdp->cpu_stat.irq_ex_cnt_wake = 0;
 	cdp->cpu_stat.ipi_cnt_wake = 0;
@@ -733,9 +753,13 @@ cpu_init(void)
 	cdp->cpu_running = TRUE;
 	cdp->cpu_sleep_token_last = cdp->cpu_sleep_token;
 	cdp->cpu_sleep_token = 0x0UL;
+
 #if CONFIG_CPU_COUNTERS
-	kpc_idle_exit();
-	mt_cpu_up(cdp);
+	/*
+	 * After setting `cpu_running` to true so timers can be armed,
+	 * if necessary.
+	 */
+	cpc_cpu_transition(CPC_CPU_ONLINE, cdp);
 #endif /* CONFIG_CPU_COUNTERS */
 }
 

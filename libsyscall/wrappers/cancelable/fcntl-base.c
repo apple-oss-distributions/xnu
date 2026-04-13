@@ -75,6 +75,7 @@ fcntl(int fd, int cmd, ...)
 	case F_GETSIGSINFO:
 	case F_ATTRIBUTION_TAG:
 	case F_ASSERT_BG_ACCESS:
+	case F_DIRLSEEK:
 		arg = va_arg(ap, void *);
 		break;
 	default:

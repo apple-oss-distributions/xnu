@@ -269,10 +269,10 @@ dtrace_ptss_free_page(struct proc* p, struct dtrace_ptss_page* ptss_page)
 	mach_vm_size_t size = PAGE_SIZE; // We need some way to assert that this matches vm_map_round_page() !!!
 
 	// Silent failures, no point in checking return code.
-	mach_vm_deallocate(map, addr, size);
+	mach_vm_deallocate_kernel(map, addr, size);
 
 	mach_vm_address_t write_addr = ptss_page->entries[0].write_addr;
-	mach_vm_deallocate(map, write_addr, size);
+	mach_vm_deallocate_kernel(map, write_addr, size);
 
 	vm_map_deallocate(map);
 }

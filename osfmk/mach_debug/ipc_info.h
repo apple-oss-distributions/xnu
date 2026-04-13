@@ -140,6 +140,7 @@ __enum_decl(ipc_info_object_type_t, natural_t, {
 	IPC_OTYPE_TASK_FATAL            = 51,
 	IPC_OTYPE_KCDATA                = 52,
 	IPC_OTYPE_EXCLAVES_RESOURCE     = 53,
+	IPC_OTYPE_THREAD_RESUME         = 54,
 
 	/* catchall */
 	IPC_OTYPE_UNKNOWN               = ~0u,

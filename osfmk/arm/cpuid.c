@@ -222,9 +222,25 @@ cpuid_get_cpufamily(void)
 		case CPU_PART_PCORE_BRAVA_C:
 			cpufamily = CPUFAMILY_ARM_BRAVA;
 			break;
+		case CPU_PART_ECORE_TAHITI:
+		case CPU_PART_PCORE_TAHITI:
+			cpufamily = CPUFAMILY_ARM_TAHITI;
+			break;
+		case CPU_PART_ECORE_TUPAI:
+		case CPU_PART_PCORE_TUPAI:
+			cpufamily = CPUFAMILY_ARM_TUPAI;
+			break;
 		case CPU_PART_ECORE_HIDRA:
 		case CPU_PART_PCORE_HIDRA:
 			cpufamily = CPUFAMILY_ARM_HIDRA;
+			break;
+		case CPU_PART_ECORE_THERA:
+		case CPU_PART_PCORE_THERA:
+			cpufamily = CPUFAMILY_ARM_THERA;
+			break;
+		case CPU_PART_ECORE_TILOS:
+		case CPU_PART_PCORE_TILOS:
+			cpufamily = CPUFAMILY_ARM_TILOS;
 			break;
 		default:
 			cpufamily = CPUFAMILY_UNKNOWN;
@@ -327,9 +343,25 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_PCORE_BRAVA_C:
 		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
 		break;
+	case CPU_PART_ECORE_TAHITI:
+	case CPU_PART_PCORE_TAHITI:
+		cpusubfamily = CPUSUBFAMILY_ARM_HP;
+		break;
+	case CPU_PART_ECORE_TUPAI:
+	case CPU_PART_PCORE_TUPAI:
+		cpusubfamily = CPUSUBFAMILY_ARM_HA;
+		break;
 	case CPU_PART_ECORE_HIDRA:
 	case CPU_PART_PCORE_HIDRA:
 		cpusubfamily = CPUSUBFAMILY_ARM_HG;
+		break;
+	case CPU_PART_ECORE_THERA:
+	case CPU_PART_PCORE_THERA:
+		cpusubfamily = CPUSUBFAMILY_ARM_HP;
+		break;
+	case CPU_PART_ECORE_TILOS:
+	case CPU_PART_PCORE_TILOS:
+		cpusubfamily = CPUSUBFAMILY_ARM_HA;
 		break;
 	default:
 		cpusubfamily = CPUSUBFAMILY_UNKNOWN;

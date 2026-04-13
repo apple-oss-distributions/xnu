@@ -309,6 +309,7 @@
 #define MIDR_VAR_MASK   (0xf << MIDR_VAR_SHIFT)
 
 
+
 #if __ARM_KERNEL_PROTECT__
 /*
  * __ARM_KERNEL_PROTECT__ is a feature intended to guard against potential
@@ -2143,6 +2144,12 @@
 
 #define ARM_TTE_VALID               0x0000000000000001ULL          /* valid entry */
 
+/**
+ * Sentinel value that will be written to the ignored region of a TTE table entry to indicate the table
+ * is slated for removal.  The table is expected to remain valid and mapped while this bit is present.
+ */
+#define ARM_TTE_TABLE_CONDEMNED     0x0000000000000004ULL          /* table is slated for future unmapping */
+
 #define ARM_TTE_TYPE_MASK           0x0000000000000002ULL          /* mask for extracting the type */
 #define ARM_TTE_TYPE_TABLE          0x0000000000000002ULL          /* page table type */
 #define ARM_TTE_TYPE_BLOCK          0x0000000000000000ULL          /* block entry type */
@@ -2645,6 +2652,7 @@ typedef enum {
  *   IFSC: Instruction Fault Status Code
  */
 
+
 #define ISS_IA_FNV_SHIFT 10
 #define ISS_IA_FNV      (0x1 << ISS_IA_FNV_SHIFT)
 
@@ -2671,6 +2679,8 @@ typedef enum {
  *   S1PTW: Stage 2 exception on Stage 1 page table walk
  *   DFSC:  Data Fault Status Code
  */
+
+
 #define ISS_DA_FNV_SHIFT 10
 #define ISS_DA_FNV      (0x1 << ISS_DA_FNV_SHIFT)
 
@@ -2778,6 +2788,7 @@ typedef enum {
 #define ISS_SEI_IDS        (0x1 << ISS_SEI_IDS_SHIFT)
 
 
+
 #if HAS_UCNORMAL_MEM
 #define ISS_UC 0x11
 #endif /* HAS_UCNORMAL_MEM */
@@ -2821,8 +2832,29 @@ typedef enum {
 #endif
 #define SMCR_EL1_LEN(x)         ((x) & SMCR_EL1_LEN_MASK)
 
-#define SMPRI_EL1_PRIORITY_MASK 0xf
-#define SMPRI_EL1_PRIORITY(x)   ((x) & SMPRI_EL1_PRIORITY_MASK)
+/*
+ * SME prioritization controls. If USE_SME_PRIORITY is not defined, these are
+ * effectively disabled.
+ */
+#define SMPRIMAP_VAL(IDX, VAL) (SMPRI_EL1_PRIORITY(VAL) << (IDX))
+#define SMPRIMAP_DEFAULT SMPRIMAP_ALL(SMPRI_EL1_DEFAULT)
+#define SMPRIMAP_ALL(VAL)                                                                          \
+	SMPRIMAP_VAL(0, VAL) | SMPRIMAP_VAL(1, VAL) | SMPRIMAP_VAL(2, VAL) | SMPRIMAP_VAL(3, VAL) |    \
+	SMPRIMAP_VAL(4, VAL) | SMPRIMAP_VAL(5, VAL) | SMPRIMAP_VAL(6, VAL) |                           \
+	SMPRIMAP_VAL(7, VAL) | SMPRIMAP_VAL(8, VAL) | SMPRIMAP_VAL(9, VAL) |                           \
+	SMPRIMAP_VAL(10, VAL) | SMPRIMAP_VAL(11, VAL) | SMPRIMAP_VAL(12, VAL) |                        \
+	SMPRIMAP_VAL(13, VAL) | SMPRIMAP_VAL(14, VAL) | SMPRIMAP_VAL(15, VAL)
+
+#define SMPRI_EL1_MIN (0U)
+#if USE_SME_PRIORITY
+#define SMPRI_EL1_DEFAULT       (5U)
+#define SMPRI_EL1_MAX           (15U)
+#else
+#define SMPRI_EL1_DEFAULT       (SMPRI_EL1_MIN)
+#define SMPRI_EL1_MAX           (SMPRI_EL1_MIN)
+#endif
+#define SMPRI_EL1_PRIORITY_MASK   (0xf)
+#define SMPRI_EL1_PRIORITY(x)     ((x) & SMPRI_EL1_PRIORITY_MASK)
 
 /*
  * Streaming Vector Control Register (SVCR)
@@ -2954,11 +2986,23 @@ typedef enum {
 /*Brava*/
 #define MIDR_BRAVA_ACCE    (0x054 << MIDR_EL1_PNUM_SHIFT)
 #define MIDR_BRAVA_ACCP    (0x055 << MIDR_EL1_PNUM_SHIFT)
+/*Tahiti*/
+#define MIDR_TAHITI_ACCE   (0x060 << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_TAHITI_ACCP   (0x061 << MIDR_EL1_PNUM_SHIFT)
+/*Tupai*/
+#define MIDR_TUPAI_ACCE    (0x06A << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_TUPAI_ACCP    (0x06B << MIDR_EL1_PNUM_SHIFT)
 
 #if defined(APPLEACC8)
 /*Hidra*/
 #define MIDR_HIDRA_ACCE    (0x062 << MIDR_EL1_PNUM_SHIFT)
 #define MIDR_HIDRA_ACCP    (0x063 << MIDR_EL1_PNUM_SHIFT)
+/*Thera*/
+#define MIDR_THERA_ACCE    (0x070 << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_THERA_ACCP    (0x071 << MIDR_EL1_PNUM_SHIFT)
+/*Tilos*/
+#define MIDR_TILOS_ACCE    (0x07A << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_TILOS_ACCP    (0x07B << MIDR_EL1_PNUM_SHIFT)
 #endif /* defined(APPLEACC8) */
 
 
@@ -3332,6 +3376,19 @@ typedef enum {
 #define ID_AA64SMFR0_EL1_F32F32_MASK    (1ull << ID_AA64SMFR0_EL1_F32F32_OFFSET)
 #define ID_AA64SMFR0_EL1_F32F32_EN      (1ull << ID_AA64SMFR0_EL1_F32F32_OFFSET)
 
+/*
+ * ID_AA64ZFR0_EL1 - SVE Feature ID Register 0
+ *
+ *  63  60 59   56 55   52 51   48 47  44 43  40 39  36 35  32 31  28 27    24 23  20 19    16 15    12 11   8 7   4 3      0
+ * +------+-------+-------+-------+------+------+------+------+------+--------+------+--------+--------+------+-----+--------+
+ * | res0 | F64MM | F32MM | F16MM | I8MM | SM4  | res0 | SHA3 | res0 | B16B16 | BF16 |BitPerm |EltPerm | res0 | AES | SVEver |
+ * +------+-------+-------+-------+------+------+------+------+------+--------+------+--------+--------+------+-----+--------+
+ */
+
+#define ID_AA64ZFR0_EL1_B16B16_OFFSET   24
+#define ID_AA64ZFR0_EL1_B16B16_MASK     (0xfull << ID_AA64ZFR0_EL1_B16B16_OFFSET)
+#define ID_AA64ZFR0_EL1_B16B16_EN       (0x1ull << ID_AA64ZFR0_EL1_B16B16_OFFSET)
+
 
 #if HAS_MTE
 
@@ -3447,6 +3504,7 @@ typedef enum {
 #define ACNTHV_CTL_EL2                          S3_1_C15_C7_4
 #define ACNTHV_CTL_EL2_EN_OFFSET                0
 #define ACNTHV_CTL_EL2_EN_MASK                  (1ULL << ACNTHV_CTL_EL2_EN_OFFSET)
+
 
 #ifdef __ASSEMBLER__
 

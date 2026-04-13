@@ -102,7 +102,7 @@
 #define ARM_SME_ZA_STATE9        40
 #define ARM_SME_ZA_STATE10       41
 #define ARM_SME_ZA_STATE11       42
-#define ARM_SME_ZA_STATE12       42
+#define ARM_SME_ZA_STATE12       43
 #define ARM_SME_ZA_STATE13       44
 #define ARM_SME_ZA_STATE14       45
 #define ARM_SME_ZA_STATE15       46
@@ -1053,8 +1053,8 @@ typedef struct arm_debug_aggregate_state arm_debug_state_t;
  * NEON context
  */
 typedef __uint128_t uint128_t;
-typedef uint64_t uint64x2_t __attribute__((ext_vector_type(2)));
-typedef uint32_t uint32x4_t __attribute__((ext_vector_type(4)));
+typedef uint64_t uint64x2_t __attribute__((neon_vector_type(2)));
+typedef uint32_t uint32x4_t __attribute__((neon_vector_type(4)));
 
 struct arm_neon_saved_state32 {
 	union {

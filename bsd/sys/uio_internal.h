@@ -109,7 +109,7 @@ struct user_iovec;
 __private_extern__ struct user_iovec * uio_iovsaddr_user( uio_t a_uio );
 __private_extern__ int uio_calculateresid_user(uio_t __attribute((nonnull)) a_uio);
 __private_extern__ uio_t  uio_createwithbuffer( int a_iovcount, off_t a_offset, int a_spacetype, int a_iodirection, void *a_buf_p, size_t a_buffer_size );
-__private_extern__ int copyin_user_iovec_array(user_addr_t uaddr, int spacetype, int count, struct user_iovec *dst);
+__private_extern__ int copyin_user_iovec_array(user_addr_t uaddr, int spacetype, int count, struct user_iovec *dst, int capacity);
 
 /*
  * uio_reset_fast - reset an uio_t.

@@ -150,6 +150,10 @@ fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 	req.nfr_pid = pid;
 	req.nfr_port_reservation = cparams->port_reservation;
 
+	if (cparams->disabled) {
+		req.nfr_flags |= NXFLOWREQF_DISABLED;
+	}
+
 	if (cparams->is_demuxable_parent) {
 		req.nfr_flags |= NXFLOWREQF_PARENT;
 	} else {
@@ -262,6 +266,77 @@ fsw_netagent_flow_del(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 }
 
 static int
+fsw_netagent_flow_update(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
+    void *context, struct necp_client_nexus_parameters *cparams)
+{
+	struct flow_mgr *fm = fsw->fsw_flow_mgr;
+	struct flow_owner_bucket *fob;
+	struct flow_owner *fo;
+	struct flow_entry *__single fe = NULL;
+	bool low_latency = false;  // Could extract from cparams if needed
+	int error = 0;
+
+#if SK_LOG
+	uuid_string_t uuidstr;
+	SK_DF(SK_VERB_FLOW, "pid %d update flow_uuid %s disabled=%d",
+	    pid, sk_uuid_unparse(flow_uuid, uuidstr), cparams->disabled);
+#endif /* SK_LOG */
+
+	/*
+	 * Use the detach barrier to prevent flowswitch instance from
+	 * going away while we are here.
+	 */
+	if (!fsw_detach_barrier_add(fsw)) {
+		SK_ERR("netagent detached");
+		return ENXIO;
+	}
+
+	// Find the flow owner
+	fob = flow_mgr_get_fob_by_pid(fm, pid);
+	FOB_LOCK_SPIN(fob);
+
+	fo = flow_owner_find_by_pid(fob, pid, context, low_latency);
+	if (fo == NULL) {
+		error = ENOENT;
+		SK_ERR("pid %d flow owner not found", pid);
+		goto done;
+	}
+
+	// Find the flow entry by UUID
+	fe = flow_entry_find_by_uuid(fo, flow_uuid);
+	if (fe == NULL) {
+		error = ENOENT;
+#if SK_LOG
+		SK_ERR("pid %d flow_uuid %s not found",
+		    pid, sk_uuid_unparse(flow_uuid, uuidstr));
+#endif /* SK_LOG */
+		goto done;
+	}
+
+	// Update the disabled flag based on parameters
+	if (cparams->disabled) {
+		os_atomic_or(&fe->fe_flags, FLOWENTF_DISABLED, relaxed);
+	} else {
+		os_atomic_andnot(&fe->fe_flags, FLOWENTF_DISABLED, relaxed);
+	}
+
+#if SK_LOG
+	SK_DF(SK_VERB_FLOW, "pid %d flow_uuid %s updated, disabled=%d, fe_flags=0x%x",
+	    pid, sk_uuid_unparse(flow_uuid, uuidstr),
+	    cparams->disabled, fe->fe_flags);
+#endif /* SK_LOG */
+
+done:
+	if (fe != NULL) {
+		flow_entry_release(&fe);
+	}
+	FOB_UNLOCK(fob);
+	fsw_detach_barrier_remove(fsw);
+
+	return error;
+}
+
+static int
 fsw_netagent_event(u_int8_t event, uuid_t flow_uuid, pid_t pid, void *context,
     void *ctx, struct necp_client_agent_parameters *cparams, void * __sized_by(*results_length) *results,
     size_t *results_length)
@@ -299,6 +374,13 @@ fsw_netagent_event(u_int8_t event, uuid_t flow_uuid, pid_t pid, void *context,
 		error = fsw_netagent_flow_del(fsw, flow_uuid, pid,
 		    (event == NETAGENT_EVENT_NEXUS_FLOW_REMOVE), context,
 		    cparams->u.close_token);
+		break;
+
+	case NETAGENT_EVENT_NEXUS_FLOW_UPDATE:
+		/* these are required for this event */
+		ASSERT(cparams != NULL);
+		error = fsw_netagent_flow_update(fsw, flow_uuid, pid, context,
+		    &cparams->u.nexus_request);
 		break;
 
 	default:

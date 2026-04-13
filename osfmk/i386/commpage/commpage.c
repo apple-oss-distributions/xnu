@@ -62,6 +62,7 @@
 #include <machine/pmap.h>
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_map_internal.h>
+#include <vm/vm_map_lock_internal.h>
 #include <vm/vm_map_xnu.h>
 #include <stdatomic.h>
 
@@ -165,9 +166,12 @@ commpage_allocate(
 	 *
 	 * JMM - What we really need is a way to create it like this in the first place.
 	 */
-	if (!(kr = vm_map_lookup_entry( kernel_map, vm_map_trunc_page(kernel_addr, VM_MAP_PAGE_MASK(kernel_map)), &entry) || entry->is_sub_map)) {
+	vm_map_ilk_lock(kernel_map);
+	entry = vm_map_lookup(kernel_map, kernel_addr);
+	if (entry == VM_MAP_ENTRY_NULL || entry->is_sub_map) {
 		panic("cannot find commpage entry %d", kr);
 	}
+	vm_map_ilk_unlock(kernel_map);
 	VME_OBJECT(entry)->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	if ((kr = mach_make_memory_entry( kernel_map,           // target map

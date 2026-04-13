@@ -1058,7 +1058,7 @@ run_all_patterns(int flags)
 
 T_DECL(mte_compressor_paging,
     "Test paging out to the compressor and paging in from the compressor of MTE pages",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	run_all_patterns(0);
@@ -1067,7 +1067,7 @@ T_DECL(mte_compressor_paging,
 
 T_DECL(mte_compressor_no_pageing,
     "Test what happens if the tagged memory is not paged-in before being deallocated",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	run_all_patterns(DONT_PAGEIN);
@@ -1216,7 +1216,7 @@ dealloc(vm_address_t address, size_t bufsize)
 // the make sure that the bytes number maintained in the sysctl is the same as the actual mte_sizes in the segments
 T_DECL(mte_compressor_counters_verify,
     "Verify that the overhead bytes statistics match the size as it appears in the segments",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	counters_verify();
@@ -1226,7 +1226,7 @@ T_DECL(mte_compressor_counters_verify,
 
 T_DECL(mte_compressor_exercise_counters_verify,
     "Exericise the MTE tags compress, then verify that the overhead bytes statistics match the size as it appears in the segments",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	size_t bufsize = 100 * PAGE_SIZE;
@@ -1386,7 +1386,7 @@ analyse_rle_runs(const char* load_from_file, const char* dump_to_file, bool show
 
 T_DECL(mte_compressor_analyze_rle,
     "Exercise the MTE tags compress, then read, verify and print the RLE commands stats and the runs stats",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	const char *dump_to_file = NULL, *load_from_file = NULL;
@@ -1418,7 +1418,7 @@ T_DECL(mte_compressor_analyze_rle,
 
 T_DECL(mte_compressor_exercise_analyze_rle,
     "Exercise the MTE tags compress, then read, verify and print the RLE commands stats and the runs stats",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	size_t bufsize = 100 * PAGE_SIZE;

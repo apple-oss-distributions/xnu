@@ -118,6 +118,7 @@ kern_return_t arm64_bti_test(void);
 #endif /* BTI_ENFORCED */
 extern kern_return_t arm64_speculation_guard_test(void);
 extern kern_return_t arm64_aie_test(void);
+extern kern_return_t arm64_static_if_asm_test(void);
 #endif /* __arm64__ */
 
 extern kern_return_t test_thread_call(void);
@@ -177,6 +178,9 @@ struct xnupost_test kernel_post_tests[] = {
 #endif
 #if HAS_SPECRES
 	XNUPOST_TEST_CONFIG_BASIC(specres_test),
+#endif
+#if __arm64__
+	XNUPOST_TEST_CONFIG_BASIC(arm64_static_if_asm_test),
 #endif
 };
 
@@ -3291,17 +3295,17 @@ kprintf_hhx_test(void)
 	return KERN_SUCCESS;
 }
 
-static STATIC_IF_KEY_DEFINE_TRUE(key_true);
-static STATIC_IF_KEY_DEFINE_TRUE(key_true_to_false);
-static STATIC_IF_KEY_DEFINE_FALSE(key_false);
-static STATIC_IF_KEY_DEFINE_FALSE(key_false_to_true);
+STATIC_IF_KEY_DEFINE_TRUE(static_if_test_key_true);
+STATIC_IF_KEY_DEFINE_TRUE(static_if_test_key_true_to_false);
+STATIC_IF_KEY_DEFINE_FALSE(static_if_test_key_false);
+STATIC_IF_KEY_DEFINE_FALSE(static_if_test_key_false_to_true);
 
 __static_if_init_func
 static void
 static_if_tests_setup(const char *args __unused)
 {
-	static_if_key_disable(key_true_to_false);
-	static_if_key_enable(key_false_to_true);
+	static_if_key_disable(static_if_test_key_true_to_false);
+	static_if_key_enable(static_if_test_key_false_to_true);
 }
 STATIC_IF_INIT(static_if_tests_setup);
 
@@ -3310,52 +3314,52 @@ static_if_tests(void)
 {
 	int n = 0;
 
-	if (static_if(key_true)) {
+	if (static_if(static_if_test_key_true)) {
 		n++;
 	}
-	if (probable_static_if(key_true)) {
+	if (probable_static_if(static_if_test_key_true)) {
 		n++;
 	}
-	if (improbable_static_if(key_true)) {
+	if (improbable_static_if(static_if_test_key_true)) {
 		n++;
 	}
 	if (n != 3) {
 		panic("should still be enabled [n == %d, expected %d]", n, 3);
 	}
 
-	if (static_if(key_true_to_false)) {
+	if (static_if(static_if_test_key_true_to_false)) {
 		n++;
 	}
-	if (probable_static_if(key_true_to_false)) {
+	if (probable_static_if(static_if_test_key_true_to_false)) {
 		n++;
 	}
-	if (improbable_static_if(key_true_to_false)) {
+	if (improbable_static_if(static_if_test_key_true_to_false)) {
 		n++;
 	}
 	if (n != 3) {
 		panic("should now be disabled [n == %d, expected %d]", n, 3);
 	}
 
-	if (static_if(key_false)) {
+	if (static_if(static_if_test_key_false)) {
 		n++;
 	}
-	if (probable_static_if(key_false)) {
+	if (probable_static_if(static_if_test_key_false)) {
 		n++;
 	}
-	if (improbable_static_if(key_false)) {
+	if (improbable_static_if(static_if_test_key_false)) {
 		n++;
 	}
 	if (n != 3) {
 		panic("should still be disabled [n == %d, expected %d]", n, 3);
 	}
 
-	if (static_if(key_false_to_true)) {
+	if (static_if(static_if_test_key_false_to_true)) {
 		n++;
 	}
-	if (probable_static_if(key_false_to_true)) {
+	if (probable_static_if(static_if_test_key_false_to_true)) {
 		n++;
 	}
-	if (improbable_static_if(key_false_to_true)) {
+	if (improbable_static_if(static_if_test_key_false_to_true)) {
 		n++;
 	}
 	if (n != 6) {
@@ -3406,10 +3410,57 @@ kernel_func7(__unused int a, __unused char b)
 }
 int kernel_func8_was_called = 0;
 __mockable void
-kernel_func8(__unused int a, __unused char b)
+kernel_func8(int a, __unused char b)
 {
-	printf("in void func8");
+	printf("in void func8 %d", a);
 	kernel_func8_was_called = a;
+}
+
+__mockable __attribute__((overloadable)) int
+kernel_func9(__unused const char* s)
+{
+	printf("in kernel_func9 string overload\n");
+	return 1;
+}
+__mockable __attribute__((overloadable)) int
+kernel_func9(__unused int v)
+{
+	printf("in kernel_func9 int overload\n");
+	return 2;
+}
+// a function with the same name as the above overloadables, but without the
+// overloadable attribute. It's symbol is going to be not mangled
+__mockable int
+kernel_func9(__unused int a, __unused int b)
+{
+	printf("in kernel_func9 two-ints overload\n");
+	return 3;
+}
+
+__mockable size_t
+kernel_func10(__unused int a, __unused char b)
+{
+	return 10000;
+}
+
+__attribute__((noinline, used)) void
+test_mock_noinline(size_t __unused expect_from_func5, int expect_from_func8)
+{
+	// constant propagation out of return value - the caller (here) of kernel_func5() would have
+	// the constant return value propagated
+	size_t f5ret = kernel_func5(1, 2);
+	assert3u(f5ret, ==, expect_from_func5);
+
+	// constant propagation into arguments - kernel_func8() would be compiled with the constants seen in the
+	// invocation from the same translation unit
+	kernel_func8(200, 0);
+	assert3s(kernel_func8_was_called, ==, expect_from_func8);
+}
+
+__mockable int
+kernel_func11(__unused int a, __unused char b)
+{
+	return 1;
 }
 
 #endif /* __BUILDING_XNU_LIB_UNITTEST__ */

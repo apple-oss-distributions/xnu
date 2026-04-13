@@ -85,7 +85,7 @@ skt_utun27302538_common(void)
 
 	usleep(100000);
 
-	channel = sktu_create_interface_channel(SKTU_IFT_UTUN, tunsock);
+	channel = sktu_create_interface_channel(SKTU_IFT_UTUN, tunsock, false);
 	assert(channel);
 }
 

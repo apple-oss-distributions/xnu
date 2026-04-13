@@ -208,7 +208,7 @@ struct vnode {
 	mount_t XNU_PTRAUTH_SIGNED_PTR("vnode.v_mount") v_mount;                        /* ptr to vfs we are in */
 	void *  v_data;                         /* private data for fs */
 #if CONFIG_MACF
-	struct label *v_label;                  /* MAC security label */
+	struct label *_Atomic v_label;          /* MAC security label */
 #endif
 #if CONFIG_TRIGGERS
 	vnode_resolve_t v_resolve;              /* trigger vnode resolve info (VDIR only) */
@@ -323,6 +323,8 @@ struct vnode {
 #define VE_LINKCHANGEWAIT        0x02
 #define VE_NOT_HARDLINK          0x04
 #define VE_APPENDONLY            0x08   /* UF_APPEND / SF_APPEND flag set */
+#define VE_CHOWN_CHMOD_BUSY      0x10   /* chown/chmod operation in progress */
+#define VE_CHOWN_CHMOD_WAITING   0x20   /* thread waiting for chown/chmod to complete */
 
 /*
  * This structure describes vnode data which is specific to a file descriptor.
@@ -584,6 +586,9 @@ errno_t vnode_setsize(vnode_t, off_t, int ioflag, vfs_context_t);
 int     vnode_setattr_fallback(vnode_t vp, struct vnode_attr *vap, vfs_context_t ctx);
 int     vnode_isspec(vnode_t vp);
 
+/* Serialize chmod/chown operations to prevent race conditions */
+int     vnode_chmod_chown_busy(vnode_t vp);
+void    vnode_chmod_chown_unbusy(vnode_t vp);
 
 #ifdef BSD_KERNEL_PRIVATE
 

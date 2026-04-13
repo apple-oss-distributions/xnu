@@ -74,6 +74,7 @@ struct persona_modify_info {
 /* Redeem bank voucher on behalf of another process while changing the persona */
 #define ENTITLEMENT_PERSONA_MODIFY    "com.apple.private.persona.modify"
 #define ENTITLEMENT_PERSONA_NO_PROPAGATE "com.apple.private.personas.no.propagate"
+#define ENTITLEMENT_PERSONA_NO_INHERIT "com.apple.private.personas.no.inherit"
 /* Allow to adopt any persona when spawned in no-persona */
 #define ENTITLEMENT_PERSONA_ADOPT_ANY    "com.apple.private.persona.adopt.any"
 #endif /* PRIVATE */

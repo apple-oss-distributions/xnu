@@ -144,6 +144,11 @@ returned in
 .Pp
 .Bl -tag -width Er
 .\" ==========
+.It Bq Er EFAULT
+Failed to transfer the asynchronous I/O control buffer
+.Fa aiocbp
+into the kernel's memory space, possibly due to an invalid or incorrect address.
+.\" ==========
 .It Bq Er EBADF
 The
 .Fa aiocbp->aio_fildes

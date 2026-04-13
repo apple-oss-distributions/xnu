@@ -137,7 +137,11 @@ extern uint32_t net_wake_pkt_debug;
 extern uint32_t dlil_input_sanity_check;
 #endif /* IFNET_INPUT_SANITY_CHK */
 
+/******************************************************************************
+* Section: DLIL misc                                                         *
+******************************************************************************/
 
+extern uint32_t if_max_magic_search_len;
 
 #endif /* BSD_KERNEL_PRIVATE */
 

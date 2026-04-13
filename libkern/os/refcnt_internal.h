@@ -234,7 +234,7 @@ os_ref_get_count(struct os_refcnt *rc)
 #endif
 
 #if XNU_KERNEL_PRIVATE
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*
  * Raw API
@@ -485,7 +485,7 @@ os_ref_release_last_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp)
 #define os_ref_release_last_mask(rc, b, grp) (os_ref_release_last_mask)((rc), (b), NULL)
 #endif
 
-#pragma GCC visibility pop
+__exported_pop
 #endif
 
 __END_DECLS

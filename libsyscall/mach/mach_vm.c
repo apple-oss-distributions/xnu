@@ -39,6 +39,7 @@
 #undef _mach_vm_user_
 #include <mach/mach_vm_internal.h>
 #include <mach/vm_statistics.h>
+#include <mach/vm_region_private.h>
 
 #include "stack_logging_internal.h"
 
@@ -459,7 +460,7 @@ static const char *vm_tag_descriptions[VM_MEMORY_COUNT] = {
 	/* maximum width indicator                         123456789012345678901234 */
 	[VM_MEMORY_MACH_MSG]                            = "Mach Message",
 	[VM_MEMORY_IOKIT]                               = "IOKit",
-	[22]                                            = "VM_MEMORY_22",
+	[VM_MEMORY_VM_RECLAIM]                          = "Deferred Reclaim",
 	[23]                                            = "VM_MEMORY_23",
 	[24]                                            = "VM_MEMORY_24",
 	[25]                                            = "VM_MEMORY_25",
@@ -725,4 +726,51 @@ mach_vm_tag_describe(unsigned int tag)
 		return vm_tag_descriptions[tag];
 	}
 	return "Invalid Tag (?)";
+}
+
+kern_return_t
+mach_vm_reallocate(
+	mach_port_name_t        task,
+	mach_vm_address_t       src,
+	mach_vm_size_t          src_size,
+	mach_vm_address_t      *dst_inout,
+	mach_vm_size_t          dst_size,
+	mach_vm_offset_t        align_mask,
+	int                     options,
+	int                     flags)
+{
+	kern_return_t kr;
+
+	kr = _kernelrpc_mach_vm_reallocate(task, src, src_size, dst_inout, dst_size, align_mask, options, flags);
+	if (__syscall_logger && kr == KERN_SUCCESS) {
+		__syscall_logger(stack_logging_type_vm_deallocate, (uintptr_t)task, (uintptr_t)src, (uintptr_t)src_size, 0, 0);
+		__syscall_logger(stack_logging_type_vm_allocate, (uintptr_t)task, (uintptr_t)dst_size, 0, (uintptr_t)*dst_inout, 0);
+	}
+
+	return kr;
+}
+
+kern_return_t
+vm_reallocate(
+	mach_port_name_t        task,
+	vm_address_t            src,
+	vm_size_t               src_size,
+	vm_address_t           *dst_inout,
+	vm_size_t               dst_size,
+	vm_offset_t             align_mask,
+	int                     options,
+	int                     flags)
+{
+	kern_return_t kr;
+	mach_vm_address_t mach_addr;
+
+	mach_addr = (mach_vm_address_t)(*dst_inout);
+	kr = mach_vm_reallocate(task, src, src_size, &mach_addr, dst_size, align_mask, options, flags);
+#if defined(__LP64__)
+	*dst_inout = mach_addr;
+#else
+	*dst_inout = (vm_address_t)(mach_addr & ((vm_address_t)-1));
+#endif /* __LP64__ */
+
+	return kr;
 }

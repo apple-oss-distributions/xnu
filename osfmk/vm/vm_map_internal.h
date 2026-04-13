@@ -61,6 +61,7 @@
 #include <vm/vm_kern_xnu.h>
 #include <mach/vm_types_unsafe.h>
 #include <vm/vm_sanitize_internal.h>
+#include <kern/counter.h>
 #include <kern/thread_test_context.h>
 #ifdef MACH_KERNEL_PRIVATE
 #include <vm/vm_object_internal.h>
@@ -97,7 +98,8 @@ extern kern_return_t vm_map_unwire_impl(
 
 #endif /* XNU_KERNEL_PRIVATE */
 #ifdef MACH_KERNEL_PRIVATE
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
+#include <vm/vm_entry_lock_internal.h>
 
 /* definitions related to overriding the NX behavior */
 #define VM_ABI_32       0x1
@@ -112,14 +114,112 @@ extern kern_return_t vm_map_unwire_impl(
 #define MiB(mb) ((mb) << 20ull)
 #define BtoMiB(b) ((b) >> 20)
 
-#if __LP64__
-#define KMEM_SMALLMAP_THRESHOLD     (MiB(1))
-#else
-#define KMEM_SMALLMAP_THRESHOLD     (KiB(256))
-#endif
+typedef struct vm_map_lock_ctx *vm_map_lock_ctx_t;
 
-struct kmem_page_meta;
+/*
+ * Debugging options available via boot-arg.
+ * See vm_debug_parse_boot_args() for usage.
+ */
+#if MACH_ASSERT
+extern bool vm_debug_any_options_enabled;
+#endif  /* MACH_ASSERT */
 
+/*!
+ * @function vm_map_entry_create_locked()
+ *
+ * @brief
+ * Creates a new vm map entry.
+ *
+ * @discussion.
+ * The entry is returned exclusively locked.
+ *
+ * @param map           the map this entry belongs to.
+ * @param start         the entry start address.
+ * @param end           the entry end address.
+ */
+extern vm_map_entry_t vm_map_entry_create_locked(
+	vm_map_t                map,
+	vm_map_address_t        start,
+	vm_map_address_t        end);
+
+/*!
+ * @function vm_map_entry_create_sentinel_locked()
+ *
+ * @brief
+ * Creates a new sentinel vm map entry outside of any range lock context. See
+ * documentation of VMRL_ATOMIC_ALLOW_HOLES for discussion of sentinel entries.
+ *
+ * @discussion.
+ * The entry is returned exclusively locked, and should never be unlocked.
+ * This is intended to be used by vm_map_delete to fill holes in the space
+ * deleted.
+ *
+ * @param map           the map this entry belongs to.
+ * @param start         the start address of the range where the sentinel will be mapped
+ * @param end           the end address of the range where the sentinel will be mapped
+ */
+extern vm_map_entry_t vm_map_entry_create_sentinel_locked(
+	vm_map_t                map,
+	mach_vm_address_t       start,
+	mach_vm_address_t       end);
+
+/*!
+ * @function vm_map_entry_copy_locked()
+ *
+ * @brief
+ * Creates a copy of an exclusively locked entry.
+ *
+ * @discussion.
+ * The entry is returned locked.
+ * The entry owns a reference on the object/submap it points to if any.
+ * The entry should only be inserted in real maps, not copy maps. For the
+ * latter, look at @c vm_map_copy_entry_copy.
+ *
+ * @param map           the map this entry belongs to.
+ * @param entry         the entry to copy.
+ */
+extern vm_map_entry_t vm_map_entry_copy_locked(
+	vm_map_t                map,
+	vm_map_entry_t          entry);
+
+/*!
+ * @function vm_map_entry_free_locked()
+ *
+ * @brief
+ * Wakes up any waiters and then frees an entry that is currently locked, or
+ * simply frees an entry whose lock is already invalid.
+ *
+ * @discussion.
+ * This should not be the lock_context's vmlc_vme, but instead on a
+ * zap list (vm_map_zap_t) or a newly created entry.
+ *
+ * This function releases references to the object/submap the entry points
+ * to as well.
+ *
+ * @param map           the map this entry belongs to.
+ * @param entry         the entry to be freed.
+ */
+extern void vm_map_entry_free_locked(
+	vm_map_t                map,
+	vm_map_entry_t          entry);
+
+/*!
+ * @function vm_map_copy_entry_copy
+ *
+ * @brief
+ * Creates a copy of a vm map entry in a vm_map_copy_t.
+ *
+ * @discussion
+ * The entry owns a reference on the object/submap it points to if any.
+ * The entry should only be inserted in copy maps, not real maps. For the
+ * latter, look at @c vm_map_entry_copy_locked.
+ *
+ * @param copy           the copy this entry belongs to.
+ * @param entry          the entry to copy
+ */
+extern vm_map_entry_t vm_map_copy_entry_copy(
+	vm_map_copy_t           copy,
+	vm_map_entry_t          entry);
 
 /* We can't extern this from vm_kern.h because we can't include pmap.h */
 extern void kernel_memory_populate_object_and_unlock(
@@ -142,14 +242,14 @@ extern void vm_map_init(void);
  * @brief
  * Locate (no reservation) a range in the specified VM map.
  *
- * @param map           the map to scan for memory, must be locked.
+ * @param map           the map to scan for memory. interlock must be held.
+ * @param hint          an optional address to start scanning from, or 0
  * @param size          the size of the allocation to make.
  * @param mask          an alignment mask the allocation must respect.
  *                      (takes vmk_flags.vmkf_guard_before into account).
  * @param vmk_flags     the vm map kernel flags to influence this call.
  *                      vmk_flags.vmf_anywhere must be set.
- * @param start_inout   in: an optional address to start scanning from, or 0
- * @param entry_out     the entry right before the hole.
+ * @param reservation   the reservation if KERN_SUCCESS is returned.
  *
  * @returns
  * - KERN_SUCCESS in case of success, in which case:
@@ -161,37 +261,18 @@ extern void vm_map_init(void);
  *   (typically invalid vmk_flags).
  *
  * - KERN_NO_SPACE if no space was found with the specified constraints.
+ *
+ * @note
+ * This function may sleep and temporarily release the interlock, but it always
+ * returns with it held.
  */
 extern kern_return_t vm_map_locate_space_anywhere(
 	vm_map_t                map,
+	vm_map_address_t        hint,
 	vm_map_size_t           size,
 	vm_map_offset_t         mask,
 	vm_map_kernel_flags_t   vmk_flags,
-	vm_map_offset_t        *start_inout,
-	vm_map_entry_t         *entry_out);
-
-/* Allocate a range in the specified virtual address map and
- * return the entry allocated for that range. */
-extern kern_return_t vm_map_find_space(
-	vm_map_t                map,
-	vm_map_address_t        hint_addr,
-	vm_map_size_t           size,
-	vm_map_offset_t         mask,
-	vm_map_kernel_flags_t   vmk_flags,
-	vm_map_entry_t          *o_entry);                              /* OUT */
-
-extern void vm_map_clip_start(
-	vm_map_t                map,
-	vm_map_entry_t          entry,
-	vm_map_offset_t         endaddr);
-
-extern void vm_map_clip_end(
-	vm_map_t                map,
-	vm_map_entry_t          entry,
-	vm_map_offset_t         endaddr);
-
-extern boolean_t vm_map_entry_should_cow_for_true_share(
-	vm_map_entry_t          entry);
+	vm_map_store_rsv_t     *reservation);
 
 extern void vm_map_seal(
 	vm_map_t                 map,
@@ -212,6 +293,7 @@ extern void vm_map_seal(
  * @const VM_MAP_REMOVE_INTERRUPTIBLE
  * Whether the call is interruptible if it needs to wait for a vm map
  * entry to quiesce (interruption leads to KERN_ABORTED).
+ * Not valid for the kernel_map.
  *
  * @const VM_MAP_REMOVE_NOKUNWIRE_LAST
  * Do not unwire the last page of this entry during remove.
@@ -223,16 +305,23 @@ extern void vm_map_seal(
  * @const VM_MAP_REMOVE_GAPS_FAIL
  * Return KERN_INVALID_VALUE when a gap is being removed instead of panicking.
  *
- * @const VM_MAP_REMOVE_NO_YIELD.
- * Try to avoid yielding during this call.
- *
- * @const VM_MAP_REMOVE_GUESS_SIZE
- * The caller doesn't know the precise size of the entry,
- * but the address must match an atomic entry.
+ * @const VM_MAP_REMOVE_TO_OVERWRITE
+ * The caller will overwrite the region with new memory.
  *
  * @const VM_MAP_REMOVE_IMMUTABLE_CODE
  * Allow executables entries to be removed (for VM_PROT_COPY),
  * which is used by debuggers.
+ *
+ * @const VM_MAP_REMOVE_RANGE_LOCKED
+ * Allow the removal of a range which is already exclusively locked by the
+ * caller. Callers should only use the vm_map_delete_and_iunlock_range_locked
+ * interface when passing this flag, as it re-runs the deletion preflight.
+ *
+ * @constant VM_MAP_REMOVE_ZERO_FILL
+ * Replaces each removed entry with a new entry with a NULL object, resulting
+ * in faults in the entry being zero-filled. The replacement entries are created
+ * with the same protections and inheritance as the entries they replace.
+ *
  */
 __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_NO_FLAGS          = 0x000,
@@ -241,26 +330,31 @@ __options_decl(vmr_flags_t, uint32_t, {
 	VM_MAP_REMOVE_NOKUNWIRE_LAST    = 0x004,
 	VM_MAP_REMOVE_IMMUTABLE         = 0x008,
 	VM_MAP_REMOVE_GAPS_FAIL         = 0x010,
-	VM_MAP_REMOVE_NO_YIELD          = 0x020,
-	VM_MAP_REMOVE_GUESS_SIZE        = 0x040,
-	VM_MAP_REMOVE_IMMUTABLE_CODE    = 0x080,
-	VM_MAP_REMOVE_TO_OVERWRITE      = 0x100,
+	VM_MAP_REMOVE_TO_OVERWRITE      = 0x020,
+	VM_MAP_REMOVE_IMMUTABLE_CODE    = 0x040,
+	VM_MAP_REMOVE_RANGE_LOCKED      = 0x080,
+	VM_MAP_REMOVE_ZERO_FILL         = 0x100,
 });
 
+extern void vm_map_remove_entry(
+	vm_map_t                map,
+	vm_map_entry_t          entry,
+	vmr_flags_t             flags);
+
 /* Deallocate a region */
-extern kmem_return_t vm_map_remove_guard(
+extern kern_return_t vm_map_remove_guard(
 	vm_map_t                map,
 	vm_map_offset_t         start,
 	vm_map_offset_t         end,
 	vmr_flags_t             flags,
 	kmem_guard_t            guard) __result_use_check;
 
-extern kmem_return_t vm_map_remove_and_unlock(
-	vm_map_t        map,
-	vm_map_offset_t start,
-	vm_map_offset_t end,
-	vmr_flags_t     flags,
-	kmem_guard_t    guard) __result_use_check;
+extern kern_return_t vm_map_remove_and_iunlock(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end,
+	vmr_flags_t             flags,
+	kmem_guard_t            guard) __result_use_check;
 
 /* Deallocate a region */
 static inline void
@@ -274,45 +368,6 @@ vm_map_remove(
 
 	(void)vm_map_remove_guard(map, start, end, flags, guard);
 }
-
-extern bool kmem_is_ptr_range(vm_map_range_id_t range_id);
-
-extern mach_vm_range_t kmem_validate_range_for_overwrite(
-	vm_map_offset_t         addr,
-	vm_map_size_t           size);
-
-extern uint32_t kmem_addr_get_slot_idx(
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_map_range_id_t       range_id,
-	struct kmem_page_meta **meta,
-	uint32_t               *size_idx,
-	mach_vm_range_t         slot);
-
-extern void kmem_validate_slot(
-	vm_map_offset_t         addr,
-	struct kmem_page_meta  *meta,
-	uint32_t                size_idx,
-	uint32_t                slot_idx);
-
-/*
- * Function used to allocate VA from kmem pointer ranges
- */
-extern kern_return_t kmem_locate_space(
-	vm_map_size_t           size,
-	vm_map_range_id_t       range_id,
-	bool                    direction,
-	vm_map_offset_t        *start_inout,
-	vm_map_entry_t         *entry_out);
-
-/*
- * Function used to free VA to kmem pointer ranges
- */
-extern void kmem_free_space(
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_map_range_id_t       range_id,
-	mach_vm_range_t         slot);
 
 ppnum_t vm_map_get_phys_page(
 	vm_map_t        map,
@@ -333,7 +388,7 @@ extern kern_return_t    vm_map_protect(
 	boolean_t               set_max,
 	vm_prot_ut              new_prot_u);
 
-#pragma GCC visibility pop
+__exported_pop
 
 static inline void
 VME_OBJECT_SET(
@@ -343,6 +398,8 @@ VME_OBJECT_SET(
 	uint32_t       context)
 {
 	__builtin_assume(((vm_offset_t)object & 3) == 0);
+
+	VM_ENTRY_ASSERT_FIELDS_WRITABLE(entry);
 
 	entry->vme_atomic = atomic;
 	entry->is_sub_map = false;
@@ -382,6 +439,19 @@ VME_OBJECT_SET(
 #endif /* HAS_MTE */
 }
 
+static inline void
+VM_OBJECT_SET_KEEP_JIT(
+	vm_map_entry_t entry,
+	vm_object_t    object,
+	bool           atomic,
+	uint32_t       context)
+{
+	/* VME_OBJECT_SET will reset used_for_jit, so preserve it. */
+	boolean_t saved_used_for_jit = entry->used_for_jit;
+	VME_OBJECT_SET(entry, object, atomic, context);
+	entry->used_for_jit = saved_used_for_jit;
+}
+
 
 static inline void
 VME_OFFSET_SET(
@@ -415,6 +485,8 @@ VME_OBJECT_SHADOW(
 {
 	vm_object_t object;
 	vm_object_offset_t offset;
+
+	VM_ENTRY_ASSERT_FIELDS_WRITABLE(entry);
 
 	object = VME_OBJECT(entry);
 	offset = VME_OFFSET(entry);
@@ -467,8 +539,7 @@ vme_btref_consider_and_put(__unused vm_map_entry_t entry)
 #endif /* VM_BTLOG_TAGS */
 }
 
-extern kern_return_t
-vm_map_copy_adjust_to_target(
+extern kern_return_t vm_map_copy_adjust_to_target(
 	vm_map_copy_t           copy_map,
 	vm_map_offset_ut        offset,
 	vm_map_size_ut          size,
@@ -479,63 +550,8 @@ vm_map_copy_adjust_to_target(
 	vm_map_offset_t         *overmap_end_p,
 	vm_map_offset_t         *trimmed_start_p);
 
-
-__attribute__((always_inline))
-int vm_map_lock_read_to_write(vm_map_t map);
-
-__attribute__((always_inline))
-boolean_t vm_map_try_lock(vm_map_t map);
-
-__attribute__((always_inline))
-boolean_t vm_map_try_lock_read(vm_map_t map);
-
 int vm_self_region_page_shift(vm_map_t target_map);
 int vm_self_region_page_shift_safely(vm_map_t target_map);
-
-/* Lookup map entry containing or the specified address in the given map */
-extern boolean_t        vm_map_lookup_entry_or_next(
-	vm_map_t                map,
-	vm_map_address_t        address,
-	vm_map_entry_t          *entry);                                /* OUT */
-
-extern void             vm_map_copy_remap(
-	vm_map_t                map,
-	vm_map_entry_t          where,
-	vm_map_copy_t           copy,
-	vm_map_offset_t         adjustment,
-	vm_prot_t               cur_prot,
-	vm_prot_t               max_prot,
-	vm_inherit_t            inheritance);
-
-/* Find the VM object, offset, and protection for a given virtual address
- * in the specified map, assuming a page fault of the	type specified. */
-extern kern_return_t    vm_map_lookup_and_lock_object(
-	vm_map_t                *var_map,                               /* IN/OUT */
-	vm_map_address_t        vaddr,
-	vm_prot_t               fault_type,
-	int                     object_lock_type,
-	vm_map_version_t        *out_version,                           /* OUT */
-	vm_object_t             *object,                                /* OUT */
-	vm_object_offset_t      *offset,                                /* OUT */
-	vm_prot_t               *out_prot,                              /* OUT */
-	boolean_t               *wired,                                 /* OUT */
-	vm_object_fault_info_t  fault_info,                             /* OUT */
-	vm_map_t                *real_map,                              /* OUT */
-	bool                    *contended);                            /* OUT */
-
-/* Verifies that the map has not changed since the given version. */
-extern boolean_t        vm_map_verify(
-	vm_map_t                map,
-	vm_map_version_t        *version);                              /* REF */
-
-
-/* simplify map entries */
-extern void             vm_map_simplify_entry(
-	vm_map_t        map,
-	vm_map_entry_t  this_entry);
-extern void             vm_map_simplify(
-	vm_map_t                map,
-	vm_map_offset_t         start);
 
 #if __arm64__
 extern kern_return_t    vm_map_enter_fourk(
@@ -596,6 +612,26 @@ extern kern_return_t    vm_map_remap(
 	vm_prot_ut              *max_protection,
 	vm_inherit_ut           inheritance);
 
+extern kern_return_t    vm_map_reallocate(
+	vm_map_t                map,
+	vm_map_address_ut       src,
+	vm_map_size_ut          src_size,
+	vm_map_address_ut      *dst_inout,
+	vm_map_size_ut          dst_size,
+	vm_map_offset_ut        align_mask,
+	int                     options,
+	int                     flags);
+
+extern kern_return_t    vm_map_relocate(
+	vm_map_t                map,
+	vm_map_address_t        src,
+	vm_map_size_t           src_size,
+	vm_map_address_t       *dst_inout,
+	vm_map_size_t           dst_size,
+	vm_map_offset_t         align_mask,
+	int                     options,
+	vm_map_kernel_flags_t   flags);
+
 
 /* Add or remove machine-dependent attributes from map regions */
 extern kern_return_t    vm_map_machine_attribute(
@@ -617,6 +653,32 @@ extern kern_return_t    vm_map_behavior_set(
 	vm_map_offset_t         start,
 	vm_map_offset_t         end,
 	vm_behavior_t           new_behavior);
+
+/*!
+ * @abstract
+ * Helper for vm_map_region() to resolve either an entry or a fake guard object
+ * hole.
+ *
+ * @discussion
+ * @c vm_map_region_resolve_done() must be called once when done.
+ */
+extern vm_map_entry_t vm_map_region_resolve_entry(
+	vm_map_lock_ctx_t       ctx,
+	vm_map_t               *mapp,
+	vm_map_address_t        start,
+	uint32_t                flags, /* vmrl_sh_flags_t */
+	vm_map_entry_t          fake_entry,
+	kern_return_t          *kr_out);
+
+/*!
+ * @abstract
+ * Function to be called for each call to vm_map_region_resolve_entry(),
+ * once the caller is done with the returned entry.
+ */
+extern void vm_map_region_resolve_done(
+	vm_map_lock_ctx_t        ctx,
+	vm_map_t                *mapp,
+	kern_return_t            kr);
 
 extern kern_return_t vm_map_region(
 	vm_map_t                 map,
@@ -642,14 +704,15 @@ extern int override_nx(vm_map_t map, uint32_t user_tag);
 extern void vm_map_region_top_walk(
 	vm_map_entry_t entry,
 	vm_region_top_info_t top);
+
 extern void vm_map_region_walk(
-	vm_map_t map,
-	vm_map_offset_t va,
-	vm_map_entry_t entry,
-	vm_object_offset_t offset,
-	vm_object_size_t range,
-	vm_region_extended_info_t extended,
-	boolean_t look_for_pages,
+	vm_map_t                        map,
+	vm_map_offset_t                 va,
+	vm_map_entry_t                  entry,
+	vm_object_offset_t              offset,
+	vm_object_size_t                range,
+	vm_region_extended_info_t       extended,
+	boolean_t                       look_for_pages,
 	mach_msg_type_number_t count);
 
 extern void vm_map_copy_ledger(
@@ -658,6 +721,17 @@ extern void vm_map_copy_ledger(
 	int     ledger_entry);
 
 #endif /* MACH_KERNEL_PRIVATE */
+
+__options_decl(vm_map_destroy_options_t, uint8_t, {
+	VM_MAP_DESTROY_DEFAULT                  = 0x0,
+#if DEVELOPMENT || DEBUG
+	VM_MAP_DESTROY_ALLOW_TRANSPARENT_SUBMAP = 1 << 0,
+#endif /* DEVELOPMENT || DEBUG */
+});
+
+extern void             vm_map_destroy_options(
+	vm_map_t                 map,
+	vm_map_destroy_options_t options);
 
 /* Get rid of a map */
 extern void             vm_map_destroy(
@@ -804,8 +878,6 @@ extern void vm_map_iokit_unmapped_region(
 	vm_map_t                map,
 	vm_size_t               bytes);
 
-extern boolean_t first_free_is_valid(vm_map_t);
-
 extern void             vm_map_range_fork(
 	vm_map_t                new_map,
 	vm_map_t                old_map);
@@ -823,8 +895,7 @@ VM_MAP_IS_EXOTIC(
 	vm_map_t map __unused)
 {
 #if __arm64__
-	if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT ||
-	    pmap_is_exotic(map->pmap)) {
+	if (pmap_is_exotic(map->pmap)) {
 		return true;
 	}
 #endif /* __arm64__ */
@@ -931,7 +1002,7 @@ VM_MAP_POLICY_WRITABLE_SHARED_REGION(
 }
 
 static inline void
-vm_prot_to_wimg(unsigned int prot, unsigned int *wimg)
+vm_prot_to_wimg(unsigned int prot, uint8_t *wimg)
 {
 	switch (prot) {
 	case MAP_MEM_NOOP:                      break;
@@ -971,10 +1042,47 @@ vm_map_sizes(vm_map_t map,
     vm_map_size_t * plargest_free);
 
 extern void vm_map_guard_exception(
+	vm_map_t                map,
 	vm_map_offset_t         address,
 	unsigned                reason);
 
+extern void vm_map_synthesize_guard_exception(
+	vm_map_t                map,
+	thread_t                thread);
+
+
+/* See the impl for comments on the function */
+bool
+vm_map_copy_overwrite_can_page_copy(
+	vm_map_t map,
+	vm_map_entry_t entry,
+	vm_object_offset_t offset,
+	vm_page_t old_page,
+	vm_object_t old_copy_object,
+	uint64_t old_copy_version);
+
+/* see comment for this function in vm_map.c */
+vm_object_t
+vm_map_stabilize_object_for_share(
+	vm_map_lock_ctx_t ctx,
+	vm_map_entry_t entry,
+	bool is_mapped_entry,
+	bool apply_upl_optimization);
+
+/*
+ * Return if we should shadow the object before we change the copy_strategy from
+ * COPY_SYMMETRIC to COPY_DELAY.
+ */
+extern bool
+vm_map_should_shadow_to_change_copy_strategy(
+	vm_map_lock_ctx_t ctx,
+	vm_map_entry_t src_entry,
+	bool apply_upl_optimization);
+
 #endif /* MACH_KERNEL_PRIVATE */
+
+extern void
+vm_map_set_lock_contention_debug(vm_map_t map, bool enable);
 
 __END_DECLS
 

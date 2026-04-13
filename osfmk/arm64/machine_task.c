@@ -60,6 +60,11 @@
 
 #include <IOKit/IOBSD.h>
 
+#include <arm64/x86_64_compat.h>
+
+#if HYPERVISOR
+#include <arm64/hv/hv.h>
+#endif
 
 extern zone_t ads_zone;
 
@@ -213,6 +218,12 @@ machine_task_terminate(task_t task)
 {
 	if (task) {
 		void *task_debug;
+#if HYPERVISOR
+		if (task->hv_task_target) {
+			hv_callback_task_destroy(task->hv_task_target);
+			task->hv_task_target = NULL;
+		}
+#endif
 		task_debug = task->task_debug;
 		if (task_debug != NULL) {
 			task->task_debug = NULL;
@@ -288,6 +299,9 @@ platform_and_sdk_fall_2024_os_or_later(uint32_t platform, uint32_t sdk)
 	case PLATFORM_WATCHOS:
 	case PLATFORM_WATCHOSSIMULATOR:
 		return sdk >= sdk_version(11, 0, 0);
+	case PLATFORM_XROS:
+	case PLATFORM_XROSSIMULATOR:
+		return sdk >= sdk_version(2, 0, 0);
 	case PLATFORM_DRIVERKIT:
 		return sdk >= sdk_version(24, 0, 0);
 	default:
@@ -317,11 +331,18 @@ machine_task_process_signature(
 	kern_return_t kr = KERN_SUCCESS;
 
 	bool const x18_entitled =
+	    IOTaskHasEntitlement(task, "com.apple.security.custom-x18-abi-toggle") ||
+	    ml_satisfies_x86_64_requirements(^bool (const char * ent) {
+		return IOTaskHasEntitlement(task, ent);
+	});
+
+	bool const x18_entitled_always =
 	    IOTaskHasEntitlement(task, "com.apple.private.custom-x18-abi") ||
 	    IOTaskHasEntitlement(task, "com.apple.private.uexc");
 
 #if !__ARM_KERNEL_PROTECT__
-	task->preserve_x18 = x18_entitled;
+	task->preserve_x18_entitled = x18_entitled || x18_entitled_always;
+	task->preserve_x18_always = x18_entitled_always;
 
 	/*
 	 * Temporary override for tasks before macOS 13.
@@ -329,15 +350,16 @@ machine_task_process_signature(
 	 */
 
 	if (platform == PLATFORM_MACOS && sdk < sdk_version(13, 0, 0)) {
-		task->preserve_x18 = true;
+		task->preserve_x18_always = true;
 	}
 #else /* !__ARM_KERNEL_PROTECT__ */
-	if (x18_entitled) {
+	if (x18_entitled || x18_entitled_always) {
 		/*
-		 * This *will* make you sad, because it means you are
-		 * trying to use x18 on a device where that's just not
-		 * possible. As these are private entitlements, we can
-		 * prevent confusing damage now.
+		 * This *will* make you sad, because it means you are trying
+		 * to use x18 on a device where that's just not possible. As
+		 * this is either through private entitlements, or an
+		 * entitlement that was created long after those devices were
+		 * new, we can prevent confusing damage now.
 		 */
 
 		*error_msg = "process has entitlement that indicates custom x18 ABI usage, not available on this device";
@@ -345,7 +367,7 @@ machine_task_process_signature(
 	}
 #endif /* !__ARM_KERNEL_PROTECT__ */
 
-	/* The task defaults to enable ARMv8.7 extensions if the SDK is recent. */
+	/* The task defaults to enable ARMv9.4 extensions if the SDK is recent. */
 	bool uses_1ghz_timebase = platform_and_sdk_fall_2024_os_or_later(platform, sdk);
 
 #if CONFIG_ROSETTA
@@ -354,6 +376,7 @@ machine_task_process_signature(
 #endif /* CONFIG_ROSETTA */
 
 	task->uses_1ghz_timebase = uses_1ghz_timebase;
+
 
 	return kr;
 }

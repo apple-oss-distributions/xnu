@@ -1195,7 +1195,7 @@ IODMACommand::transferSegment(void   *reference,
     UInt32        segmentIndex)
 {
 	IODMACommandTransferContext * context = (IODMACommandTransferContext *) reference;
-	UInt64   length  = min(segment.fLength, context->remaining);
+	UInt64   length  = IOMin(segment.fLength, context->remaining);
 	addr64_t ioAddr  = segment.fIOVMAddr;
 	addr64_t cpuAddr = ioAddr;
 
@@ -1206,7 +1206,7 @@ IODMACommand::transferSegment(void   *reference,
 		if ((kMapped == MAPTYPE(target->fMappingOptions))
 		    && target->fMapper) {
 			cpuAddr = target->fMapper->mapToPhysicalAddress(ioAddr);
-			copyLen = min(copyLen, page_size - (ioAddr & (page_size - 1)));
+			copyLen = IOMin(copyLen, page_size - (ioAddr & (page_size - 1)));
 			ioAddr += copyLen;
 		}
 		if (copyLen > (UINT_MAX - PAGE_SIZE + 1)) {
@@ -1245,7 +1245,7 @@ IODMACommand::transfer(IOOptionBits transferOp, UInt64 offset, void * buffer, UI
 	if (offset >= state->fPreparedLength) {
 		return 0;
 	}
-	length = min(length, state->fPreparedLength - offset);
+	length = IOMin(length, state->fPreparedLength - offset);
 
 	context.buffer       = buffer;
 	context.bufferOffset = 0;

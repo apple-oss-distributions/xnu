@@ -55,12 +55,76 @@ T_DECL(pmap_exec_remove_test,
 	    "kern.pmap_exec_remove_test, %d loops", num_loops);
 }
 
+T_DECL(pmap_exec_remove_test_4k,
+    "Test that an executable mapping can be created while another mapping of the same physical page is removed, in a 4K pmap", T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	int num_loops = 10000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_exec_remove_test_4k", NULL, NULL, &num_loops, sizeof(num_loops)),
+	    "kern.pmap_exec_remove_test_4k, %d loops", num_loops);
+}
+
+T_DECL(pmap_enter_remove_test,
+    "Test more than two threads concurrently entering and removing the same mapping", T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	/**
+	 * This test spawns a number of long-running and CPU-intensive kernel worker threads
+	 * which inherit the main thread's priority.  Temporarily drop our priority down to
+	 * the default (low) userspace priority to avoid producing a bunch of foreground-
+	 * priority kernel threads that may starve other threads on smaller/slower devices.
+	 */
+	qos_class_t prev_qos;
+	pthread_get_qos_class_np(pthread_self(), &prev_qos, NULL);
+	pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
+
+	int num_loops = 100000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_enter_remove_test", NULL, NULL, &num_loops, sizeof(num_loops)),
+	    "kern.pmap_enter_remove_test, %d loops", num_loops);
+
+	pthread_set_qos_class_self_np(prev_qos, 0);
+}
+
+T_DECL(pmap_enter_remove_test_4k,
+    "Test more than two threads concurrently entering and removing the same mapping, in a 4K pmap", T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	/**
+	 * This test spawns a number of long-running and CPU-intensive kernel worker threads
+	 * which inherit the main thread's priority.  Temporarily drop our priority down to
+	 * the default (low) userspace priority to avoid producing a bunch of foreground-
+	 * priority kernel threads that may starve other threads on smaller/slower devices.
+	 */
+	qos_class_t prev_qos;
+	pthread_get_qos_class_np(pthread_self(), &prev_qos, NULL);
+	pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
+
+	int num_loops = 100000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_enter_remove_test_4k", NULL, NULL, &num_loops, sizeof(num_loops)),
+	    "kern.pmap_enter_remove_test_4k, %d loops", num_loops);
+
+	pthread_set_qos_class_self_np(prev_qos, 0);
+}
+
 T_DECL(pmap_compress_remove_test,
     "Test that a page can be disconnected for compression while concurrently unmapping the same page", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int num_loops = 1000000;
 	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_compress_remove_test", NULL, NULL, &num_loops, sizeof(num_loops)),
 	    "kern.pmap_compress_remove_test, %d loops", num_loops);
+}
+
+T_DECL(pmap_protect_remove_test,
+    "Test that a VA region can be concurrently unmapped while having its protection changed", T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	int num_loops = 10000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_protect_remove_test", NULL, NULL, &num_loops, sizeof(num_loops)),
+	    "kern.pmap_protect_remove_test, %d loops", num_loops);
+}
+
+T_DECL(pmap_query_remove_test,
+    "Test that a VA region can be concurrently unmapped while having its mapping state queried", T_META_TAG_VM_NOT_ELIGIBLE)
+{
+	int num_loops = 10000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_query_remove_test", NULL, NULL, &num_loops, sizeof(num_loops)),
+	    "kern.pmap_query_remove_test, %d loops", num_loops);
 }
 
 T_DECL(pmap_nesting_test,

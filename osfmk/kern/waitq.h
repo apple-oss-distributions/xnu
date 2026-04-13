@@ -84,6 +84,12 @@ __exported_push_hidden
  *
  * @const WAITQ_HANDOFF (waitq_wakeup64_one, waitq_wakeup64_identify*)
  * Attempt a handoff to the woken up thread.
+ *
+ * @const WAITQ_CHECK_HAS_MORE (waitq_wakeup64_*)
+ * Check if there's one more thread for that event (but don't wake it up)
+ * Note that while the flag is valid for all wakeup variants, only
+ * @c waitq_wakeup64_nthreads*() and @c waitq_wakeup64_identify_locked()
+ * can communicate that status back.
  #endif
  */
 __options_decl(waitq_wakeup_flags_t, uint32_t, {
@@ -95,6 +101,7 @@ __options_decl(waitq_wakeup_flags_t, uint32_t, {
 	WAITQ_KEEP_LOCKED       = 0x0000,
 	WAITQ_HANDOFF           = 0x0008,
 	WAITQ_ENABLE_INTERRUPTS = 0x0010,
+	WAITQ_CHECK_HAS_MORE    = 0x0020,
 #endif /* MACH_KERNEL_PRIVATE */
 });
 
@@ -403,6 +410,73 @@ waitq_flags_splx(spl_t spl_level)
 {
 	return spl_level ? WAITQ_ENABLE_INTERRUPTS : WAITQ_WAKEUP_DEFAULT;
 }
+
+/*!
+ * @macro WAITQ_TYPED_EVENT64
+ *
+ * @brief
+ * Macro to form a "typed" event from a kernel pointer.
+ *
+ * @discussion
+ * The waitq subsystem uses "events" to perform wakeups that tend to be kernel
+ * pointers. Some subsystems do not tolerate spurious wakeups but some
+ * subsystems might perform wakeup on "freed" pointers which could cause such
+ * spurious wakeups.
+ *
+ * This macros allows to create events that are "typed" so that spurious wakeups
+ * caused by a given subsystem can't cause spurious wakeups in subsystems that
+ * expect precise wakeups.
+ *
+ * Default events behave like WAITQ_TYPED_EVENT(kThreadWaitNone, ...) and aren't
+ * allowed to perform spurious wakeups.
+ *
+ *
+ * This allows for primitive that track existence of waiters into some storage
+ * to performance wakeups and maintain these bits even when not being able to
+ * reason with the lifecycle of the underlying storage.
+ *
+ * If a thread can be pulled from the wait queue for a given typed event
+ * (using @c waitq_wakeup64_identify()), until that thread is resumed
+ * (with @c waitq_resume_identified_thread()), then it is safe to mutate
+ * the backing store of the primitive, because the caller borrows it from the
+ * thread it pulled from the wait queue.
+ *
+ * The downside of this trick is that the wake up can be spurious and affect
+ * a "future" instance of the synchronization primitive that happens to have
+ * been reallocated, and as a result, the underlying primitive must be resilient
+ * to spurious wakeups. The current client of this technology is XNU's modern
+ * reader-writer lock.
+ *
+ * Events used for typed events are expected to be either small integers,
+ * or valid kernel pointers, for which the [48:55] bits are either 0x00
+ * or 0xff.
+ *
+ * Note: MTE systems however make this race even less likely given that a reused
+ *       primitive would likely use a different MTE tag and as a result
+ *       a different event.
+ */
+#define WAITQ_TYPED_EVENT64(hint, pointer) \
+	(CAST_EVENT64_T(pointer) ^ ((uint64_t)(uint8_t)(hint) << 48))
+
+/*!
+ * @function waitq_untyped_event()
+ *
+ * @brief
+ * Returns the original pointer that was passed to WAITQ_TYPED_EVENT64()
+ *
+ * @discussion
+ * Events used for typed events are expected to be either small integers,
+ * or valid kernel pointers, for which the [48:63] bits are either 0x0000
+ * or 0xf<tag>ff. This function reconstructs bits [48:55] from the top bit.
+ */
+static inline event64_t
+waitq_untyped_event(event64_t event)
+{
+	event64_t mask = 0xffull << 48;
+
+	return (event & ~mask) | (CAST_EVENT64_T((long long)event >> 63) & mask);
+}
+
 
 #endif  /* MACH_KERNEL_PRIVATE */
 #pragma mark locking
@@ -742,7 +816,9 @@ extern kern_return_t waitq_wakeup64_all_locked(
  *
  * May temporarily disable and re-enable interrupts.
  *
- * @returns how many threads have been woken up
+ * @returns how many threads have been woken up, or @c nthreads + 1
+ *          if @c WAITQ_CHECK_HAS_MORE was set in the flags and
+ *          @c nthreads threads were woken up.
  */
 extern uint32_t waitq_wakeup64_nthreads_locked(
 	waitq_t                 waitq,
@@ -782,7 +858,8 @@ extern kern_return_t waitq_wakeup64_one_locked(
 extern thread_t waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
-	waitq_wakeup_flags_t    flags);
+	waitq_wakeup_flags_t    flags,
+	bool                   *has_more);
 
 /**
  * @function waitq_resume_identified_thread()

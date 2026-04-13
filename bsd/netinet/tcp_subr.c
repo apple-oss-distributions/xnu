@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -191,6 +191,55 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, now_init, CTLFLAG_RD | CTLFLAG_LOCKED,
 /* ToDo - remove once uTCP stops using it */
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, microuptime_init, CTLFLAG_RD | CTLFLAG_LOCKED,
     uint32_t, tcp_microuptime_init, 0, "Initial tcp uptime value in micro seconds");
+
+#if (DEVELOPMENT || DEBUG)
+/*
+ * Sysctl to read the current tcp_now value.
+ * This is useful for debugging TIME_WAIT timer issues.
+ */
+static int
+sysctl_tcp_now SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	uint32_t value = tcp_now;
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+SYSCTL_PROC(_net_inet_tcp, OID_AUTO, now,
+    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_tcp_now, "IU", "Current tcp_now timer value in milliseconds");
+
+/*
+ * Debug sysctl to force tcp_now to a specific value.
+ * This is used for testing TIME_WAIT timer wraparound behavior.
+ * Setting this immediately updates tcp_now to the specified value.
+ */
+static int
+sysctl_tcp_now_offset SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	uint32_t new_value;
+	int error;
+
+	error = SYSCTL_IN(req, &new_value, sizeof(new_value));
+	if (error) {
+		return error;
+	}
+
+	/*
+	 * Force tcp_now to the requested value.
+	 * This takes effect immediately.
+	 */
+	tcp_now = new_value;
+
+	return 0;
+}
+
+SYSCTL_PROC(_net_inet_tcp, OID_AUTO, now_offset,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
+    0, 0, sysctl_tcp_now_offset, "IU",
+    "Force tcp_now to specific value for testing (DEBUG/DEVELOPMENT only)");
+#endif /* DEVELOPMENT || DEBUG */
 
 /*
  * Minimum MSS we accept and use. This prevents DoS attacks where
@@ -447,7 +496,7 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 
 	error = sysctl_io_string(req, keystring, sizeof(keystring), 0, NULL);
 	if (error) {
-		os_log(OS_LOG_DEFAULT,
+		os_log(tcp_log_handle,
 		    "%s: sysctl_io_string() error %d, req->newlen %lu, sizeof(keystring) %lu",
 		    __func__, error, req->newlen, sizeof(keystring));
 		goto exit;
@@ -458,7 +507,7 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 
 	ks_len = strbuflen(keystring, sizeof(keystring));
 	if (ks_len != TCP_FASTOPEN_KEYLEN * 2) {
-		os_log(OS_LOG_DEFAULT,
+		os_log(tcp_log_handle,
 		    "%s: strlen(keystring) %lu != TCP_FASTOPEN_KEYLEN * 2 %u, newlen %lu",
 		    __func__, ks_len, TCP_FASTOPEN_KEYLEN * 2, req->newlen);
 		error = EINVAL;
@@ -472,7 +521,7 @@ tcp_sysctl_fastopenkey(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		 */
 		if (sscanf(__unsafe_null_terminated_from_indexable(&keystring[i * 8]), "%8x", &key[i]) != 1) {
 			error = EINVAL;
-			os_log(OS_LOG_DEFAULT,
+			os_log(tcp_log_handle,
 			    "%s: sscanf() != 1, error EINVAL", __func__);
 			goto exit;
 		}
@@ -720,11 +769,11 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	}
 
 	if (PE_parse_boot_argn("tcp_log", &tcp_log_enable_flags, sizeof(tcp_log_enable_flags))) {
-		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_log_enable_flags to 0x%x", tcp_log_enable_flags);
+		os_log(tcp_log_handle, "tcp_init: set tcp_log_enable_flags to 0x%x", tcp_log_enable_flags);
 	}
 
 	if (PE_parse_boot_argn("tcp_link_heuristics", &tcp_link_heuristics_flags, sizeof(tcp_link_heuristics_flags))) {
-		os_log(OS_LOG_DEFAULT, "tcp_init: set tcp_link_heuristics_flags to 0x%x", tcp_link_heuristics_flags);
+		os_log(tcp_log_handle, "tcp_init: set tcp_link_heuristics_flags to 0x%x", tcp_link_heuristics_flags);
 	}
 
 	/*
@@ -754,6 +803,9 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	read_frandom(&isn_secret, sizeof(isn_secret));
 
 	bzero(&tcp_rst_rlc_state, sizeof(struct in_endpoints));
+
+	tcp_log_handle = os_log_create("com.apple.xnu.net.tcp", "");
+	inp_log_init();
 }
 
 /*
@@ -953,7 +1005,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen __sized_by(ipgen_size), size_t ipgen_s
 	ip6 = ipgen;
 	ip = ipgen;
 
-	if (tp) {
+	if (tp != NULL) {
 		check_qos_marking_again = tp->t_inpcb->inp_socket->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE ? FALSE : TRUE;
 		sifscope = tp->t_inpcb->inp_lifscope;
 		fifscope = tp->t_inpcb->inp_fifscope;
@@ -981,7 +1033,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen __sized_by(ipgen_size), size_t ipgen_s
 			win = rcv_win;
 		}
 	}
-	if (m == 0) {
+	if (m == NULL) {
 		m = m_gethdr(M_DONTWAIT, MT_HEADER);    /* MAC-OK */
 		if (m == NULL) {
 			return;
@@ -1011,7 +1063,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen __sized_by(ipgen_size), size_t ipgen_s
 		flags = TH_ACK;
 	} else {
 		m_freem(m->m_next);
-		m->m_next = 0;
+		m->m_next = NULL;
 		m->m_data = (uintptr_t)ipgen;
 		/* m_len is set later */
 		tlen = 0;
@@ -1064,7 +1116,8 @@ tcp_respond(struct tcpcb *tp, void *ipgen __sized_by(ipgen_size), size_t ipgen_s
 	}
 	m->m_len = tlen;
 	m->m_pkthdr.len = tlen;
-	m->m_pkthdr.rcvif = 0;
+	m->m_pkthdr.rcvif = NULL;
+	m->m_pkthdr.pkt_flags &= ~PKTF_WAKE_PKT;    /* Clear wake-packet flag */
 	if (tra->keep_alive) {
 		m->m_pkthdr.pkt_flags |= PKTF_KEEPALIVE;
 	}
@@ -3757,7 +3810,7 @@ tcp_set_tso(struct tcpcb *tp, struct ifnet *ifp)
 
 		if ((ifp->if_hwassist & IFNET_TSO_MASK) != (tunnel_ifp->if_hwassist & IFNET_TSO_MASK)) {
 			if (tso_debug > 0) {
-				os_log(OS_LOG_DEFAULT,
+				os_log(tcp_log_handle,
 				    "%s: %u > %u TSO 0 tunnel_ifp %s hwassist mismatch with ifp %s",
 				    __func__,
 				    ntohs(tp->t_inpcb->inp_lport), ntohs(tp->t_inpcb->inp_fport),
@@ -3768,7 +3821,7 @@ tcp_set_tso(struct tcpcb *tp, struct ifnet *ifp)
 		if (inp->inp_last_outifp != NULL &&
 		    (inp->inp_last_outifp->if_hwassist & IFNET_TSO_MASK) != (tunnel_ifp->if_hwassist & IFNET_TSO_MASK)) {
 			if (tso_debug > 0) {
-				os_log(OS_LOG_DEFAULT,
+				os_log(tcp_log_handle,
 				    "%s: %u > %u TSO 0 tunnel_ifp %s hwassist mismatch with inp_last_outifp %s",
 				    __func__,
 				    ntohs(tp->t_inpcb->inp_lport), ntohs(tp->t_inpcb->inp_fport),
@@ -3779,7 +3832,7 @@ tcp_set_tso(struct tcpcb *tp, struct ifnet *ifp)
 		if ((inp->inp_flags & INP_BOUND_IF) && inp->inp_boundifp != NULL &&
 		    (inp->inp_boundifp->if_hwassist & IFNET_TSO_MASK) != (tunnel_ifp->if_hwassist & IFNET_TSO_MASK)) {
 			if (tso_debug > 0) {
-				os_log(OS_LOG_DEFAULT,
+				os_log(tcp_log_handle,
 				    "%s: %u > %u TSO 0 tunnel_ifp %s hwassist mismatch with inp_boundifp %s",
 				    __func__,
 				    ntohs(tp->t_inpcb->inp_lport), ntohs(tp->t_inpcb->inp_fport),
@@ -3814,7 +3867,7 @@ tcp_set_tso(struct tcpcb *tp, struct ifnet *ifp)
 	}
 
 	if (tso_debug > 1) {
-		os_log(OS_LOG_DEFAULT, "%s: %u > %u TSO %d ifp %s",
+		os_log(tcp_log_handle, "%s: %u > %u TSO %d ifp %s",
 		    __func__,
 		    ntohs(tp->t_inpcb->inp_lport),
 		    ntohs(tp->t_inpcb->inp_fport),
@@ -3850,13 +3903,14 @@ calculate_tcp_clock(void)
 	current_tcp_now = (uint32_t)now.tv_sec * 1000 + now.tv_usec / TCP_RETRANSHZ_TO_USEC;
 
 	tmp = os_atomic_load(&tcp_now, relaxed);
-	if (tmp < current_tcp_now) {
+	if (TSTMP_LT(tmp, current_tcp_now)) {
 		os_atomic_cmpxchg(&tcp_now, tmp, current_tcp_now, relaxed);
 
 		/*
-		 * No cmpxchg loop needed here. If someone else updated quicker,
-		 * we can take that value. The only requirement is that
-		 * tcp_now never decreases.
+		 * No cmpxchg loop needed here. If someone else updated
+		 * quicker, we can take that value. The requirement is that
+		 * tcp_now always advances in modular arithmetic, correctly
+		 * wrapping from 0xFFFFFFFF to 0.
 		 */
 	}
 }
@@ -4139,7 +4193,7 @@ uint32_t
 tcp_seg_len(struct tcp_seg_sent *seg)
 {
 	if (SEQ_LT(seg->end_seq, seg->start_seq)) {
-		os_log_error(OS_LOG_DEFAULT, "segment end(%u) can't be smaller "
+		os_log_error(tcp_log_handle, "segment end(%u) can't be smaller "
 		    "than segment start(%u)", seg->end_seq, seg->start_seq);
 	}
 
@@ -4255,7 +4309,7 @@ tcp_seg_sent_insert(struct tcpcb *tp, struct tcp_seg_sent *seg, tcp_seq start, t
 		if (seg->end_seq == end) {
 			/* Entire seg retransmitted in RACK recovery, start and end sequence doesn't change */
 			if (seg->start_seq != start) {
-				os_log_error(OS_LOG_DEFAULT, "Segment start (%u) is not same as retransmitted "
+				os_log_error(tcp_log_handle, "Segment start (%u) is not same as retransmitted "
 				    "start sequence number (%u)", seg->start_seq, start);
 			}
 			tcp_rack_transmit_seg(tp, seg, seg->start_seq, seg->end_seq, xmit_ts, seg_flags);
@@ -4418,14 +4472,14 @@ tcp_seg_delete_acked(struct tcpcb *tp, uint32_t acked_xmit_ts, uint32_t tsecr)
 		const uint32_t seg_len = tcp_seg_len(acked_seg);
 		if (acked_seg->flags & TCP_SEGMENT_LOST) {
 			if (tp->bytes_lost < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) can't be smaller than already "
+				os_log_error(tcp_log_handle, "bytes_lost (%u) can't be smaller than already "
 				    "lost segment length (%u)", tp->bytes_lost, seg_len);
 			}
 			tp->bytes_lost -= seg_len;
 		}
 		if (acked_seg->flags & TCP_RACK_RETRANSMITTED) {
 			if (tp->bytes_retransmitted < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_retransmitted (%u) can't be smaller "
+				os_log_error(tcp_log_handle, "bytes_retransmitted (%u) can't be smaller "
 				    "than already retransmited segment length (%u)",
 				    tp->bytes_retransmitted, seg_len);
 			}
@@ -4433,7 +4487,7 @@ tcp_seg_delete_acked(struct tcpcb *tp, uint32_t acked_xmit_ts, uint32_t tsecr)
 		}
 		if (acked_seg->flags & TCP_SEGMENT_SACKED) {
 			if (tp->bytes_sacked < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_sacked (%u) can't be smaller than already "
+				os_log_error(tcp_log_handle, "bytes_sacked (%u) can't be smaller than already "
 				    "SACKed segment length (%u)", tp->bytes_sacked, seg_len);
 			}
 			tp->bytes_sacked -= seg_len;
@@ -4553,7 +4607,7 @@ tcp_seg_mark_sacked(struct tcpcb *tp, struct tcp_seg_sent *seg, uint32_t *newbyt
 			 */
 			seg->flags &= ~(TCP_SEGMENT_LOST | TCP_RACK_RETRANSMITTED);
 			if (tp->bytes_lost < seg_len || tp->bytes_retransmitted < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) and/or bytes_retransmitted (%u) "
+				os_log_error(tcp_log_handle, "bytes_lost (%u) and/or bytes_retransmitted (%u) "
 				    "can't be smaller than already lost/retransmitted segment length (%u)", tp->bytes_lost,
 				    tp->bytes_retransmitted, seg_len);
 			}
@@ -4564,7 +4618,7 @@ tcp_seg_mark_sacked(struct tcpcb *tp, struct tcp_seg_sent *seg, uint32_t *newbyt
 		if (seg->flags & TCP_SEGMENT_LOST) {
 			seg->flags &= ~(TCP_SEGMENT_LOST);
 			if (tp->bytes_lost < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) can't be smaller "
+				os_log_error(tcp_log_handle, "bytes_lost (%u) can't be smaller "
 				    "than already lost segment length (%u)", tp->bytes_lost, seg_len);
 			}
 			tp->bytes_lost -= seg_len;
@@ -4754,7 +4808,7 @@ tcp_segs_clear_sacked(struct tcpcb *tp)
 		if (seg->flags & TCP_SEGMENT_SACKED) {
 			seg->flags &= ~(TCP_SEGMENT_SACKED);
 			if (tp->bytes_sacked < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_sacked (%u) can't be smaller "
+				os_log_error(tcp_log_handle, "bytes_sacked (%u) can't be smaller "
 				    "than already SACKed segment length (%u)", tp->bytes_sacked, seg_len);
 			}
 			tp->bytes_sacked -= seg_len;
@@ -4772,7 +4826,7 @@ tcp_mark_seg_lost(struct tcpcb *tp, struct tcp_seg_sent *seg)
 			/* Retransmission was lost */
 			seg->flags &= ~TCP_RACK_RETRANSMITTED;
 			if (tp->bytes_retransmitted < seg_len) {
-				os_log_error(OS_LOG_DEFAULT, "bytes_retransmitted (%u) can't be "
+				os_log_error(tcp_log_handle, "bytes_retransmitted (%u) can't be "
 				    "smaller than retransmited segment length (%u)",
 				    tp->bytes_retransmitted, seg_len);
 				return;
@@ -4812,11 +4866,11 @@ tcp_segs_sent_clean(struct tcpcb *tp, bool free_segs)
 		tcp_seg_delete(tp, seg);
 	}
 	if (__improbable(!RB_EMPTY(&tp->t_segs_sent_tree))) {
-		os_log_error(OS_LOG_DEFAULT, "RB tree still contains segments while "
+		os_log_error(tcp_log_handle, "RB tree still contains segments while "
 		    "time ordered list is already empty");
 	}
 	if (__improbable(!TAILQ_EMPTY(&tp->t_segs_acked))) {
-		os_log_error(OS_LOG_DEFAULT, "Segment ACKed list shouldn't contain "
+		os_log_error(tcp_log_handle, "Segment ACKed list shouldn't contain "
 		    "any segments as they are removed immediately after being ACKed");
 	}
 	/* Reset seg_retransmitted as we emptied the list */
@@ -5260,7 +5314,7 @@ tcp_notify_kao_timeout(ifnet_t ifp,
 		tp = tcp_drop(tp, ETIMEDOUT);
 
 		tcpstat.tcps_ka_offload_drops++;
-		os_log_info(OS_LOG_DEFAULT, "%s: dropped lport %u fport %u\n",
+		os_log_info(tcp_log_handle, "%s: dropped lport %u fport %u\n",
 		    __func__, frame->local_port, frame->remote_port);
 
 		socket_unlock(so, 1);

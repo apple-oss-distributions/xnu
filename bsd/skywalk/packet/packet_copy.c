@@ -87,7 +87,7 @@ _pkt_copy(void *__sized_by(len)src, void *__sized_by(len)dst, size_t len)
  * start/stuff is relative to soff, within [0, len], such that
  * [ 0 ... soff ... soff + start/stuff ... soff + len ... ]
  */
-void
+int
 pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
     kern_packet_t sph, const uint16_t soff, const uint32_t len,
     const boolean_t copysum, const uint16_t start, const uint16_t stuff,
@@ -168,8 +168,15 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 				csum = 0xffff;
 			}
 
-			/* Insert checksum into packet */
-			ASSERT(stuff <= (len - sizeof(csum)));
+			/*
+			 * Insert checksum into packet.
+			 * Here we verify the checksum will be in the
+			 * buffer.
+			 */
+			if (doff + stuff + sizeof(csum) > PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp) ||
+			    stuff + sizeof(csum) > len) {
+				return ERANGE;
+			}
 			if (IS_P2ALIGNED(dbaddr + stuff, sizeof(csum))) {
 				*(uint16_t *)(uintptr_t)(dbaddr + stuff) = csum;
 			} else {
@@ -206,6 +213,7 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
 	    (t == NR_RX) ? "RX" : "TX",
 	    sk_dump("buf", dbaddr, len, 128));
 #endif
+	return 0;
 }
 
 /*
@@ -662,7 +670,7 @@ pkt_sum(kern_packet_t sph, uint16_t soff, uint16_t len)
  * start/stuff is relative to soff, within [0, len], such that
  * [ 0 ... soff ... soff + start/stuff ... soff + len ... ]
  */
-void
+int
 pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
     const uint16_t doff, kern_packet_t sph, const uint16_t soff,
     const uint32_t len, const boolean_t copysum, const uint16_t start,
@@ -733,12 +741,13 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 
 			/*
 			 * Insert checksum into packet.
-			 * Here we assume that checksum will be in the
+			 * Here we verify the checksum will be in the
 			 * first buffer.
 			 */
-			ASSERT((stuff + doff + sizeof(csum)) <=
-			    PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp));
-			ASSERT(stuff <= (len - sizeof(csum)));
+			if (doff + stuff + sizeof(csum) > PP_BUF_SIZE_DEF(dpkt->pkt_qum.qum_pp) ||
+			    stuff + sizeof(csum) > len) {
+				return ERANGE;
+			}
 
 			/* get first buflet buffer address from packet */
 			MD_BUFLET_ADDR_ABS(dpkt, baddr);
@@ -775,6 +784,7 @@ pkt_copy_multi_buflet_from_pkt(const enum txrx t, kern_packet_t dph,
 		/* NOTREACHED */
 		__builtin_unreachable();
 	}
+	return 0;
 }
 
 static inline uint32_t
@@ -1475,7 +1485,7 @@ _convert_pkt_csum_flags(uint32_t pkt_flags)
  * start/stuff is relative to poff, within [0, len], such that
  * [ 0 ... poff ... poff + start/stuff ... poff + len ... ]
  */
-void
+int
 pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
     struct mbuf *m, const uint16_t moff, const uint32_t len,
     const boolean_t copysum, const uint16_t start)
@@ -1489,6 +1499,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 	uint8_t *baddr;
 	uint8_t *dp;
 	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(pkt);
+	uintptr_t doff;
 
 	ASSERT(len >= start);
 	static_assert(sizeof(csum) == sizeof(uint16_t));
@@ -1594,9 +1605,9 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 	case NR_TX:
 		dp = (uint8_t *)m_mtod_current(m);
 		ASSERT(m->m_next == NULL);
+		doff = (uintptr_t)dp - (uintptr_t)mbuf_datastart(m);
 
-		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
-		    (uint32_t)mbuf_maxlen(m));
+		VERIFY(doff + len <= (uint32_t)mbuf_maxlen(m));
 		m->m_len += len;
 		m->m_pkthdr.len += len;
 		VERIFY(m->m_len == m->m_pkthdr.len &&
@@ -1622,8 +1633,15 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 				csum = 0xffff;
 			}
 
-			/* Insert checksum into packet */
-			ASSERT(stuff <= (len - sizeof(csum)));
+			/*
+			 * Insert checksum into packet.
+			 * Here we verify the checksum will be in the
+			 * buffer.
+			 */
+			if (doff + stuff + sizeof(csum) > (uint32_t)mbuf_maxlen(m) ||
+			    stuff + sizeof(csum) > len) {
+				return ERANGE;
+			}
 			if (IS_P2ALIGNED(dp + stuff, sizeof(csum))) {
 				*(uint16_t *)(uintptr_t)(dp + stuff) = csum;
 			} else {
@@ -1702,6 +1720,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 	    (t == NR_RX) ? "RX" : "TX",
 	    sk_dump("buf", (uint8_t *)dp, m->m_len, 128));
 #endif
+	return 0;
 }
 
 /*
@@ -1713,7 +1732,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
  * start/stuff is relative to poff, within [0, len], such that
  * [ 0 ... poff ... poff + start/stuff ... poff + len ... ]
  */
-void
+int
 pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
     const uint16_t poff, struct mbuf *m, const uint16_t moff,
     const uint32_t len, const boolean_t copysum, const uint16_t start)
@@ -1726,6 +1745,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 	uint16_t vlan = 0;
 	uint8_t *baddr;
 	uint8_t *dp;
+	uintptr_t doff;
 	boolean_t do_sum = copysum && !PACKET_HAS_FULL_CHECKSUM_FLAGS(pkt);
 
 	ASSERT(len >= start);
@@ -1830,9 +1850,9 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 	case NR_TX:
 		ASSERT(len <= M16KCLBYTES);
 		dp = (uint8_t *)m_mtod_current(m);
+		doff = (uintptr_t)dp - (uintptr_t)mbuf_datastart(m);
 		ASSERT(m->m_next == NULL);
-		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
-		    (uint32_t)mbuf_maxlen(m));
+		VERIFY(doff + len <= (uint32_t)mbuf_maxlen(m));
 		m->m_len += len;
 		m->m_pkthdr.len += len;
 		VERIFY(m->m_len == m->m_pkthdr.len &&
@@ -1857,8 +1877,15 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 				csum = 0xffff;
 			}
 
-			/* Insert checksum into packet */
-			ASSERT(stuff <= (len - sizeof(csum)));
+			/*
+			 * Insert checksum into packet.
+			 * Here we verify the checksum will be in the
+			 * buffer.
+			 */
+			if (doff + stuff + sizeof(csum) > (uint32_t)mbuf_maxlen(m) ||
+			    stuff + sizeof(csum) > len) {
+				return ERANGE;
+			}
 			if (IS_P2ALIGNED(dp + stuff, sizeof(csum))) {
 				*(uint16_t *)(uintptr_t)(dp + stuff) = csum;
 			} else {
@@ -1935,6 +1962,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 	    (t == NR_RX) ? "RX" : "TX",
 	    sk_dump("buf", (uint8_t *)dp, m->m_len, 128));
 #endif
+	return 0;
 }
 
 /*

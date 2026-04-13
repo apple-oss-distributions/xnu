@@ -96,6 +96,8 @@ errno_t mach_to_bsd_errno(kern_return_t mach_err);
 extern uint32_t vm_compressor_pool_size(void);
 extern uint32_t vm_compressor_fragmentation_level(void);
 
+extern boolean_t memorystatus_freeze_daemons_all_allowed;
+
 int block_corpses = 0; /* counter to block new corpses if jetsam purges them */
 
 /* For logging clarity */
@@ -594,6 +596,15 @@ static uint64_t
 memorystatus_sysprocs_idle_time(proc_t p)
 {
 	uint64_t idle_delay_time = 0;
+
+	/*
+	 * If the proc is brand-new (i.e. has not yet marked itself dirty),
+	 * always provide the full idle delay time
+	 */
+	if (p->p_memstat_dirty & P_DIRTY_IM_NEW_HERE) {
+		return memorystatus_sysprocs_idle_delay_time;
+	}
+
 	/*
 	 * For system processes, base the idle delay time on the
 	 * jetsam relaunch behavior specified by launchd. The idea
@@ -1986,7 +1997,7 @@ memorystatus_init(void)
 #if CONFIG_FREEZE
 	memorystatus_frozen_processes_max = FREEZE_PROCESSES_MAX_DEFAULT;
 	memorystatus_frozen_shared_mb_max = ((MAX_FROZEN_SHARED_MB_PERCENT * max_task_footprint_mb) / 100); /* 10% of the system wide task limit */
-	memorystatus_freeze_shared_mb_per_process_max = (memorystatus_frozen_shared_mb_max / 4);
+	memorystatus_freeze_shared_mb_per_process_max = ((memorystatus_frozen_shared_mb_max * MAX_FROZEN_SHARED_MB_PER_PROCESS_PERCENT) / 100);
 	memorystatus_freeze_pages_min = FREEZE_PAGES_MIN_DEFAULT;
 	memorystatus_freeze_pages_max = FREEZE_PAGES_MAX_DEFAULT;
 	memorystatus_max_frozen_demotions_daily = MAX_FROZEN_PROCESS_DEMOTIONS_DEFAULT;
@@ -2239,8 +2250,16 @@ memorystatus_init(void)
 #endif /* DEVELOPMENT || DEBUG */
 
 	/* Initialize the jetsam_threads state array */
+#if __x86_64__
+	(void)zalloc_permanent(sizeof(struct jetsam_state_s) *
+	    max_jetsam_threads, ZALIGN(struct jetsam_state_s));
+#endif /* __x86_64__ */
 	jetsam_threads = zalloc_permanent(sizeof(struct jetsam_state_s) *
 	    max_jetsam_threads, ZALIGN(struct jetsam_state_s));
+#if __x86_64__
+	(void)zalloc_permanent(sizeof(struct jetsam_state_s) *
+	    max_jetsam_threads, ZALIGN(struct jetsam_state_s));
+#endif /* __x86_64__ */
 
 	/* Initialize all the jetsam threads */
 	for (i = 0; i < max_jetsam_threads; i++) {
@@ -2774,14 +2793,14 @@ memorystatus_add(proc_t p, boolean_t locked)
 		goto exit;
 	}
 
+#if CONFIG_FREEZE
 	/*
 	 * Opt out system processes from being frozen by default.
 	 * For coalition-based freezing, we only want to freeze sysprocs that have specifically opted in.
 	 */
-	if (isSysProc(p)) {
+	if (isSysProc(p) && !memorystatus_freeze_daemons_all_allowed) {
 		p->p_memstat_state |= P_MEMSTAT_FREEZE_DISABLED;
 	}
-#if CONFIG_FREEZE
 	memorystatus_freeze_init_proc(p);
 #endif
 
@@ -2822,6 +2841,17 @@ exit:
 	}
 
 	return 0;
+}
+
+void
+memorystatus_set_proc_entitlement_flags(proc_t p)
+{
+	static const char kInternalJetsamRangeEntitlement[] = "com.apple.private.internal-jetsam-range";
+	task_t t = proc_task(p);
+	assert(t != TASK_NULL);
+	if (IOTaskHasEntitlement(t, kInternalJetsamRangeEntitlement)) {
+		p->p_memstat_state |= P_MEMSTAT_INTERNAL_RANGE;
+	}
 }
 
 /*
@@ -2866,6 +2896,20 @@ _memstat_record_prio_transition(proc_t p, int new_priority)
 }
 
 /*
+ * Everything between the idle band and the application agining band
+ * are reserved for internal use. We allow some entitled user space programs
+ * to use this range for experimentation.
+ */
+static bool
+_memstat_proc_can_use_entitled_range(proc_t proc)
+{
+	if (proc == PROC_NULL) {
+		return false;
+	}
+	return proc->p_memstat_state & P_MEMSTAT_INTERNAL_RANGE;
+}
+
+/*
  * Description:
  *	Moves a process from one jetsam bucket to another.
  *	which changes the LRU position of the process.
@@ -2903,7 +2947,8 @@ memstat_update_priority_locked(proc_t p,
 
 	if (priority == JETSAM_PRIORITY_IDLE &&
 	    !(_memstat_proc_can_idle_exit(p) && !_memstat_proc_is_dirty(p)) &&
-	    !(_memstat_proc_is_managed(p) && !_memstat_proc_has_priority_assertion(p))) {
+	    !(_memstat_proc_is_managed(p) && !_memstat_proc_has_priority_assertion(p)) &&
+	    !_memstat_proc_can_use_entitled_range(p)) {
 		priority = JETSAM_PRIORITY_BACKGROUND;
 		memorystatus_log_error("memorystatus: %s [%d] is neither "
 		    "clean (0x%x) nor assertion-less (0x%x) and cannot "
@@ -3065,22 +3110,6 @@ SYSCTL_PROC(_kern, OID_AUTO, memorystatus_relaunch_flags, CTLTYPE_INT | CTLFLAG_
 #endif /* DEVELOPMENT || DEBUG */
 
 /*
- * Everything between the idle band and the application agining band
- * are reserved for internal use. We allow some entitled user space programs
- * to use this range for experimentation.
- */
-static bool
-current_task_can_use_entitled_range()
-{
-	static const char kInternalJetsamRangeEntitlement[] = "com.apple.private.internal-jetsam-range";
-	task_t task = current_task();
-	if (task == kernel_task) {
-		return true;
-	}
-	return IOTaskHasEntitlement(task, kInternalJetsamRangeEntitlement);
-}
-
-/*
  * Set a process' requested priority band. This is the entry point used during
  * spawn and by memorystatus_control.
  */
@@ -3105,7 +3134,7 @@ memorystatus_set_priority(proc_t p, int priority, uint64_t user_data,
 		 * Entitled processes (just munch) can use a subset of this range for testing.
 		 */
 		if (priority > JETSAM_PRIORITY_ENTITLED_MAX ||
-		    !current_task_can_use_entitled_range()) {
+		    !_memstat_proc_can_use_entitled_range(current_proc())) {
 			priority = JETSAM_PRIORITY_IDLE;
 			options |= MEMSTAT_PRIORITY_NO_AGING;
 		}
@@ -3516,6 +3545,9 @@ memorystatus_dirty_track(proc_t p, uint32_t pcontrol)
 		}
 
 		p->p_memstat_dirty |= P_DIRTY_TRACK;
+		if (!(old_dirty & P_DIRTY_TRACK)) {
+			p->p_memstat_dirty |= P_DIRTY_IM_NEW_HERE;
+		}
 	}
 
 	if (pcontrol & PROC_DIRTY_ALLOW_IDLE_EXIT) {
@@ -3677,6 +3709,7 @@ memorystatus_dirty_set(proc_t p, boolean_t self, uint32_t pcontrol)
 			kill = true;
 		}
 	} else if (!was_dirty && now_dirty) {
+		p->p_memstat_dirty &= ~P_DIRTY_IM_NEW_HERE;
 		priority = p->p_memstat_requestedpriority;
 		task_set_dirty_start(t, mach_absolute_time());
 	}
@@ -4495,13 +4528,12 @@ memstat_purge_caches(jetsam_state_t state)
 	}
 
 #if CONFIG_DEFERRED_RECLAIM
-	/* TODO: estimate memory recovered from deferred reclaim */
 	memorystatus_log("memorystatus: reclaiming all deferred user memory\n");
-	mach_vm_size_t vmdr_bytes_reclaimed;
+	size_t vmdr_bytes_reclaimed;
 	vm_deferred_reclamation_gc(RECLAIM_GC_DRAIN, &vmdr_bytes_reclaimed,
 	    RECLAIM_NO_FAULT | RECLAIM_NO_WAIT);
-	memorystatus_log("memorystatus: purged %llu KiB of deferred user memory\n",
-	    vmdr_bytes_reclaimed);
+	memorystatus_log("memorystatus: purged %zu KiB of deferred user memory\n",
+	    vmdr_bytes_reclaimed >> 10);
 #endif /* CONFIG_DEFERRED_RECLAIM */
 
 	/* TODO: estimate wired memory recovered from zone_gc */
@@ -4835,8 +4867,7 @@ memorystatus_do_action(jetsam_state_t state, memorystatus_action_t action, memor
 		memorystatus_log_info(
 			"memorystatus_do_action: Waking up swap thread. memorystatus_available_pages: %llu\n",
 			(uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES);
-		os_atomic_store(&vm_swapout_wake_pending, true, relaxed);
-		thread_wakeup((event_t)&vm_swapout_thread);
+		vm_swapout_wakeup();
 		break;
 	case MEMORYSTATUS_PROCESS_SWAPIN_QUEUE:
 		memorystatus_log_info(
@@ -8184,7 +8215,7 @@ memorystatus_cmd_grp_set_priorities(user_addr_t buffer, size_t buffer_size)
 			 * Entitled processes (just munch) can use a subset of this range for testing.
 			 */
 			if (entries[i].priority > JETSAM_PRIORITY_ENTITLED_MAX ||
-			    !current_task_can_use_entitled_range()) {
+			    !_memstat_proc_can_use_entitled_range(current_proc())) {
 				entries[i].priority = JETSAM_PRIORITY_IDLE;
 			}
 		} else if (entries[i].priority == JETSAM_PRIORITY_IDLE_HEAD) {
@@ -9598,13 +9629,6 @@ memstat_sort_coals_locked(unsigned int bucket_index, memorystatus_jetsam_sort_or
 uint32_t
 memstat_get_idle_proccnt(void)
 {
-#if CONFIG_JETSAM
-	/*
-	 * On fully jetsam-enabled systems, all processes on the idle band may
-	 * be idle-exited
-	 */
-	return os_atomic_load(&memstat_bucket[JETSAM_PRIORITY_IDLE].count, relaxed);
-#else /* !CONFIG_JETSAM */
 	uint32_t count = 0;
 	uint32_t bucket = JETSAM_PRIORITY_IDLE;
 
@@ -9612,6 +9636,16 @@ memstat_get_idle_proccnt(void)
 	for (proc_t p = memorystatus_get_first_proc_locked(&bucket, FALSE);
 	    p != PROC_NULL;
 	    p = memorystatus_get_next_proc_locked(&bucket, p, FALSE)) {
+#if CONFIG_JETSAM
+		if (!_memstat_proc_has_error(p)) {
+			/*
+			 * If termination hit an error on this jetsam iteration, don't consider the
+			 * process idle. We'll clear the error bit before going to sleep and have
+			 * another chance at killing it when we get re-awoken.
+			 */
+			count++;
+		}
+#else /* !CONFIG_JETSAM */
 		/*
 		 * On macOS, we can only exit clean daemons. In the future, we
 		 * should include assertion-less managed daemons. Apps may make
@@ -9622,11 +9656,11 @@ memstat_get_idle_proccnt(void)
 		    !_memstat_proc_is_terminating(p)) {
 			count++;
 		}
+#endif /* CONFIG_JETSAM */
 	}
 	proc_list_unlock();
 
 	return count;
-#endif /* CONFIG_JETSAM */
 }
 
 uint32_t

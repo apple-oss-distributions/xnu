@@ -90,7 +90,6 @@
 #include <vm/vm_kern.h>
 #include <kern/kern_cdata.h>
 #include <kern/ledger.h>
-#include <san/kcov_ksancov.h>
 
 
 #if DEVELOPMENT || DEBUG
@@ -155,11 +154,17 @@ extern uint64_t         last_hwaccess_thread;
 extern uint8_t          last_hwaccess_type; /* 0 : read, 1 : write. */
 extern uint8_t          last_hwaccess_size;
 extern uint64_t         last_hwaccess_paddr;
+#if HAS_SPTM_SYSCTL
+extern bool             disarm_protected_io;
+extern bool             disarm_protected_io_ever;
+#endif /* HAS_SPTM_SYSCTL */
 
-/*Choosing the size for gTargetTypeBuffer as 16 and size for gModelTypeBuffer as 32
- *  since the target name and model name typically  doesn't exceed this size */
+/* Choosing the size for gTargetTypeBuffer as 16 since the target
+ * name typically doesn't exceed this size */
 extern char  gTargetTypeBuffer[16];
-extern char  gModelTypeBuffer[32];
+/* Device-specific buffers for coalesced targets to show actual device info instead of coalesced info */
+extern char  gUniqueDeviceTargetTypeBuffer[16];
+extern char  gUniqueDeviceModelTypeBuffer[32];
 
 extern struct timeval    gIOLastSleepTime;
 extern struct timeval    gIOLastWakeTime;
@@ -500,12 +505,18 @@ do_print_all_panic_info(const char *message, uint64_t panic_options, const char 
 	paniclog_append_noflush("Debugger message: %.1200s\n", message);
 	if (debug_enabled) {
 		paniclog_append_noflush("Device: %s\n",
-		    ('\0' != gTargetTypeBuffer[0]) ? gTargetTypeBuffer : "Not set yet");
+		    ('\0' != gUniqueDeviceTargetTypeBuffer[0]) ? gUniqueDeviceTargetTypeBuffer : "Not set yet");
 		paniclog_append_noflush("Hardware Model: %s\n",
-		    ('\0' != gModelTypeBuffer[0]) ? gModelTypeBuffer:"Not set yet");
+		    ('\0' != gUniqueDeviceModelTypeBuffer[0]) ? gUniqueDeviceModelTypeBuffer:"Not set yet");
 		paniclog_append_noflush("ECID: %02X%02X%02X%02X%02X%02X%02X%02X\n", gPlatformECID[7],
 		    gPlatformECID[6], gPlatformECID[5], gPlatformECID[4], gPlatformECID[3],
 		    gPlatformECID[2], gPlatformECID[1], gPlatformECID[0]);
+#if HAS_SPTM_SYSCTL
+		if (disarm_protected_io_ever) {
+			paniclog_append_noflush("SPTM protected IO disabled? %d, ever disabled? %d\n",
+			    disarm_protected_io, disarm_protected_io_ever);
+		}
+#endif /* HAS_SPTM_SYSCTL */
 		if (last_hwaccess_thread) {
 			paniclog_append_noflush("AppleHWAccess Thread: 0x%llx\n", last_hwaccess_thread);
 			if (!last_hwaccess_size) {
@@ -688,7 +699,8 @@ do_print_all_panic_info(const char *message, uint64_t panic_options, const char 
 		    PANIC_VALIDATE_PTR(task->map->pmap)) {
 			ledger_amount_t resident = 0;
 			if (task != kernel_task) {
-				ledger_get_balance(task->ledger, task_ledgers.phys_mem, &resident);
+				ledger_get_balance(task->ledger, task_ledgers.phys_mem,
+				    LEO_NO_SETTLE, &resident);
 				resident >>= VM_MAP_PAGE_SHIFT(task->map);
 			}
 			paniclog_append_noflush("Panicked task %p: %lld pages, %d threads: ",
@@ -736,6 +748,10 @@ do_print_all_panic_info(const char *message, uint64_t panic_options, const char 
 		    sizeof(panic_info->eph_bootsessionuuid_string));
 	}
 	panic_info->eph_roots_installed = roots_installed;
+
+	/* Copy device-specific target and model type buffers */
+	memcpy(panic_info->eph_device_target_type, gUniqueDeviceTargetTypeBuffer, sizeof(panic_info->eph_device_target_type));
+	memcpy(panic_info->eph_device_model_type, gUniqueDeviceModelTypeBuffer, sizeof(panic_info->eph_device_model_type));
 
 	if (panic_initiator != NULL) {
 		bytes_remaining = debug_buf_size - (unsigned int)((uintptr_t)debug_buf_ptr - (uintptr_t)debug_buf_base);
@@ -828,8 +844,6 @@ do_print_all_panic_info(const char *message, uint64_t panic_options, const char 
 			paniclog_append_noflush("\n!! Stackshot Failed !!\nkcdata_memory_static_init returned %d", err);
 		}
 	}
-
-	ksancov_on_panic_log();
 
 #if CONFIG_EXT_PANICLOG
 	// Write ext paniclog at the end of the paniclog region.
@@ -1079,6 +1093,7 @@ kern_return_t
 DebuggerXCallEnter(
 	boolean_t proceed_on_sync_failure, bool is_stackshot)
 {
+	extern _Atomic(unsigned int) panic_stop_count;
 	uint64_t max_mabs_time, current_mabs_time;
 	int cpu;
 	int timeout_cpu = -1;
@@ -1137,11 +1152,15 @@ DebuggerXCallEnter(
 
 		max_mabs_time = os_atomic_load(&debug_ack_timeout, relaxed);
 
-		if (max_mabs_time > 0) {
-			current_mabs_time = mach_absolute_time();
-			max_mabs_time += current_mabs_time;
-			assert(max_mabs_time > current_mabs_time);
-		}
+		/*
+		 * If the debug_ack_timeout is zero, we will wait for one second, which is more than
+		 * enough time for virtual machines and simulated devices to respond to the debugger IPI.
+		 * Infinite wait here resulted in watchdog timeouts when CPUs were blocked in SPTM panic
+		 * loop or blocked with interrupts held disabled, making problems harder to diagonse.
+		 */
+		current_mabs_time = mach_absolute_time();
+		max_mabs_time = current_mabs_time + ((max_mabs_time > 0) ? max_mabs_time : 24000000ull);
+		assert(max_mabs_time > current_mabs_time);
 
 		/*
 		 * Wait for DEBUG_ACK_TIMEOUT ns for a response from everyone we IPI'd.  If we
@@ -1152,11 +1171,12 @@ DebuggerXCallEnter(
 		 */
 		do {
 			current_mabs_time = mach_absolute_time();
-			sync_pending = os_atomic_load(&debugger_sync, acquire);
-		} while ((sync_pending != 0) && (max_mabs_time == 0 || current_mabs_time < max_mabs_time));
+			sync_pending = os_atomic_load(&debugger_sync, acquire) -
+			    os_atomic_load(&panic_stop_count, acquire);
+		} while ((sync_pending != 0) && (current_mabs_time < max_mabs_time));
 	}
 
-	if (!immediate_halt && max_mabs_time > 0 && current_mabs_time >= max_mabs_time) {
+	if (!immediate_halt && current_mabs_time >= max_mabs_time) {
 		/*
 		 * We timed out trying to IPI the other CPUs. Skip counting any CPUs that
 		 * are offline; then we must account for the remainder, either counting
@@ -1217,14 +1237,15 @@ DebuggerXCallEnter(
 #endif
 		}
 
-		if (debugger_sync == 0) {
+		sync_pending = os_atomic_load(&debugger_sync, acquire) - os_atomic_load(&panic_stop_count, acquire);
+		if (sync_pending == 0) {
 			return KERN_SUCCESS;
 		} else if (!proceed_on_sync_failure) {
 			panic("%s>Debugger synch pending on cpu %d\n",
 			    __FUNCTION__, timeout_cpu);
 		}
 	}
-	if (immediate_halt || (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
+	if (immediate_halt || (current_mabs_time >= max_mabs_time)) {
 		if (immediate_halt) {
 			__builtin_arm_dmb(DMB_ISH);
 		}

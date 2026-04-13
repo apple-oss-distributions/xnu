@@ -1288,7 +1288,7 @@ void
 sched_perfcontrol_thread_group_recommend(__unused void *machine_data, __unused cluster_type_t new_recommendation)
 {
 	panic("sched_perfcontrol_thread_group_recommend() not supported on the Edge scheduler");
-	/* Use sched_perfcontrol_thread_group_preferred_clusters_set() instead */
+	/* Use sched_perfcontrol_thread_group_preferred_psets_set() instead */
 }
 
 static perfcontrol_class_t
@@ -1462,33 +1462,60 @@ sched_perfcontrol_edge_matrix_set(sched_clutch_edge *edge_matrix, bool *edge_cha
  * perfcontrol callouts.
  */
 void
+sched_perfcontrol_thread_group_preferred_psets_set(
+	void *machine_data,
+	pset_id_t tg_preferred_pset,
+	pset_id_t overrides[PERFCONTROL_CLASS_MAX],
+	sched_perfcontrol_preferred_cluster_options_t options)
+{
+	struct thread_group *tg = (struct thread_group *)((uintptr_t)machine_data - offsetof(struct thread_group, tg_machine_data));
+	pset_id_t tg_bucket_preferred_pset[TH_BUCKET_SCHED_MAX];
+	for (sched_bucket_t bucket = 0; bucket < TH_BUCKET_SCHED_MAX; bucket++) {
+		perfcontrol_class_t pc = sched_bucket_to_perfcontrol_class(bucket);
+		pset_id_t pset_id = (overrides[pc] != SCHED_PERFCONTROL_PREFERRED_PSET_OVERRIDE_NONE)
+		    ? overrides[pc]
+		    : tg_preferred_pset;
+		tg_bucket_preferred_pset[bucket] = pset_id;
+	}
+	sched_edge_tg_preferred_pset_change(tg, tg_bucket_preferred_pset, options);
+}
+/*
+ * Note this may be called in both preemption enabled context as well as in the
+ * context of the scheduler csw callout / quantum interrupt / timer interrupt
+ * perfcontrol callouts.
+ */
+void
 sched_perfcontrol_thread_group_preferred_clusters_set(void *machine_data, uint32_t tg_preferred_cluster,
     uint32_t overrides[PERFCONTROL_CLASS_MAX], sched_perfcontrol_preferred_cluster_options_t options)
 {
-	struct thread_group *tg = (struct thread_group *)((uintptr_t)machine_data - offsetof(struct thread_group, tg_machine_data));
-	uint32_t tg_bucket_preferred_cluster[TH_BUCKET_SCHED_MAX];
+	pset_id_t tg_preferred_pset = cluster_id_to_pset_id[tg_preferred_cluster];
+	pset_id_t overrides_psets[PERFCONTROL_CLASS_MAX] = {};
+
 	for (sched_bucket_t bucket = 0; bucket < TH_BUCKET_SCHED_MAX; bucket++) {
 		perfcontrol_class_t pc = sched_bucket_to_perfcontrol_class(bucket);
-		tg_bucket_preferred_cluster[bucket] = (overrides[pc] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE) ? overrides[pc] : tg_preferred_cluster;
+		uint32_t cluster_id = (overrides[pc] != SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE)
+		    ? overrides[pc]
+		    : tg_preferred_cluster;
+		overrides_psets[pc] = cluster_id_to_pset_id[cluster_id];
 	}
-	sched_edge_tg_preferred_cluster_change(tg, tg_bucket_preferred_cluster, options);
+	sched_perfcontrol_thread_group_preferred_psets_set(machine_data, tg_preferred_pset, overrides_psets, (sched_perfcontrol_preferred_pset_options_t)options);
 }
 
 void
-sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t cluster_id, uint64_t preferred_bitmask, uint64_t migration_bitmask)
+sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t pset_id, uint64_t preferred_bitmask, uint64_t migration_bitmask)
 {
-	assert(cluster_id < MAX_PSETS);
+	assert(pset_id < MAX_PSETS);
 	assert((preferred_bitmask & migration_bitmask) == 0);
-	processor_set_t pset = pset_array[cluster_id];
+	processor_set_t pset = pset_array[pset_id];
 	pset->perfcontrol_cpu_preferred_bitmask = preferred_bitmask;
 	pset->perfcontrol_cpu_migration_bitmask = migration_bitmask;
 }
 
 void
-sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t cluster_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask)
+sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t pset_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask)
 {
-	assert(cluster_id < MAX_PSETS);
-	processor_set_t pset = pset_array[cluster_id];
+	assert(pset_id < MAX_PSETS);
+	processor_set_t pset = pset_array[pset_id];
 	*preferred_bitmask = pset->perfcontrol_cpu_preferred_bitmask;
 	*migration_bitmask = pset->perfcontrol_cpu_migration_bitmask;
 }
@@ -1525,18 +1552,27 @@ sched_perfcontrol_edge_matrix_set(__unused sched_clutch_edge *edge_matrix, __unu
 }
 
 void
+sched_perfcontrol_thread_group_preferred_psets_set(
+	__unused void *machine_data,
+	__unused pset_id_t tg_preferred_pset,
+	__unused pset_id_t overrides[PERFCONTROL_CLASS_MAX],
+	__unused sched_perfcontrol_preferred_cluster_options_t options)
+{
+}
+
+void
 sched_perfcontrol_thread_group_preferred_clusters_set(__unused void *machine_data, __unused uint32_t tg_preferred_cluster,
     __unused uint32_t overrides[PERFCONTROL_CLASS_MAX], __unused sched_perfcontrol_preferred_cluster_options_t options)
 {
 }
 
 void
-sched_perfcontrol_edge_cpu_rotation_bitmasks_set(__unused uint32_t cluster_id, __unused uint64_t preferred_bitmask, __unused uint64_t migration_bitmask)
+sched_perfcontrol_edge_cpu_rotation_bitmasks_set(__unused uint32_t pset_id, __unused uint64_t preferred_bitmask, __unused uint64_t migration_bitmask)
 {
 }
 
 void
-sched_perfcontrol_edge_cpu_rotation_bitmasks_get(__unused uint32_t cluster_id, __unused uint64_t *preferred_bitmask, __unused uint64_t *migration_bitmask)
+sched_perfcontrol_edge_cpu_rotation_bitmasks_get(__unused uint32_t pset_id, __unused uint64_t *preferred_bitmask, __unused uint64_t *migration_bitmask)
 {
 }
 

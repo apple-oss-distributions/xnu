@@ -32,6 +32,14 @@
 
 #include "net_test_lib.h"
 
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("rpaulo")
+	);
+
 network_interface interface;
 
 static void
@@ -40,7 +48,7 @@ cleanup(void)
 	network_interface_destroy(&interface);
 }
 
-T_DECL(net_multicast_igmp_ssm, "IGMP SSM test", T_META_ASROOT(true))
+T_DECL(multicast_igmp_ssm, "IGMP SSM test", T_META_ASROOT(true))
 {
 	int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
@@ -67,7 +75,7 @@ T_DECL(net_multicast_igmp_ssm, "IGMP SSM test", T_META_ASROOT(true))
 	close(s);
 }
 
-T_DECL(net_multicast_mld_ssm, "MLD SSM test", T_META_ASROOT(true))
+T_DECL(multicast_mld_ssm, "MLD SSM test", T_META_ASROOT(true))
 {
 	int s6 = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 

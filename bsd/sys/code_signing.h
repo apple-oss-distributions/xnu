@@ -822,7 +822,7 @@ csm_associate_os_entitlements(
 kern_return_t
 csm_accelerate_entitlements(
 	void *monitor_sig_obj,
-	CEQueryContext_t *ce_ctx);
+	const CEContext_t **ce_ctx);
 
 kern_return_t
 vm_map_entry_cs_associate(

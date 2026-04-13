@@ -231,7 +231,7 @@ __BEGIN_DECLS
 __END_DECLS
 
 #define malloc(size)         malloc_impl(size)
-#define malloc_type(type)    kalloc_type(type, Z_SET_NOTEARLY)
+#define malloc_type(type)    kalloc_type(type, Z_SET_NOT_EARLY)
 static inline void *
 malloc_impl(size_t size)
 {

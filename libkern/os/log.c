@@ -869,7 +869,7 @@ _os_log_internal_driverKit(void *dso, os_log_t log, uint8_t type, const char *fm
 	return 0;
 }
 
-__attribute__((noinline, not_tail_called)) __mockable void
+__attribute__((noinline, not_tail_called)) __mockable_strong void
 os_log_with_args(os_log_t oslog, os_log_type_t type, const char *fmt,
     va_list args, void *addr)
 {

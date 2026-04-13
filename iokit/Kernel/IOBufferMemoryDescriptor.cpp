@@ -857,7 +857,7 @@ IOBufferMemoryDescriptor::setDirection(IODirection direction)
 bool
 IOBufferMemoryDescriptor::appendBytes(const void * bytes, vm_size_t withLength)
 {
-	vm_size_t   actualBytesToCopy = min(withLength, _capacity - _length);
+	vm_size_t   actualBytesToCopy = IOMin(withLength, _capacity - _length);
 	IOByteCount offset;
 
 	assert(_length <= _capacity);

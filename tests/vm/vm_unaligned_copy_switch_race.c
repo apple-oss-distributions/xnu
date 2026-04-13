@@ -98,6 +98,7 @@ T_DECL(unaligned_copy_switch_race,
 	ctx->mem_entry_ro = MACH_PORT_NULL;
 
 	/* allocate our attack target memory */
+	ro_addr = 0;
 	kr = vm_allocate(mach_task_self(),
 	    &ro_addr,
 	    ctx->obj_size,
@@ -160,6 +161,7 @@ T_DECL(unaligned_copy_switch_race,
 	T_QUIET; T_EXPECT_MACH_ERROR(kr, KERN_INVALID_RIGHT, " vm_map() mem_entry_rw");
 
 	/* allocate a source buffer for the unaligned copy */
+	e5 = 0;
 	kr = vm_allocate(mach_task_self(),
 	    &e5,
 	    ctx->obj_size,

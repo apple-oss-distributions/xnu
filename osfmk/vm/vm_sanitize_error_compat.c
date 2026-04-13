@@ -38,6 +38,7 @@
         "integer", "unsigned-shift-base", "nullability", "bounds"))), apply_to=function)
 #endif
 
+#include <vm/vm_map_lock_internal.h>
 #include <vm/vm_map_xnu.h>
 #include <vm/vm_sanitize_internal.h>
 
@@ -261,6 +262,8 @@ vm_sanitize_err_compat_cur_and_max_prots_vm_map(
  */
 VM_SANITIZE_DEFINE_CALLER(VM_MAP_REMAP);
 
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_REALLOCATE);
+
 /* mmap has new successes that we can't rewrite or telemeter */
 VM_SANITIZE_DEFINE_CALLER(MMAP, /* no error compat needed */);
 
@@ -457,12 +460,11 @@ vm_sanitize_err_compat_addr_size_useracc(
 	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask)) {
 		vm_address_t aligned_start = vm_map_trunc_page(start, pgmask);
 		vm_address_t aligned_end = vm_map_round_page(start + size, pgmask);
-		vm_map_entry_t tmp_entry;
 		bool have_entry;
 
-		vm_map_lock(map_or_null);
-		have_entry = vm_map_lookup_entry(map_or_null, aligned_start, &tmp_entry);
-		vm_map_unlock(map_or_null);
+		vm_map_ilk_lock(map_or_null);
+		have_entry = vm_map_has_entry_at_address_ilocked(map_or_null, aligned_start);
+		vm_map_ilk_unlock(map_or_null);
 
 		if (vm_sanitize_range_overflows_allow_zero(aligned_start, aligned_end - aligned_start, pgmask) ||
 		    aligned_start < vm_map_min(map_or_null) ||

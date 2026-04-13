@@ -486,7 +486,11 @@ struct proc {
 #endif /* CONFIG_FREEZE */
 #endif /* CONFIG_MEMORYSTATUS */
 
-	_Atomic uint32_t  p_user_faults; /* count the number of user faults generated */
+// Index for `p_user_faults` for the global fault count limit
+#define PROC_P_USER_FAULTS_GLOBAL_IDX 0
+// Index for `p_user_faults` for OS_REASON_SECURITY_SOFT_TRAPS namespace fault limit
+#define PROC_P_USER_FAULTS_SOFT_TRAPS_IDX 1
+	_Atomic uint16_t  p_user_faults[2]; /* count the number of user faults generated */
 
 	uint32_t          p_memlimit_increase; /* byte increase for memory limit for dyld SPI rdar://problem/49950264, structure packing 32-bit and 64-bit */
 

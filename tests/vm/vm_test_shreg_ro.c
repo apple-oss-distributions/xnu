@@ -5,6 +5,7 @@
 #include <mach/mach_init.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
+#include <sys/mman.h>
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
@@ -95,6 +96,17 @@ find_nested_read_only_mapping(
 		return true;
 	}
 	return false;
+}
+
+static void
+cause_mapping_unnesting(mach_vm_address_t start, mach_vm_size_t size)
+{
+	int rc;
+
+	rc = mlock((void *)start, size);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(rc, "mlock() succeeds");
+	rc = munlock((void *)start, size);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(rc, "munlock() succeeds");
 }
 
 T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be overwritten", T_META_TAG_VM_PREFERRED)
@@ -258,8 +270,8 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 	    vmsize_sub,
 	    FALSE,                  /* set_maximum */
 	    VM_PROT_COPY | VM_PROT_READ | VM_PROT_WRITE);
-	T_EXPECT_MACH_ERROR(kr, KERN_NO_SPACE,
-	    "vm_protect(VM_PROT_COPY) fails with KERN_NO_SPACE");
+	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE,
+	    "vm_protect(VM_PROT_COPY) fails with KERN_PROTECTION_FAILURE");
 	/* check protections again */
 	depth2 = 0;
 	count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
@@ -286,7 +298,7 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 	    &vmaddr_tmp,
 	    vmsize_sub,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
-	T_EXPECT_MACH_ERROR(kr, KERN_NO_SPACE, "vm_allocate(OVERWRITE) fails with KERN_NO_SPACE");
+	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE, "vm_allocate(OVERWRITE) fails with KERN_PROTECTION_FAILURE");
 	T_EXPECT_EQ(vmaddr, vmaddr_tmp, "vmaddr is unchanged");
 	/* check protections again */
 	depth2 = 0;
@@ -333,6 +345,7 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 	T_LOG("==========================================");
 	T_EXPECT_EQ(ri1.is_submap, 1, "mapping should be nested");
 	/* get a temporary buffer */
+	vmaddr_buf = 0;
 	kr = mach_vm_allocate(mach_task_self(),
 	    &vmaddr_buf,
 	    vmsize_sub,
@@ -372,12 +385,7 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 	T_LOG("==========================================");
 	ri1 = ri2;
 	T_EXPECT_EQ(ri1.is_submap, 1, "mapping should be nested");
-	kr = mach_vm_protect(mach_task_self(),
-	    vmaddr_sub,
-	    vmsize_sub,
-	    FALSE,                  /* set_maximum */
-	    VM_PROT_COPY | VM_PROT_READ | VM_PROT_WRITE);
-	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE, "vm_protect(0x%llx,0x%llx,VM_PROT_COPY) fails with KERN_PROTECTION_FAILURE", (uint64_t)vmaddr_sub, (uint64_t)vmsize_sub);
+	cause_mapping_unnesting(vmaddr_sub, vmsize_sub);
 	/* check protections again */
 	depth2 = 0;
 	count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
@@ -428,7 +436,7 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 }
 
 T_DECL(shared_region_x86_writable, "Tests shared region PROT_WRITE is permitted on Intel only, and fails on all other architectures",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	mach_vm_address_t vmaddr_sub;
 	mach_vm_size_t vmsize_sub;

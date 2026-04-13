@@ -625,8 +625,7 @@ workq_thread_update_bucket(proc_t p, struct workqueue *wq, struct uthread *uth,
 	thread_qos_t old_bucket = old_pri.qos_bucket;
 	thread_qos_t new_bucket = workq_pri_bucket(new_pri);
 
-	if ((old_bucket != new_bucket) &&
-	    !workq_thread_is_permanently_bound(uth)) {
+	if (old_bucket != new_bucket) {
 		_wq_thactive_move(wq, old_bucket, new_bucket);
 	}
 
@@ -638,7 +637,6 @@ workq_thread_update_bucket(proc_t p, struct workqueue *wq, struct uthread *uth,
 	}
 
 	if (wq->wq_reqcount &&
-	    !workq_thread_is_permanently_bound(uth) &&
 	    (old_bucket > new_bucket || force_run)) {
 		int flags = WORKQ_THREADREQ_CAN_CREATE_THREADS;
 		if (old_bucket > new_bucket) {
@@ -2789,10 +2787,12 @@ bsdthread_get_max_parallelism(thread_qos_t qos, unsigned long flags,
 		return EINVAL;
 	}
 
+#if !HAS_ARM_FEAT_SME
 	/* No units are present */
 	if (flags & QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE) {
 		return ENOTSUP;
 	}
+#endif /* !HAS_ARM_FEAT_SME */
 
 	if (flags & QOS_PARALLELISM_REALTIME) {
 		if (qos) {
@@ -3056,6 +3056,12 @@ workq_kern_threadreq_initiate(struct proc *p, workq_threadreq_t req,
 	struct uthread *uth = NULL;
 
 	assert(req->tr_flags & (WORKQ_TR_FLAG_WORKLOOP | WORKQ_TR_FLAG_KEVENT));
+	/*
+	 * Thread bound kqworkloops overlay the priority queue entry with other
+	 * data (the thread_t and work interval), so should never have their
+	 * threadreq passed here.
+	 */
+	assert(!(req->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND));
 
 	/*
 	 * For any new initialization changes done to workqueue thread request below,
@@ -3451,6 +3457,18 @@ workq_kern_bound_thread_park(struct workq_threadreq_s *kqr)
 	kr = thread_set_voucher_name(MACH_PORT_NULL);
 	assert(kr == KERN_SUCCESS);
 
+	/*
+	 * Bound threads park (and unpark) with the scheduler callback cleared and
+	 * not counting towards thactive. If we unpark to do work (as opposed to
+	 * waking up to thread exit), the scheduler callback is added via
+	 * workq_setup_and_run, and thactive is incremented in
+	 * workq_bound_thread_setup_and_run.
+	 */
+	thread_sched_call(get_machthread(uth), NULL);
+	proc_t p = current_proc();
+	struct workqueue *wq = proc_get_wqptr_fast(p);
+	_wq_thactive_dec(wq, uth->uu_workq_pri.qos_bucket);
+
 	kqworkloop_bound_thread_park_commit(kqr,
 	    workq_parked_wait_event(uth), workq_bound_thread_unpark_continue);
 
@@ -3499,12 +3517,35 @@ workq_kern_bound_thread_terminate(struct workq_threadreq_s *kqr)
 	thread_t th = get_machthread(uth);
 	vm_map_t vmap = get_task_map(proc_task(p));
 
+	uint32_t setup_flags = WQ_SETUP_EXIT_THREAD;
+
 	if ((uu_workq_flags_orig & UT_WORKQ_NEW) == 0) {
 		upcall_flags |= WQ_FLAG_THREAD_REUSE;
+	} else {
+		/*
+		 * The bound thread is exiting before ever having gone to userspace. We
+		 * need pthread to perform initial setup before calling _pthread_exit.
+		 * TODO(aaron): We should investigate an optimization both here and in
+		 * workq_unpark_for_death_and_unlock to never send these threads to
+		 * userspace, instead processing ASTs and calling destroying the stack.
+		 */
+		setup_flags |= WQ_SETUP_FIRST_USE;
+
+		/*
+		 * Typically we'd set the workq_thport in workq_setup_and_run, but we
+		 * haven't been through that path yet.
+		 */
+		assert(uth->uu_workq_thport == MACH_PORT_NULL);
+		/* convert_thread_to_port_immovable() consumes a reference */
+		thread_reference(th);
+		/* Convert to immovable thread port, then pin the entry */
+		uth->uu_workq_thport = ipc_port_copyout_send_pinned(
+			convert_thread_to_port_immovable(th),
+			get_task_ipcspace(proc_task(p)));
 	}
 
 	pthread_functions->workq_setup_thread(p, th, vmap, uth->uu_workq_stackaddr,
-	    uth->uu_workq_thport, 0, WQ_SETUP_EXIT_THREAD, upcall_flags);
+	    uth->uu_workq_thport, 0, setup_flags, upcall_flags);
 	__builtin_unreachable();
 }
 
@@ -4967,7 +5008,7 @@ workq_setup_and_run(proc_t p, struct uthread *uth, int setup_flags)
 	WQ_TRACE_WQ(TRACE_wq_runthread | DBG_FUNC_START,
 	    proc_get_wqptr_fast(p), 0, 0, 0);
 
-	if (workq_thread_is_cooperative(uth) || workq_thread_is_permanently_bound(uth)) {
+	if (workq_thread_is_cooperative(uth)) {
 		thread_sched_call(th, NULL);
 	} else {
 		thread_sched_call(th, workq_sched_callback);
@@ -4995,7 +5036,16 @@ workq_bound_thread_setup_and_run(struct uthread *uth, int setup_flags)
 		upcall_flags |= WQ_FLAG_THREAD_OVERCOMMIT;
 	}
 	uth->uu_save.uus_workq_park_data.upcall_flags = upcall_flags;
-	workq_setup_and_run(current_proc(), uth, setup_flags);
+
+	/*
+	 * Increment thactive since we've decided this thread should go to
+	 * userspace. The scheduler callback is set in workq_setup_and_run.
+	 */
+	proc_t p = current_proc();
+	struct workqueue *wq = proc_get_wqptr_fast(p);
+	_wq_thactive_inc(wq, uth->uu_workq_pri.qos_bucket);
+
+	workq_setup_and_run(p, uth, setup_flags);
 	__builtin_unreachable();
 }
 

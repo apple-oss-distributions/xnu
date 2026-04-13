@@ -129,6 +129,7 @@ T_DECL(unaligned_write_to_cow_bypass,
 		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_read e0->e1");
 
 		/* allocate a source buffer */
+		e5 = 0;
 		kr = vm_allocate(mach_task_self(),
 		    &e5,
 		    ctx->obj_size,

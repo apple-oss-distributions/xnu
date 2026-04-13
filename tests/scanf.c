@@ -26,6 +26,8 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#pragma clang diagnostic error "-Wunused-function"
+
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
@@ -44,20 +46,26 @@ int libkern_vsscanf(const char *inp, char const *fmt0, va_list ap);
 # include <stdio.h>
 #endif
 
-T_DECL(scanf_empty, "empty")
+static void
+test_scanf_empty(void)
 {
+	T_LOG("%s", __func__);
 	T_ASSERT_EQ_INT(sscanf("", ""), 0, "empty input and format");
 	T_ASSERT_EQ_INT(sscanf("", "match me"), EOF, "empty input");
 	T_ASSERT_EQ_INT(sscanf("lonely", ""), 0, "empty format");
 }
 
-T_DECL(scanf_percent, "percent")
+static void
+test_scanf_percent(void)
 {
+	T_LOG("%s", __func__);
 	T_ASSERT_EQ_INT(sscanf("%", "%%"), 0, "two percent");
 }
 
-T_DECL(scanf_character, "character")
+static void
+test_scanf_character(void)
 {
+	T_LOG("%s", __func__);
 	char c;
 	for (char i = ' '; i <= '~'; ++i) {
 		char buf[] = { i, '\0' };
@@ -66,8 +74,10 @@ T_DECL(scanf_character, "character")
 	}
 }
 
-T_DECL(scanf_characters, "characters")
+static void
+test_scanf_characters(void)
 {
+	T_LOG("%s", __func__);
 	char c[] = { 'a', 'b', 'c', 'd', 'e' };
 	T_ASSERT_EQ_INT(sscanf("01234", "%4c", c), 1, "characters matched");
 	T_ASSERT_EQ_INT(c[0], '0', "characters value");
@@ -77,8 +87,10 @@ T_DECL(scanf_characters, "characters")
 	T_ASSERT_EQ_INT(c[4], 'e', "characters value wasn't overwritten");
 }
 
-T_DECL(scanf_string, "string")
+static void
+test_scanf_string(void)
 {
+	T_LOG("%s", __func__);
 	char s[] = { 'a', 'b', 'c', 'd', 'e' };
 	T_ASSERT_EQ_INT(sscanf("012", "%s", s), 1, "string matched");
 	T_ASSERT_EQ_STR(s, "012", "string value");
@@ -88,8 +100,10 @@ T_DECL(scanf_string, "string")
 	T_ASSERT_EQ_INT(s[4], 'e', "string value wasn't overwritten");
 }
 
-T_DECL(scanf_decimal, "decimal")
+static void
+test_scanf_decimal(void)
 {
+	T_LOG("%s", __func__);
 	int num;
 	for (char i = 0; i <= 9; ++i) {
 		char buf[] = { i + '0', '\0' };
@@ -112,8 +126,10 @@ T_DECL(scanf_decimal, "decimal")
 	T_ASSERT_EQ_INT(num, INT32_MAX, "INT32_MAX value");
 }
 
-T_DECL(scanf_integer, "integer")
+static void
+test_scanf_integer(void)
 {
+	T_LOG("%s", __func__);
 	int num;
 	T_ASSERT_EQ_INT(sscanf("0", "%i", &num), 1, "octal integer matched");
 	T_ASSERT_EQ_INT(num, 0, "octal integer value");
@@ -134,15 +150,19 @@ T_DECL(scanf_integer, "integer")
 	}
 }
 
-T_DECL(scanf_unsigned, "unsigned")
+static void
+test_scanf_unsigned(void)
 {
+	T_LOG("%s", __func__);
 	unsigned num;
 	T_ASSERT_EQ_INT(sscanf("4294967295", "%u", &num), 1, "UINT32_MAX matched");
 	T_ASSERT_EQ_UINT(num, UINT32_MAX, "UINT32_MAX value");
 }
 
-T_DECL(scanf_octal, "octal")
+static void
+test_scanf_octal(void)
 {
+	T_LOG("%s", __func__);
 	int num;
 	T_ASSERT_EQ_INT(sscanf("0", "%o", &num), 1, "octal matched");
 	T_ASSERT_EQ_INT(num, 0, "octal value");
@@ -153,8 +173,10 @@ T_DECL(scanf_octal, "octal")
 	}
 }
 
-T_DECL(scanf_hex, "hex")
+static void
+test_scanf_hex(void)
 {
+	T_LOG("%s", __func__);
 	int num;
 	for (char i = 0; i <= 9; ++i) {
 		char buf[] = { '0', 'x', i + '0', '\0' };
@@ -168,8 +190,10 @@ T_DECL(scanf_hex, "hex")
 	}
 }
 
-T_DECL(scanf_read, "read")
+static void
+test_scanf_read(void)
 {
+	T_LOG("%s", __func__);
 	int val, num;
 	T_ASSERT_EQ_INT(sscanf("", "%n", &num), 0, "read matched");
 	T_ASSERT_EQ_INT(num, 0, "read count");
@@ -182,8 +206,10 @@ T_DECL(scanf_read, "read")
 	T_ASSERT_EQ_INT(num, 7, "read count");
 }
 
-T_DECL(scanf_pointer, "pointer")
+static void
+test_scanf_pointer(void)
 {
+	T_LOG("%s", __func__);
 	void *ptr;
 	if (sizeof(void*) == 4) {
 		T_ASSERT_EQ_INT(sscanf("0xdeadbeef", "%p", &ptr), 1, "pointer matched");
@@ -192,4 +218,22 @@ T_DECL(scanf_pointer, "pointer")
 		T_ASSERT_EQ_INT(sscanf("0xdeadbeefc0defefe", "%p", &ptr), 1, "pointer matched");
 		T_ASSERT_EQ_PTR(ptr, (void*)0xdeadbeefc0defefe, "pointer value");
 	}
+}
+
+T_DECL(scanf, "scanf",
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_TAG_VM_PREFERRED)
+{
+	test_scanf_empty();
+	test_scanf_percent();
+	test_scanf_character();
+	test_scanf_characters();
+	test_scanf_string();
+	test_scanf_decimal();
+	test_scanf_integer();
+	test_scanf_unsigned();
+	test_scanf_octal();
+	test_scanf_hex();
+	test_scanf_read();
+	test_scanf_pointer();
 }

@@ -162,6 +162,8 @@ extern int ipsec_bypass;
 
 #include <os/log.h>
 
+extern void log_hexdump(os_log_t log_handle, void *__sized_by(len) data, size_t len);
+
 struct ip6protosw *ip6_protox[IPPROTO_MAX];
 
 static LCK_GRP_DECLARE(in6_ifaddr_rwlock_grp, "in6_ifaddr_rwlock");
@@ -789,14 +791,38 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 	return result;
 }
 
+
 static void
-ip6_input_process_wake_packet(struct mbuf *m)
+log_lpw_ip6_mbuf(struct ifnet *ifp, struct mbuf *m)
+{
+	char buffer[64];
+	size_t buflen = MIN(mbuf_pkthdr_len(m), sizeof(buffer));
+
+	os_log(wake_packet_log_handle, "LPW IP6 packet from %s len %d wakepkt: %d",
+	    ifp->if_xname, m_pktlen(m), (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT));
+	if (mbuf_copydata(m, 0, buflen, buffer) == 0) {
+		log_hexdump(wake_packet_log_handle, buffer, buflen);
+	}
+}
+
+static void
+ip6_input_process_lpw_packet(struct mbuf *m, int nxt)
 {
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
 
-	if (if_is_lpw_enabled(ifp)) {
-		if_exit_lpw(ifp, "IP6 packet");
+	switch (nxt) {
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+		return;
+	default:
+		break;
 	}
+
+	if (net_wake_pkt_debug > 0) {
+		log_lpw_ip6_mbuf(ifp, m);
+	}
+	if_ports_used_match_mbuf(ifp, PF_INET6, m);
+	if_exit_lpw(ifp, "IP6 packet");
 }
 
 void
@@ -1452,10 +1478,10 @@ injectit:
 		    struct ip *, NULL, struct ip6_hdr *, ip6);
 
 		/*
-		 * Check if need to switch to full wake mode -- TCP knows about idle connections
+		 * Check if need to switch to full wake mode
 		 */
-		if (__improbable(nxt != IPPROTO_TCP && (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) != 0)) {
-			ip6_input_process_wake_packet(m);
+		if (__improbable(if_is_lpw_enabled(inifp))) {
+			ip6_input_process_lpw_packet(m, nxt);
 		}
 
 		if ((pr_input = ip6_protox[nxt]->pr_input) == NULL) {

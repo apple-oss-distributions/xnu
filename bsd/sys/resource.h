@@ -652,7 +652,7 @@ __END_DECLS
 
 #endif  /* !KERNEL */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/resource_private.h>
 #endif
 

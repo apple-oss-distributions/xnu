@@ -611,9 +611,12 @@ def PmapDecodeTTEARM64(tte, level, stage2 = False, is_iommu_tte = False):
 def PmapTTnIndexARM64(vaddr, pmap_pt_attr):
     pta_max_level = unsigned(pmap_pt_attr.pta_max_level)
 
+    # Mask VA with valid bits first (matches ttn_index in pmap_pt_geometry.h)
+    vaddr_masked = vaddr & unsigned(pmap_pt_attr.pta_va_valid_mask)
+
     tt_index = []
     for i in range(pta_max_level + 1):
-        tt_index.append((vaddr & unsigned(pmap_pt_attr.pta_level_info[i].index_mask)) \
+        tt_index.append((vaddr_masked & unsigned(pmap_pt_attr.pta_level_info[i].index_mask)) \
             >> unsigned(pmap_pt_attr.pta_level_info[i].shift))
 
     return tt_index

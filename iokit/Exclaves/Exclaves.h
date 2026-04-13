@@ -147,6 +147,9 @@ struct IOExclaveLPWUpcallArgs {
 	union {
 		struct {
 			uint64_t id_out;
+			uint64_t owner;
+			uint64_t data;
+			uint64_t types;
 		} createassertion;
 		struct {
 			uint64_t id;
@@ -172,6 +175,17 @@ IOReturn IOExclaveLPWUpcallHandler(struct IOExclaveLPWUpcallArgs *args);
 
 IOReturn IOExclaveLPWCreateAssertion(uint64_t *id_out, const char *desc);
 IOReturn IOExclaveLPWReleaseAssertion(uint64_t id);
+
+/*!
+ * @function IOExclavesFullWake
+ *
+ * @abstract
+ * Request transition to full wake when in LPW
+ *
+ * @param reason
+ * Exclaves reason for requesting fullwake
+ */
+void IOExclavesFullWake(const char * reason);
 
 /* Test support */
 

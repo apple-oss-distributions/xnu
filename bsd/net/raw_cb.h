@@ -70,12 +70,12 @@
  * to tie a socket to the generic raw interface.
  */
 struct rawcb {
-	LIST_ENTRY(rawcb) list;
-	struct  socket *rcb_socket;     /* back pointer to socket */
-	struct  sockaddr *rcb_faddr;    /* destination address */
-	struct  sockaddr *rcb_laddr;    /* socket's address */
-	struct  sockproto rcb_proto;    /* protocol family, protocol */
-	uint32_t        reserved[4];            /* for future use */
+	LIST_ENTRY(rawcb)   list;
+	struct socket       *rcb_socket;     /* back pointer to socket */
+	struct sockaddr     *rcb_faddr;    /* destination address */
+	struct sockaddr     *rcb_laddr;    /* socket's address */
+	struct sockproto    rcb_proto;    /* protocol family, protocol */
+	uint64_t            rcb_gencnt;
 };
 
 #define sotorawcb(so)           ((struct rawcb *)(so)->so_pcb)

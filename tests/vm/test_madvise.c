@@ -161,3 +161,87 @@ T_DECL(madv_willneed, "test madvise(MADV_WILLNEED)")
 		    "madvised page %lu should be resident", i);
 	}
 }
+
+void
+get_region_size(
+	mach_vm_address_t region_addr,
+	mach_vm_size_t * const out_size)
+{
+	mach_vm_address_t query_address = region_addr;
+	natural_t depth = 1;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	vm_region_submap_info_data_64_t out_info;
+
+	kern_return_t kr =      kr = mach_vm_region_recurse(mach_task_self(),
+	    &query_address, out_size, &depth,
+	    (vm_region_recurse_info_t)&out_info,
+	    &count);
+
+	T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "region_recurse");
+	T_ASSERT_EQ_ULLONG(query_address, region_addr, "correct region start");
+}
+
+void
+test_an_madvise(int flavor, bool madvise_both_pages)
+{
+	mach_vm_address_t addr = 0;
+	kern_return_t kr;
+	mach_vm_size_t allocation_size = PAGE_SIZE * 2;
+	mach_vm_size_t madvise_size;
+	if (madvise_both_pages) {
+		madvise_size = PAGE_SIZE * 2;
+	} else {
+		madvise_size = PAGE_SIZE;
+	}
+
+	int ret;
+	T_LOG("Testing %s on madvise of %s pages", flavor == MADV_FREE ? "MADV_FREE" : "MADV_FREE_REUSABLE", madvise_both_pages ? "1" : "2");
+
+
+	/*
+	 * We care about the map structure of two pages and will be madvising those.
+	 * To avoid any issue with coalescing, we allocate two extra pages then mprotect them.
+	 */
+	mach_vm_address_t real_allocation_addr = 0;
+	kr = mach_vm_allocate(mach_task_self(), &real_allocation_addr, allocation_size + 2 * PAGE_SIZE, VM_FLAGS_ANYWHERE);
+	T_QUIET; T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "allocation failed");
+	addr = real_allocation_addr + PAGE_SIZE;
+
+	kr = mach_vm_protect(mach_task_self(), real_allocation_addr, PAGE_SIZE, false, VM_PROT_NONE);
+	T_QUIET; T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "protect failed");
+	kr = mach_vm_protect(mach_task_self(), addr + allocation_size, PAGE_SIZE, false, VM_PROT_NONE);
+	T_QUIET; T_ASSERT_EQ_INT(kr, KERN_SUCCESS, "protect failed");
+
+	/* Fault in our memory, then MADV_FREE it. */
+	memset((void *) addr, 0, allocation_size);
+
+	ret = madvise((void *)addr, madvise_size, flavor);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "madvise worked");
+
+	mach_vm_size_t real_region_size;
+	get_region_size(addr, &real_region_size);
+
+
+	mach_vm_size_t out_count = allocation_size / PAGE_SIZE;
+	int page_range_query_buf[4096];
+	assert(sizeof(page_range_query_buf) / sizeof(int) > out_count);
+	kr = mach_vm_page_range_query(mach_task_self(), addr, allocation_size, (mach_vm_address_t)&page_range_query_buf, &out_count);
+
+	/* Verify the MADV_FREE didn't change our map structure and did free the pages (first page is not dirty). */
+	T_ASSERT_EQ_INT(page_range_query_buf[0] & VM_PAGE_QUERY_PAGE_DIRTY, 0, "First page is dirty");
+	if (madvise_both_pages) {
+		T_ASSERT_EQ_INT(page_range_query_buf[1] & VM_PAGE_QUERY_PAGE_DIRTY, 0, "Second page is dirty");
+	} else {
+		T_ASSERT_NE_INT(page_range_query_buf[1] & VM_PAGE_QUERY_PAGE_DIRTY, 0, "Second page is not dirty");
+	}
+	T_ASSERT_EQ_ULLONG(real_region_size, allocation_size, "clipping happened");
+}
+
+T_DECL(madv_page_freeing, "Test MADV_FREE_REUSABLE and MADV_FREE make pages not dirty")
+{
+	test_an_madvise(MADV_FREE_REUSABLE, true);
+	test_an_madvise(MADV_FREE_REUSABLE, false);
+
+	test_an_madvise(MADV_FREE, true);
+	test_an_madvise(MADV_FREE, false);
+}

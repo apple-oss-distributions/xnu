@@ -1,0 +1,32 @@
+#!/bin/sh
+
+dir="$(dirname "$0")"
+jar=tla2tools.jar
+out="$dir/$jar"
+url=https://github.com/tlaplus/tlaplus/releases/latest/download/$jar
+
+echo "$out"
+
+if test -e "$out"; then
+    before="$(date -r "$out" 2>/dev/null)"
+    curl -L -Ss -R -o "$out" -z "$out" "$url"
+else
+    before=""
+    curl -L -Ss -R -o "$out" "$url"
+fi
+
+if test $? -ne 0; then
+    echo "Failed to download $out" 1>&1
+    exit 1
+fi
+
+after="$(date -r "$out" 2>/dev/null)"
+
+if test "$before" = "$after"; then
+    echo "No updates"
+elif test -n "$before"; then
+    echo "Updated tla2tools.jar (version $(java -jar "$out" tlc2.TLC | grep Version | cut -d' ' -f3))"
+else
+    echo "Created tla2tools.jar (version $(java -jar "$out" tlc2.TLC | grep Version | cut -d' ' -f3))"
+fi
+

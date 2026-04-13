@@ -236,7 +236,7 @@ kern_return_t kern_register_coredump_helper(int kern_coredump_config_vers, const
 
 kern_return_t kern_register_xnu_coredump_helper(kern_coredump_callback_config *kc_callbacks);
 kern_return_t kern_register_sk_coredump_helper(kern_coredump_callback_config *kc_callbacks, void *refcon);
-kern_return_t kern_register_userspace_coredump(task_t task, const char * name);
+kern_return_t kern_register_userspace_coredump(task_t task, const char * name, boolean_t emergency);
 kern_return_t kern_unregister_userspace_coredump(task_t task);
 
 __options_closed_decl(kern_coredump_flags_t, uint64_t, {
@@ -265,6 +265,8 @@ __enum_closed_decl(kern_coredump_type_t, uint8_t, {
 struct kern_userspace_coredump_context {
 	/* Task to dump */
 	task_t task;
+	/* Only safe scenario to dump an inactive task */
+	boolean_t emergency_dump;
 };
 
 kern_return_t user_dump_init(void *refcon, void *context);

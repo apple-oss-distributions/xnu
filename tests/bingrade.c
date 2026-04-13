@@ -29,6 +29,7 @@
 #include <mach/host_info.h>
 #include <mach/mach_host.h>
 #include <spawn.h>
+#include <stdio.h>
 #include <sys/wait.h>
 
 #include "test_utils.h"
@@ -65,7 +66,7 @@ T_DECL(bingrade_vm_force_arm64_32, "Test forced arm64_32 binary grading policy f
 	{
 		char * const argv[] = {"bingrade_helper_arm64", NULL};
 		const int rc = posix_spawn(NULL, argv[0], NULL, NULL, argv, NULL);
-		T_ASSERT_POSIX_ERROR(rc, EBADARCH, "64-bit process should be rejected.");
+		T_ASSERT_EQ(rc, EBADARCH, "64-bit process should be rejected. Got %s", strerror(rc));
 	}
 
 	/* Fat binary should select 32-bit process. */

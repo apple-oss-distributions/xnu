@@ -36,10 +36,15 @@
 
 #include "kern/exclaves.tightbeam.h"
 
+#include "exclaves_resource.h"
+
 __BEGIN_DECLS
 
 /*!
  * @function exclaves_aoe_setup
+ *
+ * Use of exclaves_aoe_enumerate_and_setup_services preferred;
+ * this function included for legacy AOEd compatibility.
  *
  * @abstract
  * Called from a thread in an Always-On conclave. Returns the number of message
@@ -56,6 +61,41 @@ __BEGIN_DECLS
  */
 extern kern_return_t
 exclaves_aoe_setup(uint8_t *num_message, uint8_t *num_worker);
+
+/*!
+ * @function exclaves_aoe_enumerate_and_setup_services
+ *
+ * @abstract
+ * Called from a thread in an Always-On conclave. Performs any per-service setup
+ * work and and returns the number of services.
+ *
+ * @param num_services
+ * Returns the number of services within the conclave.
+ *
+ * @return
+ * KERN_SUCCESS or error code on failure.
+ */
+extern kern_return_t
+exclaves_aoe_enumerate_and_setup_services(uint8_t *num_services);
+
+/*!
+ * @function exclaves_aoe_get_all_service_infos
+ *
+ * @abstract
+ * Called from a thread in an Always-On conclave. Returns an exclaves_aoe_service_info_t
+ * struct for every service in the conclave.
+ *
+ * @param sinfos
+ * A buffer to be filled with the exclaves_aoe_service_info_t structs.
+ *
+ * @param n_services
+ * The number of exclaves_aoe_service_info_t structs the buffer is sized for.
+ *
+ * @return
+ * KERN_SUCCESS or error code on failure.
+ */
+extern kern_return_t
+exclaves_aoe_get_all_service_infos(exclaves_aoe_service_info_t *sinfos, uint8_t n_services);
 
 /*!
  * @function exclaves_aoe_teardown
@@ -79,6 +119,21 @@ extern kern_return_t
 exclaves_aoe_message_loop(void);
 
 /*!
+ * @function exclaves_aoe_message_loop_with_service_id
+ *
+ * @abstract
+ * Called from an AOE message thread. Can return with an error if AOE is not
+ * supported or uninitialised. Once successfully setup will only ever return if
+ * the thread was aborted.
+ * Used to handle message delivery.
+ *
+ * @param service_id
+ * The id of the AOE endpoint this message thread will serve.
+ */
+extern kern_return_t
+exclaves_aoe_message_loop_with_service_id(uint64_t service_id);
+
+/*!
  * @function exclaves_aoe_work_loop
  *
  * @abstract
@@ -89,6 +144,21 @@ exclaves_aoe_message_loop(void);
  */
 extern kern_return_t
 exclaves_aoe_work_loop(void);
+
+/*!
+ * @function exclaves_aoe_work_loop
+ *
+ * @abstract
+ * Called from an AOE worker thread. Can return with an error if AOE is not
+ * supported or uninitialised. Once successfully setup will only ever return if
+ * the thread was aborted.
+ * Worker threads for message processing.
+ *
+ * @param service_id
+ * The id of the AOE endpoint this worker thread will serve.
+ */
+extern kern_return_t
+exclaves_aoe_work_loop_with_service_id(uint64_t service_id);
 
 /*!
  * @function exclaves_aoe_upcall_work_available

@@ -2264,6 +2264,7 @@ public:
 	void cancelIdlePowerDown(IOService * service);
 	void cancelIdlePowerDownSync( void );
 	bool currentOrPendingPowerState(uint32_t state);
+	void addPMDriverClass(uint64_t driverClass);
 
 protected:
 	bool tellClientsWithResponse( int messageType );
@@ -2379,7 +2380,8 @@ private:
 	void notifyControllingDriverDone( void );
 	void driverSetPowerState( void );
 	void driverInformPowerChange( void );
-	unsigned long driverMaxCapabilityForDomainState( IOPMPowerFlags domainState );
+	unsigned long serviceMaxCapabilityForDomainState( IOPMPowerFlags domainState );
+	unsigned long driverMaxCapabilityForDomainState( IOService * service, IOPMPowerFlags domainState );
 	unsigned long driverInitialPowerStateForDomainState( IOPMPowerFlags domainState );
 	bool isPMBlocked( IOPMRequest * request, int count );
 	void notifyChildren( void );
@@ -2397,7 +2399,6 @@ private:
 	IOReturn configureSimplePowerReport(IOReportConfigureAction action, void *result );
 	IOReturn updateSimplePowerReport( IOReportConfigureAction action, void *result, void *destination );
 	void waitForPMDriverCall( IOService * target = NULL );
-	void addPMDriverClass(uint64_t driverClass);
 #if DEBUG || DEVELOPMENT
 	void __patchProperties(void);
 #endif

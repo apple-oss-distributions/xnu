@@ -67,6 +67,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/socketvar.h>
 #include <uuid/uuid.h>
 
 struct route_old {
@@ -353,6 +354,35 @@ struct rtstat_64 {
 	uint64_t        rts_wildcard;           /* lookups satisfied by a wildcard */
 	uint64_t        rts_badrtgwroute;       /* route to gateway is not direct */
 };
+
+/*
+ * Routing socket pcblist
+ */
+struct  xrtsockgen {
+	u_int32_t       xg_len;         /* length of this structure */
+	u_int64_t       xg_count;       /* number of PCBs at this time */
+	u_int64_t       xg_gencnt;         /* generation count at this time */
+	u_int64_t       xg_sogen;       /* current socket generation count */
+};
+
+struct xrtsockpcb {
+	uint32_t        xrp_len;
+	uint32_t        xrp_kind;
+	uint64_t        xrp_gencnt;
+	uint16_t        xrp_family;
+	uint16_t        xrp_protocol;
+	union {
+		struct sockaddr         xrfu_addr;       /* destination address */
+		char                    xrfu_dummy1[256];
+	} xr_fu;
+#define xrp_faddr xr_fu.xrfu_addr
+	union {
+		struct sockaddr         xrlu_addr;       /* destination address */
+		char                    xrlu_dummy1[256];
+	} xr_lu;
+#define xrp_laddr xr_lu.xrlu_addr
+};
+#define HAS_XRTSOCKPCB 1
 
 #ifdef BSD_KERNEL_PRIVATE
 /*

@@ -361,6 +361,11 @@ T_DECL(vm_deallocate_unguarded,
 		.single_entry_3 = successful_vm_deallocate,
 		.single_entry_4 = successful_vm_deallocate,
 
+		.single_entry_nonnull_1 = successful_vm_deallocate,
+		.single_entry_nonnull_2 = successful_vm_deallocate,
+		.single_entry_nonnull_3 = successful_vm_deallocate,
+		.single_entry_nonnull_4 = successful_vm_deallocate,
+
 		.multiple_entries_1 = successful_vm_deallocate,
 		.multiple_entries_2 = successful_vm_deallocate,
 		.multiple_entries_3 = successful_vm_deallocate,
@@ -482,6 +487,11 @@ T_DECL(vm_deallocate_guarded,
 		.single_entry_2 = successful_vm_deallocate_guarded,
 		.single_entry_3 = successful_vm_deallocate_guarded,
 		.single_entry_4 = successful_vm_deallocate_guarded,
+
+		.single_entry_nonnull_1 = successful_vm_deallocate_guarded,
+		.single_entry_nonnull_2 = successful_vm_deallocate_guarded,
+		.single_entry_nonnull_3 = successful_vm_deallocate_guarded,
+		.single_entry_nonnull_4 = successful_vm_deallocate_guarded,
 
 		.multiple_entries_1 = successful_vm_deallocate_guarded,
 		.multiple_entries_2 = successful_vm_deallocate_guarded,

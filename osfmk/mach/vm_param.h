@@ -567,6 +567,7 @@ typedef struct vm_packing_params {
  * @param params        The encoding parameters.
  * @returns             The packed pointer.
  */
+__pure2
 static inline vm_offset_t
 vm_pack_pointer(vm_offset_t ptr, vm_packing_params_t params)
 {
@@ -599,6 +600,7 @@ vm_pack_pointer(vm_offset_t ptr, vm_packing_params_t params)
  * @param params        The encoding parameters.
  * @returns             The unpacked pointer.
  */
+__pure2
 static inline vm_offset_t
 vm_unpack_pointer(vm_offset_t packed, vm_packing_params_t params)
 {
@@ -606,7 +608,7 @@ vm_unpack_pointer(vm_offset_t packed, vm_packing_params_t params)
 		intptr_t addr = (intptr_t)packed;
 		addr <<= __WORDSIZE - params.vmpp_bits;
 		addr >>= __WORDSIZE - params.vmpp_bits - params.vmpp_shift;
-		return vm_memtag_load_tag((vm_offset_t)addr);
+		return addr ? vm_memtag_load_tag((vm_offset_t)addr) : 0;
 	}
 	if (packed) {
 		return vm_memtag_load_tag((packed << params.vmpp_shift) + params.vmpp_base);

@@ -98,7 +98,8 @@ static ZONE_DEFINE_TYPE(ipc_space_zone, "ipc spaces",
 SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_kernel;
 SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_reply;
 
-static ipc_space_t
+__static_testable __mockable
+ipc_space_t
 ipc_space_alloc(void)
 {
 	ipc_space_t space;
@@ -270,7 +271,6 @@ ipc_space_rand_freelist(
  *		KERN_SUCCESS		Created a space.
  *		KERN_RESOURCE_SHORTAGE	Couldn't allocate memory.
  */
-
 kern_return_t
 ipc_space_create(
 	ipc_label_t             label,

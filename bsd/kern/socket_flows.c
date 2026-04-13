@@ -1127,6 +1127,7 @@ soflow_nstat_provider_request_extensions(nstat_provider_context ctx,
 			    domain_info->is_silent);
 		}
 		size = sizeof(nstat_domain_info);
+		OS_FALLTHROUGH;
 
 	default:
 		break;

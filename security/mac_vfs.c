@@ -100,7 +100,7 @@
  * KDBG_EVENTID(DBG_FSYSTEM, DBG_VFS, dcode) global event id, see bsd/sys/kdebug.h.
  * Note that dcode is multiplied by 4 and ORed as part of the construction. See bsd/kern/trace_codes
  * for list of system-wide {global event id, name} pairs. Currently DBG_VFS event ids are in range
- * [0x3130000, 0x313019C].
+ * [0x3130000, 0x31301B0].
  */
 
 //#define VFS_TRACE_POLICY_OPS
@@ -173,7 +173,12 @@ mac_mount_label_destroy(struct mount *mp)
 struct label *
 mac_vnode_label_alloc(vnode_t vp)
 {
-	return mac_labelzone_alloc_for_owner(vp ? &vp->v_label : NULL, MAC_WAITOK, ^(struct label *label) {
+	/*
+	 * ok to cast vp->v_label to non-atomic because mac_labelzone_alloc_for_owner
+	 * does not modify vp->v_label
+	 */
+	return mac_labelzone_alloc_for_owner((struct label **)&vp->v_label,
+	           MAC_WAITOK, ^(struct label *label) {
 		VFS_KERNEL_DEBUG_START0(2);
 		MAC_PERFORM(vnode_label_init, label);
 		VFS_KERNEL_DEBUG_END0(2);
@@ -193,7 +198,11 @@ mac_vnode_label_init(vnode_t vp)
 struct label *
 mac_vnode_label(vnode_t vp)
 {
-	return mac_label_verify(&vp->v_label);
+	/*
+	 * ok to cast to non-atomic because mac_label_verify
+	 * uses atomic_load()
+	 */
+	return mac_label_verify((struct label **)&vp->v_label);
 }
 
 static void
@@ -217,7 +226,11 @@ mac_vnode_label_free(struct label *label)
 void
 mac_vnode_label_destroy(struct vnode *vp)
 {
-	mac_labelzone_free_owned(&vp->v_label, ^(struct label *label) {
+	/*
+	 * ok to cast to non-atomic because mac_labelzone_free_owned
+	 * uses atomic_load() and atomic_store()
+	 */
+	mac_labelzone_free_owned((struct label **)&vp->v_label, ^(struct label *label) {
 		mac_vnode_label_cleanup(label);
 	});
 }
@@ -1591,6 +1604,29 @@ mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
 	VFS_KERNEL_DEBUG_START1(50, dvp);
 	MAC_CHECK(vnode_check_lookup_preflight, cred, dvp, mac_vnode_label(dvp), path, pathlen);
 	VFS_KERNEL_DEBUG_END1(50, dvp);
+	return error;
+}
+
+int
+mac_vnode_check_lookup_postflight(vfs_context_t ctx, struct vnode *vp,
+    uint32_t resolve_flags)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return 0;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return 0;
+	}
+	VFS_KERNEL_DEBUG_START1(108, vp);
+	MAC_CHECK(vnode_check_lookup_postflight, cred, vp, mac_vnode_label(vp), resolve_flags);
+	VFS_KERNEL_DEBUG_END1(108, vp);
 	return error;
 }
 

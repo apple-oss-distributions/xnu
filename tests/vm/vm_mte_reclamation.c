@@ -61,7 +61,7 @@ run_sysctl_test(const char *t, int64_t value, bool may_fail)
 T_DECL(vm_mte_ts_for_compressor_bootarg_on,
     "Use tag storage pages for the compressor pool",
     T_META_BOOTARGS_SET("mte_ts_compressor=1"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -73,7 +73,7 @@ T_DECL(vm_mte_ts_for_compressor_bootarg_on,
 T_DECL(vm_mte_ts_for_compressor_bootarg_off,
     "Use normal pages for the compressor pool",
     T_META_BOOTARGS_SET("mte_ts_compressor=0"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -85,7 +85,7 @@ T_DECL(vm_mte_ts_for_compressor_bootarg_off,
 T_DECL(vm_mte_ts_for_stack_bootarg_on,
     "Use tag storage for thread stacks",
     T_META_BOOTARGS_SET("mte_ts_vm_tag=30"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -103,7 +103,7 @@ T_DECL(vm_mte_ts_for_stack_bootarg_on,
 T_DECL(vm_mte_ts_for_stack_bootarg_off,
     "Use normal page for thread stacks",
     T_META_BOOTARGS_SET("mte_ts_vm_tag=1"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -121,7 +121,7 @@ T_DECL(vm_mte_ts_for_stack_bootarg_off,
 T_DECL(vm_mte_ts_for_untagged_malloc,
     "Use tag storage page for untagged malloc heap",
     T_META_BOOTARGS_SET("mte_ts_vm_tag=1_4,7_9,11_12"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {

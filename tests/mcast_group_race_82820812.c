@@ -4,9 +4,18 @@
 #include <darwintest.h>
 #include <TargetConditionals.h>
 
+
 #include <mach/mach_host.h>
 
 #include "net_test_lib.h"
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("plakhera")
+	);
+
 
 volatile static int lock_a;
 volatile static int lock_b;

@@ -335,6 +335,7 @@ memory_object_lock_request(
 	 *	Lock the object, and acquire a paging reference to
 	 *	prevent the memory_object reference from being released.
 	 */
+	vm_page_grab_prime();
 	vm_object_lock(object);
 	vm_object_paging_begin(object);
 
@@ -422,6 +423,7 @@ vm_object_sync(
 	 * prevent the memory_object and control ports from
 	 * being destroyed.
 	 */
+	vm_page_grab_prime();
 	vm_object_lock(object);
 	vm_object_paging_begin(object);
 
@@ -820,7 +822,8 @@ RETRY_COW_OF_LOCK_REQUEST:
 			    (int *)0,
 			    &error,
 			    FALSE,
-			    &fault_info);
+			    &fault_info,
+			    NULL);
 
 			switch (result) {
 			case VM_FAULT_SUCCESS:
@@ -1862,7 +1865,7 @@ memory_object_control_to_vm_object(
 	return control;
 }
 
-__private_extern__ vm_object_t
+__exported_hidden vm_object_t
 memory_object_to_vm_object(
 	memory_object_t mem_obj)
 {
@@ -2043,7 +2046,7 @@ memory_object_data_initialize
  */
 
 /* Routine memory_object_map */
-kern_return_t
+__mockable kern_return_t
 memory_object_map
 (
 	memory_object_t memory_object,
@@ -2056,7 +2059,7 @@ memory_object_map
 }
 
 /* Routine memory_object_last_unmap */
-kern_return_t
+__mockable kern_return_t
 memory_object_last_unmap
 (
 	memory_object_t memory_object

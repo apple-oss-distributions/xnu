@@ -226,25 +226,13 @@ fd_guard_ast(
 	mach_exception_code_t code,
 	mach_exception_subcode_t subcode)
 {
-	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
 	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-
-	int flags = PX_DEBUG_NO_HONOR;
-	exception_info_t info = {
-		.os_reason = OS_REASON_GUARD,
-		.exception_type = EXC_GUARD,
-		.mx_code = code,
-		.mx_subcode = subcode,
-	};
-
-	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-		flags |= PX_PSIGNAL;
-	}
-	exit_with_mach_exception(current_proc(), info, flags);
+	exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_GUARD,
+	    EXC_GUARD, code, subcode, PX_FLAGS_NONE);
 }
 
 /*
@@ -1345,6 +1333,7 @@ vn_guard_ast(thread_t __unused t,
 {
 	unsigned int flavor = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
 	const bool fatal = (flavor == VNG_PERMISSIONS) ? false : true;
+	uint32_t flags = PX_FLAGS_NONE;
 
 	/*
 	 * All the VN guard except VNG_PERMISSIONS are experimental and
@@ -1370,7 +1359,6 @@ vn_guard_ast(thread_t __unused t,
 	 * exception.
 	 */
 
-	int flags = PX_DEBUG_NO_HONOR;
 	exception_info_t info = {
 		.os_reason = OS_REASON_GUARD,
 		.exception_type = EXC_GUARD,
@@ -1380,7 +1368,7 @@ vn_guard_ast(thread_t __unused t,
 
 	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		if (fatal) {
-			flags |= PX_PSIGNAL;
+			flags |= PX_NO_CRASH_REPORT;
 		}
 	} else {
 		if (!fatal) {
@@ -1389,6 +1377,7 @@ vn_guard_ast(thread_t __unused t,
 	}
 
 	if (fatal) {
+		/* kill the task, unconditionally and fatally */
 		exit_with_mach_exception(current_proc(), info, flags);
 	}
 }
@@ -1596,9 +1585,6 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) vng_policy_handle;
 void
 vnguard_policy_init(void)
 {
-	if (0 == PE_i_can_has_debugger(NULL)) {
-		return;
-	}
 	vng_policy_flags = kVNG_POLICY_LOGMSG |
 	    kVNG_POLICY_EXC_CORPSE | kVNG_POLICY_UPRINTMSG;
 	PE_parse_boot_argn("vnguard", &vng_policy_flags, sizeof(vng_policy_flags));

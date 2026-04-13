@@ -158,7 +158,7 @@ enum {
 #define kIOExclaveAssignedKey    "exclave-assigned"
 #define kIOExclaveProxyKey       "IOExclaveProxy"
 
-#define kIOPMAOTAllowKey           "IOPMAOTAllow"
+#define kIOPMAOTAllowKey             "IOPMAOTAllow"
 #define kIOPMSystemOffPhase2AllowKey "IOPMSystemOffPhase2Allow"
 
 // IONVRAMSystemVariableList:

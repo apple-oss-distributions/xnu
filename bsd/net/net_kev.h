@@ -82,6 +82,9 @@
 #define KEV_DL_RRC_STATE_CHANGED                28
 #define KEV_DL_QOS_MODE_CHANGED                 29
 #define KEV_DL_LOW_POWER_MODE_CHANGED           30
+#ifdef PRIVATE
+#define KEV_DL_LPW_FULL_WAKE                    31
+#endif /* PRIVATE */
 
 #ifdef PRIVATE
 #define KEV_DL_MASTER_ELECTED KEV_DL_PRIMARY_ELECTED

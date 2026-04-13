@@ -235,7 +235,11 @@ SLOT_INCREMENT(uint32_t i, uint32_t n, uint32_t lim)
 /*
  * Flow advisory entries.
  */
+#ifdef XNU_PLATFORM_MacOSX
+#define NX_FLOWADV_DEFAULT      1024
+#else
 #define NX_FLOWADV_DEFAULT      512
+#endif
 #define NX_FLOWADV_MAX          (64 * 1024)
 #define FO_FLOWADV_CHUNK        64
 

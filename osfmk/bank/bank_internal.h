@@ -177,8 +177,8 @@ typedef struct bank_account * bank_account_t;
 	        (os_atomic_sub_orig(&(elem)->ba_made, (num), relaxed))
 
 struct _bank_ledger_indices {
-	int cpu_time;
-	int energy;
+	ledger_entry_id_t cpu_time;
+	ledger_entry_id_t energy;
 };
 
 extern struct _bank_ledger_indices bank_ledgers;

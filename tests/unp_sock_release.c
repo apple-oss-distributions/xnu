@@ -36,7 +36,8 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.net"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("networking"),
-	T_META_ASROOT(true)
+	T_META_ASROOT(true),
+	T_META_OWNER("vlubet")
 	);
 
 T_DECL(test_unp_sock_release, "UDS with sock_release()",

@@ -450,7 +450,6 @@ typedef void (*perfmon_interrupt_handler_func)(cpu_id_t source);
 extern kern_return_t PE_cpu_perfmon_interrupt_install_handler(perfmon_interrupt_handler_func handler);
 extern void PE_cpu_perfmon_interrupt_enable(cpu_id_t target, boolean_t enable);
 
-#if DEVELOPMENT || DEBUG
 /* panic_trace boot-arg modes */
 __options_decl(panic_trace_t, uint32_t, {
 	panic_trace_disabled                 = 0x00000000,
@@ -458,9 +457,11 @@ __options_decl(panic_trace_t, uint32_t, {
 	panic_trace_enabled                  = 0x00000002,
 	panic_trace_alt_enabled              = 0x00000010,
 	panic_trace_partial_policy           = 0x00000020,
+	panic_trace_apt_present              = 0x00000100,
 });
 extern panic_trace_t panic_trace;
 
+#if DEVELOPMENT || DEBUG
 extern void PE_arm_debug_enable_trace(bool should_kprintf);
 extern void (*PE_arm_debug_panic_hook)(const char *str);
 #else
@@ -564,6 +565,14 @@ extern void PE_read_socd_client_buffer(vm_offset_t offset, void *out_buff, vm_si
  * Write data to the SOCD client buffer in SMC SRAM
  */
 extern void PE_write_socd_client_buffer(vm_offset_t offset, const void *in_buff, vm_size_t size);
+
+/*!
+ * @function PE_device_is_simulated
+ *
+ * @brief
+ * Returns true if the device is a simulator, else false
+ */
+extern boolean_t PE_device_is_simulated(void);
 
 __END_DECLS
 

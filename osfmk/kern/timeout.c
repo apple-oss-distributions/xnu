@@ -56,7 +56,9 @@ kern_timeout_restart(kern_timeout_t *to, timeout_flags_t flags)
 		to->start_cycles = 0;
 		to->start_instrs = 0;
 	} else {
-		mt_cur_cpu_cycles_instrs_speculative(&to->start_cycles, &to->start_instrs);
+		struct cpc_cycles_instrs counts = cpc_cycles_instrs_spec();
+		to->start_cycles = counts.cycles;
+		to->start_instrs = counts.instrs;
 	}
 #endif /* CONFIG_CPU_COUNTERS */
 
@@ -105,15 +107,13 @@ kern_timeout_override(kern_timeout_t *to)
 void
 kern_timeout_cycles_instrs(kern_timeout_t *to, uint64_t *cycles, uint64_t *instrs)
 {
-	uint64_t now_cycles, now_instrs;
-
 	if (__improbable(to->start_cycles == 0)) {
 		*cycles = 0;
 		*instrs = 0;
 	} else {
-		mt_cur_cpu_cycles_instrs_speculative(&now_cycles, &now_instrs);
-		*cycles = now_cycles - to->start_cycles;
-		*instrs = now_instrs - to->start_instrs;
+		struct cpc_cycles_instrs counts = cpc_cycles_instrs_spec();
+		*cycles = counts.cycles - to->start_cycles;
+		*instrs = counts.instrs - to->start_instrs;
 	}
 }
 

@@ -138,7 +138,7 @@ kau_close(struct au_record *rec, struct timespec *ctime, short event)
 	default:
 		panic("kau_close: invalid address family");
 	}
-	tot_rec_size = rec->len + AUDIT_HEADER_SIZE + AUDIT_TRAILER_SIZE;
+	tot_rec_size = rec->len + hdrsize + AUDIT_TRAILER_SIZE;
 	rec->data = kalloc_data(tot_rec_size, Z_WAITOK | Z_ZERO);
 	if (rec->data == NULL) {
 		return ENOMEM;

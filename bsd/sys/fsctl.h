@@ -448,8 +448,24 @@ typedef struct {
 #endif
 } fsioc_get_graft_info_t;
 
+#define FSIOC_GET_GRAFT_INFO_MAX_COUNT 255
+
 /* This used to be defined in APFS, we keep the group as 'J' for backward compatability */
 #define FSIOC_GET_GRAFT_INFO _IOWR('J', 102, fsioc_get_graft_info_t)
+
+#ifdef KERNEL
+
+typedef struct {
+	char *nameptr;      /* IN: directory entry name (null terminated) */
+	size_t namelen;     /* IN: length of directory entry name (excluding null terminator) */
+	unsigned int flags; /* IN: flags */
+	off_t offset;       /* OUT: seek offset in directory */
+} fsioc_dirlseek_t;
+
+/* Get seek offset for the given dirent name */
+#define FSIOC_DIRLSEEK _IOWR('A', 28, fsioc_dirlseek_t)
+
+#endif /* KERNEL */
 
 //
 // Spotlight and fseventsd use these fsctl()'s to find out

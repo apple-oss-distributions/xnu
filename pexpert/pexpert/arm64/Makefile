@@ -17,7 +17,7 @@ PRIVATE_DATAFILES = \
 	vhe_disable.h \
 	board_config.h \
 	boot.h \
-	H14.h \
+	H17.h
 
 
 PRIVATE_KERNELFILES = \

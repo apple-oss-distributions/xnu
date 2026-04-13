@@ -41,7 +41,6 @@
 #include <kern/debug.h>
 #include <kern/monotonic.h>
 #include <prng/random.h>
-#include <kern/ecc.h>
 #include <machine/machine_routines.h>
 #include <machine/commpage.h>
 #include <machine/config.h>
@@ -305,6 +304,13 @@ arm_slide_rebase_and_sign_image(void)
 	vm_kernel_slide = slide;
 }
 
+void arm_static_if_init(boot_args *args);
+MARK_AS_FIXUP_TEXT void
+arm_static_if_init(boot_args *args)
+{
+	static_if_init(args->CommandLine);
+}
+
 void
 arm_auxkc_init(void *mh, void *base)
 {
@@ -351,6 +357,8 @@ arm_init(
 	unsigned int dt_entry_size = 0;
 
 	arm_slide_rebase_and_sign_image();
+
+	arm_static_if_init(args);
 
 	/* If kernel integrity is supported, use a constant copy of the boot args. */
 	const_boot_args = *args;
@@ -453,18 +461,18 @@ arm_init(
 	ml_parse_cpu_topology();
 
 
-	master_cpu = ml_get_boot_cpu_number();
-	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
+	boot_cpu_id = ml_get_boot_cpu_number();
+	assert(boot_cpu_id >= 0 && boot_cpu_id <= ml_get_max_cpu_number());
 
-	BootCpuData.cpu_number = (unsigned short)master_cpu;
+	BootCpuData.cpu_number = (unsigned short)boot_cpu_id;
 	BootCpuData.intstack_top = (vm_offset_t) &intstack_top;
 	BootCpuData.istackptr = &intstack_top;
 #if __arm64__
 	BootCpuData.excepstack_top = (vm_offset_t) &excepstack_top;
 	BootCpuData.excepstackptr = &excepstack_top;
 #endif
-	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
-	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
+	CpuDataEntries[boot_cpu_id].cpu_data_vaddr = &BootCpuData;
+	CpuDataEntries[boot_cpu_id].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
 	    + ((uintptr_t)&BootCpuData
 	    - (uintptr_t)(args->virtBase)));
 
@@ -825,7 +833,6 @@ arm_init_cpu(
 		lck_spin_unlock(&ctrr_cpu_start_lck);
 	}
 #endif
-
 
 	secondary_cpu_main(NULL);
 }

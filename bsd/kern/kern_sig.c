@@ -843,7 +843,8 @@ sigpending(__unused proc_t p, struct sigpending_args *uap, __unused int32_t *ret
 	sigset_t pendlist;
 
 	ut = current_uthread();
-	pendlist = ut->uu_siglist;
+	/* masking SIGKILL and SIGSTOP to not leak to userspace due to security concerns */
+	pendlist = ut->uu_siglist & (~sigcantmask);
 
 	if (uap->osv) {
 		copyout(&pendlist, uap->osv, sizeof(sigset_t));
@@ -2633,6 +2634,12 @@ void
 psignal_try_thread_with_reason(proc_t p, thread_t thread, int signum, struct os_reason *signal_reason)
 {
 	psignal_internal(p, TASK_NULL, thread, PSIG_TRY_THREAD, signum, signal_reason);
+}
+
+void
+psignal_try_thread_with_reason_locked(proc_t p, thread_t thread, int signum, struct os_reason *signal_reason)
+{
+	psignal_internal(p, TASK_NULL, thread, PSIG_TRY_THREAD | PSIG_LOCKED, signum, signal_reason);
 }
 
 void

@@ -77,10 +77,6 @@
 // disabled since lockForArbitration() can be held externally
 #define DEBUG_NOTIFIER_LOCKED   0
 
-enum{
-	kIOUserServerCheckInTimeoutSecs = 120ULL
-};
-
 #include "IOServicePrivate.h"
 #include "IOServicePMPrivate.h"
 #include "IOKitKernelInternal.h"
@@ -295,10 +291,6 @@ static thread_call_t            gIOConsoleLockCallout;
 static IONotifier *             gIOServiceNullNotifier;
 
 static SECURITY_READ_ONLY_LATE(uint32_t) gIODextRelaunchMax;
-
-#if DEVELOPMENT || DEBUG
-uint64_t                        driverkit_checkin_timed_out = 0;
-#endif
 
 IORecursiveLock               * gDriverKitLaunchLock;
 OSSet                         * gDriverKitLaunches;
@@ -1037,7 +1029,9 @@ IOService::detach( IOService * provider )
 		provider->unlockForArbitration();
 	}
 
-	if (kIOServiceRematchOnDetach & __state[1]) {
+	if (kIOServiceRematchOnDetach & __state[1] && !IOUserServer::shouldLeakObjects()) {
+		// kIOServiceRematchOnDetach isn't just for dexts
+		// but if IOUserServer already starts leaking objects, it doesn't matter anymore
 		provider->registerService();
 	}
 }
@@ -1071,6 +1065,10 @@ IOService::registerService( IOOptionBits options )
 	if (gIOPlatform && (!gIOPlatform->platformAdjustService(this))) {
 		return;
 	}
+
+#if DEBUG || DEVELOPMENT
+	__patchProperties();
+#endif /* DEBUG || DEVELOPMENT */
 
 	IOInstallServicePlatformActions(this);
 	IOInstallServiceSleepPlatformActions(this);
@@ -4315,44 +4313,6 @@ IOService::probeCandidates( OSOrderedSet * matches )
 	}
 }
 
-/*
- * Wait for a IOUserServer to check in
- */
-
-static
-__attribute__((noinline, not_tail_called))
-IOUserServer *
-__WAITING_FOR_USER_SERVER__(IOUserServerCheckInToken * token)
-{
-	IOUserServer * result = NULL;
-	IOService * server = NULL;
-	const OSSymbol * serverName = token->copyServerName();
-	OSNumber       * serverTag = token->copyServerTag();
-	OSDictionary   * matching = IOService::serviceMatching(gIOUserServerClassKey);
-
-	if (!matching || !serverName || !serverTag) {
-		goto finish;
-	}
-	IOService::propertyMatching(gIOUserServerNameKey, serverName, matching);
-	if (!(kIODKDisableDextTag & gIODKDebug)) {
-		IOService::propertyMatching(gIOUserServerTagKey, serverTag, matching);
-	}
-
-	server = IOService::waitForMatchingServiceWithToken(matching, kIOUserServerCheckInTimeoutSecs * NSEC_PER_SEC, token);
-	result = OSDynamicCast(IOUserServer, server);
-	if (!result) {
-		OSSafeReleaseNULL(server);
-		token->cancel();
-	}
-
-finish:
-	OSSafeReleaseNULL(matching);
-	OSSafeReleaseNULL(serverName);
-	OSSafeReleaseNULL(serverTag);
-
-	return result;
-}
-
 void
 IOService::willShutdown()
 {
@@ -4653,6 +4613,38 @@ TUNABLE(bool, dk_panic_on_shutdown_hang, "dk_panic_on_shutdown_hang", false);
 #endif
 TUNABLE(bool, dk_panic_on_setpowerstate_hang, "dk_panic_on_setpowerstate_hang", DK_SETPOWERSTATE_HANG);
 
+OSArray *
+IOServicePH::servicesWithPowerState(bool state)
+{
+	OSArray * userServersWait = NULL;
+	__block OSArray * services = NULL;
+	lock();
+	if (fUserServersWait) {
+		userServersWait = OSArray::withArray(fUserServersWait);
+	}
+	unlock();
+	if (!userServersWait) {
+		return NULL;
+	}
+	userServersWait->iterateObjects(^(OSObject * object) {
+		IOUserServer * us = OSDynamicCast(IOUserServer, object);
+		if (us) {
+		        OSArray * result = us->servicesWithPowerState(state);
+		        if (result) {
+		                if (!services) {
+		                        services = result;
+				} else {
+		                        services->merge(result);
+		                        OSSafeReleaseNULL(result);
+				}
+			}
+		}
+		return false;
+	});
+	OSSafeReleaseNULL(userServersWait);
+	return services;
+}
+
 void
 IOServicePH::userServerAckTimerExpired(void *, void *)
 {
@@ -4661,7 +4653,78 @@ IOServicePH::userServerAckTimerExpired(void *, void *)
 	if (fSystemPowerAckTo) {
 		DKLOG("ack timer expired\n");
 		if (dk_panic_on_setpowerstate_hang) {
-			panic("DK ack timer expired after %u ms", dk_shutdown_timeout_ms);
+			// Enable emergency dext coredump as the kernel is panicking
+			fUserServersWait->iterateObjects(^(OSObject * object) {
+				IOUserServer * userServer = OSDynamicCast(IOUserServer, object);
+				if (userServer) {
+				        userServer->emergencyPanicCoreDumpEnable();
+				}
+				return false;
+			});
+
+			unlock();
+			char * servicesString = NULL;
+			__block size_t stringLength = 0, cursor = 0;
+			OSArray * services = NULL;
+			OSOrderedSet * sortedServices = NULL;
+
+			do {
+				sortedServices = OSOrderedSet::withCapacity(1,
+				    ^int32_t (const OSMetaClassBase * obj1, const OSMetaClassBase * obj2) {
+					IOService * service1 = OSDynamicCast(IOService, obj1);
+					IOService * service2 = OSDynamicCast(IOService, obj2);
+					if (service1 && service1->getName() && service2 && service2->getName()) {
+					        return -1 * strcmp(service1->getName(), service2->getName());
+					}
+					return 0;
+				});
+				if (!sortedServices) {
+					break;
+				}
+
+				services = servicesWithPowerState(true);
+				if (!services) {
+					break;
+				}
+
+				// These need to be sorted to keep the panic string consistent
+				services->iterateObjects(^(OSObject * object) {
+					sortedServices->setObject(object);
+					return false;
+				});
+
+				// Format a string with comma separated service names
+				sortedServices->iterateObjects(^(OSObject * object) {
+					IOService * service = (IOService *)object;
+					if (stringLength == 0) {
+					        stringLength = snprintf(NULL, 0, "\'%s\'", service->getName());
+					} else {
+					        stringLength += snprintf(NULL, 0, ",\'%s\'", service->getName());
+					}
+					return false;
+				});
+				if (stringLength == 0) {
+					break;
+				}
+
+				stringLength++;
+				servicesString = (char *)IOMallocData(stringLength);
+				if (!servicesString) {
+					break;
+				}
+
+				sortedServices->iterateObjects(^(OSObject * object) {
+					IOService * service = (IOService *)object;
+					if (cursor == 0) {
+					        cursor = snprintf(servicesString, stringLength, "\'%s\'", service->getName());
+					} else {
+					        cursor += snprintf(servicesString + cursor, stringLength - cursor, ",\'%s\'", service->getName());
+					}
+					return false;
+				});
+			} while (false);
+
+			panic("DK ack timer expired after %u ms: %s", dk_shutdown_timeout_ms, servicesString ? servicesString : "");
 		}
 		userServers = fUserServersWait;
 		fUserServersWait = NULL;
@@ -4892,16 +4955,16 @@ IOService::__patchProperties(void)
 {
 #if 0
 	if (!strcmp("AppleCentauriManager", getName())) {
-		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetwork, 64);
+		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetworkWifi | kIOPMDriverClassNetworkBluetooth, 64);
 	}
 	if (!strcmp("CentauriControl", getName())) {
-		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetwork, 64);
+		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetworkWifi | kIOPMDriverClassNetworkBluetooth, 64);
 	}
 	if (!strcmp("CentauriAlpha", getName())) {
-		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetwork, 64);
+		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetworkWifi, 64);
 	}
 	if (!strcmp("CentauriBeta", getName())) {
-		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetwork, 64);
+		setProperty(kIOPMAOTAllowKey, kIOPMDriverClassNetworkBluetooth, 64);
 	}
 #endif
 }
@@ -4950,7 +5013,6 @@ IOService::startCandidate( IOService * service )
 		const OSSymbol * sym;
 		OSNumber       * serverTag;
 		uint64_t         entryID;
-		IOUserServerCheckInToken * token;
 		OSData         * serverDUI;
 
 		if ((serverName = OSDynamicCast(OSString, obj))) {
@@ -4958,7 +5020,6 @@ IOService::startCandidate( IOService * service )
 			bundleID  = OSDynamicCast(OSString, obj);
 			entryID   = service->getRegistryEntryID();
 			serverTag = OSNumber::withNumber(entryID, 64);
-			token     = NULL;
 
 			if (kIODKDisableDextLaunch & gIODKDebug) {
 				DKLOG(DKS " dext launches are disabled \n", DKN(service));
@@ -4998,60 +5059,22 @@ IOService::startCandidate( IOService * service )
 
 			sym = OSSymbol::withString(serverName);
 			bool reuse = service->propertyExists(gIOUserServerOneProcessKey);
-			bool reuseRequired = false;
-			if (propertyExists(gIOUserServerNameKey)) {
-				reuseRequired = reuse && service->propertyHasValue(gIOUserServerNameKey, getProperty(gIOUserServerNameKey));
-			}
 			serverDUI = OSDynamicCast(OSData, service->getProperty(kOSBundleDextUniqueIdentifierKey));
-			userServer = IOUserServer::launchUserServer(this, bundleID, sym, serverTag, reuse, &token, serverDUI);
+			userServer = IOUserServer::launchUserServer(this, service, bundleID, sym, serverTag, reuse, serverDUI);
 			OSSafeReleaseNULL(sym);
 			OSSafeReleaseNULL(serverTag);
 			OSSafeReleaseNULL(serverName);
-			if (userServer) {
-				DKLOG(DKS " using existing server " DKS "\n", DKN(service), DKN(userServer));
-			} else if (!reuseRequired && token != NULL) {
-				const OSSymbol * tokenServerName = token->copyServerName();
-				OSNumber * tokenServerTag = token->copyServerTag();
-				assert(tokenServerName && tokenServerTag);
-				DKLOG(DKS " waiting for server %s-%llx\n", DKN(service), tokenServerName->getCStringNoCopy(), tokenServerTag->unsigned64BitValue());
-				userServer = __WAITING_FOR_USER_SERVER__(token);
-				OSSafeReleaseNULL(tokenServerName);
-				OSSafeReleaseNULL(tokenServerTag);
-			} else if (reuseRequired) {
-				DKLOG(DKS " failed to reuse server\n", DKN(service));
-			} else {
+			if (!userServer) {
 				DKLOG(DKS " failed to launch server\n", DKN(service));
 			}
-
 
 			if (!userServer) {
 				service->detach(this);
 				IOServicePH::matchingEnd(this);
 				OSSafeReleaseNULL(obj);
-
-				if (token != NULL) {
-					DKLOG(DKS " user server timeout\n", DKN(service));
-#if DEVELOPMENT || DEBUG
-					driverkit_checkin_timed_out = mach_absolute_time();
-#endif
-				}
-
-				OSSafeReleaseNULL(token);
 				return false;
 			}
 
-			if (token && !(kIODKDisableCheckInTokenVerification & gIODKDebug)) {
-				if (!userServer->serviceMatchesCheckInToken(token)) {
-					OSSafeReleaseNULL(token);
-					service->detach(this);
-					IOServicePH::matchingEnd(this);
-					OSSafeReleaseNULL(obj);
-					userServer->exit("Check In Token verification failed");
-					userServer->release();
-					return false;
-				}
-			}
-			OSSafeReleaseNULL(token);
 			OSSafeReleaseNULL(obj);
 
 			if (!(kIODKDisableEntitlementChecking & gIODKDebug)) {
@@ -6745,13 +6768,13 @@ IOService::waitForMatchingServiceWithToken( OSDictionary * matching,
 
 	LOCKWRITENOTIFY();
 	do{
-		if (cancelArgs.canceled) {
-			// token was already canceled, no need to wait or find services
-			break;
-		}
 		result = (IOService *) copyExistingServices( matching,
 		    kIOServiceMatchedState, kIONotifyOnce );
 		if (result) {
+			break;
+		}
+		if (cancelArgs.canceled) {
+			// token was already canceled, no need to wait or find services
 			break;
 		}
 		notify = IOService::setNotification( gIOMatchedNotification, matching,

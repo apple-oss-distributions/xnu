@@ -611,6 +611,24 @@ fake_set_peer(const char * feth, const char * feth_peer)
 }
 
 void
+ifnet_set_low_power_wake(const char * ifname, bool enable)
+{
+	struct ifreq ifr;
+	int s = inet_dgram_socket_get();
+	int ret;
+
+	bzero(&ifr, sizeof(ifr));
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	ifr.ifr_intval = enable ? 1 : 0;
+
+	ret = ioctl(s, SIOCSLOWPOWERWAKE, &ifr);
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(ret, "SIOCSLOWPOWERWAKE(%s, %d)", ifname, enable);
+	T_LOG("%s low power wake %s\n", ifname, enable ? "enabled" : "disabled");
+	return;
+}
+
+void
 siocsifvlan(const char * vlan, const char * phys, uint16_t tag)
 {
 	int             result;

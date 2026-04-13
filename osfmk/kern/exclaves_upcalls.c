@@ -545,6 +545,11 @@ static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
 		    completion);
 	},
 
+	.daemonnotificationsignal = ^(const uint64_t id,
+	    tb_error_t (^completion)(xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_s)) {
+		return exclaves_driverkit_upcall_daemon_notification_signal(id, completion);
+	},
+
 	.suspend = ^(const uint32_t flags,
 	    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_suspend__result_s)) {
 		return exclaves_conclave_upcall_suspend(flags, completion);
@@ -562,6 +567,11 @@ static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
 	.createpowerassertion = ^(
 		tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createpowerassertion__result_s)) {
 		return exclaves_driverkit_upcall_lpw_createpowerassertion(completion);
+	},
+	.createtypedpowerassertion = ^(
+		const uint64_t owner, const uint64_t data, const uint64_t types,
+		tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_s)) {
+		return exclaves_driverkit_upcall_lpw_createtypedpowerassertion(owner, data, types, completion);
 	},
 	.releasepowerassertion = ^(const xnuupcallsv2_assertionid_s id,
 		tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_releasepowerassertion__result_s)) {

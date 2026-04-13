@@ -680,7 +680,7 @@ client_server_template(char *launchd_plist, char *server_helper, char *client_he
 /* Actual test definitions */
 T_DECL(mte_mach_msg_send_ool_tagged_entitled,
     "Send tagged memory OOL in a mach msg from MTE-enabled -> MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     // T_META_ENABLED(__arm64__)
@@ -693,7 +693,7 @@ T_DECL(mte_mach_msg_send_ool_tagged_entitled,
 
 T_DECL(mte_mach_msg_send_ool_untagged_entitled,
     "Send untagged memory OOL in a mach msg from MTE-enabled -> MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(__arm64__))
@@ -704,7 +704,7 @@ T_DECL(mte_mach_msg_send_ool_untagged_entitled,
 
 T_DECL(mte_mach_msg_send_ool_tagged_entitled_to_unentitled,
     "Send tagged memory OOL in a mach msg from MTE-enabled -> non MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(__arm64__))
@@ -715,7 +715,7 @@ T_DECL(mte_mach_msg_send_ool_tagged_entitled_to_unentitled,
 
 T_DECL(mte_mach_msg_send_memory_entry_tagged_entitled,
     "Send tagged memory entries in a mach msg from MTE-enabled -> MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     // T_META_ENABLED(__arm64__)
@@ -728,7 +728,7 @@ T_DECL(mte_mach_msg_send_memory_entry_tagged_entitled,
 
 T_DECL(mte_mach_msg_send_memory_entry_untagged_entitled,
     "Send untagged memory entries in a mach msg from MTE-enabled -> MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(__arm64__))
@@ -739,7 +739,7 @@ T_DECL(mte_mach_msg_send_memory_entry_untagged_entitled,
 
 T_DECL(mte_mach_msg_send_memory_entry_tagged_entitled_to_unentitled,
     "Send tagged memory entries in a mach msg from MTE-enabled -> non MTE-enabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(__arm64__))

@@ -68,7 +68,6 @@ int os_reason_alloc_buffer(os_reason_t cur_reason, uint32_t osr_bufsize);
 
 typedef struct _exception_info {
 	int os_reason;
-	int signal;
 	exception_type_t exception_type;
 	mach_exception_data_type_t mx_code;
 	mach_exception_data_type_t mx_subcode;
@@ -78,16 +77,49 @@ typedef struct _exception_info {
 	} kt_info;
 } exception_info_t;
 
-#define PX_FLAGS_NONE           0
-/* think twice about userspace debugging experience before using PX_DEBUG_NO_HONOR */
-#define PX_DEBUG_NO_HONOR       (1 << 0) /* force exit even when debugging */
-#define PX_KTRIAGE              (1 << 1) /* leave a ktriage record */
-#define PX_PSIGNAL              (1 << 2) /* send sig instead of forced exit */
-#define PX_NO_EXCEPTION_UTHREAD (1 << 3) /* do not set bsdthread exception */
+/* flags for exit_with_mach_exception */
 
+/*
+ * None, force exit the task with SIGKILL using exit_with_reason,
+ * while generating a crash report for the killed task.
+ */
+#define PX_FLAGS_NONE               0
+/*
+ * Leave a ktriage record.
+ */
+#define PX_KTRIAGE                  (1 << 0)
+/*
+ * Send SIGKILL using psignal, instead of exit_with_reason.
+ * This is used when userspace handled the exception, and we
+ * do not need to generate a crash report.
+ */
+#define PX_NO_CRASH_REPORT          (1 << 1)
+
+/*
+ * Terminates execution of a task, unconditionally and fatally.
+ *
+ * For call-sites that intend to raise fatal exceptions, it's highly
+ * recommended to use the unified generic exit_with_fatal_exception_and_notify
+ * since it implements the longstanding policy about dev-mode and debuggers.
+ */
 int exit_with_mach_exception(struct proc *p, exception_info_t exception, uint32_t flags);
+
+/*
+ * Enforce the policy for fatal exceptions; first, use task_exception_notify
+ * to respect dev-mode and debuggers. Then, unconditionally and fatally
+ * kill the task, with an uncatchable SIGKILL, regardless of how userspace
+ * responded.
+ */
+int exit_with_fatal_exception_and_notify(
+	struct proc *p,
+	int os_reason,
+	exception_type_t exception_type,
+	mach_exception_data_type_t mx_code,
+	mach_exception_data_type_t mx_subcode,
+	uint32_t flags);
+
 #if CONFIG_EXCLAVES
-int exit_with_exclave_exception(struct proc *p, exception_info_t exception, uint32_t flags);
+int exit_with_exclave_exception(struct proc *p, exception_info_t exception);
 #endif
 void exit_with_mach_exception_using_ast(exception_info_t exception, uint32_t flags, bool fatal);
 
@@ -158,11 +190,12 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_BACKBOARD  45
 #define OS_REASON_POWEREXCEPTIONS 46
 #define OS_REASON_SECINIT    47
+#define OS_REASON_SECURITY_SOFT_TRAPS 48
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_SECINIT
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_SECURITY_SOFT_TRAPS
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 
@@ -183,7 +216,12 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 /*
  * Set of flags that are allowed to be passed from userspace
  */
-#define OS_REASON_FLAG_MASK_ALLOWED_FROM_USER (OS_REASON_FLAG_CONSISTENT_FAILURE | OS_REASON_FLAG_ONE_TIME_FAILURE | OS_REASON_FLAG_NO_CRASH_REPORT | OS_REASON_FLAG_ABORT | OS_REASON_FLAG_CAPTURE_LOGS | OS_REASON_FLAG_SECURITY_SENSITIVE)
+#define OS_REASON_FLAG_MASK_ALLOWED_FROM_USER (OS_REASON_FLAG_CONSISTENT_FAILURE \
+	        | OS_REASON_FLAG_ONE_TIME_FAILURE \
+	        | OS_REASON_FLAG_NO_CRASH_REPORT \
+	        | OS_REASON_FLAG_ABORT \
+	        | OS_REASON_FLAG_CAPTURE_LOGS \
+	        | OS_REASON_FLAG_SECURITY_SENSITIVE)
 
 /*
  * Macros to encode the exit reason namespace and first 32 bits of code in exception code

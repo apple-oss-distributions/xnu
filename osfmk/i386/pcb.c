@@ -63,6 +63,7 @@
 #include <mach/vm_param.h>
 
 #include <kern/kalloc.h>
+#include <kern/ledger.h>
 #include <kern/mach_param.h>
 #include <kern/processor.h>
 #include <kern/cpu_data.h>

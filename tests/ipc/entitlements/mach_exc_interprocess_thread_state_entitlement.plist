@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Enhanced Security V3 -->
+	<key>com.apple.security.hardened-process</key>
+	<true/>
+	<key>com.apple.security.hardened-process.enhanced-security-version-string</key>
+	<string>3</string>
+
+	<!-- task_for_pid entitlements -->
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+
+	<key>com.apple.system-task-ports.control</key>
+	<!-- Supercedes the two above in AzulE+, cross-platfrom -->
+	<true/>
+</dict>
+</plist>

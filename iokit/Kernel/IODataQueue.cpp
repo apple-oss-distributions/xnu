@@ -111,7 +111,7 @@ IODataQueue::initWithCapacity(UInt32 size)
 	((IODataQueueInternal *)notifyMsg)->queueSize = size;
 
 	kr = kmem_alloc(kernel_map, (vm_offset_t *)&dataQueue, allocSize,
-	    (kma_flags_t)(KMA_DATA | KMA_ZERO), IOMemoryTag(kernel_map));
+	    (kma_flags_t)(KMA_DATA_SHARED | KMA_ZERO), IOMemoryTag(kernel_map));
 	if (kr != KERN_SUCCESS) {
 		return false;
 	}

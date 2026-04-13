@@ -3223,6 +3223,12 @@ ifnet_enqueue_single(struct ifnet *ifp, struct ifclassq *ifcq,
 	error = ifclassq_enqueue(((ifcq != NULL) ? ifcq : ifp->if_snd), p, p,
 	    1, pktlen, pdrop);
 
+	/* Increment LPW transmit statistics */
+	if (__improbable(is_net_lpw_mode())) {
+		os_atomic_add(&ifp->if_data.ifi_lpw_opackets, 1, relaxed);
+		os_atomic_add(&if_ports_used_stats.ifpu_lpw_tx_packets, 1, relaxed);
+	}
+
 	/*
 	 * Tell the driver to start dequeueing; do this even when the queue
 	 * for the packet is suspended (EQSUSPENDED), as the driver could still
@@ -3243,17 +3249,54 @@ ifnet_enqueue_chain(struct ifnet *ifp, struct ifclassq *ifcq,
 {
 	int error;
 
-	/* enqueue the packet (caller consumes object) */
-	error = ifclassq_enqueue(ifcq != NULL ? ifcq : ifp->if_snd, head, tail,
-	    cnt, bytes, pdrop);
+	if (ifp->if_output_netem != NULL) {
+		classq_pkt_t cpkt = *head;
+		classq_pkt_t cpkt_next = *head;
 
-	/*
-	 * Tell the driver to start dequeueing; do this even when the queue
-	 * for the packet is suspended (EQSUSPENDED), as the driver could still
-	 * be dequeueing from other unsuspended queues.
-	 */
-	if ((error == 0 && flush) || error == EQFULL || error == EQSUSPENDED) {
-		ifnet_start(ifp);
+		while (1) {
+			switch (head->cp_ptype) {
+			case QP_PACKET:
+				cpkt.cp_kpkt->pkt_pflags &= ~PKT_F_TS_VALID;
+				cpkt_next.cp_kpkt = cpkt.cp_kpkt->pkt_nextpkt;
+				break;
+			case QP_MBUF:
+				cpkt.cp_mbuf->m_pkthdr.pkt_flags &= ~PKTF_TS_VALID;
+				cpkt_next.cp_mbuf = cpkt.cp_mbuf->m_nextpkt;
+				break;
+			default:
+				VERIFY(0);
+				/* NOTREACHED */
+				__builtin_unreachable();
+			}
+
+			bool drop;
+			error = netem_enqueue(ifp->if_output_netem, &cpkt, &drop);
+			*pdrop = drop ? TRUE : FALSE;
+
+			if (cpkt_next.cp_kpkt == NULL) {
+				break;
+			}
+			cpkt = cpkt_next;
+		}
+	} else {
+		/* enqueue the packet (caller consumes object) */
+		error = ifclassq_enqueue(ifcq != NULL ? ifcq : ifp->if_snd, head, tail,
+		    cnt, bytes, pdrop);
+
+		/* Increment LPW transmit statistics */
+		if (__improbable(is_net_lpw_mode())) {
+			os_atomic_add(&ifp->if_data.ifi_lpw_opackets, cnt, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_tx_packets, cnt, relaxed);
+		}
+
+		/*
+		 * Tell the driver to start dequeueing; do this even when the queue
+		 * for the packet is suspended (EQSUSPENDED), as the driver could still
+		 * be dequeueing from other unsuspended queues.
+		 */
+		if ((error == 0 && flush) || error == EQFULL || error == EQSUSPENDED) {
+			ifnet_start(ifp);
+		}
 	}
 	return error;
 }

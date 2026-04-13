@@ -33,6 +33,9 @@
 #include <DriverKit/OSAction.iig>
 #include <DriverKit/IOService.iig>
 
+#define kIOUserServrMaxPanicReasonLength    1024
+#define kIOUserServrMaxExitReasonLength     1024
+#define kIOUserServrMaxModulePathLength     1024
 
 /*!
 @iig implementation
@@ -51,6 +54,9 @@ public:
 		OSString      * bundleID,
 		IOUserServer ** server);
 
+	virtual kern_return_t
+	Panic(const char reason[kIOUserServrMaxPanicReasonLength]);
+
 	virtual bool
 	init() override;
 
@@ -58,10 +64,10 @@ public:
 	free() override;
 
 	virtual kern_return_t
-	Exit(const char reason[1024]) LOCAL;
+	Exit(const char reason[kIOUserServrMaxExitReasonLength]) LOCAL;
 
 	virtual kern_return_t
-	LoadModule(const char path[1024]) LOCAL;
+	LoadModule(const char path[kIOUserServrMaxModulePathLength]) LOCAL;
 
 	virtual kern_return_t
 	RegisterService() override;

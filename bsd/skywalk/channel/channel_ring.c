@@ -1771,7 +1771,12 @@ kr_internalize_metadata(struct kern_channel *ch,
 		}
 
 		/* all good to go */
-		len += kbuf->buf_dlen;
+		if (os_add_overflow(kbuf->buf_dlen, len, &len)) {
+			SK_ERR("%s(%d) buflet overflow",
+			    sk_proc_name(p), sk_proc_pid(p));
+			err = ERANGE;
+			goto done;
+		}
 		pubuf = ubuf;
 		pkbuf = kbuf;
 	}

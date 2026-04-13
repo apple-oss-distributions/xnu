@@ -63,7 +63,7 @@ T_DECL(memory_entry_page_counts,
 	T_QUIET; T_ASSERT_NE(memory_entry, MACH_PORT_NULL, "memory entry is non-null");
 
 	T_LOG("Mapping memory entry");
-	mach_vm_address_t addr;
+	mach_vm_address_t addr = 0;
 	err = mach_vm_map(mach_task_self(), &addr, size, 0,
 	    VM_FLAGS_ANYWHERE, memory_entry, 0, FALSE,
 	    VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_NONE);

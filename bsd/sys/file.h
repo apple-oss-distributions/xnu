@@ -95,6 +95,8 @@ int file_drop(int);
 #endif /* KERNEL */
 
 #ifdef KERNEL_PRIVATE
+int file_vnode_ext(int, vnode_t *, uint32_t *, int);
+
 struct fileglob;
 struct fileproc;
 struct vnode;

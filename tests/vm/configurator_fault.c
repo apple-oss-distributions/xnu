@@ -93,8 +93,7 @@ test_fault_one_allocation(
 	bool in_submap,
 	mach_vm_address_t *const inout_next_address_to_fault)
 {
-	/* fault should not affect COW */
-	checker_fault_for_prot_not_cow(checker_list, checker,
+	checker_fault_all(checker_list, checker,
 	    is_write_fault ? VM_PROT_WRITE : VM_PROT_READ);
 	return test_fault_one_checker(checker, is_write_fault, in_submap, inout_next_address_to_fault);
 }
@@ -123,8 +122,7 @@ test_fault_one_submap(
 		mach_vm_address_t unnest_address = next_address_to_fault;
 		vm_entry_checker_t *unnested_checker =
 		    checker_list_try_unnest_one_entry_in_submap(checker_list, submap_parent,
-		    true /* unnest_readonly */, true /* all_overwritten */,
-		    &unnest_address);
+		    true /* unnest_readonly */, &unnest_address);
 		if (unnested_checker != NULL) {
 			/*
 			 * Unnest occurred. Don't change *inout_next_address_to_fault
@@ -303,6 +301,26 @@ test_fault_write_cow_2nd(
 	return test_fault_write(checker_list, range_start, range_size);
 }
 
+static test_result_t
+test_fault_write_cow_1st_inaccessible(
+	checker_list_t *checker_list,
+	mach_vm_address_t range_start,
+	mach_vm_size_t range_size)
+{
+	/* 1st entry is COW but inaccessible. */
+	if (is_new_vm()) {
+		/*
+		 * New VM resolves COW but then performs no writes.
+		 * Shadow chain does not collapse.
+		 */
+		vm_entry_checker_t *checker = checker_list_nth(checker_list, 0);
+		checker_make_shadow_object(checker_list, checker);
+	} else {
+		/* Old VM does not resolve COW. */
+	}
+	return test_fault_write(checker_list, range_start, range_size);
+}
+
 T_DECL(fault_read,
     "perform read faults with various vm configurations")
 {
@@ -311,6 +329,11 @@ T_DECL(fault_read,
 		.single_entry_2 = test_fault_read,
 		.single_entry_3 = test_fault_read,
 		.single_entry_4 = test_fault_read,
+
+		.single_entry_nonnull_1 = test_fault_read,
+		.single_entry_nonnull_2 = test_fault_read,
+		.single_entry_nonnull_3 = test_fault_read,
+		.single_entry_nonnull_4 = test_fault_read,
 
 		.multiple_entries_1 = test_fault_read,
 		.multiple_entries_2 = test_fault_read,
@@ -428,6 +451,11 @@ T_DECL(fault_write,
 		.single_entry_3 = test_fault_write,
 		.single_entry_4 = test_fault_write,
 
+		.single_entry_nonnull_1 = test_fault_write,
+		.single_entry_nonnull_2 = test_fault_write,
+		.single_entry_nonnull_3 = test_fault_write,
+		.single_entry_nonnull_4 = test_fault_write,
+
 		.multiple_entries_1 = test_fault_write,
 		.multiple_entries_2 = test_fault_write,
 		.multiple_entries_3 = test_fault_write,
@@ -468,8 +496,8 @@ T_DECL(fault_write,
 		.cow_unreferenced = test_fault_write_cow_1st,
 		.cow_nocow = test_fault_write_cow_1st,
 		.nocow_cow = test_fault_write_cow_2nd,
-		.cow_unreadable = test_fault_write,
-		.cow_unwriteable = test_fault_write,
+		.cow_unreadable = test_fault_write_cow_1st_inaccessible,
+		.cow_unwriteable = test_fault_write_cow_1st_inaccessible,
 
 		.permanent_entry = test_fault_write,
 		.permanent_before_permanent = test_fault_write,

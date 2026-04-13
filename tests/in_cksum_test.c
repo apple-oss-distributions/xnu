@@ -6,7 +6,13 @@
 
 #include <darwintest.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_OWNER("dieter")
+	);
 
 extern uint32_t os_cpu_in_cksum(const void *, uint32_t, uint32_t);
 

@@ -1262,8 +1262,8 @@ load_static_trust_cache(void)
 				continue;
 			}
 
-			/* Allocate the trust cache data structure -- Z_WAITOK_ZERO means this can't fail */
-			trust_cache = kalloc_type(TrustCache_t, Z_WAITOK_ZERO);
+			/* Allocate the trust cache data structure. */
+			trust_cache = kalloc_type(TrustCache_t, Z_WAITOK_ZERO_NOFAIL);
 			assert(trust_cache != NULL);
 		}
 

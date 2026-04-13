@@ -360,7 +360,7 @@ struct pmap {
 	/* Ledger tracking phys mappings */
 	ledger_t ledger;
 
-	decl_lck_rw_data(, rwlock);
+	lck_rw_old_t rwlock;
 
 	/* Global list of pmaps */
 	queue_chain_t pmaps;
@@ -487,15 +487,6 @@ struct pmap {
 
 #define PMAP_VASID(pmap) (((uint32_t)((pmap)->sw_asid) << 16) | pmap->hw_asid)
 
-#if VM_DEBUG
-extern int pmap_list_resident_pages(
-	pmap_t pmap,
-	vm_offset_t *listp,
-	int space);
-#else /* VM_DEBUG */
-#define pmap_list_resident_pages(pmap, listp, space) (0)
-#endif /* VM_DEBUG */
-
 extern int copysafe(vm_map_address_t from, vm_map_address_t to, uint32_t cnt, int type, uint32_t *bytes_copied);
 
 /* Globals shared between arm_vm_init and pmap */
@@ -542,8 +533,6 @@ extern void * pmap_auth_user_ptr(void *value, ptrauth_key key, uint64_t data, ui
 
 #define pmap_kernel_va(VA) \
 	(((VA) >= VM_MIN_KERNEL_ADDRESS) && ((VA) <= VM_MAX_KERNEL_ADDRESS))
-
-#define pmap_attribute(pmap, addr, size, attr, value) (KERN_INVALID_ADDRESS)
 
 #define copyinmsg(from, to, cnt) copyin(from, to, cnt)
 #define copyoutmsg(from, to, cnt) copyout(from, to, cnt)
@@ -719,7 +708,6 @@ void pmap_abandon_measurement(void);
 
 
 
-
 #define PMAP_LOAD_TRUST_CACHE_WITH_TYPE_INDEX 98
 #define PMAP_QUERY_TRUST_CACHE_INDEX 99
 #define PMAP_TOGGLE_DEVELOPER_MODE_INDEX 100
@@ -850,7 +838,6 @@ extern void pmap_static_allocations_done(void);
 
 #endif /* XNU_MONITOR */
 
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
 /*
  * Strip a pointer of all metadata bits based on its pmap.
  * This function will return a pointer that is cleared of any bit that is not part
@@ -858,7 +845,6 @@ extern void pmap_static_allocations_done(void);
  * replacing these bits with bit 55 value.
  */
 extern vm_map_address_t pmap_strip_addr(pmap_t pmap, vm_map_address_t ptr);
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 /*
  * Indicates that we are done mutating sensitive state in the system, and that
@@ -870,6 +856,7 @@ extern void pmap_lockdown_ppl(void);
 extern void pmap_nop(pmap_t);
 
 extern lck_grp_t pmap_lck_grp;
+extern lck_attr_t pmap_lck_rw_attr;
 
 extern void CleanPoC_DcacheRegion_Force_nopreempt_nohid(vm_offset_t va, size_t length);
 
@@ -878,6 +865,8 @@ extern void CleanPoC_DcacheRegion_Force_nopreempt(vm_offset_t va, size_t length)
 #define pmap_force_dcache_clean(va, sz) CleanPoC_DcacheRegion_Force_nopreempt(va, sz)
 #define pmap_simple_lock(l)             simple_lock_nopreempt(l, &pmap_lck_grp)
 #define pmap_simple_unlock(l)           simple_unlock_nopreempt(l)
+#define pmap_simple_unlock_nopreempt(l) simple_unlock_nopreempt(l)
+#define pmap_simple_enable_preemption() ((void)0)
 #define pmap_simple_lock_try(l)         simple_lock_try_nopreempt(l, &pmap_lck_grp)
 #define pmap_simple_lock_assert(l, t)   simple_lock_assert(l, t)
 #define pmap_lock_bit(l, i)             hw_lock_bit_nopreempt(l, i, &pmap_lck_grp)
@@ -886,6 +875,8 @@ extern void CleanPoC_DcacheRegion_Force_nopreempt(vm_offset_t va, size_t length)
 #define pmap_force_dcache_clean(va, sz) CleanPoC_DcacheRegion_Force(va, sz)
 #define pmap_simple_lock(l)             simple_lock(l, &pmap_lck_grp)
 #define pmap_simple_unlock(l)           simple_unlock(l)
+#define pmap_simple_unlock_nopreempt(l) simple_unlock_nopreempt(l)
+#define pmap_simple_enable_preemption() enable_preemption()
 #define pmap_simple_lock_try(l)         simple_lock_try(l, &pmap_lck_grp)
 #define pmap_simple_lock_assert(l, t)   simple_lock_assert(l, t)
 #define pmap_lock_bit(l, i)             hw_lock_bit(l, i, &pmap_lck_grp)

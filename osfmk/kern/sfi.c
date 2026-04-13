@@ -113,10 +113,10 @@ uint64_t sfi_window_interval;
 uint64_t sfi_next_off_deadline;
 
 typedef struct {
-	sfi_class_id_t  class_id;
+	sfi_class_id_t          class_id;
 	thread_continue_t       class_continuation;
-	const char *    class_name;
-	const char *    class_ledger_name;
+	const char             *class_name;
+	const char             *class_ledger_name;
 } sfi_class_registration_t;
 
 /*
@@ -154,7 +154,7 @@ SFI_ ## clsid ## _registration = {                                              
 STARTUP_ARG(TUNABLES, STARTUP_RANK_MIDDLE,                                      \
     sfi_class_register, &SFI_ ## clsid ## _registration)
 
-/* SFI_CLASS_UNSPECIFIED not included here */
+/* SFI_CLASS_UNSPECIFIED not included here keep task.c ledger in sync */
 SFI_CLASS_REGISTER(MAINTENANCE, MAINTENANCE);
 SFI_CLASS_REGISTER(DARWIN_BG, DARWIN_BG);
 SFI_CLASS_REGISTER(APP_NAP, APP_NAP);
@@ -254,41 +254,10 @@ sfi_init(void)
 }
 
 /* Can be called before sfi_init() by task initialization, but after sfi_early_init() */
-sfi_class_id_t
-sfi_get_ledger_alias_for_class(sfi_class_id_t class_id)
+const char *
+sfi_class_ledger_name(sfi_class_id_t class_id)
 {
-	sfi_class_id_t i;
-	const char *ledger_name = NULL;
-
-	ledger_name = sfi_classes[class_id].class_ledger_name;
-
-	/* Find the first class in the registration table with this ledger name */
-	if (ledger_name) {
-		for (i = SFI_CLASS_UNSPECIFIED + 1; i < class_id; i++) {
-			if (0 == strcmp(sfi_classes[i].class_ledger_name, ledger_name)) {
-				dprintf("sfi_get_ledger_alias_for_class(0x%x) -> 0x%x\n", class_id, i);
-				return i;
-			}
-		}
-
-		/* This class is the primary one for the ledger, so there is no alias */
-		dprintf("sfi_get_ledger_alias_for_class(0x%x) -> 0x%x\n", class_id, SFI_CLASS_UNSPECIFIED);
-		return SFI_CLASS_UNSPECIFIED;
-	}
-
-	/* We are permissive on SFI class lookup failures. In sfi_init(), we assert more */
-	return SFI_CLASS_UNSPECIFIED;
-}
-
-int
-sfi_ledger_entry_add(ledger_template_t template, sfi_class_id_t class_id)
-{
-	const char *ledger_name = NULL;
-
-	ledger_name = sfi_classes[class_id].class_ledger_name;
-
-	dprintf("sfi_ledger_entry_add(%p, 0x%x) -> %s\n", template, class_id, ledger_name);
-	return ledger_entry_add(template, ledger_name, "sfi", "MATUs");
+	return sfi_classes[class_id].class_ledger_name;
 }
 
 static void
@@ -952,7 +921,7 @@ _sfi_wait_cleanup(void)
 		int64_t sfi_wait_time = made_runnable - self->wait_sfi_begin_time;
 		assert(sfi_wait_time >= 0);
 
-		ledger_credit(get_threadtask(self)->ledger,
+		ledger_credit(self->t_ledger,
 		    task_ledgers.sfi_wait_times[current_sfi_wait_class],
 		    sfi_wait_time);
 

@@ -715,8 +715,8 @@ __END_DECLS
 #endif /* !KERNEL */
 #endif /* XNU_PLATFORM_DriverKit */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <netinet/in_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* _NETINET_IN_H_ */

@@ -44,21 +44,13 @@
 static inline void
 PMAP_LOCK_EXCLUSIVE(pmap_t p)
 {
-	mp_disable_preemption();
-	lck_rw_lock_exclusive(&p->pmap_rwl);
+	lck_rw_lock_exclusive_spin(&p->pmap_rwl);
 }
 
 static inline void
 PMAP_LOCK_SHARED(pmap_t p)
 {
-	mp_disable_preemption();
-	lck_rw_lock_shared(&p->pmap_rwl);
-}
-
-static inline void
-PMAP_LOCK_SHARED_TO_EXCLUSIVE(pmap_t p)
-{
-	lck_rw_lock_shared_to_exclusive(&p->pmap_rwl);
+	lck_rw_lock_shared_spin(&p->pmap_rwl);
 }
 
 static inline void
@@ -70,15 +62,13 @@ PMAP_LOCK_EXCLUSIVE_TO_SHARED(pmap_t p)
 static inline void
 PMAP_UNLOCK_EXCLUSIVE(pmap_t p)
 {
-	lck_rw_unlock_exclusive(&p->pmap_rwl);
-	mp_enable_preemption();
+	lck_rw_unlock_exclusive_spin(&p->pmap_rwl);
 }
 
 static inline void
 PMAP_UNLOCK_SHARED(pmap_t p)
 {
-	lck_rw_unlock_shared(&p->pmap_rwl);
-	mp_enable_preemption();
+	lck_rw_unlock_shared_spin(&p->pmap_rwl);
 }
 
 #define iswired(pte)    ((pte) & INTEL_PTE_WIRED)
@@ -1050,18 +1040,6 @@ pmap_pv_is_altacct(
 	UNLOCK_PV_HASH(pvhash_idx);
 
 	return is_altacct;
-}
-
-static inline void
-PMAP_ZINFO_PALLOC(pmap_t pmap, vm_size_t bytes)
-{
-	pmap_ledger_credit(pmap, task_ledgers.tkm_private, (ledger_amount_t)bytes);
-}
-
-static inline void
-PMAP_ZINFO_PFREE(pmap_t pmap, vm_size_t bytes)
-{
-	pmap_ledger_debit(pmap, task_ledgers.tkm_private, (ledger_amount_t)bytes);
 }
 
 extern boolean_t        pmap_initialized;/* Has pmap_init completed? */

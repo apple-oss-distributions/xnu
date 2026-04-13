@@ -694,6 +694,15 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 
 	sock_gettype(so, &sodomain, &sotype, &soprotocol);
 
+	bool valid_inet = (sodomain == AF_INET || sodomain == AF_INET6) && (soprotocol == IPPROTO_UDP || soprotocol == IPPROTO_TCP);
+	bool valid_unix = sodomain == AF_UNIX;
+
+	if (!valid_inet && !valid_unix) {
+		log(LOG_ERR, "nfssvc_addsock: unexpected af=%u proto=%u combination\n", sodomain, soprotocol);
+		mbuf_freem(mynam);
+		return EINVAL;
+	}
+
 	/* There should be only one UDP socket for each of IPv4 and IPv6 */
 	if ((sodomain == AF_INET) && (soprotocol == IPPROTO_UDP) && nfsrv_udpsock) {
 		mbuf_freem(mynam);
@@ -1331,7 +1340,7 @@ nfssvc_exportstats(proc_t p, user_addr_t argp)
 	user_size_t oldlen, newlen;
 	struct user_iovec iov[2];
 
-	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov);
+	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov, 2);
 	if (error) {
 		return error;
 	}
@@ -1483,7 +1492,7 @@ nfssvc_userstats(proc_t p, user_addr_t argp)
 	user_size_t oldlen, newlen;
 	struct user_iovec iov[2];
 
-	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov);
+	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov, 2);
 	if (error) {
 		return error;
 	}
@@ -1620,7 +1629,7 @@ nfssvc_usercount(proc_t p, user_addr_t argp)
 	struct user_iovec iov[2];
 	size_t stat_size = sizeof(nfsrv_user_stat_node_count);
 
-	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov);
+	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov, 2);
 	if (error) {
 		return error;
 	}
@@ -1670,7 +1679,7 @@ nfssvc_srvstats(proc_t p, user_addr_t argp)
 	struct user_iovec iov[2];
 	size_t stat_size = sizeof(nfsrvstats);
 
-	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov);
+	error = copyin_user_iovec_array(argp, IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32, 2, iov, 2);
 	if (error) {
 		return error;
 	}

@@ -715,7 +715,7 @@ def GetKtraceMachine():
     This is best effort -- several fields are only available to user space or
     are difficult to determine from a core file.
     """
-    master_cpu_data = GetCpuDataForCpuID(0)
+    boot_cpu_data = GetCpuDataForCpuID(0)
     if kern.arch == 'x86_64':
         cpu_family = unsigned(kern.globals.cpuid_cpu_info.cpuid_cpufamily)
     else:
@@ -734,8 +734,8 @@ def GetKtraceMachine():
         'os_build': str(kern.globals.osversion),
         'arch': 'Unknown', # XXX
         'hw_model': 'Unknown', # XXX
-        'cpu_type': unsigned(master_cpu_data.cpu_type),
-        'cpu_subtype': unsigned(master_cpu_data.cpu_subtype),
+        'cpu_type': unsigned(boot_cpu_data.cpu_type),
+        'cpu_subtype': unsigned(boot_cpu_data.cpu_subtype),
         'cpu_family': cpu_family,
         'active_cpus': unsigned(kern.globals.processor_avail_count),
         'max_cpus': unsigned(kern.globals.machine_info.logical_cpu_max),

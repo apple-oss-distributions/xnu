@@ -399,7 +399,7 @@ copyout_kern(const char *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 	return 0;
 }
 
-int
+__mockable int
 copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes)
 {
 	vm_map_t map = current_thread()->map;
@@ -575,7 +575,7 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
 	return result;
 }
 
-int
+__mockable int
 copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 {
 	vm_map_t map = current_thread()->map;

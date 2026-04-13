@@ -982,4 +982,5 @@ enum {
 	kIOPMSystemCapabilityAOT        = 0x10,
 };
 
+
 #endif /* ! _IOKIT_IOPM_H */

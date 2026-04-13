@@ -153,6 +153,10 @@ If
 .Fa path
 does not reside in the hierarchy beneath the starting directory,
 an error is returned.
+.It Dv AT_UNIQUE
+If
+.Fa path
+has multiple hard links, an error is returned.
 .El
 .Sh RETURN VALUES
 .Rv -std
@@ -261,6 +265,10 @@ nor a file descriptor associated with a directory.
 if AT_RESOLVE_BENEATH is passed and
 .Fa path
 does not reside in the directory hierarchy beneath the starting directory.
+.It Bq Er ENOTCAPABLE
+if AT_UNIQUE is passed and
+.Fa path
+has multiple hard links.
 .El
 .Sh SEE ALSO
 .Xr chflags 2 ,

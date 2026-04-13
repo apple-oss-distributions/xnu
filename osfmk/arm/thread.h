@@ -128,7 +128,7 @@ struct machine_thread {
 	};
 #endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
-	long                      reserved4;
+	uint64_t                  reserved4;
 	uint64_t                  recover_far;
 
 	arm_debug_state_t        *DebugData;
@@ -163,11 +163,10 @@ struct machine_thread {
 	unsigned int              preemption_count;       /* preemption count */
 	uint16_t                  exception_trace_code;
 	bool                      reserved7;
+	bool                      el0_synchronous_trap;   /* is this thread inside an EL0 synchronous trap handler? */
 #if HAS_MTE
 	bool                      sec_override;           /* disable MTE for this thread, regardless of the current map's MTE policy */
-	bool                      el0_synchronous_trap;   /* is this thread inside an EL0 synchronous trap handler? */
 #else
-	bool                      reserved8;
 	bool                      reserved9;
 #endif
 #if defined(HAS_APPLE_PAC)
@@ -210,6 +209,8 @@ extern arm_debug_state32_t *       find_debug_state32(thread_t);
 extern arm_debug_state32_t *       find_or_allocate_debug_state32(thread_t);
 extern arm_debug_state64_t *       find_debug_state64(thread_t);
 extern arm_debug_state64_t *       find_or_allocate_debug_state64(thread_t);
+extern arm_debug_state_t *         allocate_debug_state64(void);
+extern void                        free_debug_state(arm_debug_state_t *);
 extern void                        set_user_neon_reg(thread_t, unsigned int, uint128_t);
 
 #define FIND_PERFCONTROL_STATE(th) (&th->machine.perfctrl_state)
@@ -232,6 +233,8 @@ extern void act_thread_cfree(void *ctx);
 #if MACH_KERNEL_PRIVATE
 
 #if HAS_ARM_FEAT_SME
+extern uint64_t machine_thread_get_sme_priority(thread_t thread);
+extern void machine_thread_update_sme_priority(thread_t thread);
 extern arm_sme_saved_state_t *machine_thread_get_sme_state(thread_t thread);
 extern kern_return_t machine_thread_sme_state_alloc(thread_t thread);
 #endif

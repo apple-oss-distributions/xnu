@@ -162,18 +162,16 @@ endef
 # The next build should be a "clean" build to prevent the .o file avoiding
 # verification.
 #
-# Any stderr output from the verifier is printed with an "error:" prefix.
-#
 # $(1) is the name of the verifier to call
 # $(2) is the name of the .o file to pass to the verifier
 define VERIFY
-{ ERROR_OUTPUT="$$({ $(call $(1),$(2)) } 2>&1 1>&3)"; } 3>&1; \
+( $(call $(1),$(2)) ); \
 RETURN=$$?; \
-$(ERR) "$$($(SED) -e 's/^/error: /' <<< "$$ERROR_OUTPUT")"; \
 if [ $$RETURN -ne 0 ]; then \
 	UNVERIFIED_FILE=$(@:o=o.unverified) ; \
 	$(MV) '$(2)' "$$UNVERIFIED_FILE"; \
-	$(ERR) "error: Moved object file $(2) with verifier failures to $$PWD/$$UNVERIFIED_FILE"; \
+	$(ERR) "error: Verifying object file $(2) failed with error code $$RETURN."; \
+	$(ERR) "Moved object file $(2) with verifier failures to $$PWD/$$UNVERIFIED_FILE"; \
 	exit $$RETURN; \
 fi;
 endef

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2025 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -3212,15 +3212,26 @@ nd6_ioctl(u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data, struct ifnet *i
 			struct in6_ifaddr *__single ia = NULL;
 			bool iterate_pfxlist_again = false;
 
-			next = pr->ndpr_next;
-
 			NDPR_LOCK(pr);
+			next = pr->ndpr_next;
+			if (next != NULL) {
+				NDPR_LOCK(next);
+				NDPR_ADDREF(next);
+				NDPR_UNLOCK(next);
+			}
+
 			if (IN6_IS_ADDR_LINKLOCAL(&pr->ndpr_prefix.sin6_addr)) {
 				NDPR_UNLOCK(pr);
+				if (next != NULL) {
+					NDPR_REMREF(next);
+				}
 				continue; /* XXX */
 			}
 			if (ifp != lo_ifp && pr->ndpr_ifp != ifp) {
 				NDPR_UNLOCK(pr);
+				if (next != NULL) {
+					NDPR_REMREF(next);
+				}
 				continue;
 			}
 			/* do we really have to remove addresses as well? */
@@ -3269,7 +3280,15 @@ nd6_ioctl(u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data, struct ifnet *i
 			pfxlist_onlink_check(true);
 			NDPR_REMREF(pr);
 			if (iterate_pfxlist_again) {
+				if (next != NULL) {
+					NDPR_REMREF(next);
+				}
 				next = nd_prefix.lh_first;
+				if (next != NULL) {
+					NDPR_LOCK(next);
+					NDPR_ADDREF(next);
+					NDPR_UNLOCK(next);
+				}
 			}
 		}
 		nd_prefix_busy_signal();
@@ -3764,7 +3783,8 @@ fail:
 	}
 
 	if (do_update) {
-		rt_lookup_qset_id(rt, false);
+		uint64_t qset_id = rt_lookup_qset_id(rt, false);
+		nd6log3(info, "nd6_cache_lladdr: do_update qset_id=%lld", qset_id);
 
 		int route_ev_code = 0;
 
@@ -4555,6 +4575,7 @@ release:
 		 *  run on the downstream interface */
 		if (result == 0 && ifp->if_eth_traffic_rule_count) {
 			uint64_t qset_id = rt_lookup_qset_id(route, true);
+			nd6log3(info, "nd6_lookup_ipv6:  qset_id=%lld", qset_id);
 			if (packet != NULL) {
 				packet->m_pkthdr.pkt_ext_flags |= PKTF_EXT_QSET_ID_VALID;
 				packet->m_pkthdr.pkt_mpriv_qsetid = qset_id;

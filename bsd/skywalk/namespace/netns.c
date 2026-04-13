@@ -1762,6 +1762,62 @@ netns_change_flags(netns_token *token, uint32_t set_flags,
 	NETNS_UNLOCK();
 }
 
+static void
+netns_log_local_port_scan_flow_entry(struct ns_token *token, protocol_family_t protocol,
+    const char *msg)
+{
+	char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+	char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+	in_port_t lport;
+	in_port_t fport;
+	char pname[MAXCOMLEN + 1] = {};
+	const struct ns_flow_info *nfi = token->nt_flow_info;
+
+	if (nfi == NULL) {
+		return;
+	}
+
+	proc_name(nfi->nfi_owner_pid, pname, sizeof(pname));
+
+#if SK_LOG
+	if (protocol == PF_INET) {
+		sk_ntop(PF_INET, &nfi->nfi_laddr.sin.sin_addr,
+		    lbuf, sizeof(lbuf));
+		sk_ntop(PF_INET, &nfi->nfi_faddr.sin.sin_addr,
+		    fbuf, sizeof(fbuf));
+	} else {
+		sk_ntop(PF_INET6, &nfi->nfi_laddr.sin6.sin6_addr.s6_addr,
+		    lbuf, sizeof(lbuf));
+		sk_ntop(PF_INET6, &nfi->nfi_faddr.sin6.sin6_addr,
+		    fbuf, sizeof(fbuf));
+	}
+#else /* SK_LOGn*/
+	if (protocol == PF_INET) {
+		strlcpy(lbuf, "<IPv4-redacted>", sizeof(lbuf));
+		strlcpy(fbuf, "<IPv4-redacted>", sizeof(fbuf));
+	} else {
+		strlcpy(lbuf, "<IPv6-redacted>", sizeof(lbuf));
+		strlcpy(fbuf, "<IPv6-redacted>", sizeof(fbuf));
+	}
+#endif /* SK_LOGn*/
+
+	if (protocol == PF_INET) {
+		lport = nfi->nfi_laddr.sin.sin_port;
+		fport = nfi->nfi_faddr.sin.sin_port;
+	} else {
+		lport = nfi->nfi_laddr.sin6.sin6_port;
+		fport = nfi->nfi_faddr.sin6.sin6_port;
+	}
+
+	os_log(wake_packet_log_handle,
+	    "netns_local_port_scan_flow_entry: %s %s %s:%u %s:%u ifp %s proc %s:%d",
+	    msg != NULL ? msg : "",
+	    token->nt_proto == IPPROTO_TCP ? "tcp" : "udp",
+	    lbuf, ntohs(lport), fbuf, ntohs(fport),
+	    token->nt_ifp != NULL ? token->nt_ifp->if_xname : "",
+	    pname, nfi->nfi_owner_pid);
+}
+
 /*
  * Port offloading KPI
  */
@@ -1847,79 +1903,17 @@ netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protoc
 
 		if (fr == NULL || fr->fr_rt_dst == NULL ||
 		    (fr->fr_rt_dst->rt_flags & (RTF_UP | RTF_CONDEMNED)) != RTF_UP) {
-#if DEBUG || DEVELOPMENT
-			char lbuf[MAX_IPv6_STR_LEN + 6] = {};
-			char fbuf[MAX_IPv6_STR_LEN + 6] = {};
-			in_port_t lport;
-			in_port_t fport;
-			char pname[MAXCOMLEN + 1];
-			const struct ns_flow_info *nfi = token->nt_flow_info;
-
-			proc_name(nfi->nfi_owner_pid, pname, sizeof(pname));
-
-			if (protocol == PF_INET) {
-				sk_ntop(PF_INET, &nfi->nfi_laddr.sin.sin_addr,
-				    lbuf, sizeof(lbuf));
-				sk_ntop(PF_INET, &nfi->nfi_faddr.sin.sin_addr,
-				    fbuf, sizeof(fbuf));
-				lport = nfi->nfi_laddr.sin.sin_port;
-				fport = nfi->nfi_faddr.sin.sin_port;
-			} else {
-				sk_ntop(PF_INET6, &nfi->nfi_laddr.sin6.sin6_addr.s6_addr,
-				    lbuf, sizeof(lbuf));
-				sk_ntop(PF_INET6, &nfi->nfi_faddr.sin6.sin6_addr,
-				    fbuf, sizeof(fbuf));
-				lport = nfi->nfi_laddr.sin6.sin6_port;
-				fport = nfi->nfi_faddr.sin6.sin6_port;
+			if (if_ports_used_verbose > 0) {
+				netns_log_local_port_scan_flow_entry(token, protocol, "route is down");
 			}
-
-			os_log(wake_packet_log_handle,
-			    "netns_local_port_scan_flow_entry: route is down %s %s:%u %s:%u ifp %s proc %s:%d",
-			    token->nt_proto == IPPROTO_TCP ? "tcp" : "udp",
-			    lbuf, ntohs(lport), fbuf, ntohs(fport),
-			    token->nt_ifp->if_xname, pname, nfi->nfi_owner_pid);
-#endif /* DEBUG || DEVELOPMENT */
-
 			return;
 		}
 	}
 
-#if DEBUG || DEVELOPMENT
-	if (!(flags & IFNET_GET_LOCAL_PORTS_NOWAKEUPOK) &&
+	if (if_ports_used_verbose > 1 && !(flags & IFNET_GET_LOCAL_PORTS_NOWAKEUPOK) &&
 	    (token->nt_flags & NETNS_NOWAKEFROMSLEEP)) {
-		char lbuf[MAX_IPv6_STR_LEN + 6] = {};
-		char fbuf[MAX_IPv6_STR_LEN + 6] = {};
-		in_port_t lport;
-		in_port_t fport;
-		char pname[MAXCOMLEN + 1];
-		const struct ns_flow_info *nfi = token->nt_flow_info;
-
-		proc_name(nfi->nfi_owner_pid, pname, sizeof(pname));
-
-		if (protocol == PF_INET) {
-			sk_ntop(PF_INET, &nfi->nfi_laddr.sin.sin_addr,
-			    lbuf, sizeof(lbuf));
-			sk_ntop(PF_INET, &nfi->nfi_faddr.sin.sin_addr,
-			    fbuf, sizeof(fbuf));
-			lport = nfi->nfi_laddr.sin.sin_port;
-			fport = nfi->nfi_faddr.sin.sin_port;
-		} else {
-			sk_ntop(PF_INET6, &nfi->nfi_laddr.sin6.sin6_addr.s6_addr,
-			    lbuf, sizeof(lbuf));
-			sk_ntop(PF_INET6, &nfi->nfi_faddr.sin6.sin6_addr,
-			    fbuf, sizeof(fbuf));
-			lport = nfi->nfi_laddr.sin6.sin6_port;
-			fport = nfi->nfi_faddr.sin6.sin6_port;
-		}
-
-		os_log(wake_packet_log_handle,
-		    "netns_local_port_scan_flow_entry: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
-		    token->nt_proto == IPPROTO_TCP ? "tcp" : "udp",
-		    lbuf, ntohs(lport), fbuf, ntohs(fport),
-		    token->nt_ifp != NULL ? token->nt_ifp->if_xname : "",
-		    pname, nfi->nfi_owner_pid);
+		netns_log_local_port_scan_flow_entry(token, protocol, "no wake from sleep");
 	}
-#endif /* DEBUG || DEVELOPMENT */
 
 	if (token->nt_ifp != NULL && token->nt_flow_info != NULL) {
 		/*

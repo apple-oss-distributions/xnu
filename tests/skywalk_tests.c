@@ -34,7 +34,7 @@
 #include "skywalk/skywalk_test_common.h"
 
 T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.skywalk"),
+	T_META_NAMESPACE("xnu.net.skywalk"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("skywalk")
 	);
@@ -175,7 +175,11 @@ T_GLOBAL_META(
 	X(utunloopy4u1, "open 2 utuns with netif and floods ipv4 udp packets in one direction") \
 	X(utunloopy4u2, "open 2 utuns with netif and floods ipv4 udp packets in two directions") \
 	X(utunloopy4t1, "open 2 utuns with netif and floods ipv4 tcp packets in one direction") \
-	X(utunloopy4t2, "open 2 utuns with netif and floods ipv4 tcp packets in two directions")
+	X(utunloopy4t2, "open 2 utuns with netif and floods ipv4 tcp packets in two directions") \
+	X(utunloopy4u1upp, "open 2 utuns with netif and floods ipv4 udp packets in one direction upp enabled") \
+	X(utunloopy4u2upp, "open 2 utuns with netif and floods ipv4 udp packets in two directions upp enabled") \
+	X(utunloopy4t1upp, "open 2 utuns with netif and floods ipv4 tcp packets in one direction upp enabled") \
+	X(utunloopy4t2upp, "open 2 utuns with netif and floods ipv4 tcp packets in two directions upp enabled")
 
 #define SHUTDOWN_TESTS \
 	X(oneslotus, "test sends one slot of data on user pipe loopback using select") \
@@ -390,7 +394,7 @@ BATSUTUN_TESTS;
  * skywalk_tests --memfail 0 noop
  */
 T_DECL_REF(noop_memcleanup, noop, "run noop test to cleanup memory failure sysctl",
-    T_META_NAMESPACE("xnu.skyawlk.memcleanup"),
+    T_META_NAMESPACE("xnu.net.skywalk.memcleanup"),
     T_META_ENVVAR("memfail=0"));
 
 /*

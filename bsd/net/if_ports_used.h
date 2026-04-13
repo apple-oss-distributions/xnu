@@ -107,6 +107,11 @@ union in_addr_4_6 {
 	X(NPIF_LPW,                "l", "packet received in low power wake") \
 	X(NPIF_DELAYWAKEPKTEVENT,  "d", "delayed wake packet attribution")
 
+#define NPIXF_PLATFORMBINARY    0x0001
+#define NPI_XFLAGS_TABLE(x) \
+	X(NPIXF_PLATFORMBINARY,     "P", "platform binary")
+
+
 #define NPI_HAS_EFFECTIVE_UUID 1
 
 struct net_port_info {
@@ -124,6 +129,7 @@ struct net_port_info {
 	char                    npi_effective_pname[MAXCOMLEN + 1];
 	uuid_t                  npi_owner_uuid;
 	uuid_t                  npi_effective_uuid;
+	uint16_t                npi_ext_flags; /* NPIXF_xxx */
 };
 
 #define npi_local_addr_in npi_local_addr_._in_a_4
@@ -213,6 +219,7 @@ struct net_port_info_wake_event {
 	uint16_t            wake_pkt_if_index; /* interface of incoming wake packet */
 	in_port_t           wake_pkt_port; /* local port in network byte order */
 	uint16_t            wake_pkt_flags; /* NPIF_xxx */
+	uint16_t            wake_pkt_ext_flags; /* NPIXF_xxx */
 	pid_t               wake_pkt_owner_pid;
 	pid_t               wake_pkt_effective_pid;
 	char                wake_pkt_owner_pname[MAXCOMLEN + 1];
@@ -250,7 +257,7 @@ struct net_port_info_una_wake_event {
 	struct timeval32    una_wake_pkt_timestamp; /* when processed by networking stack */
 	uint16_t            una_wake_pkt_if_index; /* interface of incoming wake packet */
 	uint16_t            una_wake_pkt_flags; /* NPIF_xxx */
-	uint16_t            _una_wake_pkt_reserved; /* not used */
+	uint16_t            una_wake_pkt_ext_flags; /* NPIXF_xxx */
 	uint16_t            una_wake_ptk_len; /* length of una_wake_pkt */
 	uint8_t             una_wake_pkt[NPI_MAX_UNA_WAKE_PKT_LEN]; /* initial portion of the IPv4/IPv6 packet  */
 	in_port_t           una_wake_pkt_local_port; /* network byte order */
@@ -318,7 +325,9 @@ struct net_port_info_una_wake_event {
 	X(uint64_t, ifpu_delay_phy_wake_pkt, "delayed wake packet%s", "", "s") \
 	X(uint64_t, ifpu_ignored_delayed_attributed_events, "ignored delayed attributed event%s", "", "s") \
 	X(uint64_t, ifpu_ignored_delayed_unattributed_events, "ignored delayed unattributed event%s", "", "s") \
-	X(uint64_t, ifpu_wake_pkt_event_notify_in_vain, "wake pkt event notifications%s in vain", "", "s")
+	X(uint64_t, ifpu_wake_pkt_event_notify_in_vain, "wake pkt event notifications%s in vain", "", "s") \
+	X(uint64_t, ifpu_lpw_rx_packets, "packet%s received in LPW mode", "", "s") \
+	X(uint64_t, ifpu_lpw_tx_packets, "packet%s transmitted in LPW mode", "", "s")
 
 struct if_ports_used_stats {
 #define X(_type, _field, ...) _type _field;
@@ -329,10 +338,15 @@ struct if_ports_used_stats {
 #ifdef XNU_KERNEL_PRIVATE
 
 #include <os/log.h>
+#include <IOKit/IOBSD.h>
+
+extern struct if_ports_used_stats if_ports_used_stats;
 
 extern os_log_t wake_packet_log_handle;
 
 extern int if_ports_used_verbose;
+
+extern int ports_used_include_boundif;
 
 void if_ports_used_init(void);
 
@@ -360,6 +374,7 @@ bool check_wake_pkt(ifnet_t ifp, struct __kern_packet *pkt);
 #endif /* (DEBUG | DEVELOPMENT) */
 
 bool if_is_lpw_enabled(struct ifnet *);
+bool is_net_lpw_mode(void);
 void if_exit_lpw(struct ifnet *ifp, const char *lpw_exit_reason);
 
 #endif /* XNU_KERNEL_PRIVATE */

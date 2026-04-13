@@ -82,7 +82,7 @@
 #include <ipc/ipc_types.h>
 
 __BEGIN_DECLS
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 typedef ipc_object_type_t ipc_kobject_type_t;
 
@@ -491,7 +491,7 @@ extern void       ipc_typed_port_release_send(
 	ipc_kobject_type_t          kotype);
 
 #endif /* XNU_KERNEL_PRIVATE */
-#pragma GCC visibility pop
+__exported_pop
 __END_DECLS
 
 #endif /* _KERN_IPC_KOBJECT_H_ */

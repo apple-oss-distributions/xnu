@@ -8,6 +8,12 @@
 #include <netinet/ip6.h>
 #include <darwintest.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("plakhera"));
+
 struct packet1 {
 	struct ip6_hbh hbh;
 	struct ip6_opt hbh_opt;

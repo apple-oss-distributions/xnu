@@ -238,6 +238,74 @@ vm_sanitize_compute_ut_size(
 	return size_u;
 }
 
+#if CONFIG_KERNEL_TAGGING || HAS_MTE_EMULATION_SHIMS
+__attribute__((always_inline, warn_unused_result))
+vm_addr_struct_t
+vm_sanitize_canonicalize_ut_addr(
+	vm_map_t                map,
+	vm_addr_struct_t        addr_u)
+{
+	vm_addr_struct_t canonicalized_addr_u;
+	vm_address_t canonicalized_addr;
+	vm_address_t addr = VM_SANITIZE_UNSAFE_UNWRAP(addr_u);
+
+	assert(map);
+	canonicalized_addr = vm_map_strip_addr(map, addr);
+
+	VM_SANITIZE_UT_SET(canonicalized_addr_u, canonicalized_addr);
+	return canonicalized_addr_u;
+}
+
+__attribute__((always_inline, warn_unused_result))
+kern_return_t
+vm_sanitize_canonicalize_ut_addr_end(
+	vm_map_t                            map,
+	vm_addr_struct_t             *const addr_u, /* IN/OUT */
+	vm_addr_struct_t             *const end_u)  /* IN/OUT */
+{
+	vm_address_t     canonical_addr, canonical_end;
+	vm_size_struct_t size_u;        /* check that canonicalization was done correctly */
+	vm_address_t     addr = VM_SANITIZE_UNSAFE_UNWRAP(*addr_u);
+
+	assert(map);
+	size_u = vm_sanitize_compute_ut_size(*addr_u, *end_u);
+	/*
+	 * VM APIs expect (addr,size) that gets turned into (start,end) along the way.
+	 * Only canonicalize addr and calculate canonical_end from that. If the size
+	 * was a weird value, that gets preserved.
+	 *
+	 * We are okay with overflows here because they will be properly sanitized later.
+	 */
+	canonical_addr = vm_map_strip_addr(map, addr);
+	canonical_end  = vm_add_no_ubsan(canonical_addr, VM_SANITIZE_UNSAFE_UNWRAP(size_u));
+
+	VM_SANITIZE_UT_SET(*addr_u, canonical_addr);
+	VM_SANITIZE_UT_SET(*end_u, canonical_end);
+
+	return KERN_SUCCESS;
+}
+
+__attribute__((always_inline, warn_unused_result))
+kern_return_t
+vm_sanitize_validate_non_canonical_ut_addr(
+	vm_map_t                map,
+	vm_addr_struct_t        addr_u)
+{
+	vm_address_t addr = VM_SANITIZE_UNSAFE_UNWRAP(addr_u);
+	assert(map);
+
+	if (vm_map_strip_addr(map, addr) != addr) {
+#if HAS_MTE
+		mte_report_non_canonical_address((caddr_t)addr, map, __func__);
+#endif /* HAS_MTE */
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	return KERN_SUCCESS;
+}
+
+#endif /* CONFIG_KERNEL_TAGGING || HAS_MTE_EMULATION_SHIMS */
+
 __attribute__((always_inline, warn_unused_result))
 mach_vm_address_t
 vm_sanitize_addr(
@@ -400,6 +468,11 @@ vm_sanitize_size(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if ((flags & VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE) && *size != size_aligned) {
+		*size = 0;
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	if (!(flags & VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES)) {
 		*size = size_aligned;
 	}
@@ -477,47 +550,6 @@ vm_sanitize_addr_size(
 	if (flags & VM_SANITIZE_FLAGS_REALIGN_START) {
 		assert(!(flags & VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES));
 	}
-
-#if KASAN_TBI
-	if (flags & VM_SANITIZE_FLAGS_CANONICALIZE) {
-		*addr = vm_memtag_canonicalize_kernel(*addr);
-	}
-#endif /* KASAN_TBI */
-
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	/*
-	 * The next two flag checks are complementary.
-	 * VM_SANITIZE_FLAGS_STRIP_ADDR ensures that the address is stripped of
-	 * all its metadata bits (PAC, TBI, MTE). This is used by kernel entrypoints
-	 * that are expected to handle metadata-filled addresses to ease adoption.
-	 *
-	 * VM_SANITIZE_FLAGS_DENY_NON_CANONICAL_ADDR instead is for entrypoints where
-	 * we require the caller to have performed the necessary stripping of metadata
-	 * and we expect the address to be in its canonical form.
-	 *
-	 * Both these calls _require_ the map to be available, as that's used to determine
-	 * whether the user or kernel canonicalization rules should be applied (we cannot
-	 * rely on the TTBR selector bit - bit 55 - as that one is under caller's control).
-	 */
-	if (flags & VM_SANITIZE_FLAGS_STRIP_ADDR) {
-		/* strip sites must pass map. */
-		assert(map_or_null != NULL);
-		assert(!(flags & VM_SANITIZE_FLAGS_DENY_NON_CANONICAL_ADDR));
-		*addr = vm_map_strip_addr(map_or_null, *addr);
-	}
-
-	if (flags & VM_SANITIZE_FLAGS_DENY_NON_CANONICAL_ADDR) {
-		/* counter part to strip, also requires a valid map */
-		assert(map_or_null != NULL);
-		if (vm_map_strip_addr(map_or_null, *addr) != *addr) {
-#if HAS_MTE
-			mte_report_non_canonical_address((caddr_t)*addr, map_or_null, __func__);
-#endif /* HAS_MTE */
-			kr = KERN_INVALID_ARGUMENT;
-			goto unsanitary;
-		}
-	}
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 	addr_aligned = vm_map_trunc_page_mask(*addr, pgmask);
 
@@ -600,15 +632,16 @@ vm_sanitize_addr_size(
 	}
 
 	if (flags & VM_SANITIZE_FLAGS_CHECK_ADDR_RANGE) {
-#if defined(__arm64__) && MACH_ASSERT
+#if defined(__arm64__) && MACH_ASSERT && !__BUILDING_XNU_LIBRARY__
 		/*
 		 * Make sure that this fails noisily if someone adds support for large
 		 * VA extensions. With such extensions, this code will have to check
 		 * ID_AA64MMFR2_EL1 to get the actual max VA size for the system,
 		 * instead of assuming it is 48 bits.
+		 * This is excluded from unit-test build due to being EL1 only instruction
 		 */
 		assert((__builtin_arm_rsr64("ID_AA64MMFR2_EL1") & ID_AA64MMFR2_EL1_VARANGE_MASK) == 0);
-#endif /* defined(__arm64__) && MACH_ASSERT */
+#endif /* defined(__arm64__) && MACH_ASSERT && !__BUILDING_XNU_LIBRARY__ */
 		const uint64_t max_va_bits = 48;
 		const mach_vm_offset_t va_range_upper_bound = (1ULL << max_va_bits);
 		const mach_vm_offset_t va_mask = va_range_upper_bound - 1;

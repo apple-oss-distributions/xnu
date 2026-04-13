@@ -54,7 +54,7 @@
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOReportMacros.h>
 #include <IOKit/IOLib.h>
-#include <IOKit/IOKitKeys.h>
+#include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOUserServer.h>
 #include <IOKit/IOBSD.h>
 #include "IOKitKernelInternal.h"
@@ -69,6 +69,7 @@
 #include <sys/vnode_internal.h>
 #include <sys/fcntl.h>
 #include <os/log.h>
+#include <os/log_private.h>
 #include <pexpert/device_tree.h>
 #include <pexpert/protos.h>
 #include <AssertMacros.h>
@@ -98,6 +99,8 @@ __BEGIN_DECLS
 const char *processor_to_datastring(const char *prefix, processor_t target_processor);
 __END_DECLS
 #endif
+
+#define ARRAY_LEN(x) (sizeof (x) / sizeof (x[0]))
 
 #define kIOPMrootDomainClass    "IOPMrootDomain"
 #define LOG_PREFIX              "PMRD: "
@@ -766,6 +769,72 @@ private:
 	uint8_t                     coreGraphicsData;
 };
 
+struct IOPMAssertionLog {
+	IOPMAssertionLogData data;
+
+	mach_port_t  notificationPort;
+	uint64_t     notificationThreshold;
+
+public:
+	IOReturn
+	setNotificationThreshold(uint64_t threshold)
+	{
+		if (threshold > ARRAY_LEN(data.intervals)) {
+			return kIOReturnBadArgument;
+		}
+		notificationThreshold = threshold;
+		return kIOReturnSuccess;
+	}
+
+	IOReturn
+	setNotificationPort(mach_port_t port)
+	{
+		if (port != MACH_PORT_NULL && notificationPort != MACH_PORT_NULL) {
+			return kIOReturnExclusiveAccess;
+		}
+
+		notificationPort = port;
+		return kIOReturnSuccess;
+	}
+
+	void
+	notify()
+	{
+		if (notificationPort == MACH_PORT_NULL) {
+			return;
+		}
+
+		mach_msg_header_t msg;
+		msg.msgh_bits         = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
+		msg.msgh_id           = 0;
+		msg.msgh_size         = sizeof(mach_msg_header_t);
+		msg.msgh_local_port   = MACH_PORT_NULL;
+		msg.msgh_remote_port  = notificationPort;
+		(void)mach_msg_send_from_kernel_with_options(&msg, msg.msgh_size, MACH64_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
+	}
+
+	void
+	addInterval(IOPMDriverAssertionID id, uint64_t create_timestamp, uint64_t delete_timestamp)
+	{
+		IOPMAssertionLogData::Interval& interval = data.intervals[data.intervals_pos++ % ARRAY_LEN(data.intervals)];
+		interval.id = id;
+		interval.create_timestamp = create_timestamp;
+		interval.delete_timestamp = delete_timestamp;
+
+		if (notificationPort && notificationThreshold == (data.intervals_pos % ARRAY_LEN(data.intervals))) {
+			notify();
+		}
+	}
+
+	void
+	addName(IOPMDriverAssertionID id, const char *name)
+	{
+		IOPMAssertionLogData::Properties& prop = data.props[data.props_pos++ % ARRAY_LEN(data.props)];
+		prop.id = id;
+		strlcpy(prop.name, name, sizeof(prop.name));
+	}
+};
+
 /*
  * this should be treated as POD, as it's byte-copied around
  * and we cannot rely on d'tor firing at the right time
@@ -828,6 +897,10 @@ private:
 	IOPMDriverAssertionType     assertionsKernel;
 	IOPMDriverAssertionType     assertionsUser;
 	IOPMDriverAssertionType     assertionsCombined;
+
+	IOPMAssertionLog            assertionsLog;
+
+	friend class IOPMrootDomain;
 };
 
 OSDefineMetaClassAndFinalStructors(PMAssertionsTracker, OSObject);
@@ -2163,6 +2236,58 @@ IOPMrootDomain::setLockdownModeHibernation(uint32_t status)
 }
 #endif
 
+IOReturn
+IOPMrootDomain::getAssertionLog(IOPMAssertionLogData *outLog)
+{
+	if (!gIOPMWorkLoop->inGate()) {
+		return gIOPMWorkLoop->runAction(
+			OSMemberFunctionCast(IOWorkLoop::Action, this,
+			&IOPMrootDomain::getAssertionLog),
+			this, (void *)(uintptr_t) outLog);
+	}
+
+	if (!pmAssertions) {
+		return kIOReturnNotFound;
+	}
+
+	*outLog = pmAssertions->assertionsLog.data;
+	return kIOReturnSuccess;
+}
+
+IOReturn
+IOPMrootDomain::setAssertionLogNotificationPort(mach_port_t port)
+{
+	if (!gIOPMWorkLoop->inGate()) {
+		return gIOPMWorkLoop->runAction(
+			OSMemberFunctionCast(IOWorkLoop::Action, this,
+			&IOPMrootDomain::setAssertionLogNotificationPort),
+			this, (void *)(uintptr_t) port);
+	}
+
+	if (!pmAssertions) {
+		return kIOReturnNotFound;
+	}
+
+	return pmAssertions->assertionsLog.setNotificationPort(port);
+}
+
+IOReturn
+IOPMrootDomain::setAssertionLogNotificationThreshold(uint64_t threshold)
+{
+	if (!gIOPMWorkLoop->inGate()) {
+		return gIOPMWorkLoop->runAction(
+			OSMemberFunctionCast(IOWorkLoop::Action, this,
+			&IOPMrootDomain::setAssertionLogNotificationThreshold),
+			this, (void *)(uintptr_t) threshold);
+	}
+
+	if (!pmAssertions) {
+		return kIOReturnNotFound;
+	}
+
+	return pmAssertions->assertionsLog.setNotificationThreshold(threshold);
+}
+
 // MARK: -
 // MARK: Aggressiveness
 
@@ -2943,15 +3068,19 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 	notifierThread = current_thread();
 	switch (getPowerState()) {
 	case SLEEP_STATE: {
-		if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionForceWakeupBit)) {
-			IOLog("accelerate wake for assertion\n");
-			setWakeTime(mach_continuous_time());
+#if defined(__arm64__) && HIBERNATION
+		if (kIOHibernateStateInactive == gIOHibernateState)
+#endif /* defined(__arm64__) && HIBERNATION */
+		{
+			if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionForceWakeupBit)) {
+				IOLog("accelerate wake for assertion\n");
+				setWakeTime(mach_continuous_time());
+			}
+			if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionForceFullWakeupBit)) {
+				// Note: The scheduled RTC wakeup will trigger a full wake.
+				scheduleImmediateDebugWake();
+			}
 		}
-		if (kIOPMDriverAssertionLevelOn == getPMAssertionLevel(kIOPMDriverAssertionForceFullWakeupBit)) {
-			// Note: The scheduled RTC wakeup will trigger a full wake.
-			scheduleImmediateDebugWake();
-		}
-
 		if (kPMCalendarTypeInvalid != _aotWakeTimeCalendar.selector) {
 			secs = 0;
 			microsecs = 0;
@@ -3296,7 +3425,10 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 		aotShouldExit(false);
 		unsigned long newState = getRUN_STATE();
 		if (AOT_STATE == newState) {
-			_aotRunMode = gLPWFlags;
+			if (gLPWFlags) {
+				_aotRunMode = gLPWFlags | _aotWakeEventRunMode;
+			}
+			IOLog("_aotRunMode = 0x%llx|0x%llx\n", gLPWFlags, _aotWakeEventRunMode);
 		}
 		WAKEEVENT_UNLOCK();
 
@@ -6560,7 +6692,12 @@ IOPMrootDomain::handleOurPowerChangeStart(
 		// Clear stats about sleep
 
 		if (AOT_STATE == newPowerState) {
+			// Temporarily increase the capacity of the log subsystem to buffer logs in AOT.
+			os_log_adjust_buffering_capacity(LOG_BUFFERING_CAPACITY_MAX);
 			_pendingCapability = kIOPMSystemCapabilityAOT;
+		} else {
+			// Restore the maximum capacity of the log subsystem once waking to full wake.
+			os_log_adjust_buffering_capacity(LOG_BUFFERING_CAPACITY_DEFAULT);
 		}
 
 		if (AOT_STATE == currentPowerState) {
@@ -7838,11 +7975,43 @@ IOPMrootDomain::considerRunMode(IOService * service, uint64_t pmDriverClass)
 		// neutral
 		return 0;
 	}
+	if (pmDriverClass) {
+		IOLog("considerRunMode: %s 0x%llx 0x%llx\n", service->getName(), pmDriverClass, _aotRunMode);
+	}
 	promote = (0 != (_aotRunMode & pmDriverClass)) ? 1 : -1;
 	if (promote > 0) {
 		IOLog("IOPMRD: %s 0x%llx runmode to %s\n", service->getName(), pmDriverClass, (promote < 0) ? "OFF" : "ON");
 	}
 	return promote;
+}
+
+void
+IOPMrootDomain::handleRegisterPowerDriver(IOService * child)
+{
+	OSNumber * num;
+	IOService * userServer;
+	uint64_t driverClassFlags;
+	OSSharedPtr<OSObject> prop = child->copyProperty(kIOPMAOTAllowKey);
+
+	if (!prop || (NULL == (num = OSDynamicCast(OSNumber, prop.get())))) {
+		return;
+	}
+	driverClassFlags = num->unsigned64BitValue();
+
+	userServer = NULL;
+	if (child->reserved->uvars && (userServer = child->reserved->uvars->userServer)) {
+		WAKEEVENT_LOCK();
+		_aotWakeEventRunModeImpliesStorage |= driverClassFlags;
+		WAKEEVENT_UNLOCK();
+	}
+
+	IOLog("addPMDriverClass %s %llx\n", child->getName(), driverClassFlags);
+	if (driverClassFlags) {
+		child->addPMDriverClass(driverClassFlags);
+		if (userServer) {
+			userServer->addPMDriverClass(driverClassFlags);
+		}
+	}
 }
 
 //******************************************************************************
@@ -11207,6 +11376,7 @@ IOPMrootDomain::acceptSystemWakeEvents( uint32_t control )
 				_systemWakeEventsArray->flushCollection();
 			}
 		}
+		_aotWakeEventRunMode = 0;
 
 		// Remove stale WakeType property before system sleep
 		removeProperty(kIOPMRootDomainWakeTypeKey);
@@ -11395,6 +11565,17 @@ IOPMrootDomain::claimSystemWakeEvent(
 			strlcat(gWakeReasonString, " ", sizeof(gWakeReasonString));
 		}
 		strlcat(gWakeReasonString, reason, sizeof(gWakeReasonString));
+	}
+
+	if (_aotNow && _acceptSystemWakeEvents) {
+		uint64_t runModeBits = (kIOPMAOTModeRunModeMask & flags) >> kIOPMAOTModeRunModeShift;
+		if (runModeBits) {
+			if (_aotWakeEventRunModeImpliesStorage & runModeBits) {
+				runModeBits |= kIOPMDriverClassStorage;
+			}
+			IOLog("AOT wake event %s -> mode 0x%llx\n", reasonString->getCStringNoCopy(), runModeBits);
+			_aotWakeEventRunMode |= runModeBits;
+		}
 	}
 
 	WAKEEVENT_UNLOCK();
@@ -11687,6 +11868,7 @@ PMAssertionsTracker::pmAssertionsTracker( IOPMrootDomain *rootDomain )
 	me->assertionsCombined = 0;
 	me->assertionsArrayLock = IOLockAlloc();
 	me->tabulateProducerCount = me->tabulateConsumerCount = 0;
+	bzero(&me->assertionsLog, sizeof(me->assertionsLog));
 
 	assert(me->assertionsArray);
 	assert(me->assertionsArrayLock);
@@ -11743,7 +11925,7 @@ PMAssertionsTracker::tabulate(void)
 void
 PMAssertionsTracker::updateCPUBitAccounting( PMAssertStruct *assertStruct )
 {
-	AbsoluteTime now;
+	AbsoluteTime now, elapsed;
 	uint64_t     nsec;
 
 	if (((assertStruct->assertionBits & kIOPMDriverAssertionCPUBit) == 0) ||
@@ -11751,9 +11933,11 @@ PMAssertionsTracker::updateCPUBitAccounting( PMAssertStruct *assertStruct )
 		return;
 	}
 
-	now = mach_absolute_time();
-	SUB_ABSOLUTETIME(&now, &assertStruct->assertCPUStartTime);
-	absolutetime_to_nanoseconds(now, &nsec);
+	now = mach_continuous_time();
+	assertionsLog.addInterval(assertStruct->id, assertStruct->assertCPUStartTime, now);
+
+	elapsed = now - assertStruct->assertCPUStartTime;
+	absolutetime_to_nanoseconds(elapsed, &nsec);
 	assertStruct->assertCPUDuration += nsec;
 	assertStruct->assertCPUStartTime = 0;
 
@@ -11880,12 +12064,16 @@ PMAssertionsTracker::handleCreateAssertion(OSValueObject<PMAssertStruct> *newAss
 	ASSERT_GATED();
 
 	if (newAssertion) {
-		IOLockLock(assertionsArrayLock);
 		assertStruct = newAssertion->getMutableBytesNoCopy();
+
 		if ((assertStruct->assertionBits & kIOPMDriverAssertionCPUBit) &&
 		    (assertStruct->level == kIOPMDriverAssertionLevelOn)) {
-			assertStruct->assertCPUStartTime = mach_absolute_time();
+			assertStruct->assertCPUStartTime = mach_continuous_time();
 		}
+
+		assertionsLog.addName(assertStruct->id, assertStruct->ownerString->getCStringNoCopy());
+
+		IOLockLock(assertionsArrayLock);
 		assertionsArray->setObject(newAssertion);
 		IOLockUnlock(assertionsArrayLock);
 		newAssertion->release();
@@ -12014,7 +12202,7 @@ PMAssertionsTracker::handleSetAssertionLevel(
 	if ((assertStruct->assertionBits & kIOPMDriverAssertionCPUBit) &&
 	    (assertStruct->level != _level)) {
 		if (_level == kIOPMDriverAssertionLevelOn) {
-			assertStruct->assertCPUStartTime = mach_absolute_time();
+			assertStruct->assertCPUStartTime = mach_continuous_time();
 		} else {
 			updateCPUBitAccounting(assertStruct);
 		}

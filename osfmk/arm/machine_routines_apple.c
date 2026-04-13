@@ -34,10 +34,13 @@
 
 #include <arm/cpuid_internal.h>
 #include <arm/cpu_capabilities_public.h>
+#include <arm/cpu_data_internal.h>
 #include <arm/pmap.h>
 #include <arm64/proc_reg.h>
 #include <machine/machine_cpuid.h>
 #include <machine/machine_routines.h>
+#include <machine/static_if.h>
+#include <sys/random.h>
 #include <vm/vm_protos.h>
 
 #if APPLEVIRTUALPLATFORM
@@ -71,6 +74,7 @@ void
 configure_misc_apple_regs(bool is_boot_cpu)
 {
 #pragma unused(is_boot_cpu)
+
 
 }
 
@@ -264,5 +268,7 @@ ml_non_arm64e_user_jop_pid(void)
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 }
 #endif /* HAS_APPLE_PAC */
+
+
 
 

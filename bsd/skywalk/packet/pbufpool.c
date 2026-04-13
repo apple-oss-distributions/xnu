@@ -31,6 +31,9 @@
 #include <sys/sdt.h>
 #include <net/droptap.h>
 #include <kern/uipc_domain.h>
+#if HAS_MTE
+#include <arm64/mte_xnu.h>
+#endif /* HAS_MTE */
 
 static struct kern_pbufpool *pp_alloc(zalloc_flags_t);
 static void pp_free(struct kern_pbufpool *);
@@ -95,10 +98,6 @@ static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_hash, SKMEM_TAG_PBUFPOOL_HASH);
 
 #define SKMEM_TAG_PBUFPOOL_BFT_HASH  "com.apple.skywalk.pbufpool.bft.hash"
 static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_bft_hash, SKMEM_TAG_PBUFPOOL_BFT_HASH);
-
-#if HAS_MTE
-extern bool is_mte_enabled;
-#endif /* HAS_MTE */
 
 struct kern_pbufpool_u_htbl {
 	struct kern_pbufpool_u_bkt upp_hash[KERN_PBUFPOOL_U_HASH_SIZE];
@@ -605,7 +604,7 @@ pp_metadata_construct(struct __kern_quantum *kqum, struct __user_quantum *uqum,
 			}
 
 #if HAS_MTE && CONFIG_KERNEL_TAGGING
-			if (__probable(is_mte_enabled)) {
+			if (mte_kern_enabled()) {
 				/* Checking to ensure the object address is tagged */
 				ASSERT((vm_offset_t)kbuf !=
 				    vm_memtag_canonicalize_kernel((vm_offset_t)kbuf));
@@ -2028,7 +2027,7 @@ pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
 		}
 
 #if HAS_MTE && CONFIG_KERNEL_TAGGING
-		if (__probable(is_mte_enabled)) {
+		if (mte_kern_enabled()) {
 			/* Checking to ensure the object address is tagged */
 			ASSERT((vm_offset_t)kqum !=
 			    vm_memtag_canonicalize_kernel((vm_offset_t)kqum));
@@ -2155,7 +2154,7 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 		}
 
 #if HAS_MTE && CONFIG_KERNEL_TAGGING
-		if (__probable(is_mte_enabled)) {
+		if (mte_kern_enabled()) {
 			/* Checking to ensure the object address is tagged */
 			ASSERT((vm_offset_t)kpkt !=
 			    vm_memtag_canonicalize_kernel((vm_offset_t)kpkt));
@@ -2584,7 +2583,7 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp,
 		kbft = (kern_buflet_t)(void *)list;
 
 #if HAS_MTE && CONFIG_KERNEL_TAGGING
-		if (__probable(is_mte_enabled)) {
+		if (mte_kern_enabled()) {
 			/* Checking to ensure the object address is tagged */
 			ASSERT((vm_offset_t)kbft !=
 			    vm_memtag_canonicalize_kernel((vm_offset_t)kbft));

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2008 Apple,Inc. All rights reserved.
+ * Copyright (c) 2006, 2008, 2025 Apple,Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -24,6 +24,7 @@
 #ifndef _SPAWN_PRIVATE_H_
 #define _SPAWN_PRIVATE_H_
 
+#include <os/base.h>
 #include <spawn.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
@@ -123,6 +124,13 @@ int     posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr,
 int     posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr, const int policy) __SPI_AVAILABLE(macos(13.3), ios(16.4), tvos(16.4), watchos(9.4));
 
 int     posix_spawnattr_set_conclave_id_np(const posix_spawnattr_t *attr, const char *conclave_id) __SPI_AVAILABLE(macos(14.0), ios(17.0), tvos(17.0), watchos(10.0));
+
+OS_OPTIONS(posix_spawn_telemetry_flags, uint64_t,
+    PSA_TELEMETRY_BASE = 0x00,
+    PSA_TELEMETRY_PAGEIN = 0x01,
+    );
+
+int     posix_spawnattr_set_telemetry_np(posix_spawnattr_t *attr, posix_spawn_telemetry_flags_t flags, uint64_t argument) __SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4));
 
 __END_DECLS
 

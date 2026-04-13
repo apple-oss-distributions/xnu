@@ -166,6 +166,7 @@ T_DECL(vm_test_linkedit_permanent, "Tests that LINKEDIT mapping can't be overwri
 	T_LOG("==========================================");
 	T_EXPECT_EQ(ri1.is_submap, 0, "mapping should be nested");
 	/* get a temporary buffer */
+	vmaddr_buf = 0;
 	kr = mach_vm_allocate(mach_task_self(),
 	    &vmaddr_buf,
 	    vmsize_linkedit,
@@ -206,7 +207,8 @@ T_DECL(vm_test_linkedit_permanent, "Tests that LINKEDIT mapping can't be overwri
 	    &vmaddr_tmp,
 	    vmsize_linkedit,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
-	T_EXPECT_MACH_ERROR(kr, KERN_NO_SPACE, "vm_allocate(OVERWRITE) fails with KERN_NO_SPACE");
+	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE,
+	    "vm_allocate(OVERWRITE) fails with KERN_PROTECTION_FAILURE");
 	T_EXPECT_EQ(vmaddr_linkedit, vmaddr_tmp, "vmaddr is unchanged");
 	/* check protections again */
 	depth2 = 0;
@@ -240,7 +242,8 @@ T_DECL(vm_test_linkedit_permanent, "Tests that LINKEDIT mapping can't be overwri
 	    &cur_prot,
 	    &max_prot,
 	    VM_INHERIT_DEFAULT);
-	T_EXPECT_MACH_ERROR(kr, KERN_NO_SPACE, "vm_remap(OVERWRITE) fails with KERN_NO_SPACE");
+	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE,
+	    "vm_remap(OVERWRITE) fails with KERN_PROTECTION_FAILURE");
 	T_EXPECT_EQ(vmaddr_linkedit, vmaddr_tmp, "vmaddr is unchanged");
 	/* check protections again */
 	depth2 = 0;
@@ -268,8 +271,8 @@ T_DECL(vm_test_linkedit_permanent, "Tests that LINKEDIT mapping can't be overwri
 	    vmsize_linkedit,
 	    FALSE,                  /* set_maximum */
 	    VM_PROT_COPY | VM_PROT_READ | VM_PROT_WRITE);
-	T_EXPECT_MACH_ERROR(kr, KERN_NO_SPACE,
-	    "vm_protect(VM_PROT_COPY) fails with KERN_NO_SPACE");
+	T_EXPECT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE,
+	    "vm_protect(VM_PROT_COPY) fails with KERN_PROTECTION_FAILURE");
 	/* check protections again */
 	depth2 = 0;
 	count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;

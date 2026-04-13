@@ -118,11 +118,11 @@ kperf_system_memory_log(void)
 	extern unsigned int memorystatus_level;
 
 	BUF_DATA(PERF_MI_SYS_DATA, (uintptr_t)vm_page_free_count,
-	    (uintptr_t)vm_page_wire_count, (uintptr_t)vm_page_external_count,
+	    (uintptr_t)vm_page_wire_count, counter_load(&vm_page_external_count),
 	    (uintptr_t)(vm_page_active_count + vm_page_inactive_count +
 	    vm_page_speculative_count));
 	BUF_DATA(PERF_MI_SYS_DATA_2, (uintptr_t)vm_page_anonymous_count,
-	    (uintptr_t)vm_page_internal_count,
+	    counter_load(&vm_page_internal_count),
 	    (uintptr_t)vm_pageout_vminfo.vm_pageout_compressions,
 	    (uintptr_t)VM_PAGE_COMPRESSOR_COUNT);
 	BUF_DATA(PERF_MI_SYS_DATA_3,
@@ -131,7 +131,7 @@ kperf_system_memory_log(void)
 #else // CONFIG_SECLUDED_MEMORY
 	    0,
 #endif // !CONFIG_SECLUDED_MEMORY
-	    (uintptr_t)vm_page_purgeable_count,
+	    (uintptr_t)counter_load(&vm_page_purgeable_count),
 	    memorystatus_level);
 }
 

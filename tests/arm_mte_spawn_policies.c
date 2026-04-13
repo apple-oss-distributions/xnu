@@ -151,7 +151,7 @@ do_spawn_flags_test(
 T_DECL(non_mte_enabled_binary_enablement_test,
     "Verify enablement rules against a process tree that starts with "
     "a non-MTE enabled binary",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	do_entitlement_test(SPAWN_HELPER_WITHOUT_ENTITLEMENT, DO_NOT_EXPECT_MTE);
 }
@@ -159,7 +159,7 @@ T_DECL(non_mte_enabled_binary_enablement_test,
 T_DECL(mte_enabled_binary_enablement_test,
     "Verify enablement rules against a process tree that starts with "
     "a MTE-enabled binary.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	do_entitlement_test(SPAWN_HELPER_WITH_ENTITLEMENT, EXPECT_MTE);
 }
@@ -167,7 +167,7 @@ T_DECL(mte_enabled_binary_enablement_test,
 T_DECL(mte_opted_out_binary_enablement_test,
     "Verify enablement rules against a process tree that starts with "
     "a MTE-opted-out binary.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	T_SKIP("skip until Monorail doesn't resign binaries fooling our ID checks");
 	do_entitlement_test(HARDENED_PROCESS_TOP_LEVEL_ONLY_AND_IN_AMFI_MTE_OPT_OUT_HELPER, DO_NOT_EXPECT_MTE);
@@ -182,7 +182,7 @@ T_DECL(mte_opted_out_binary_enablement_test,
 T_DECL(mte_legacy_spawn_api_default_behavior,
     "Call posix_spawnattr_set_use_sec_transition_shims_np() and verify that "
     "MTE is enabled AND inheritance is present.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	/* spawn flags and inheritance take precedence over the entitlement state */
 	for (int i = 0; i < MTE_TOTAL_ENABLEMENT_TESTS; i++) {
@@ -207,7 +207,7 @@ T_DECL(mte_legacy_spawn_api_default_behavior,
 T_DECL(mte_legacy_spawn_api_disable_flag_development,
     "Call posix_spawnattr_set_use_sec_transition_shims_np() passing the"
     "POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE flag and verify that MTE is disabled.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,
     XNU_T_META_SOC_SPECIFIC) {
 	uint16_t sec_flags = POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE;
@@ -244,7 +244,7 @@ T_DECL(mte_legacy_spawn_api_disable_flag_development,
 T_DECL(mte_legacy_spawn_api_disable_flag_release,
     "Call posix_spawnattr_set_use_sec_transition_shims_np() passing the"
     "POSIX_SPAWN_SECFLAG_EXPLICIT_DISABLE flag and verify that on RELEASE we fail the call.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_REQUIRES_RELEASE_KERNEL,
     XNU_T_META_SOC_SPECIFIC) {
 	posix_spawnattr_t attr;
@@ -268,7 +268,7 @@ T_DECL(mte_legacy_spawn_api_disable_flag_release,
  */
 T_DECL(first_party_dext_spawns_with_mte,
     "Ensure first-party dexts receive MTE",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	/* Given a first-party binary signed with com.apple.developer.driverkit */
 	pid_t target_pid;
@@ -293,7 +293,7 @@ T_DECL(first_party_dext_spawns_with_mte,
 T_DECL(mte_double_entitlement_setting_failure,
     "Execute a binary which has both the com.apple.developer and com.apple.security"
     " set of entitlements and verify that we fail execution.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	pid_t child_pid = 0;
 	/* We should not get to execute the binary at all, so no need to have the right arguments. */

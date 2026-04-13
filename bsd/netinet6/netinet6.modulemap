@@ -1,4 +1,4 @@
-module Darwin.netinet6 [system] {
+module Darwin.netinet6 {
   #ifdef XNU_KERNEL_PRIVATE
   // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.

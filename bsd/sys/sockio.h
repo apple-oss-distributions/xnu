@@ -200,7 +200,7 @@
 
 #define SIOCGIFDIRECTLINK _IOWR('i', 222, struct ifreq) /* get DIRECTLINK */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/sockio_private.h>
 #endif /* PRIVATE */
 

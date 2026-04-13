@@ -2129,6 +2129,13 @@ ipc_right_copyin(
 	bool deadok = !!(flags & IPC_OBJECT_COPYIN_FLAGS_DEADOK);
 	bool allow_imm_send = !!(flags & IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
 
+	/*
+	 * This is a temporary fix to allow re-sending a connection port after
+	 * pseudo receive. We need to fix this properly. See rdar://164492988.
+	 */
+	allow_imm_send |= (bits & MACH_PORT_TYPE_RECEIVE) &&
+	    IP_VALID(port) && ip_is_connection_port(port);
+
 	if (flags & IPC_OBJECT_COPYIN_FLAGS_DEST_EXTRA_MOVE) {
 		assert((flags & IPC_OBJECT_COPYIN_FLAGS_DEST_EXTRA_COPY) == 0);
 		assert(msgt_name == MACH_MSG_TYPE_MOVE_SEND);
@@ -2144,7 +2151,7 @@ ipc_right_copyin(
 
 	assert(is_active(space));
 
-	/* Only allow send_once disposition on certain ports */
+	/* On certain port types (reply ports), only allow SEND_ONCE dispositions */
 	if (IP_VALID(port) && ip_is_reply_port(port) &&
 	    !MACH_MSG_TYPE_PORT_ANY_SEND_ONCE(msgt_name)) {
 		mach_port_guard_exception(name,
@@ -2593,9 +2600,24 @@ ipc_right_copyout_any_send(
 	}
 	ip_label_put(port, &label);
 
+	/*
+	 * A caller that copies out an immovable send right for a new entry
+	 * must demonstrate sufficient awareness of what they're doing.
+	 */
+	if ((bits & IE_BITS_IMMOVABLE_SEND) &&
+	    !(flags & IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND) &&
+	    IE_BITS_TYPE(bits) == MACH_PORT_TYPE_NONE) {
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_IMMOVABLE_SEND_RIGHT_CREATION,
+			space,
+			0,
+			0,
+			IP_NULL,
+			0);
+	}
+
 	switch (msgt_name) {
 	case MACH_MSG_TYPE_PORT_SEND_ONCE:
-
 		assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_NONE);
 		assert(IE_BITS_UREFS(bits) == 0);
 		assert(port->ip_sorights > 0);

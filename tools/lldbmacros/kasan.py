@@ -414,11 +414,11 @@ class ClassicMemObjectProvider(object):
         except:
             pass
 
-        ranges = kern.globals.kmem_ranges
+        ranges = kern.globals.kmem_slabs
         for i in range(1, GetEnumValue('vm_map_range_id_t', 'KMEM_RANGE_ID_MAX') + 1):
-            if addr < unsigned(ranges[i].min_address):
+            if addr < unsigned(ranges[i].vgos_range.min_address):
                 continue
-            if addr >= unsigned(ranges[i].max_address):
+            if addr >= unsigned(ranges[i].vgos_range.max_address):
                 continue
             return VMMemObject(addr)
 

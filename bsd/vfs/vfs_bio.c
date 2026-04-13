@@ -3791,7 +3791,7 @@ allocbuf(buf_t bp, int size)
 					} else {
 						bp->b_datap = (uintptr_t)NULL;
 						kmem_alloc(kernel_map, (vm_offset_t *)&bp->b_datap, desired_size,
-						    KMA_KOBJECT | KMA_DATA | KMA_NOFAIL,
+						    KMA_KOBJECT | KMA_DATA_SHARED | KMA_NOFAIL,
 						    VM_KERN_MEMORY_FILE);
 						CLR(bp->b_flags, B_ZALLOC);
 					}
@@ -3805,7 +3805,7 @@ allocbuf(buf_t bp, int size)
 					/* reallocate to a bigger size */
 					bp->b_datap = (uintptr_t)NULL;
 					kmem_alloc(kernel_map, (vm_offset_t *)&bp->b_datap, desired_size,
-					    KMA_KOBJECT | KMA_DATA | KMA_NOFAIL,
+					    KMA_KOBJECT | KMA_DATA_SHARED | KMA_NOFAIL,
 					    VM_KERN_MEMORY_FILE);
 					bcopy(elem, (caddr_t)bp->b_datap, bp->b_bufsize);
 					kmem_free(kernel_map, (vm_offset_t)elem, bp->b_bufsize);
@@ -3823,7 +3823,7 @@ allocbuf(buf_t bp, int size)
 				SET(bp->b_flags, B_ZALLOC);
 			} else {
 				kmem_alloc(kernel_map, (vm_offset_t *)&bp->b_datap, desired_size,
-				    KMA_KOBJECT | KMA_DATA | KMA_NOFAIL,
+				    KMA_KOBJECT | KMA_DATA_SHARED | KMA_NOFAIL,
 				    VM_KERN_MEMORY_FILE);
 			}
 		}

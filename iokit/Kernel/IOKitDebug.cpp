@@ -1021,7 +1021,6 @@ IOTrackingLeakScan(void * refcon)
 			is = ml_set_interrupts_enabled(false);
 			clock_interval_to_deadline(10, kMillisecondScale, &deadline);
 		}
-
 		ppn = kernel_pmap_present_mapping(vaddr, &vincr, &vphysaddr);
 		// check noencrypt to avoid VM structs (map entries) with pointers
 		if (ppn && (!pmap_valid_page(ppn) || (!ref->zoneSize && pmap_is_noencrypt(ppn)))) {

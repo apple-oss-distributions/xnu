@@ -70,7 +70,7 @@ static void get_error_attributes(vnode_t, struct attrlist *, uint64_t, user_addr
     size_t, int, caddr_t, vfs_context_t) __attribute__((noinline));
 
 static int getvolattrlist(vfs_context_t, vnode_t, struct attrlist *, user_addr_t,
-    size_t, uint64_t, enum uio_seg, int) __attribute__((noinline));
+    size_t, uint64_t, enum uio_seg, int, int) __attribute__((noinline));
 
 static int get_direntry(vfs_context_t, vnode_t, struct fd_vn_data *, int *,
     struct direntry **) __attribute__((noinline));
@@ -991,7 +991,7 @@ getattrlist_findnamecomp(const char *mn, const char **np, ssize_t *nl)
 static int
 getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
     user_addr_t attributeBuffer, size_t bufferSize, uint64_t options,
-    enum uio_seg segflg, int is_64bit)
+    enum uio_seg segflg, int is_64bit, int is_fast_statfs)
 {
 	struct vfs_attr vs = {};
 	struct vnode_attr va;
@@ -1056,6 +1056,20 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		}
 	}
 
+#if CONFIG_MACF
+	/*
+	 * Now that we have the root vnode (mountpoint), check getattrlist permission
+	 * on it to prevent bypassing file-read-metadata enforcement for volume attributes.
+	 */
+	if (!is_fast_statfs) {
+		error = mac_vnode_check_getattrlist(ctx, vp, alp, options);
+		if (error != 0) {
+			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: MAC framework denied getattrlist on mountpoint vnode, error %d", error);
+			goto out;
+		}
+	}
+#endif
+
 	/*
 	 * Set up the vfs_attr structure and call the filesystem.
 	 */
@@ -1063,6 +1077,25 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: setup for request failed");
 		goto out;
 	}
+
+	/* Set up the vnode_attr structure and authorize for common attributes */
+	{
+		kauth_action_t action;
+		ssize_t dummy_size;
+
+		if ((error = getattrlist_setupvattr(alp, &va, &dummy_size, &action,
+		    proc_is64bit(vfs_context_proc(ctx)), (vp->v_type == VDIR),
+		    (options & FSOPT_ATTR_CMN_EXTENDED) != 0)) != 0) {
+			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: vnode setup for volume request failed");
+			goto out;
+		}
+		/* Note: vp is now the root vnode after substitution above */
+		if ((error = vnode_authorize(vp, NULL, action, ctx)) != 0) {
+			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: volume authorization failed/denied");
+			goto out;
+		}
+	}
+
 	if (vs.f_active != 0) {
 		/* If we're going to ask for f_vol_name, allocate a buffer to point it at */
 		if (VFSATTR_IS_ACTIVE(&vs, f_vol_name)) {
@@ -2681,7 +2714,7 @@ struct _attrlist_paths {
 static errno_t
 calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
     ssize_t *varsizep, struct _attrlist_paths *pathsp, const char **vnamep,
-    const char **cnpp, ssize_t *cnlp, char *pathbuf)
+    const char **cnpp, ssize_t *cnlp, char *pathbuf, int is_nofirmlinkpath)
 {
 	int error = 0;
 
@@ -2744,7 +2777,7 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 			}
 		}
 
-		err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, pathbuf, (int)perfix_len, 0);
+		err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, pathbuf, (int)perfix_len, is_nofirmlinkpath ? BUILDPATH_NO_FIRMLINK : 0);
 		if (err) {
 			error = err;
 			goto out;
@@ -2840,6 +2873,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	int return_valid;
 	int pack_invalid;
 	int is_realdev;
+	int is_nofirmlinkpath;
 	int alloc_local_buf;
 	const int use_fork = options & FSOPT_ATTR_CMN_EXTENDED;
 	size_t attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
@@ -2868,6 +2902,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	return_valid = (alp->commonattr & ATTR_CMN_RETURNED_ATTRS) ? 1 : 0;
 	pack_invalid = (options & FSOPT_PACK_INVAL_ATTRS) ? 1 : 0;
 	is_realdev = options & FSOPT_RETURN_REALDEV ? 1 : 0;
+	is_nofirmlinkpath = options & FSOPT_NOFIRMLINKPATH ? 1 : 0;
 
 	if (pack_invalid) {
 		/* Generate a valid mask for post processing */
@@ -2914,7 +2949,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	/*
 	 * Compute variable-space requirements.
 	 */
-	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl, pathbuf);
+	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl, pathbuf, is_nofirmlinkpath);
 	if (error) {
 		goto out;
 	}
@@ -3334,7 +3369,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 		}
 		/* handle volume attribute request */
 		error = getvolattrlist(ctx, vp, alp, attributeBuffer,
-		    bufferSize, options, segflg, proc_is64);
+		    bufferSize, options, segflg, proc_is64, is_fast_statfs);
 		goto out;
 	}
 
@@ -3538,6 +3573,10 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	int32_t nameiflags;
 	int error;
 
+	if ((options & FSOPT_AUTOFIRMLINKPATH) && (options & FSOPT_NOFIRMLINKPATH)) {
+		return EINVAL;
+	}
+
 	nameiflags = 0;
 	/*
 	 * Look up the file.
@@ -3555,6 +3594,9 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	if (options & FSOPT_RESOLVE_BENEATH) {
 		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
 	}
+	if (options & FSOPT_UNIQUE) {
+		nd.ni_flag |= NAMEI_UNIQUE;
+	}
 
 	error = nameiat(&nd, fd);
 
@@ -3563,6 +3605,14 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	}
 
 	vp = nd.ni_vp;
+
+	if (options & FSOPT_AUTOFIRMLINKPATH) {
+		options &= ~FSOPT_AUTOFIRMLINKPATH;
+
+		if (!(nd.ni_flag & NAMEI_FIRMLINK_FOLLOWED)) {
+			options |= FSOPT_NOFIRMLINKPATH;
+		}
+	}
 
 	error = getattrlist_internal(ctx, vp, alp, attributeBuffer,
 	    bufferSize, options, segflg, NULL, NOCRED, nd.ni_pathbuf);
@@ -4744,12 +4794,24 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	}
 
 	/*
+	 * Serialize chmod/chown operations to prevent race conditions.
+	 * This must be done before vnode_authattr to prevent TOCTOU issues.
+	 */
+	int needs_busy = (al.commonattr & (ATTR_CMN_ACCESSMASK | ATTR_CMN_OWNERID | ATTR_CMN_GRPID)) != 0;
+	if (needs_busy) {
+		error = vnode_chmod_chown_busy(vp);
+		if (error) {
+			goto out;
+		}
+	}
+
+	/*
 	 * Validate and authorize.
 	 */
 	action = 0;
 	if ((va.va_active != 0LL) && ((error = vnode_authattr(vp, &va, &action, ctx)) != 0)) {
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: attribute changes refused: %d", error);
-		goto out;
+		goto out_unbusy;
 	}
 	/*
 	 * We can auth file Finder Info here.  HFS volume FinderInfo is really boot data,
@@ -4759,7 +4821,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 		if (al.volattr & ATTR_VOL_INFO) {
 			if (vp->v_tag != VT_HFS) {
 				error = EINVAL;
-				goto out;
+				goto out_unbusy;
 			}
 		} else {
 			action |= KAUTH_VNODE_WRITE_EXTATTRIBUTES;
@@ -4768,7 +4830,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 
 	if ((action != 0) && ((error = vnode_authorize(vp, NULL, action, ctx)) != 0)) {
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: authorization failed");
-		goto out;
+		goto out_unbusy;
 	}
 
 	/*
@@ -4784,7 +4846,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	if ((fndrinfo != NULL) && !(al.volattr & ATTR_VOL_INFO) &&
 	    (al.commonattr & ATTR_CMN_ACCESSMASK) && !(va.va_mode & S_IWUSR)) {
 		if ((error = setattrlist_setfinderinfo(vp, fndrinfo, ctx)) != 0) {
-			goto out;
+			goto out_unbusy;
 		}
 		fndrinfo = NULL;  /* it was set here so skip setting below */
 	}
@@ -4794,7 +4856,7 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	 */
 	if ((va.va_active != 0LL) && ((error = vnode_setattr(vp, &va, ctx)) != 0)) {
 		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: filesystem returned %d", error);
-		goto out;
+		goto out_unbusy;
 	}
 
 #if CONFIG_MACF
@@ -4813,13 +4875,13 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 #define HFS_SET_BOOT_INFO   (FCNTL_FS_SPECIFIC_BASE + 0x00005)
 				error = VNOP_IOCTL(vp, HFS_SET_BOOT_INFO, (caddr_t)fndrinfo, 0, ctx);
 				if (error != 0) {
-					goto out;
+					goto out_unbusy;
 				}
 			} else {
 				/* XXX should never get here */
 			}
 		} else if ((error = setattrlist_setfinderinfo(vp, fndrinfo, ctx)) != 0) {
-			goto out;
+			goto out_unbusy;
 		}
 	}
 
@@ -4837,24 +4899,28 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 #if CONFIG_MACF
 		error = mac_mount_check_setattr(ctx, vp->v_mount, &vs);
 		if (error != 0) {
-			goto out;
+			goto out_unbusy;
 		}
 #endif
 
 		if ((error = vfs_setattr(vp->v_mount, &vs, ctx)) != 0) {
 			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: setting volume name failed");
-			goto out;
+			goto out_unbusy;
 		}
 
 		if (!VFSATTR_ALL_SUPPORTED(&vs)) {
 			error = EINVAL;
 			VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: could not set volume name");
-			goto out;
+			goto out_unbusy;
 		}
 	}
 
 	/* all done and successful */
 
+out_unbusy:
+	if (needs_busy) {
+		vnode_chmod_chown_unbusy(vp);
+	}
 out:
 	kfree_data(user_buf, uap->bufferSize);
 	VFS_DEBUG(ctx, vp, "ATTRLIST - set returning %d", error);
@@ -4888,6 +4954,9 @@ setattrlist(proc_t p, struct setattrlist_args *uap, __unused int32_t *retval)
 	}
 	if (uap->options & FSOPT_RESOLVE_BENEATH) {
 		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
+	}
+	if (uap->options & FSOPT_UNIQUE) {
+		nd.ni_flag |= NAMEI_UNIQUE;
 	}
 	if ((error = namei(&nd)) != 0) {
 		goto out;
@@ -4936,6 +5005,9 @@ setattrlistat(proc_t p, struct setattrlistat_args *uap, __unused int32_t *retval
 	}
 	if (uap->options & FSOPT_RESOLVE_BENEATH) {
 		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
+	}
+	if (uap->options & FSOPT_UNIQUE) {
+		nd.ni_flag |= NAMEI_UNIQUE;
 	}
 	if ((error = nameiat(&nd, uap->fd)) != 0) {
 		goto out;

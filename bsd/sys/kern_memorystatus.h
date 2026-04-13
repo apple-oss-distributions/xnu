@@ -563,6 +563,8 @@ __options_closed_decl(memstat_get_kill_counts_options_t, int, {
 #define P_MEMSTAT_FROZEN_XPC_SERVICE              0x00100000   /* Process is an XPC service. Only used for freezer telemetry. */
 #define P_MEMSTAT_FROZEN_FOCAL_THAW               0x00200000 /* Process has been thawed while focal in the current freezer interval. Only used for freezer telemetry. */
 #define P_MEMSTAT_TEST_IMP_ASSERTION              0x00400000 /* Used for testing to pretend a process has an importance assertion. */
+#define P_MEMSTAT_NEEDS_DEMOTION                  0x00800000 /* Needs to be demoted from freezer band */
+#define P_MEMSTAT_INTERNAL_RANGE                  0x01000000 /* Has private memstat range entitlement */
 
 /*
  * p_memstat_relaunch_flags holds
@@ -678,6 +680,8 @@ void memorystatus_act_on_ios13extended_footprint_entitlement(proc_t p);
 void memorystatus_act_on_entitled_task_limit(proc_t p);
 void memorystatus_act_on_entitled_developer_task_limit(proc_t p);
 #endif /* __arm64__ */
+
+void memorystatus_set_proc_entitlement_flags(proc_t p);
 
 #endif /* CONFIG_MEMORYSTATUS */
 

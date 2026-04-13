@@ -9,7 +9,11 @@
 #include <stdio.h>
 #include <unistd.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"));
 
 #define TEST_ADDR "127.0.0.1"
 #define TEST_PORT 4242

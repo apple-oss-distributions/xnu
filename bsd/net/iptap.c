@@ -628,7 +628,7 @@ iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 			}
 
 			/* Need to check the packet flag in case full wake has been requested */
-			if (m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW || if_is_lpw_enabled(ifp)) {
+			if ((m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW) != 0 || is_net_lpw_mode()) {
 				hdr->pth_flags |= PTH_FLAG_LPW;
 			}
 			if (outgoing != 0) {

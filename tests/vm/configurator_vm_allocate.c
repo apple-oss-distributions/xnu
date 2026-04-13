@@ -46,17 +46,6 @@ T_GLOBAL_META(
 	);
 
 /*
- * rdar://143341561 vm_allocate(FIXED | OVERWRITE) sometimes provokes EXC_GUARD
- * Remove this when that bug is fixed.
- *
- * normal workaround: run vm_allocate with the EXC_GUARD catcher in place
- *     when the test is expected to hit rdar://143341561
- * Rosetta workaround: EXC_GUARD catcher doesn't work on Rosetta, so don't run
- *     vm_allocate when the test is expected to hit rdar://143341561
- */
-#define workaround_rdar_143341561 1
-
-/*
  * Update the checker list after a successful call to vm_allocate().
  * Any pre-existing checkers inside this range are deleted and replaced.
  */
@@ -79,28 +68,6 @@ checker_perform_successful_vm_allocate(
 	/* Free the old checkers and insert the new checker. */
 	checker_list_replace_range(checker_list, old_range, new_range);
 }
-
-#if workaround_rdar_143341561
-/*
- * Return true if flags has VM_FLAGS_FIXED
- * This is non-trivial because VM_FLAGS_FIXED is zero;
- * the real value is the absence of VM_FLAGS_ANYWHERE.
- */
-static bool
-is_fixed(int flags)
-{
-	static_assert(VM_FLAGS_FIXED == 0, "this test requires VM_FLAGS_FIXED be zero");
-	static_assert(VM_FLAGS_ANYWHERE != 0, "this test requires VM_FLAGS_ANYWHERE be nonzero");
-	return !(flags & VM_FLAGS_ANYWHERE);
-}
-
-/* Return true if flags has VM_FLAGS_FIXED and VM_FLAGS_OVERWRITE set. */
-static bool
-is_fixed_overwrite(int flags)
-{
-	return is_fixed(flags) && (flags & VM_FLAGS_OVERWRITE);
-}
-#endif  /* workaround_rdar_143341561 */
 
 static bool
 call_vm_allocate_and_expect_result(
@@ -163,6 +130,21 @@ call_vm_allocate_and_expect_no_space(
 	return call_vm_allocate_and_expect_result(start, size, flags_and_tag, KERN_NO_SPACE);
 }
 
+/*
+ * For FIXED | OVERWRITE atop permanent entries.
+ * old VM: expect KERN_NO_SPACE
+ * new VM: expect KERN_PROTECTION_FAILURE
+ */
+static bool
+call_vm_allocate_overwriting_permanent(
+	mach_vm_address_t start,
+	mach_vm_size_t size,
+	int flags_and_tag)
+{
+	return call_vm_allocate_and_expect_result(start, size, flags_and_tag,
+	           overwrite_permanent_error());
+}
+
 static test_result_t
 successful_vm_allocate_fixed(
 	checker_list_t *checker_list,
@@ -175,6 +157,68 @@ successful_vm_allocate_fixed(
 	checker_perform_successful_vm_allocate(checker_list, start, size, 0);
 
 	return verify_vm_state(checker_list, "after vm_allocate(FIXED)");
+}
+
+
+
+static test_result_t
+test_permanent_entry_fixed_overwrite_rangelocked(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+	assert(is_new_vm());
+
+#if workaround_rdar_143341561
+	if (isRosetta()) {
+		T_LOG("warning: can't work around rdar://143341561 on Rosetta; just passing instead");
+		return TestSucceeded;
+	}
+#endif
+
+	if (!call_vm_allocate_overwriting_permanent(
+		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
+		return TestFailed;
+	}
+
+	/*
+	 * No checker updates. Any fixed|overwrite atop a permanent entry
+	 * fails during preflight.
+	 */
+
+	return verify_vm_state(checker_list, "after vm_allocate(FIXED | OVERWRITE)");
+}
+
+static test_result_t
+test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size)
+{
+#if workaround_rdar_143341561
+	if (isRosetta()) {
+		T_LOG("warning: can't work around rdar://143341561 on Rosetta; just passing instead");
+		return TestSucceeded;
+	}
+#endif
+
+	uint16_t tag;
+
+	/*
+	 * Allocate with a tag matching the entry to the left,
+	 */
+	tag = get_user_tag_for_address(start - 1);
+	if (!call_vm_allocate_overwriting_permanent(
+		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
+		return TestFailed;
+	}
+
+	/*
+	 * No checker updates. Any fixed|overwrite atop a permanent entry
+	 * fails during preflight.
+	 */
+
+	return verify_vm_state(checker_list, "after vm_allocate(FIXED | OVERWRITE)");
 }
 
 
@@ -191,7 +235,7 @@ test_permanent_entry_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -215,7 +259,7 @@ test_permanent_before_permanent_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -240,7 +284,7 @@ test_permanent_before_allocation_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -268,7 +312,7 @@ test_permanent_before_allocation_fixed_overwrite_rdar144128567(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -296,7 +340,7 @@ test_permanent_before_hole_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -324,7 +368,7 @@ test_permanent_after_allocation_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -352,7 +396,7 @@ test_permanent_after_hole_fixed_overwrite(
 	}
 #endif
 
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)) {
 		return TestFailed;
 	}
@@ -387,7 +431,7 @@ test_permanent_entry_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -417,7 +461,7 @@ test_permanent_before_permanent_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -448,7 +492,7 @@ test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -475,7 +519,7 @@ test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags_rdar14412856
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -509,7 +553,7 @@ test_permanent_before_hole_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -543,7 +587,7 @@ test_permanent_after_allocation_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -577,7 +621,7 @@ test_permanent_after_hole_fixed_overwrite_with_neighbor_tags(
 	 * Allocate with a tag matching the entry to the left,
 	 */
 	tag = get_app_specific_user_tag_for_address(start - 1);
-	if (!call_vm_allocate_and_expect_no_space(
+	if (!call_vm_allocate_overwriting_permanent(
 		    start, size, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(tag))) {
 		return TestFailed;
 	}
@@ -674,6 +718,11 @@ T_DECL(vm_allocate_fixed,
 		.single_entry_2 = fixed_no_space,
 		.single_entry_3 = fixed_no_space,
 		.single_entry_4 = fixed_no_space,
+
+		.single_entry_nonnull_1 = fixed_no_space,
+		.single_entry_nonnull_2 = fixed_no_space,
+		.single_entry_nonnull_3 = fixed_no_space,
+		.single_entry_nonnull_4 = fixed_no_space,
 
 		.multiple_entries_1 = fixed_no_space,
 		.multiple_entries_2 = fixed_no_space,
@@ -794,6 +843,11 @@ T_DECL(vm_allocate_fixed_overwrite,
 		.single_entry_3 = successful_vm_allocate_fixed_overwrite,
 		.single_entry_4 = successful_vm_allocate_fixed_overwrite,
 
+		.single_entry_nonnull_1 = successful_vm_allocate_fixed_overwrite,
+		.single_entry_nonnull_2 = successful_vm_allocate_fixed_overwrite,
+		.single_entry_nonnull_3 = successful_vm_allocate_fixed_overwrite,
+		.single_entry_nonnull_4 = successful_vm_allocate_fixed_overwrite,
+
 		.multiple_entries_1 = successful_vm_allocate_fixed_overwrite,
 		.multiple_entries_2 = successful_vm_allocate_fixed_overwrite,
 		.multiple_entries_3 = successful_vm_allocate_fixed_overwrite,
@@ -836,13 +890,13 @@ T_DECL(vm_allocate_fixed_overwrite,
 		.cow_unreadable = successful_vm_allocate_fixed_overwrite,
 		.cow_unwriteable = successful_vm_allocate_fixed_overwrite,
 
-		.permanent_entry = test_permanent_entry_fixed_overwrite,
-		.permanent_before_permanent = test_permanent_before_permanent_fixed_overwrite,
-		.permanent_before_allocation = test_permanent_before_allocation_fixed_overwrite,
-		.permanent_before_allocation_2 = test_permanent_before_allocation_fixed_overwrite_rdar144128567,
-		.permanent_before_hole = test_permanent_before_hole_fixed_overwrite,
-		.permanent_after_allocation = test_permanent_after_allocation_fixed_overwrite,
-		.permanent_after_hole = test_permanent_after_hole_fixed_overwrite,
+		.permanent_entry = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_entry_fixed_overwrite,
+		.permanent_before_permanent = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_before_permanent_fixed_overwrite,
+		.permanent_before_allocation = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_before_allocation_fixed_overwrite,
+		.permanent_before_allocation_2 = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_before_allocation_fixed_overwrite_rdar144128567,
+		.permanent_before_hole = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_before_hole_fixed_overwrite,
+		.permanent_after_allocation = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_after_allocation_fixed_overwrite,
+		.permanent_after_hole = is_new_vm() ? test_permanent_entry_fixed_overwrite_rangelocked : test_permanent_after_hole_fixed_overwrite,
 
 		.single_submap_single_entry = successful_vm_allocate_fixed_overwrite,
 		.single_submap_single_entry_first_pages = successful_vm_allocate_fixed_overwrite,
@@ -913,6 +967,11 @@ T_DECL(vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.single_entry_3 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.single_entry_4 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 
+		.single_entry_nonnull_1 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
+		.single_entry_nonnull_2 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
+		.single_entry_nonnull_3 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
+		.single_entry_nonnull_4 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
+
 		.multiple_entries_1 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.multiple_entries_2 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.multiple_entries_3 = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
@@ -955,13 +1014,13 @@ T_DECL(vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.cow_unreadable = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.cow_unwriteable = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 
-		.permanent_entry = test_permanent_entry_fixed_overwrite_with_neighbor_tags,
-		.permanent_before_permanent = test_permanent_before_permanent_fixed_overwrite_with_neighbor_tags,
-		.permanent_before_allocation = test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags,
-		.permanent_before_allocation_2 = test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags_rdar144128567,
-		.permanent_before_hole = test_permanent_before_hole_fixed_overwrite_with_neighbor_tags,
-		.permanent_after_allocation = test_permanent_after_allocation_fixed_overwrite_with_neighbor_tags,
-		.permanent_after_hole = test_permanent_after_hole_fixed_overwrite_with_neighbor_tags,
+		.permanent_entry = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_entry_fixed_overwrite_with_neighbor_tags,
+		.permanent_before_permanent = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_before_permanent_fixed_overwrite_with_neighbor_tags,
+		.permanent_before_allocation = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags,
+		.permanent_before_allocation_2 = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_before_allocation_fixed_overwrite_with_neighbor_tags_rdar144128567,
+		.permanent_before_hole = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_before_hole_fixed_overwrite_with_neighbor_tags,
+		.permanent_after_allocation = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_after_allocation_fixed_overwrite_with_neighbor_tags,
+		.permanent_after_hole = is_new_vm() ? test_permanent_entry_fixed_overwrite_with_neighbor_tags_rangelocked : test_permanent_after_hole_fixed_overwrite_with_neighbor_tags,
 
 		.single_submap_single_entry = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,
 		.single_submap_single_entry_first_pages = successful_vm_allocate_fixed_overwrite_with_neighbor_tags,

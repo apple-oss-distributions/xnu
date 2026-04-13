@@ -101,9 +101,9 @@ The
 .Fa options
 parameter is a bit set that controls the behaviour of
 .Fn exchangedata .
-The following option bits are defined.
+The following option bits are defined:
 .
-.Bl -tag -width FSOPT_NOFOLLOW
+.Bl -tag -width FSOPT_NOFOLLOW_ANY
 .
 .It FSOPT_NOFOLLOW
 If this bit is set, 
@@ -114,6 +114,21 @@ the last component of
 or 
 .Fa path2 .
 .
+.It FSOPT_NOFOLLOW_ANY
+If this bit is set,
+.Fn exchangedata
+will not follow a symlink if it occurs as
+the last component of
+.Fa path1
+or
+.Fa path2 .
+In addition, if a symbolic link is encountered
+before the final component, an error is
+returned.
+.
+.It FSOPT_UNIQUE
+If this bit is set, the path lookup will fail if either target file has multiple
+hard links.
 .El
 .
 .Sh RETURN VALUES
@@ -188,6 +203,13 @@ You try to exchange something other than a regular file (for example, a director
 .
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to the file system.
+.
+.It Bq Er ENOTCAPABLE
+if FSOPT_UNIQUE was passed and either
+.Fa path1
+or
+.Fa path2
+has multiple hard links.
 .El
 .Pp
 .

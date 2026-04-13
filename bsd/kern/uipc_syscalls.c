@@ -945,7 +945,7 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 		}
 		error = copyin_user_iovec_array(uap->iov,
 		    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-		    uap->iovcnt, iovp);
+		    uap->iovcnt, iovp, uap->iovcnt);
 		if (error != 0) {
 			goto out;
 		}
@@ -1013,6 +1013,11 @@ connectit(struct socket *so, sockaddr_ref_t sa)
 	int error;
 
 	AUDIT_ARG(sockaddr, vfs_context_cwd(vfs_context_current()), sa);
+
+	socket_lock(so, 1);
+	socket_tracker_lookup_locked(so, sa);
+	socket_unlock(so, 1);
+
 #if CONFIG_MACF_SOCKET_SUBSET
 	if ((error = mac_socket_check_connect(kauth_cred_get(), so, sa)) != 0) {
 		return error;
@@ -1069,6 +1074,11 @@ connectitx(struct socket *so, sockaddr_ref_t src,
 	VERIFY(dst != NULL);
 
 	AUDIT_ARG(sockaddr, vfs_context_cwd(vfs_context_current()), dst);
+
+	socket_lock(so, 1);
+	socket_tracker_lookup_locked(so, dst);
+	socket_unlock(so, 1);
+
 #if CONFIG_MACF_SOCKET_SUBSET
 	if ((error = mac_socket_check_connect(kauth_cred_get(), so, dst)) != 0) {
 		return error;
@@ -1565,7 +1575,7 @@ sendmsg_nocancel(proc_ref_t p, struct sendmsg_nocancel_args *uap,
 		}
 		error = copyin_user_iovec_array(user_msg.msg_iov,
 		    is_p_64bit_process ? UIO_USERSPACE64 : UIO_USERSPACE32,
-		    user_msg.msg_iovlen, iovp);
+		    user_msg.msg_iovlen, iovp, user_msg.msg_iovlen);
 		if (error) {
 			goto done;
 		}
@@ -1689,7 +1699,7 @@ internalize_user_msg_x(struct user_msghdr *user_msg, uio_t *auiop, proc_ref_t p,
 		}
 		error = copyin_user_iovec_array(user_msg->msg_iov,
 		    is_p_64bit_process ? UIO_USERSPACE64 : UIO_USERSPACE32,
-		    user_msg->msg_iovlen, iovp);
+		    user_msg->msg_iovlen, iovp, user_msg->msg_iovlen);
 		if (error != 0) {
 			goto done;
 		}
@@ -2433,7 +2443,7 @@ recvmsg_nocancel(proc_ref_t p, struct recvmsg_nocancel_args *uap,
 	user_msg.msg_iov = CAST_USER_ADDR_T(iovp);
 	error = copyin_user_iovec_array(uiov,
 	    is_p_64bit_process ? UIO_USERSPACE64 : UIO_USERSPACE32,
-	    user_msg.msg_iovlen, iovp);
+	    user_msg.msg_iovlen, iovp, user_msg.msg_iovlen);
 	if (error) {
 		goto done;
 	}
@@ -2802,7 +2812,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		 * a new one
 		 */
 		if (auio != NULL) {
-			if (auio->uio_max_iovs <= user_msg.msg_iovlen) {
+			if (auio->uio_max_iovs >= user_msg.msg_iovlen) {
 				uio_reset_fast(auio, 0, spacetype, UIO_READ);
 			} else {
 				uio_free(auio);
@@ -2831,7 +2841,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 			goto done;
 		}
 		error = copyin_user_iovec_array(user_msg.msg_iov,
-		    spacetype, user_msg.msg_iovlen, iovp);
+		    spacetype, user_msg.msg_iovlen, iovp, user_msg.msg_iovlen);
 		if (error != 0) {
 			DBG_PRINTF("%s copyin_user_iovec_array() failed %d\n",
 			    __func__, error);
@@ -3484,7 +3494,7 @@ internalize_recv_msghdr_array(const void_ptr_t src, int spacetype, int direction
 			goto done;
 		}
 		error = copyin_user_iovec_array(user_msg->msg_iov,
-		    spacetype, user_msg->msg_iovlen, iovp);
+		    spacetype, user_msg->msg_iovlen, iovp, user_msg->msg_iovlen);
 		if (error) {
 			goto done;
 		}

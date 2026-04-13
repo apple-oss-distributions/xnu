@@ -10,8 +10,12 @@
 #include <darwintest_utils.h>
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.net"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("networking"),
     T_META_RUN_CONCURRENTLY(true),
-    T_META_ASROOT(true));
+    T_META_ASROOT(true),
+    T_META_OWNER("fernandes")
+    );
 
 T_DECL(PR_35136664_utun,
     "This bind a utun and close it without connecting", T_META_TAG_VM_PREFERRED)

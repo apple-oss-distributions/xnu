@@ -394,6 +394,8 @@ class KernelTarget(object):
                 value : a value object which has address as addr and type is type_str
         """
         sbv = self.globals.version.GetSBValue().CreateValueFromExpression(None,f"({type_str}){str(addr)}")
+        if not sbv.IsValid():
+            raise LookupError("Expression error: " + str(sbv)) # shows the error
 
         wanted_type = gettype(type_str)
         if sbv.GetType() != wanted_type:

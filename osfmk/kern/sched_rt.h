@@ -30,7 +30,6 @@
 #define _KERN_SCHED_RT_H_
 
 #include <kern/kern_types.h>
-#include <kern/sched_common.h>
 #include <kern/processor.h>
 #include <kern/sched_prim.h>
 
@@ -38,8 +37,6 @@ __BEGIN_DECLS
 
 #pragma mark - Constants and Tunables
 
-extern unsigned sched_rt_spill_policy;
-extern unsigned sched_rt_steal_policy;
 extern uint32_t rt_deadline_epsilon;
 extern uint32_t rt_constraint_threshold;
 extern int sched_rt_runq_strict_priority;

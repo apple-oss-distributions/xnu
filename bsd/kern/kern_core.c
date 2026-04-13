@@ -117,6 +117,7 @@ is_coredump_eligible(proc_t core_proc)
 		    core_proc->p_exit_reason->osr_namespace == OS_REASON_JETSAM)) {
 		return EPERM;
 	}
+
 	if (current_proc() != core_proc) {
 		panic("coredump for proc that is not current: %p)", core_proc);
 	}

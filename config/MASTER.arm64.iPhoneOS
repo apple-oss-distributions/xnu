@@ -65,15 +65,15 @@
 
 #  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp CPU_COUNTERS_BASE kperf PERF_EXTRAS_BASE ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEV ]
-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEBUG ]
-#  PERF_DBG_KASAN = [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEV ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEV config_memory_microstackshot ]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEBUG config_memory_microstackshot ]
+#  PERF_DBG_KASAN = [ PERF_DBG_BASE config_dtrace lock_stats zleaks alternate_debugger config_debug_syscall_rejection config_iotrace PERF_EXTRAS_DEV config_memory_microstackshot ]
 #if SOC_IS_VIRTUALIZED
 #  PARAVIRT_BASE =  [ config_pv_ticket ]
 #else
 #  PARAVIRT_BASE =  [ ]
 #endif
-#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_io_compression_stats phys_write_acct config_service_port_info PARAVIRT_BASE config_ledger_interval_max ]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_io_compression_stats phys_write_acct config_service_port_info PARAVIRT_BASE ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
 #  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_task_suspend_stats ]
 #  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_task_suspend_stats ]
@@ -81,7 +81,10 @@
 #  SCHED_RELEASE =  [ SCHED_BASE ]
 #  SCHED_DEV =      [ SCHED_BASE ]
 #  SCHED_DEBUG =    [ SCHED_BASE ]
-#if   MASTER_CONFIG_ENABLE_SPTM
+#if MASTER_CONFIG_ENABLE_KERNEL_TAG && MASTER_CONFIG_ENABLE_SPTM
+#  VM_EXTRA =       [ kernel_tagging ]
+#  VM_EXTRA_DEV =   [ ]
+#elif MASTER_CONFIG_ENABLE_SPTM
 #  VM_EXTRA =       [ ]
 #  VM_EXTRA_DEV =   [ ]
 #else

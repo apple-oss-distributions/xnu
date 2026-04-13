@@ -87,16 +87,34 @@
 #include <vm/vnode_pager.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
-#include <IOKit/IOReturn.h>     /* for kIOReturnNotPrivileged */
-#include <IOKit/IOBSD.h>        /* for IOVnodeHasEntitlement */
+#include <IOKit/IOReturn.h>          /* for kIOReturnNotPrivileged */
+#include <IOKit/IOBSD.h>             /* for IOVnodeHasEntitlement */
+#include <IOKit/IOPlatformExpert.h>  /* for PEReadNVRAMProperty */
 
 #include <os/log.h>
 #include <os/overflow.h>
 
 #include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 
 #include "kern_exec_internal.h"
+
+#if __arm64__
+#include <arm64/x86_64_compat.h>
+
+#if DEVELOPMENT || DEBUG
+/*
+ * CoreAnalytics event for tracking processes that attempt to use 4K pages
+ * without proper entitlements.
+ */
+CA_EVENT(missing_4k_entitlement,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), process_name,
+    CA_BOOL, has_4k_entitlement,
+    CA_BOOL, has_restricted_x86_64_entitlement,
+    CA_BOOL, has_unrestricted_x86_64_entitlement);
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* __arm64__ */
 
 #if APPLEVIRTUALPLATFORM
 #define ALLOW_FORCING_ARM64_32 1
@@ -679,6 +697,31 @@ grade_binary_override(cpu_type_t __unused exectype, cpu_subtype_t __unused execs
 	return -1;
 }
 
+#if __ARM_MIXED_PAGE_SIZE__
+// Internally gather telemetry instead of killing 4k processes that
+// don't satisfy requirements.  This will be removed before shipping.
+static bool
+fourk_fatal_mode_enabled(void)
+{
+#if DEVELOPMENT || DEBUG
+	uint64_t val = 0;
+	static const uint64_t X86_64_COMPAT_DEV_FATAL_MODE = 0x2;
+	unsigned int len = sizeof(val);
+
+	if (!PEReadNVRAMProperty("x86-64-compat-dev", &val, &len) ||
+	    !(len >= sizeof(val))) {
+		// NVRAM variable not set or invalid - default to non-fatal
+		return false;
+	}
+
+	return (val & X86_64_COMPAT_DEV_FATAL_MODE) != 0;
+#else
+	return true;
+#endif /* DEVELOPMENT || DEBUG */
+}
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
+
+
 load_return_t
 load_machfile(
 	struct image_params     *imgp,
@@ -706,6 +749,9 @@ load_machfile(
 	int64_t                 aslr_section_offset = 0;
 	kern_return_t           kret;
 	unsigned int            pmap_flags = 0;
+#if __ARM_MIXED_PAGE_SIZE__
+	bool                    deferred_4k_check = false;
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 
 	if (os_add_overflow(file_offset, macho_size, &total_size) ||
 	    total_size > file_size) {
@@ -729,14 +775,21 @@ load_machfile(
 		ledger_task = task;
 	}
 
-#if XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES
+#if __ARM_MIXED_PAGE_SIZE__ && XNU_TARGET_OS_OSX
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr* psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
 		if (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES) {
 			pmap_flags |= PMAP_CREATE_FORCE_4K_PAGES;
+
+			/*
+			 * Processes that are made 4k through the spawnattr must
+			 * satisfy extra conditions, some of which we can only
+			 * check later.
+			 */
+			deferred_4k_check = true;
 		}
 	}
-#endif /* XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGE */
+#endif /* __ARM_MIXED_PAGE_SIZE__ && XNU_TARGET_OS_OSX */
 
 	pmap = pmap_create_options(get_task_ledger(ledger_task),
 	    (vm_map_size_t) 0,
@@ -744,25 +797,27 @@ load_machfile(
 	if (pmap == NULL) {
 		return LOAD_RESOURCE;
 	}
-	map = vm_map_create_options(pmap, 0,
-	    vm_compute_max_offset(result->is_64bit_addr),
-	    VM_MAP_CREATE_PAGEABLE);
-
+	int vm_map_pageshift = PAGE_SHIFT;
 #if defined(__arm64__)
 	if (result->is_64bit_addr) {
 		/* enforce 16KB alignment of VM map entries */
-		vm_map_set_page_shift(map, SIXTEENK_PAGE_SHIFT);
+		vm_map_pageshift = SIXTEENK_PAGE_SHIFT;
 	} else {
-		vm_map_set_page_shift(map, page_shift_user32);
+		vm_map_pageshift = (int)page_shift_user32;
 	}
 #endif /* __arm64__ */
 
 #if PMAP_CREATE_FORCE_4K_PAGES
 	if (pmap_flags & PMAP_CREATE_FORCE_4K_PAGES) {
 		DEBUG4K_LIFE("***** launching '%s' as 4k *****\n", vp->v_name);
-		vm_map_set_page_shift(map, FOURK_PAGE_SHIFT);
+		vm_map_pageshift = FOURK_PAGE_SHIFT;
 	}
 #endif /* PMAP_CREATE_FORCE_4K_PAGES */
+	map = vm_map_create_with_page_shift(pmap, 0,
+	    vm_compute_max_offset(result->is_64bit_addr),
+	    vm_map_pageshift,
+	    VM_MAP_CREATE_DEFAULT);
+
 
 #ifndef CONFIG_ENFORCE_SIGNED_CODE
 	/* This turns off faulting for executable pages, which allows
@@ -826,8 +881,8 @@ load_machfile(
 	}
 
 	/*
-	 * From now on it's safe to query entitlements via the vnode interface. Let's get figuring
-	 * out whether we're a security relevant binary out of the way immediately.
+	 * From now on it's safe to query entitlements via the vnode interface.
+	 * Let's configure initial entitlement-based security state immediately.
 	 */
 	switch (exec_check_security_entitlement(imgp, HARDENED_PROCESS)) {
 	case EXEC_SECURITY_INVALID_CONFIG:
@@ -835,22 +890,140 @@ load_machfile(
 		return LOAD_BADMACHO;
 	case EXEC_SECURITY_ENTITLED: {
 		/*
-		 * Set the latest version of the hardened process version entitlement
-		 * if not specified
+		 * We are entitled to hardened process. Set the hardened process version.
+		 *
+		 * The order in which we check the version entitlement is:
+		 *     1. first, we look for the string-variant entitlement
+		 *     2. if not present, we look for the integer-variant entitlement
+		 *     3. if no version entitlement is specified at all,
+		 *        we set the latest version supported.
 		 */
-		uint64_t value;
-		if (IOVnodeGetIntegerEntitlement(imgp->ip_vp,
-		    (int64_t)imgp->ip_arch_offset, HARDENED_PROCESS_VERSION, &value)) {
-			result->hardened_process_version = (uint8_t)value;
+		uint64_t version_integer = 0;
+		char *version_string = NULL;
+		char *endptr;
+
+		if (IOVnodeIsEntitlementPresentWithAnyValue(imgp->ip_vp,
+		    (int64_t)imgp->ip_arch_offset, HARDENED_PROCESS_VERSION_STRING)) {
+			/*
+			 * String entitlement is present, attempt to
+			 * use that to set version_integer.
+			 */
+			version_string = IOVnodeGetEntitlement(imgp->ip_vp,
+			    (int64_t)imgp->ip_arch_offset, HARDENED_PROCESS_VERSION_STRING);
+
+			/*
+			 * If the string entitlement exists but
+			 * has an invalid type, fail the load.
+			 */
+			if (version_string == NULL) {
+				imgp->ip_free_map = map;
+				return LOAD_BADMACHO;
+			}
+
+			version_integer = (uint64_t)strtoul(version_string, &endptr, 10);
+			if (version_string == endptr ||
+			    *endptr != '\0' ||
+			    version_integer > UINT_MAX) {
+				/*
+				 * The string entitlement is invalid, fail the load.
+				 */
+				kfree_data(version_string, strlen(version_string) + 1);
+				version_string = NULL;
+				imgp->ip_free_map = map;
+				return LOAD_BADMACHO;
+			}
+
+			kfree_data(version_string, strlen(version_string) + 1);
+			version_string = NULL;
+		} else if (IOVnodeGetIntegerEntitlement(imgp->ip_vp,
+		    (int64_t)imgp->ip_arch_offset, HARDENED_PROCESS_VERSION, &version_integer)) {
+			/*
+			 * Integer entitlement is present, version_integer was
+			 * successfully set to the value it specifies.
+			 */
 		} else {
-			result->hardened_process_version = HARDENED_PROCESS_VERSION_LATEST;
+			/*
+			 * No version entitlement at all, set the latest supported version.
+			 */
+			version_integer = HARDENED_PROCESS_VERSION_LATEST;
 		}
+
+		/*
+		 * In case an entitlement version attempts to set the version to
+		 * a value bigger than the latest supported version, we default
+		 * to the latest.
+		 */
+		result->hardened_process_version =
+		    (version_integer <= HARDENED_PROCESS_VERSION_LATEST) ?
+		    (uint8_t)version_integer : HARDENED_PROCESS_VERSION_LATEST;
+
 		break;
 	}
 	case EXEC_SECURITY_NOT_ENTITLED:
 		result->hardened_process_version = HARDENED_PROCESS_DISABLED;
 		break;
 	}
+
+#define INFLATE_ENTITLEMENT_TO_RESULT_FLAG(entitlement, flag_field_name) \
+	switch (exec_check_security_entitlement(imgp, entitlement)) { \
+	        case EXEC_SECURITY_INVALID_CONFIG: \
+	/* Bail out if any of these entitlements are invalid */ \
+	                imgp->ip_free_map = map; \
+	                return LOAD_BADMACHO; \
+	        case EXEC_SECURITY_ENTITLED: \
+	                result->flag_field_name = true; \
+	                break; \
+	        case EXEC_SECURITY_NOT_ENTITLED: \
+	                result->flag_field_name = false; \
+	                break; \
+	        default: \
+	                __builtin_unreachable(); \
+    }
+
+	INFLATE_ENTITLEMENT_TO_RESULT_FLAG(IPC_CONTAINMENT_VESSEL, is_ipc_containment_vessel);
+
+#if __ARM_MIXED_PAGE_SIZE__
+	bool (^check_ent)(const char * entitlement_name) = ^bool (const char * entitlement_name) {
+		return IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset, entitlement_name);
+	};
+
+	if (deferred_4k_check &&
+	    !check_ent("com.apple.private.4k-pages") &&
+	    !ml_satisfies_x86_64_requirements(check_ent)) {
+		// Didn't satisfy any condition for 4k.
+
+		// Check fatal mode
+		bool fatal_mode = fourk_fatal_mode_enabled();
+
+#if DEVELOPMENT || DEBUG
+		// Collect entitlement status for telemetry
+		bool has_4k_ent = check_ent("com.apple.private.4k-pages");
+		bool has_restricted_x86_64_ent = check_ent("com.apple.developer.cross-architecture-support");
+		bool has_unmanaged_x86_64_ent = check_ent("com.apple.developer.cross-architecture-support-unmanaged");
+
+		// Send telemetry
+		ca_event_t event = CA_EVENT_ALLOCATE(missing_4k_entitlement);
+		CA_EVENT_TYPE(missing_4k_entitlement) * event_data = event->data;
+		strlcpy(event_data->process_name, imgp->ip_vp->v_name, CA_PROCNAME_LEN);
+		event_data->has_4k_entitlement = has_4k_ent;
+		event_data->has_restricted_x86_64_entitlement = has_restricted_x86_64_ent;
+		event_data->has_unrestricted_x86_64_entitlement = has_unmanaged_x86_64_ent;
+		CA_EVENT_SEND(event);
+#endif /* DEVELOPMENT || DEBUG */
+
+		// Log error for immediate visibility
+		os_log_error(OS_LOG_DEFAULT, "%s: binary '%s' does not satisfy requirements for 4k page size (fatal_mode=%d)",
+		    __func__, imgp->ip_vp->v_name, fatal_mode);
+
+		// Handle fatal vs non-fatal mode
+		if (fatal_mode) {
+			// Fatal mode: deny execution
+			imgp->ip_free_map = map;
+			return LOAD_BADMACHO;
+		}
+		// Non-fatal mode: continue execution (telemetry captured)
+	}
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 
 #if __x86_64__
 	/*
@@ -905,6 +1078,12 @@ load_machfile(
 	}
 
 #if __arm64__
+#if __ARM_MIXED_PAGE_SIZE__
+	if (ml_satisfies_x86_64_requirements(check_ent)) {
+		/* entitled to a soft page zero */
+		enforce_hard_pagezero = false;
+	}
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 	if (enforce_hard_pagezero && result->is_64bit_addr && (header->cputype == CPU_TYPE_ARM64)) {
 		/* 64 bit ARM binary must have "hard page zero" of 4GB to cover the lower 32 bit address space */
 		if (vm_map_has_hard_pagezero(map, 0x100000000) == FALSE) {
@@ -1826,12 +2005,12 @@ validate_potential_simulator_binary(
 #if __x86_64__
 	/* Allow 32 bit exec only for simulator binaries */
 	if (bootarg_no32exec && imgp != NULL && exectype == CPU_TYPE_X86) {
-		if (imgp->ip_simulator_binary == IMGPF_SB_DEFAULT) {
+		if ((imgp->ip_flags2 & IMGPF2_SB_MASK) == IMGPF2_SB_DEFAULT) {
 			boolean_t simulator_binary = check_if_simulator_binary(imgp, file_offset, macho_size);
-			imgp->ip_simulator_binary = simulator_binary ? IMGPF_SB_TRUE : IMGPF_SB_FALSE;
+			imgp->ip_flags2 |= simulator_binary ? IMGPF2_SB_TRUE : IMGPF2_SB_FALSE;
 		}
 
-		if (imgp->ip_simulator_binary != IMGPF_SB_TRUE) {
+		if ((imgp->ip_flags2 & IMGPF2_SB_MASK) != IMGPF2_SB_TRUE) {
 			return LOAD_BADARCH;
 		}
 	}
@@ -1962,6 +2141,7 @@ check_if_simulator_binary(
 				break;
 			}
 			if (bvc->platform == PLATFORM_IOSSIMULATOR ||
+			    bvc->platform == PLATFORM_XROSSIMULATOR ||
 			    bvc->platform == PLATFORM_WATCHOSSIMULATOR) {
 				simulator_binary = TRUE;
 			}
@@ -2421,6 +2601,40 @@ load_segment(
 			    PAGE_MASK_64);
 			vm_end_aligned = vm_end;
 		}
+#if __ARM_MIXED_PAGE_SIZE__
+		bool (^check_ent)(const char * entitlement_name) = ^bool (const char * entitlement_name) {
+			return IOVnodeHasEntitlement(imgp->ip_vp, (int64_t)imgp->ip_arch_offset, entitlement_name);
+		};
+		if (ml_satisfies_x86_64_requirements(check_ent)) {
+			/* use only a 1-page "hard" PAGEZERO */
+			ret = vm_map_raise_min_offset(map, vm_map_page_size(map));
+			if (ret != KERN_SUCCESS) {
+				DEBUG4K_ERROR("LOAD_FAILURE ret 0x%x\n", ret);
+				return LOAD_FAILURE;
+			}
+			/* and a "soft" PAGEZERO for the rest */
+			if (vm_size + slide > vm_map_page_size(map)) {
+				vm_map_offset_t tmp_start, tmp_end;
+				tmp_start = vm_map_page_size(map);
+				tmp_end = vm_size + slide;
+				kr = map_segment(map,
+				    tmp_start,
+				    tmp_end,
+				    vmk_flags,
+				    MEMORY_OBJECT_CONTROL_NULL,
+				    0,
+				    tmp_end - tmp_start,
+				    scp->initprot,
+				    scp->maxprot,
+				    result);
+				if (kr != KERN_SUCCESS) {
+					DEBUG4K_ERROR("LOAD_NOSPACE 0x%llx 0x%llx kr 0x%x\n", (unsigned long long)tmp_start, (uint64_t)(tmp_end - tmp_start), kr);
+					return LOAD_NOSPACE;
+				}
+			}
+			return LOAD_SUCCESS;
+		}
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 		ret = vm_map_raise_min_offset(map,
 		    vm_end_aligned);
 		if (ret != KERN_SUCCESS) {
@@ -3254,7 +3468,7 @@ load_dylinker(
 
 	/* Allocate wad-of-data from heap to reduce excessively deep stacks */
 
-	dyld_data = kalloc_type(typeof(*dyld_data), Z_WAITOK);
+	dyld_data = kalloc_type(typeof(*dyld_data), Z_WAITOK | Z_NOFAIL);
 	header = &dyld_data->__header;
 	myresult = &dyld_data->__myresult;
 	macho_data = &dyld_data->__macho_data;
@@ -3334,7 +3548,7 @@ load_dylinker(
 	}
 
 	struct vnode_attr *va;
-	va = kalloc_type(struct vnode_attr, Z_WAITOK | Z_ZERO);
+	va = kalloc_type(struct vnode_attr, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	VATTR_INIT(va);
 	VATTR_WANTED(va, va_fsid64);
 	VATTR_WANTED(va, va_fsid);

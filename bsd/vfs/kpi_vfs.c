@@ -121,8 +121,14 @@
 #include <mach/memory_object_types.h>
 #include <mach/task.h>
 
+#include <vm/vm_memory_entry_xnu.h>
+
 #if CONFIG_MACF
 #include <security/mac_framework.h>
+#endif
+
+#if FDESC
+#include <miscfs/devfs/fdesc.h>
 #endif
 
 #if NULLFS
@@ -2337,6 +2343,49 @@ vnode_memoryobject(vnode_t vp)
 	return ubc_getobject(vp, UBC_FLAGS_NONE);
 }
 
+ipc_port_t
+vnode_memoryentry(vnode_t vp,
+    uint64_t offset,
+    uint64_t *size)
+{
+	ipc_port_t me_port = IPC_PORT_NULL;
+	kern_return_t kr;
+	memory_object_control_t mo_control;
+	memory_object_offset_t  mo_offset;
+	memory_object_offset_t  end_offset;
+	memory_object_size_t    mo_size;
+
+	if ((vp == NULL) || (vnode_getwithref(vp) != 0)) {
+		return IPC_PORT_NULL;
+	}
+	mo_control = ubc_getobject(vp, UBC_FLAGS_NONE);
+	if (mo_control == NULL) {
+		goto error;
+	}
+	mo_size = *size;
+	if (!mo_size) {
+		mo_size = (memory_object_size_t) ubc_getsize(vp);
+		*size = mo_size;
+	}
+	if (os_add_overflow(mo_size, offset, &end_offset)) {
+		goto error;
+	}
+	if (end_offset > (memory_object_size_t) ubc_getsize(vp)) {
+		goto error;
+	}
+	mo_offset = trunc_page(offset);
+	mo_size = end_offset - mo_offset;
+	kr = mach_memory_object_control_memory_entry_64(mo_control, mo_offset, mo_size,
+	    VM_PROT_READ, &me_port);
+	if (kr != KERN_SUCCESS) {
+		me_port = IPC_PORT_NULL;
+	}
+
+error:
+	vnode_put(vp);
+	return me_port;
+}
+
 /* is vnode_t a blkdevice and has a FS mounted on it */
 int
 vnode_ismountedon(vnode_t vp)
@@ -3395,6 +3444,14 @@ vnode_getbackingvnode(vnode_t in_vp, vnode_t* out_vpp)
 	if (out_vpp) {
 		*out_vpp = NULLVP;
 	}
+
+#if FDESC
+	/* Check if this is a devfs fdesc vnode */
+	if (in_vp && vnode_tag(in_vp) == VT_FDESC) {
+		return fdesc_getbackingvnode(in_vp, out_vpp);
+	}
+#endif
+
 #if NULLFS
 	return nullfs_getbackingvnode(in_vp, out_vpp);
 #else
@@ -3584,9 +3641,9 @@ VNOP_COMPOUND_OPEN(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, int32_t fla
 #if CONFIG_APPLEDOUBLE
 		if (!NATIVE_XATTR(dvp)) {
 			/*
-			 * Remove stale Apple Double file (if any).
+			 * Remove existing Apple Double file (if any).
 			 */
-			xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 0);
+			xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 1);
 		}
 #endif /* CONFIG_APPLEDOUBLE */
 		/* On create, provide kqueue notification */
@@ -3635,9 +3692,9 @@ VNOP_CREATE(vnode_t dvp, vnode_t * vpp, struct componentname * cnp, struct vnode
 #if CONFIG_APPLEDOUBLE
 	if (_err == 0 && !NATIVE_XATTR(dvp)) {
 		/*
-		 * Remove stale Apple Double file (if any).
+		 * Remove existing Apple Double file (if any).
 		 */
-		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 0);
+		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 1);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
 
@@ -5035,9 +5092,9 @@ VNOP_MKDIR(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp,
 #if CONFIG_APPLEDOUBLE
 	if (_err == 0 && !NATIVE_XATTR(dvp)) {
 		/*
-		 * Remove stale Apple Double file (if any).
+		 * Remove existing Apple Double file (if any).
 		 */
-		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 0);
+		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 1);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
 
@@ -5072,9 +5129,9 @@ VNOP_COMPOUND_MKDIR(struct vnode *dvp, struct vnode **vpp, struct nameidata *ndp
 #if CONFIG_APPLEDOUBLE
 	if (_err == 0 && !NATIVE_XATTR(dvp)) {
 		/*
-		 * Remove stale Apple Double file (if any).
+		 * Remove existing Apple Double file (if any).
 		 */
-		xattrfile_remove(dvp, ndp->ni_cnd.cn_nameptr, ctx, 0);
+		xattrfile_remove(dvp, ndp->ni_cnd.cn_nameptr, ctx, 1);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
 
@@ -5182,9 +5239,9 @@ VNOP_COMPOUND_RMDIR(struct vnode *dvp, struct vnode **vpp, struct nameidata *ndp
 #if CONFIG_APPLEDOUBLE
 	if (_err == 0 && !NATIVE_XATTR(dvp)) {
 		/*
-		 * Remove stale Apple Double file (if any).
+		 * Remove existing Apple Double file (if any).
 		 */
-		xattrfile_remove(dvp, ndp->ni_cnd.cn_nameptr, ctx, 0);
+		xattrfile_remove(dvp, ndp->ni_cnd.cn_nameptr, ctx, 1);
 	}
 #endif
 
@@ -5411,9 +5468,9 @@ VNOP_SYMLINK(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp,
 #if CONFIG_APPLEDOUBLE
 	if (_err == 0 && !NATIVE_XATTR(dvp)) {
 		/*
-		 * Remove stale Apple Double file (if any).  Posts its own knotes
+		 * Remove existing Apple Double file (if any).  Posts its own knotes
 		 */
-		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 0);
+		xattrfile_remove(dvp, cnp->cn_nameptr, ctx, 1);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
 

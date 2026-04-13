@@ -158,13 +158,13 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 	targetCPU->initCPU(bootb);
 
 #if defined(__arm64__)
-	if (!bootb && (targetCPU->getCPUNumber() == (UInt32)master_cpu)) {
+	if (!bootb && (targetCPU->getCPUNumber() == (UInt32)boot_cpu_id)) {
 		assert(ml_is_quiescing());
 	}
 
 	if (ml_get_interrupts_enabled()) {
 		assert(bootb);
-		assert3u(targetCPU->getCPUNumber(), ==, (UInt32)master_cpu);
+		assert3u(targetCPU->getCPUNumber(), ==, (UInt32)boot_cpu_id);
 		/*
 		 * We want to assert that the AIC self-IPI actually arrives
 		 * here, but after much trials and tribulations, I found that
@@ -192,7 +192,7 @@ PE_cpu_machine_quiesce(cpu_id_t target)
 {
 	IOCPU *targetCPU = (IOCPU*)target;
 #if defined(__arm64__)
-	if (targetCPU->getCPUNumber() == (UInt32)master_cpu) {
+	if (targetCPU->getCPUNumber() == (UInt32)boot_cpu_id) {
 		assert(ml_is_quiescing());
 	}
 #endif /* defined(__arm64__) */
@@ -297,7 +297,7 @@ IOCPUSleepKernel(void)
 		// We make certain that the bootCPU is the last to sleep
 		// We'll skip it for now, and halt it after finishing the
 		// non-boot CPU's.
-		if (target->getCPUNumber() == (UInt32)master_cpu) {
+		if (target->getCPUNumber() == (UInt32)boot_cpu_id) {
 			bootCPU = target;
 		} else if (target->getCPUState() == kIOCPUStateRunning) {
 #if defined(__x86_64__)
@@ -309,7 +309,7 @@ IOCPUSleepKernel(void)
 	}
 
 	assert(bootCPU != NULL);
-	assert(cpu_number() == master_cpu);
+	assert(cpu_number() == boot_cpu_id);
 
 	console_suspend();
 
@@ -348,7 +348,7 @@ IOCPUSleepKernel(void)
 		target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
 
 		// Skip the already-woken boot CPU.
-		if (target->getCPUNumber() != (UInt32)master_cpu) {
+		if (target->getCPUNumber() != (UInt32)boot_cpu_id) {
 			if (target->getCPUState() == kIOCPUStateRunning) {
 				panic("Spurious wakeup of cpu %u", (unsigned int)(target->getCPUNumber()));
 			}

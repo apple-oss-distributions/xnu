@@ -39,8 +39,8 @@ T_DECL(vm_memory_entry_parent,
 	mach_port_t       named_me_port, child_me_port;
 	kern_return_t     kr;
 
+	src_addr = 0;
 	size = KB16 * 2;
-
 	kr = mach_vm_allocate(mach_task_self(), &src_addr, size, VM_FLAGS_ANYWHERE);
 	T_EXPECT_MACH_SUCCESS(kr, "vm_allocate");
 
@@ -82,6 +82,7 @@ T_DECL(vm_memory_entry_parent,
 	/*
 	 * Map in our child memory entry.
 	 */
+	mapped_addr = 0;
 	kr = mach_vm_map(mach_task_self(),
 	    &mapped_addr,
 	    child_entry_size,
@@ -114,7 +115,7 @@ T_DECL(vm_memory_entry_parent,
 
 T_DECL(vm_memory_entry_named_reuse_parent,
     "Test that we re-use the parent entry when possible with MAP_MEM_NAMED_REUSE",
-    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
+    T_META_RUN_CONCURRENTLY(true))
 {
 	/*
 	 * Test setup - get a memory entry, then map it into the address space.
@@ -125,7 +126,7 @@ T_DECL(vm_memory_entry_named_reuse_parent,
 	    KB16, VM_PROT_READ | VM_PROT_WRITE, 0, &parent_handle);
 	T_ASSERT_MACH_SUCCESS(kr, "make parent_handle return value");
 
-	mach_vm_address_t alloced_addr;
+	mach_vm_address_t alloced_addr = 0;
 	kr = mach_vm_map(mach_task_self(), &alloced_addr, KB16, 0, VM_FLAGS_ANYWHERE,
 	    parent_handle, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	T_ASSERT_MACH_SUCCESS(kr, "map parent_handle");
@@ -146,12 +147,12 @@ T_DECL(vm_memory_entry_named_reuse_parent,
 
 T_DECL(vm_memory_entry_parent_copy,
     "Test that making a memory entry fails if the parent is a copy entry",
-    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
+    T_META_RUN_CONCURRENTLY(true))
 {
 	/*
 	 * Test setup - allocate a region and get a copy entry to it.
 	 */
-	mach_vm_address_t alloced_addr;
+	mach_vm_address_t alloced_addr = 0;
 	kern_return_t kr = mach_vm_allocate(mach_task_self(), &alloced_addr, KB16, VM_FLAGS_ANYWHERE);
 	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_allocate");
 
@@ -176,7 +177,7 @@ T_DECL(vm_memory_entry_parent_copy,
 
 T_DECL(vm_memory_entry_from_parent_entry_insufficient_permissions,
     "Test that parent permissions are correctly checked in mach_make_memory_entry_from_parent_entry",
-    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
+    T_META_RUN_CONCURRENTLY(true))
 {
 	/*
 	 * Test setup - create parent entry with read-only permissions.
@@ -208,7 +209,7 @@ T_DECL(vm_memory_entry_from_parent_entry_insufficient_permissions,
 	T_EXPECT_MACH_SUCCESS(kr, "return value with mask_permissions");
 
 	// To validate the permissions, attempt to map it into the address space
-	mach_vm_address_t alloced_addr;
+	mach_vm_address_t alloced_addr = 0;
 	kr = mach_vm_map(mach_task_self(), &alloced_addr, KB16, 0, VM_FLAGS_ANYWHERE,
 	    parent_handle, 0, false, VM_PROT_READ | VM_PROT_WRITE,
 	    VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);

@@ -1,20 +1,49 @@
+/*
+ * Copyright (c) 2021-2025 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+
 #include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <mach/mach_vm.h>
 #include <math.h>
 #include <ptrauth.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
-
-#include <mach/mach_vm.h>
 
 /*
  * ecc_test_helper is a convenience binary to induce various ECC errors
  * it's used by ECC-related tests: XNU unit tests and end-2-end coreos-tests
  */
 
+/* Wait for a potential async ECC report, 1 second should be plenty. */
+#define ECC_SLEEP (1)
 
 int verbose = 0;
 #define PRINTF(...) \
@@ -119,8 +148,17 @@ volatile struct data {
  */
 volatile double zero = 0.0;
 
+static void
+ecc_sysctl(const char *name, void *data, size_t size)
+{
+	int err = sysctlbyname(name, NULL, NULL, data, size);
+	if (err) {
+		printf("Failed to call sysctl %s: (%d) %s\n", name, errno, strerror(errno));
+		exit(errno);
+	}
+}
 
-typedef enum TestCase {
+typedef enum command {
 	Yfoo,
 	Xfoo,
 	Yatan,
@@ -130,46 +168,73 @@ typedef enum TestCase {
 	Xcopyout,
 	Xmmap_clean,
 	Xmmap_dirty,
+	Xclean_write,
+	Xdirty_write,
+
 	Xwired,
-	kernel,
+	Xkernel,
 	Xmte_active,
 
-	BAD_TEST_CASE
-} TestCase;
+	rmdb,
+
+	BAD_COMMAND
+} command;
 
 typedef struct{
 	char *key;
-	enum TestCase val;
-} testcase_t;
+	enum command val;
+	const char *description;
+} command_t;
 
-#define testCase(name) {#name, name}
+#define define_command(name, description) {#name, name, description}
 
-static testcase_t testcases[] = {
-	testCase(Yfoo),
-	testCase(Xfoo),
-	testCase(Yatan),
-	testCase(Xatan),
-	testCase(Xclean),
-	testCase(Xdirty),
-	testCase(Xmmap_clean),
-	testCase(Xmmap_dirty),
-	testCase(Xcopyout),
-	testCase(kernel),
-	testCase(Xwired),
-	testCase(Xmte_active)
+static command_t commands[] = {
+	define_command(Yfoo, "invoke a local TEXT function."),
+	define_command(Xfoo, "inject ECC and invoke a local TEXT function."),
+	define_command(Yatan, "invoke a shared library TEXT function."),
+	define_command(Xatan, "inject ECC and invoke a shared library TEXT function."),
+	define_command(Xclean, "read from a clean DATA page."),
+	define_command(Xdirty, "read from a dirty DATA page."),
+	define_command(Xmmap_clean, "read from a clean mmap'd page"),
+	define_command(Xmmap_dirty, "read from a dirty mmap'd page"),
+	define_command(Xcopyout, "inject an ECC error and then trigger it via a copyout"),
+	define_command(Xclean_write, "write to a clean DATA page."),
+	define_command(Xdirty_write, "write to a dirty DATA page."),
+	define_command(Xwired, "inject an ECC on wired page"),
+	define_command(Xkernel, "inject an ECC on kernel page"),
+	define_command(Xmte_active, "inject an ECC on MTE active tag storage page"),
+	define_command(rmdb, "<path> - removes the file at <path>, entitled to delete ECC dbs"),
 };
 
-TestCase
-get_testcase(char *key)
+command
+get_command(char *key)
 {
 	int i;
-	for (i = 0; i < sizeof(testcases) / sizeof(testcase_t); i++) {
-		testcase_t elem = testcases[i];
+	for (i = 0; i < sizeof(commands) / sizeof(command_t); i++) {
+		command_t elem = commands[i];
 		if (strcmp(elem.key, key) == 0) {
 			return elem.val;
 		}
 	}
-	return BAD_TEST_CASE;
+	return BAD_COMMAND;
+}
+
+void
+print_commands(void)
+{
+	printf("Valid commands:\n");
+	for (int i = 0; i < sizeof(commands) / sizeof(command_t); i++) {
+		command_t elem = commands[i];
+		printf("\t%s - %s \n", elem.key, elem.description);
+	}
+}
+
+void
+usage(void)
+{
+	printf("usage: [-v] <command> [<args>]\n");
+	printf("\n");
+	print_commands();
 }
 
 int
@@ -178,38 +243,32 @@ main(int argc, char **argv)
 	void *addr;
 	int *page;
 	size_t s = sizeof(addr);
-	int err;
 	static volatile int readval;
 	static volatile double readval_d;
+	int cmd = 1;
 
 	/*
 	 * check for -v for verbose output
 	 */
 	if (argc > 1 && strcmp(argv[1], "-v") == 0) {
 		verbose = 1;
+		cmd = 2;
 	}
 
 	/*
 	 * needs to run as root for sysctl
 	 */
 	if (geteuid() != 0) {
-		printf("Test not running as root, exiting\n");
+		printf("Helper not running as root, exiting\n");
 		exit(-1);
 	}
 
-	/*
-	 * The argument determines what test to try.
-	 * "Y{name}" is a test, "X{name}" does the test after injecting an ECC error
-	 *
-	 * Tests:
-	 * "foo" - invoke a local TEXT function.
-	 * "atan" - invoke a shared library TEXT function.
-	 * "clean" - read from a clean DATA page
-	 * "dirty" - read from a dirty DATA page
-	 * "mmap_clean" - read from a clean mmap'd page
-	 * "mmap_dirty" - read from a dirty mmap'd page
-	 */
-	switch (get_testcase(argv[argc - 1])) {
+	if (cmd >= argc) {
+		usage();
+		exit(EXIT_FAILURE);
+	}
+
+	switch (get_command(argv[cmd])) {
 	case Yfoo:
 		foo();
 		break;
@@ -218,7 +277,7 @@ main(int argc, char **argv)
 		foo();
 
 		addr = (void *)ptrauth_strip(&foo, ptrauth_key_function_pointer);
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
 
 		PRINTF("Calling foo() after injection\n");
 		foo();
@@ -233,7 +292,7 @@ main(int argc, char **argv)
 		PRINTF("Warmup call to atan(0) is %g\n", readval_d);
 
 		addr = (void *)ptrauth_strip(&atan, ptrauth_key_function_pointer);
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
 
 		readval_d = atan(zero);
 		PRINTF("After injection, atan(0) is %g\n", readval_d);
@@ -243,7 +302,7 @@ main(int argc, char **argv)
 		PRINTF("initial read of clean x.big_data[35] is %d\n", readval);
 
 		addr = (void *)&x.big_data[35];
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
 
 		readval = x.big_data[35];
 		PRINTF("After injection, read of x.big_data[35] is %d\n", readval);
@@ -253,7 +312,7 @@ main(int argc, char **argv)
 		PRINTF("initial read of dirty x.big_data[36] is %d\n", x.big_data[36]);
 
 		addr = (void *)&x.big_data[36];
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
 
 		readval = x.big_data[36];
 		PRINTF("After injection, read of x.big_data[36] is %d\n", readval);
@@ -265,7 +324,7 @@ main(int argc, char **argv)
 		readval = *page;
 		PRINTF("initial read of clean page %p is %d\n", page, readval);
 
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &page, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &page, s);
 
 		readval = *page;
 		PRINTF("second read of page is %d\n", readval);
@@ -277,70 +336,124 @@ main(int argc, char **argv)
 		*page = 0xFFFF;
 		PRINTF("initial read of dirty page %p is %d (after write)\n", page, *page);
 
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &page, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &page, s);
 
 		readval = *page;
 		PRINTF("second read of page is %d\n", readval);
 		break;
-	case Xcopyout:
+	case Xcopyout: {
 		x.big_data[37] = (int)random();
 		PRINTF("initial read of dirty x.big_data[37] is %d\n", x.big_data[37]);
 
 		addr = (void *)&x.big_data[37];
-		err = sysctlbyname("vm.inject_ecc_copyout", NULL, NULL, &addr, s);
-		if (err) {
-			PRINTF("copyout return %d\n", err);
-			exit(err);
-		}
+		ecc_sysctl("vm.ecc.inject_error_copyout", &addr, s);
 
 		readval = x.big_data[37];
 		PRINTF("After injection, read of dirty x.big_data[37] is %d\n", readval);
 		break;
-	case Xwired:
+	}
+	case Xclean_write: {
+		volatile int *addr = &x.big_data[38];
+
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
+
+		/*
+		 * We expect this access to trigger a sync abort, since the
+		 * underlying page is not dirty we can just reload the page
+		 * transparently to the process.
+		 */
+		*addr = 0xecc;
+
+		printf("After injection and a write, we read %d\n", *addr);
+		break;
+	}
+	case Xdirty_write: {
+		volatile int *addr = &x.big_data[39];
+
+		*addr = 0xecc;
+		printf("initial read of dirty memory is %d\n", *addr);
+
+		ecc_sysctl("vm.ecc.inject_error_va", &addr, s);
+
+		*addr = 0xeccecc;
+
+		sleep(ECC_SLEEP);
+		PRINTF("Slept for %d second(s)\n", ECC_SLEEP);
+
+		/*
+		 * After wrtiting to poisoned memory we expect a SError which
+		 * will disconnect the page. If we read that memory again we
+		 * will get a SIGBUS.
+		 */
+		printf("After injection, we read %d\n", *addr);
+
+		break;
+	}
+	case Xwired: {
 		page = (int *) mmap(NULL, PAGE_SIZE * 3, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
 		page = (int *)((char *)page + PAGE_SIZE);
 		PRINTF("page addr %p\n", page);
 		if (mlock(page, PAGE_SIZE)) {
 			printf("Failed to wire, errno: %d", errno);
-			exit(0);
+			exit(EXIT_SUCCESS);
 		}
 
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &page, s);
+		ecc_sysctl("vm.ecc.inject_error_va", &page, s);
 
 		readval = *page;
-		PRINTF("wire trigger value: %d", readval);
+		PRINTF("wire trigger value: %d\n", readval);
+
+		sleep(ECC_SLEEP);
+
+		PRINTF("Slept for %u second(s), did not get an ECC.\n", ECC_SLEEP);
 
 		break;
-	case kernel:
+	}
+	case Xkernel: {
 		PRINTF("Inducing ECC on kernel page\n");
 
-		addr = (void *)1;         /* used to flag some kernel page */
-		err = sysctlbyname("vm.inject_ecc", NULL, NULL, &addr, s);
-		exit(0);
-	case Xmte_active:
-		PRINTF("Inducing ECC on MTE active storage page\n");
-		err = sysctlbyname("vm.inject_ecc_mte_active", NULL, NULL, NULL, 0);
-		if (err) {
-			printf("Failed to call sysctl vm.inject_ecc_mte_active: (%d) %s\n",
-			    errno, strerror(errno));
-			exit(errno);
-		}
-		exit(0);
+		ecc_sysctl("vm.ecc.inject_error_kernel", NULL, 0);
 
 		break;
-	case BAD_TEST_CASE:
-		printf("Unknown test case\n\n");
-		printf("Valid tests:\n");
-		for (int i = 0; i < sizeof(testcases) / sizeof(testcase_t); i++) {
-			testcase_t elem = testcases[i];
-			printf("%d. %s\n", i + 1, elem.key);
-		}
-		printf("\nY{name} is a test, X{name} does the test after injecting an ECC error\n");
+	}
+	case Xmte_active: {
+		PRINTF("Inducing ECC on MTE active storage page\n");
 
-		exit(1);
+		ecc_sysctl("vm.ecc.inject_error_mte_active", NULL, 0);
+
+		break;
+	}
+	case rmdb:
+		if (cmd + 1 >= argc) {
+			printf("usage: rmdb <path>\n");
+			exit(EXIT_FAILURE);
+		}
+
+		const char *path = argv[cmd + 1];
+		int rc;
+
+		/**
+		 * The iSCPreboot filesystem apparently does not know how to report different
+		 * errors, all I ever got both from access() and remove() was -1 or 0.
+		 * Not entitled -- -1. No file -- -1.
+		 * Keep that in mind if you are trying to debug.
+		 */
+		rc = remove(path);
+		if (rc == 0) {
+			printf("removed: %s\n", path);
+		} else {
+			printf("couldn't remove: %s, reason: %d\n", path, rc);
+			exit(EXIT_FAILURE);
+		}
+		break;
+
+	case BAD_COMMAND:
+		printf("Unknown command\n\n");
+		print_commands();
+		exit(EXIT_FAILURE);
 
 		break;
 	}
 
-	exit(0);
+	exit(EXIT_SUCCESS);
 }

@@ -1786,17 +1786,27 @@ T_DECL(cseg_waitinfo, "test that threads stuck in the compressor report correct 
 	};
 	__block uint64_t thread_id = 0;
 
-	dispatch_queue_t dq = dispatch_queue_create("com.apple.stackshot.cseg_waitinfo", NULL);
-	dispatch_semaphore_t child_ok = dispatch_semaphore_create(0);
+	int val = 1;
 
-	dispatch_async(dq, ^{
-		pthread_threadid_np(NULL, &thread_id);
-		dispatch_semaphore_signal(child_ok);
+	dispatch_queue_t dqa = dispatch_queue_create("com.apple.stackshot.cseg_waitinfo_a", NULL);
+	dispatch_queue_t dqb = dispatch_queue_create("com.apple.stackshot.cseg_waitinfo_b", NULL);
+	dispatch_semaphore_t children_ok = dispatch_semaphore_create(0);
+
+	dispatch_async(dqa, ^{
+		dispatch_semaphore_signal(children_ok);
 		int val = 1;
 		T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.cseg_wedge_thread", NULL, NULL, &val, sizeof(val)), "wedge child thread");
 	});
 
-	dispatch_semaphore_wait(child_ok, DISPATCH_TIME_FOREVER);
+	dispatch_async(dqb, ^{
+		pthread_threadid_np(NULL, &thread_id);
+		dispatch_semaphore_signal(children_ok);
+		int val = 1;
+		T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.cseg_wedge_setup", NULL, NULL, &val, sizeof(val)), "setup wedge");
+	});
+
+	dispatch_semaphore_wait(children_ok, DISPATCH_TIME_FOREVER);
+	dispatch_semaphore_wait(children_ok, DISPATCH_TIME_FOREVER);
 	sleep(1);
 
 	T_LOG("taking stackshot");
@@ -3371,7 +3381,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				for (id i in winfos) {
 					NSNumber *waitType = i[@"wait_type"];
 					NSNumber *owner = i[@"owner"];
-					if (waitType.intValue == kThreadWaitCompressor &&
+					if (waitType.intValue == kThreadWaitSleepWithInheritor &&
 							owner.unsignedLongValue == cseg_expected_threadid) {
 						found_cseg_waitinfo = true;
 						break;

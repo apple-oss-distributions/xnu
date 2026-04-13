@@ -1477,6 +1477,7 @@ proc_is_simulated(const proc_t p)
 		case PLATFORM_IOSSIMULATOR:
 		case PLATFORM_TVOSSIMULATOR:
 		case PLATFORM_WATCHOSSIMULATOR:
+		case PLATFORM_XROSSIMULATOR:
 			return TRUE;
 		default:
 			return FALSE;
@@ -1513,6 +1514,31 @@ proc_sdk(proc_t p)
 		return proc_get_ro(p)->p_platform_data.p_sdk;
 	}
 	return (uint32_t)-1;
+}
+
+bool
+proc_sdk_26_4_or_later(proc_t proc)
+{
+	const uint32_t sdk_vers = proc_sdk(proc);
+
+	switch (proc_platform(proc)) {
+	case PLATFORM_IOS:
+	case PLATFORM_IOSSIMULATOR:
+	case PLATFORM_MACOS:
+	case PLATFORM_TVOS:
+	case PLATFORM_TVOSSIMULATOR:
+	case PLATFORM_WATCHOS:
+	case PLATFORM_WATCHOSSIMULATOR:
+	case PLATFORM_XROS:
+	case PLATFORM_XROSSIMULATOR:
+		return sdk_vers >= 0x001a0400; // DYLD_*_VERSION_26_4
+	case PLATFORM_BRIDGEOS:
+		return sdk_vers >= 0x000a0400; // DYLD_BRIDGEOS_VERSION_10_4
+	case PLATFORM_DRIVERKIT:
+		return sdk_vers >= 0x00190400; // DYLD_DRIVERKIT_VERSION_25_4
+	default:
+		return true;
+	}
 }
 
 void
@@ -4099,6 +4125,25 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 	}
 
 	case CS_OPS_CLEARINSTALLER:
+		/*
+		 * Only allow clearing CS_INSTALLER if:
+		 * 1. The caller is clearing its own CS_INSTALLER flag, OR
+		 * 2. The caller itself has CS_INSTALLER privilege
+		 *
+		 * This prevents a non-CS_INSTALLER process from removing
+		 * CS_INSTALLER from another process, which could lead to
+		 * confused deputy vulnerabilities (rdar://128685712).
+		 */
+		if (!forself) {
+			/*
+			 * Check if current process has CS_INSTALLER.
+			 */
+			proc_t curproc = current_proc();
+			if ((proc_getcsflags(curproc) & CS_INSTALLER) == 0) {
+				error = EPERM;
+				goto out;
+			}
+		}
 		proc_lock(pt);
 		proc_csflags_clear(pt, CS_INSTALLER | CS_DATAVAULT_CONTROLLER | CS_EXEC_INHERIT_SIP);
 		proc_unlock(pt);
@@ -5324,6 +5369,25 @@ proc_set_syscall_filter_index(int which, int num, int index)
 
 	return 0;
 }
+
+SECURITY_READ_ONLY_LATE(sandbox_profile_cbfunc_t) mac_proc_get_sandbox_profile = NULL;
+
+int
+proc_set_sandbox_info_callbacks(sandbox_info_cbs_t cbs)
+{
+	if (cbs->version != SANDBOX_INFO_CALLBACK_VERSION) {
+		return EINVAL;
+	}
+
+	if (cbs->sandbox_profile_cbfunc) {
+		if (mac_proc_get_sandbox_profile != NULL) {
+			return EPERM;
+		}
+		mac_proc_get_sandbox_profile = cbs->sandbox_profile_cbfunc;
+	}
+
+	return 0;
+}
 #endif /* CONFIG_MACF */
 
 int
@@ -5348,19 +5412,6 @@ proc_get_filter_message_flag(proc_t p, boolean_t *flag)
 	*flag = task_get_filter_msg_flag(proc_task(p));
 
 	return 0;
-}
-
-bool
-proc_is_traced(proc_t p)
-{
-	bool ret = FALSE;
-	assert(p != PROC_NULL);
-	proc_lock(p);
-	if (p->p_lflag & P_LTRACED) {
-		ret = TRUE;
-	}
-	proc_unlock(p);
-	return ret;
 }
 
 #if CONFIG_PROC_RESOURCE_LIMITS
@@ -5580,19 +5631,6 @@ proc_get_ro(proc_t p)
 
 	return ro;
 }
-
-#ifdef __BUILDING_XNU_LIB_UNITTEST__
-/* this is here since unittest Makefile can't build BSD sources yet */
-void mock_init_proc(proc_t p, void* (*calloc_call)(size_t, size_t));
-void
-mock_init_proc(proc_t p, void* (*calloc_call)(size_t, size_t))
-{
-	proc_ro_t ro = calloc_call(1, sizeof(struct proc_ro));
-	ro->pr_proc = p;
-	p->p_proc_ro = ro;
-}
-#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
-
 
 task_t
 proc_ro_task(proc_ro_t pr)
@@ -6161,7 +6199,7 @@ task_inspect_for_pid(struct proc *p __unused, struct task_inspect_for_pid_args *
 	/* could be IP_NULL, consumes a ref */
 	sright = (void*) convert_task_inspect_to_port(task_insp);
 	task_insp = TASK_INSPECT_NULL;
-	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
+	tret = ipc_port_copyout_send_allow_immovable(sright, get_task_ipcspace(current_task()));
 
 tifpout:
 	task_deallocate(t1);
@@ -6283,7 +6321,7 @@ task_read_for_pid(struct proc *p __unused, struct task_read_for_pid_args *args, 
 	/* could be IP_NULL, consumes a ref */
 	sright = (void*) convert_task_read_to_port(task_read);
 	task_read = TASK_READ_NULL;
-	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
+	tret = ipc_port_copyout_send_allow_immovable(sright, get_task_ipcspace(current_task()));
 
 trfpout:
 	task_deallocate(t1);

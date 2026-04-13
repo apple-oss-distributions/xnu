@@ -48,6 +48,7 @@ struct vsockpcb {
 	uint32_t peer_fwd_cnt;
 	uint32_t last_buf_alloc;
 	uint32_t last_fwd_cnt;
+	uint32_t send_space;
 	size_t waiting_send_size;
 	vsock_gen_t vsock_gencnt;
 };

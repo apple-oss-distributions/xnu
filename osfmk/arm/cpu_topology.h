@@ -37,6 +37,9 @@
 #define _ARM_CPU_TOPOLOGY_H_
 
 #include <stdint.h>
+#include <mach/vm_types.h>
+#include <kern/kern_types.h>
+
 __BEGIN_DECLS
 
 typedef struct ml_topology_cpu {
@@ -61,6 +64,7 @@ typedef struct ml_topology_cpu {
 	uint64_t                        coresight_len;
 	unsigned int                    die_cluster_id;
 	unsigned int                    cluster_core_id;
+	pset_id_t                       cpu_pset_id;
 } ml_topology_cpu_t;
 
 typedef struct ml_topology_cluster {
@@ -82,7 +86,7 @@ typedef struct ml_topology_cluster {
 // Bump this version number any time any ml_topology_* struct changes in a
 // way that is likely to break kexts, so that users can check whether their
 // headers are compatible with the running kernel
-#define CPU_TOPOLOGY_VERSION 1
+#define CPU_TOPOLOGY_VERSION 2
 
 typedef struct ml_topology_info {
 	unsigned int                    version;

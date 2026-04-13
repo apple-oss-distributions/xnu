@@ -81,15 +81,16 @@ extern bool sptm_stability_hacks;
  */
 
 extern void pmap_remove_range_options(
-	pmap_t, vm_map_address_t, vm_map_address_t, int);
+	pmap_t, vm_map_address_t, vm_map_address_t, int, const tt_entry_t*);
 
 #if defined(PVH_FLAG_EXEC)
 extern void pmap_set_ptov_ap(unsigned int, unsigned int, boolean_t);
 #endif /* defined(PVH_FLAG_EXEC) */
 
 extern pmap_t current_pmap(void);
-extern void pmap_tt_ledger_credit(pmap_t, vm_size_t);
-extern void pmap_tt_ledger_debit(pmap_t, vm_size_t);
+extern void pmap_tt_ledger_credit(pmap_t, vm_size_t, bool);
+extern void pmap_tt_ledger_debit(pmap_t, vm_size_t, bool);
+extern void pmap_tt_deallocate(pmap_t, pmap_paddr_t, unsigned int);
 
 extern void write_pte(pt_entry_t *, pt_entry_t);
 
@@ -123,33 +124,6 @@ extern void qsort(void *a, size_t n, size_t es, cmpfunc_t cmp);
 #define PMAP_ALIGN(addr, align) ((addr) + ((align) - 1) & ~((align) - 1))
 
 /**
- * pmap_data.h must be included before this point so that pmap_lock_mode_t is
- * defined before the rest of the locking code.
- */
-
-/**
- * Initialize a pmap object's reader/writer lock.
- *
- * @param pmap The pmap whose lock to initialize.
- */
-static inline void
-pmap_lock_init(pmap_t pmap)
-{
-	lck_rw_init(&pmap->rwlock, &pmap_lck_grp, 0);
-}
-
-/**
- * Destroy a pmap object's reader/writer lock.
- *
- * @param pmap The pmap whose lock to destroy.
- */
-static inline void
-pmap_lock_destroy(pmap_t pmap)
-{
-	lck_rw_destroy(&pmap->rwlock, &pmap_lck_grp);
-}
-
-/**
  * Initialize a pmap object's TXM reader/writer lock.
  *
  * @param pmap The pmap whose TXM lock to initialize.
@@ -169,179 +143,4 @@ static inline void
 pmap_txmlock_destroy(pmap_t pmap)
 {
 	lck_rw_destroy(&pmap->txm_lck, &pmap_lck_grp);
-}
-
-/**
- * Assert that the pmap lock is held in the given mode.
- *
- * @note See pmap_lock() below for an explanation of the special handling
- *       we do for kernel_pmap.
- *
- * @param pmap The pmap whose lock to assert is being held.
- * @param mode The mode the lock should be held in.
- */
-static inline void
-pmap_assert_locked(__unused pmap_t pmap, __unused pmap_lock_mode_t mode)
-{
-#if MACH_ASSERT
-	if (pmap == kernel_pmap) {
-		return;
-	}
-	if (__improbable(sptm_stability_hacks)) {
-		mode = PMAP_LOCK_EXCLUSIVE;
-	}
-
-	switch (mode) {
-	case PMAP_LOCK_SHARED:
-		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_SHARED);
-		break;
-	case PMAP_LOCK_EXCLUSIVE:
-		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_EXCLUSIVE);
-		break;
-	case PMAP_LOCK_HELD:
-		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_HELD);
-		break;
-	default:
-		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __FUNCTION__, pmap, mode);
-	}
-#endif
-}
-
-/**
- * Assert that the pmap lock is held in any mode.
- *
- * @param pmap The pmap whose lock should be held.
- */
-__unused static inline void
-pmap_assert_locked_any(__unused pmap_t pmap)
-{
-	if (pmap != kernel_pmap) {
-		LCK_RW_ASSERT(&pmap->rwlock, LCK_RW_ASSERT_HELD);
-	}
-}
-
-/**
- * Acquire a pmap object's reader/writer lock as either shared (read-only) or
- * exclusive (read/write).
- *
- * @note If this function is called to request acquisition of the kernel pmap
- *       lock, the lock will not be acquired as a performance optimization.  See the
- *       the explanation in the function body for why this is safe to do.
- *
- * @param pmap The pmap whose lock to acquire.
- * @param mode Whether to grab the lock as shared (read-only) or exclusive (read/write).
- */
-static inline void
-pmap_lock(pmap_t pmap, pmap_lock_mode_t mode)
-{
-	/**
-	 * The pmap lock is only held exclusive for removal of a leaf-level
-	 * page table during pmap_remove(), to prevent concurrent mapping
-	 * into the to-be-deleted table.
-	 * The kernel pmap does not participate in the above, as table
-	 * removal is only done for user pmaps.
-	 * Since the kernel pmap never requires exclusive locking, it's
-	 * also pointless to use shared locking and we can therefore elide
-	 * any acquisition of the kernel pmap lock.
-	 */
-	if (pmap == kernel_pmap) {
-		return;
-	}
-	if (__improbable(sptm_stability_hacks)) {
-		mode = PMAP_LOCK_EXCLUSIVE;
-	}
-
-	switch (mode) {
-	case PMAP_LOCK_SHARED:
-		lck_rw_lock_shared(&pmap->rwlock);
-		break;
-	case PMAP_LOCK_EXCLUSIVE:
-		lck_rw_lock_exclusive(&pmap->rwlock);
-		break;
-	default:
-		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
-	}
-}
-
-/**
- * Attempt to acquire the pmap lock in the specified mode. If the lock couldn't
- * be acquired, then return immediately instead of spinning.
- *
- * @param pmap The pmap whose lock to attempt to acquire.
- * @param mode Whether to grab the lock as shared (read-only) or exclusive (read/write).
- *
- * @return True if the lock was acquired, false otherwise.
- */
-static inline bool
-pmap_try_lock(pmap_t pmap, pmap_lock_mode_t mode)
-{
-	if (pmap == kernel_pmap) {
-		return true;
-	}
-	bool ret = false;
-
-	if (__improbable(sptm_stability_hacks)) {
-		mode = PMAP_LOCK_EXCLUSIVE;
-	}
-
-	switch (mode) {
-	case PMAP_LOCK_SHARED:
-		ret = lck_rw_try_lock_shared(&pmap->rwlock);
-		break;
-	case PMAP_LOCK_EXCLUSIVE:
-		ret = lck_rw_try_lock_exclusive(&pmap->rwlock);
-		break;
-	default:
-		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
-	}
-
-	return ret;
-}
-
-/**
- * Attempts to promote an already acquired pmap lock from shared to exclusive.
- *
- * @param pmap The pmap whose lock should be promoted from shared to exclusive.
- *
- * @return True if successfully promoted, otherwise false upon failure in
- *         which case the shared lock is dropped.
- */
-static inline bool
-pmap_lock_shared_to_exclusive(pmap_t pmap)
-{
-	pmap_assert_locked(pmap, PMAP_LOCK_SHARED);
-
-	if ((pmap == kernel_pmap) || __improbable(sptm_stability_hacks)) {
-		return true;
-	}
-
-	return lck_rw_lock_shared_to_exclusive(&pmap->rwlock);
-}
-
-/**
- * Release a pmap object's reader/writer lock.
- *
- * @param pmap The pmap whose lock to release.
- * @param mode Which mode the lock should be in at time of release.
- */
-static inline void
-pmap_unlock(pmap_t pmap, pmap_lock_mode_t mode)
-{
-	if (pmap == kernel_pmap) {
-		return;
-	}
-	if (__improbable(sptm_stability_hacks)) {
-		mode = PMAP_LOCK_EXCLUSIVE;
-	}
-
-	switch (mode) {
-	case PMAP_LOCK_SHARED:
-		lck_rw_unlock_shared(&pmap->rwlock);
-		break;
-	case PMAP_LOCK_EXCLUSIVE:
-		lck_rw_unlock_exclusive(&pmap->rwlock);
-		break;
-	default:
-		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
-	}
 }

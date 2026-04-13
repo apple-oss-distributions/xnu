@@ -21,6 +21,8 @@
 
 #include <sys/mman.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
 
 #include <mach/mach_error.h>
 #include <mach/mach_init.h>
@@ -398,7 +400,7 @@ done:
 
 T_DECL(memory_entry_tagging, "test mem entry tag for rdar://problem/23334087 \
     VM memory tags should be propagated through memory entries",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	test_memory_entry_tagging(0);
 	test_memory_entry_tagging(1);
@@ -406,7 +408,7 @@ T_DECL(memory_entry_tagging, "test mem entry tag for rdar://problem/23334087 \
 
 T_DECL(map_memory_entry, "test mapping mem entry for rdar://problem/22611816 \
     mach_make_memory_entry(MAP_MEM_VM_COPY) should never use a KERNEL_BUFFER \
-    copy", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    copy", T_META_ALL_VALID_ARCHS(true))
 {
 	test_map_memory_entry();
 }
@@ -592,11 +594,158 @@ get_reusable_size(uint64_t *reusable)
 	return kr;
 }
 
+T_DECL(madvise_free_cow_pageout, "madvise(FREE) + cow + pageout",
+    T_META_ASROOT(true),
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_ALL_VALID_ARCHS(true))
+{
+	kern_return_t kr;
+	mach_vm_address_t vm_addr, vm_addr2;
+	mach_vm_size_t vm_size;
+	vm_prot_t cur_prot, max_prot;
+	int ret;
+	char vec;
+	int new_val;
+
+	T_SETUPBEGIN;
+	new_val = 0;
+	ret = sysctlbyname("vm.madvise_free_debug", NULL, NULL, &new_val, sizeof(new_val));
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(vm.madvise_free_debug)");
+	ret = sysctlbyname("vm.madvise_free_debug_sometimes", NULL, NULL, &new_val, sizeof(new_val));
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(vm.madvise_free_debug_sometimes)");
+	T_SETUPEND;
+
+	/*
+	 * COPY_NONE
+	 */
+	T_LOG("COPY_NONE");
+	vm_addr = 0;
+	vm_size = 16 * 1024;
+	kr = mach_vm_allocate(mach_task_self(), &vm_addr, vm_size, VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, (int)'x', "contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, 0, "COPY_NONE contents after pageout");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	/* make a copy */
+	vm_addr2 = 0;
+	kr = mach_vm_remap(mach_task_self(), &vm_addr2, vm_size, 0, VM_FLAGS_ANYWHERE,
+	    mach_task_self(), vm_addr, true, &cur_prot, &max_prot,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_remap()");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "copied contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "COPY_NONE copied contents after pageout");
+
+	/*
+	 * COPY_DELAY
+	 */
+	T_LOG("COPY_DELAY");
+	vm_addr = 0;
+	vm_size = 16 * 1024;
+	kr = mach_vm_allocate(mach_task_self(), &vm_addr, vm_size, VM_FLAGS_ANYWHERE);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, (int)'x', "contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, 0, "COPY_DELAY contents after pageout");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	vm_addr2 = 0;
+	kr = mach_vm_remap(mach_task_self(), &vm_addr2, vm_size, 0, VM_FLAGS_ANYWHERE,
+	    mach_task_self(), vm_addr, false, &cur_prot, &max_prot,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_remap(copy=false)");
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	/* make a copy */
+	vm_addr2 = 0;
+	kr = mach_vm_remap(mach_task_self(), &vm_addr2, vm_size, 0, VM_FLAGS_ANYWHERE,
+	    mach_task_self(), vm_addr, true, &cur_prot, &max_prot,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_remap(copy=true)");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "copied contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "COPY_DELAY copied contents after pageout");
+
+	/*
+	 * COPY_SYMMETRIC
+	 */
+	T_LOG("COPY_SYMMETRIC");
+	vm_addr = 0;
+	vm_size = 16 * 1024;
+	kr = mach_vm_allocate(mach_task_self(), &vm_addr, vm_size, VM_FLAGS_ANYWHERE);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, (int)'x', "contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr, 0, "COPY_SYMMETRIC contents after pageout");
+	*(char *)vm_addr = 'x';
+	ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_FREE);
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE)");
+	/* make a copy */
+	vm_addr2 = 0;
+	kr = mach_vm_remap(mach_task_self(), &vm_addr2, vm_size, 0, VM_FLAGS_ANYWHERE,
+	    mach_task_self(), vm_addr, true, &cur_prot, &max_prot,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_remap()");
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "copied contents before pageout");
+	do {
+		ret = madvise((char *)(uintptr_t)vm_addr, vm_size, MADV_PAGEOUT);
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+		usleep(10000);
+		ret = mincore((char *)(uintptr_t)vm_addr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore()");
+	} while (vec & MINCORE_INCORE);
+	T_EXPECT_EQ((int)*(unsigned char *)(uintptr_t)vm_addr2, (int)'x', "COPY_SYMMETRIC copied contents after pageout");
+}
+
 T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
     rethink needs madvise(MADV_FREE_HARDER)",
     T_META_RUN_CONCURRENTLY(false),
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	vm_address_t            vmaddr = 0, vmaddr2 = 0;
 	vm_size_t               vmsize, vmsize1, vmsize2;
@@ -725,8 +874,7 @@ done:
 T_DECL(madvise_purgeable_can_reuse, "test madvise purgeable can reuse for \
     rdar://problem/37476183 Preview Footprint memory regressions ~100MB \
     [ purgeable_malloc became eligible for reuse ]",
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 #if defined(__x86_64__) || defined(__i386__)
 	if (COMM_PAGE_READ(uint64_t, CPU_CAPABILITIES64) & kIsTranslated) {
@@ -976,8 +1124,7 @@ T_DECL(madvise_zero_wired, "test madvise(MADV_ZERO_WIRED_PAGES)", T_META_TAG_VM_
 
 T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
     rdar://31075370",
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2;
@@ -1038,8 +1185,7 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 
 T_DECL(copy_none_use_pmap, "test copy-on-write remapping of COPY_NONE vm \
     objects - rdar://35610377",
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2, vmaddr3;
@@ -1088,8 +1234,7 @@ T_DECL(copy_none_use_pmap, "test copy-on-write remapping of COPY_NONE vm \
 
 T_DECL(purgable_deny, "test purgeable memory is not allowed to be converted to \
     non-purgeable - rdar://31990033",
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t   kr;
 	vm_address_t    vmaddr;
@@ -1114,7 +1259,7 @@ T_DECL(purgable_deny, "test purgeable memory is not allowed to be converted to \
 #define VMSIZE 0x10000
 
 T_DECL(vm_remap_zero, "test vm map of zero size - rdar://33114981",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2;
@@ -1166,8 +1311,7 @@ extern int __shared_region_check_np(uint64_t *);
 
 T_DECL(nested_pmap_trigger, "nested pmap should only be triggered from kernel \
     - rdar://problem/41481703",
-    T_META_ALL_VALID_ARCHS(true),
-    T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	int                     ret;
 	kern_return_t           kr;
@@ -1214,7 +1358,7 @@ static const char *prot_str[] = { "---", "r--", "-w-", "rw-", "--x", "r-x", "-wx
 static const char *share_mode_str[] = { "---", "COW", "PRIVATE", "EMPTY", "SHARED", "TRUESHARED", "PRIVATE_ALIASED", "SHARED_ALIASED", "LARGE_PAGE" };
 
 T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared region shoudl not give write access to shared region - rdar://problem/74469953",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	int ret;
 	uint64_t sr_start;
@@ -1281,6 +1425,8 @@ T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared r
 			break;
 		}
 	}
+	T_LOG("Found address 0x%llx", address);
+
 	if (address >= SHARED_REGION_BASE + SHARED_REGION_SIZE) {
 		T_SKIP("could not find read-only nested mapping");
 		T_END;
@@ -1351,8 +1497,12 @@ T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared r
 //	T_QUIET; T_ASSERT_EQ(info.max_protection, VM_PROT_READ, "new max_prot read-only");
 	remap = *(uint32_t *)(uintptr_t)remap_address;
 	T_QUIET; T_ASSERT_EQ(remap, before, "remap matches original");
-// this would crash if actually read-only:
-//	*(uint32_t *)(uintptr_t)remap_address = before + 1;
+	// this would crash if actually read-only, do it safely with try_write_byte()
+	// *(uint32_t *)(uintptr_t)remap_address = before + 1;
+	// RANGELOCKINGTODO: make this check not fail rdar://150779766
+	//bool write_succeded = try_write_byte(remap_address, (uint8_t)(before + 1), &kr);
+	//T_QUIET; T_ASSERT_FALSE(write_succeded, "fail to write to read-only address");
+
 	after = *(uint32_t *)(uintptr_t)address;
 	T_LOG("vm_remap(): 0x%llx 0x%x -> 0x%x", address, before, after);
 //	*(uint32_t *)(uintptr_t)remap_address = before;
@@ -1384,10 +1534,11 @@ T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared r
 	    VM_FLAGS_ANYWHERE,
 	    mach_task_self(),
 	    address,
-	    FALSE,
+	    /*copy=*/ FALSE,
 	    &cur_prot,
 	    &max_prot,
 	    VM_INHERIT_DEFAULT);
+	// we're asking for share by the shared-cache submap entry has needs_copy=true so it's going to be a COW remap
 	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_remap_new()");
 	if (kr == KERN_PROTECTION_FAILURE) {
 		/* wrong but not a security issue... */
@@ -1396,6 +1547,7 @@ T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared r
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_remap_new()");
 	remap = *(uint32_t *)(uintptr_t)remap_address;
 	T_QUIET; T_ASSERT_EQ(remap, before, "remap matches original");
+	// This mapping is RW now so we can write to it
 	*(uint32_t *)(uintptr_t)remap_address = before + 1;
 	after = *(uint32_t *)(uintptr_t)address;
 	T_LOG("vm_remap_new(): 0x%llx 0x%x -> 0x%x", address, before, after);
@@ -1974,7 +2126,7 @@ skip_mem_entry_vm_share_rw:
 }
 
 T_DECL(copyoverwrite_submap_protection, "test copywrite vm region submap \
-    protection", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    protection", T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr;
@@ -2050,7 +2202,7 @@ T_DECL(copyoverwrite_submap_protection, "test copywrite vm region submap \
 
 T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
     the shared region triggers code-signing violations",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	uint32_t *addr, before, after;
 	int retval;
@@ -2117,23 +2269,50 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 	}
 }
 
+T_DECL(mlock_max_prot_none, "test mlock() of max_prot=none memory, rdar://150030055",
+    T_META_TAG_VM_PREFERRED)
+{
+	int err;
+	kern_return_t kr;
+	mach_vm_address_t addr = 0;
+	kr = mach_vm_allocate(mach_task_self(), &addr, PAGE_SIZE, VM_FLAGS_ANYWHERE);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "allocate");
+	kr = mach_vm_protect(mach_task_self(), addr, PAGE_SIZE, false /* set_max */, VM_PROT_NONE);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "cur_prot = none");
+	kr = mach_vm_protect(mach_task_self(), addr, PAGE_SIZE, true /* set_max */, VM_PROT_NONE);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "max_prot = none");
+
+	mach_vm_address_t query_addr = addr;
+	mach_vm_size_t query_size = 0;
+	uint32_t query_depth = 0;
+	vm_region_submap_info_data_64_t info;
+	mach_msg_type_number_t info_count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	kr = mach_vm_region_recurse(mach_task_self(), &query_addr, &query_size, &query_depth,
+	    (vm_region_recurse_info_t)&info, &info_count);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_region before");
+	T_QUIET; T_ASSERT_EQ(info.object_id_full, 0ULL, "null object before");
+
+	err = mlock((void *)addr, PAGE_SIZE);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "mlock() of max_prot=none");
+
+	kr = mach_vm_region_recurse(mach_task_self(), &query_addr, &query_size, &query_depth,
+	    (vm_region_recurse_info_t)&info, &info_count);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_region after");
+	T_QUIET; T_ASSERT_NE(info.object_id_full, 0ULL, "non-null object after");
+
+	T_PASS("mlock() of max_prot=none");
+}
+
+_Static_assert(_COMM_PAGE_BASE_ADDRESS != -1 && _COMM_PAGE_BASE_ADDRESS != 0, "unexpected commpage address");
+
 T_DECL(remap_comm_page, "test remapping of the commpage - rdar://93177124",
-    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+    T_META_ALL_VALID_ARCHS(true))
 {
 	kern_return_t           kr;
-	mach_vm_address_t       commpage_addr, remap_addr;
+	mach_vm_address_t       commpage_addr = (mach_vm_address_t)_COMM_PAGE_BASE_ADDRESS;
+	mach_vm_address_t        remap_addr;
 	mach_vm_size_t          vmsize;
-	vm_prot_t               curprot, maxprot;
-
-#if __arm__
-	commpage_addr = 0xFFFF4000ULL;
-#elif __arm64__
-	commpage_addr = 0x0000000FFFFFC000ULL;
-#elif __x86_64__
-	commpage_addr = 0x00007FFFFFE00000ULL;
-#else
-	T_FAIL("unknown commpage address for this architecture");
-#endif
+	vm_prot_t               curprot = 0, maxprot = 0;
 
 	T_LOG("Remapping commpage from 0x%llx", commpage_addr);
 	vmsize = vm_kernel_page_size;
@@ -2153,7 +2332,37 @@ T_DECL(remap_comm_page, "test remapping of the commpage - rdar://93177124",
 		T_SKIP("No mapping found at 0x%llx\n", commpage_addr);
 		return;
 	}
-	T_ASSERT_MACH_SUCCESS(kr, "vm_remap() of commpage from 0x%llx", commpage_addr);
+	T_ASSERT_MACH_SUCCESS(kr, "vm_remap() of commpage from 0x%llx to 0x%llx  curprot=%x, maxprot=%x", commpage_addr, remap_addr, curprot, maxprot);
+}
+
+T_DECL(vm_read_comm_page, "test vm_read from commpage")
+{
+	kern_return_t kr;
+	mach_vm_address_t commpage_addr = (mach_vm_address_t)_COMM_PAGE_BASE_ADDRESS;
+	mach_vm_size_t size = vm_kernel_page_size;
+	vm_offset_t read_addr = 0;
+	mach_msg_type_number_t read_size = 0;
+
+	kr = mach_vm_read(mach_task_self(), commpage_addr, size, &read_addr, &read_size);
+
+	if (kr == KERN_INVALID_ADDRESS) {
+		T_SKIP("No mapping found at 0x%llx\n", commpage_addr);
+		return;
+	}
+	if (commpage_addr < MACH_VM_MAX_ADDRESS) {
+		// in macos arm64, the commpage is inside [min_offset:max_offset] so the small kernel-buffer optimization
+		// takes effect. This allows vm_map_copyin_internal() to succeed even though the commpage region is mapped as PROT_NONE
+		T_ASSERT_MACH_SUCCESS(kr, "mach_vm_read() of commpage from 0x%llx to 0x%lx  max=0x%llx (sz=%x)", commpage_addr, read_addr, MACH_VM_MAX_ADDRESS, read_size);
+	} else {
+#if __arm64__
+		// in non-macos arm64 platforms, the commpage is outside [min_offset:max_offset] so the small kernel-buffer
+		// optimization is skipped. Then vm_map_copyin_internal() fails since the region is mapped as PROT_NONE
+		T_ASSERT_MACH_ERROR(kr, KERN_PROTECTION_FAILURE, "mach_vm_read() expected failure addr=0x%llx  max=0x%llx", commpage_addr, MACH_VM_MAX_ADDRESS);
+#else // __arm64__
+		// ... except in x86 where the commpage is a submap and not mapped as PROT_NONE, so vm_map_copyin_internal succeeds
+		T_ASSERT_MACH_SUCCESS(kr, "mach_vm_read() of commpage from 0x%llx to 0x%lx  max=0x%llx (sz=%x)", commpage_addr, read_addr, MACH_VM_MAX_ADDRESS, read_size);
+#endif // __arm64__
+	}
 }
 
 /* rdar://132439059 */
@@ -2489,6 +2698,11 @@ T_DECL(vm_region_recurse_jit_info,
     T_META_ENABLED(TARGET_OS_OSX),
     T_META_ASROOT(true))
 {
+	/* T_META_ENABLED is not respected at-desk, so check again */
+#if !TARGET_OS_OSX
+	T_SKIP("This test is not supported on embedded platforms");
+#endif /* !TARGET_OS_OSX */
+
 	T_SETUPBEGIN;
 
 	/* Given a JIT region */
@@ -2560,4 +2774,185 @@ T_DECL(vm_region_recurse_jit_info,
 	/* Cleanup */
 	kr = mach_vm_deallocate(mach_task_self(), non_jit_allocation, alloc_size);
 	T_ASSERT_MACH_SUCCESS(kr, "deallocate memory");
+}
+
+static void
+check_manual_remap(bool entry_is_copy, bool map_is_copy, bool pre_fault, bool change_first_in_copy)
+{
+	T_LOG("** case: entry_is_copy=%d,  map_is_copy=%d,  pre_fault=%d  change_first_in_copy=%d",
+	    (int)entry_is_copy, (int)map_is_copy, (int)pre_fault, (int)change_first_in_copy);
+	kern_return_t kr;
+	mach_vm_address_t addr_A = 0;
+	mach_vm_size_t size = 2 * PAGE_SIZE;
+
+	// allocate memory
+	kr = mach_vm_allocate(mach_task_self(), &addr_A, size, VM_FLAGS_ANYWHERE);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_allocate");
+	T_LOG("Address A: %llx", addr_A);
+
+	// fault and set initial value
+	uint32_t* ptr_A = (uint32_t*)addr_A;
+	uint32_t expected_value_in_A = 0;
+	if (pre_fault) {
+		*ptr_A = 1;
+		expected_value_in_A = 1;
+	}
+
+	// create mem-entry
+	mem_entry_name_port_t mem_ent = 0;
+	mach_vm_size_t entry_size = size;
+	vm_prot_t flags = MAP_MEM_USE_DATA_ADDR | VM_PROT_DEFAULT;
+	if (entry_is_copy) {
+		flags |= MAP_MEM_VM_COPY;
+	}
+	kr = mach_make_memory_entry_64(mach_task_self(), &entry_size, addr_A, flags, &mem_ent, MACH_PORT_NULL);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_make_memory_entry");
+	T_ASSERT_EQ(entry_size, size, "memory-entry size same as requested size");
+
+	// remap it
+	mach_vm_offset_t addr_B = 0;
+	kr = mach_vm_map(mach_task_self(), &addr_B, size, /*mask=*/ 0,
+	    VM_FLAGS_ANYWHERE, mem_ent, /*offset=*/ 0,
+	    /*copy=*/ map_is_copy,
+	    VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_map");
+	T_LOG("Address B: %llx", addr_B);
+
+	// verify copy/share
+	uint32_t* ptr_B = (uint32_t*)addr_B;
+
+	// the remap should be CoW if either or both entry or remap requested it to be copy
+	bool cow = entry_is_copy || map_is_copy;
+	if (change_first_in_copy) {
+		// change value from B
+		uint32_t value_in_B = *ptr_B;
+		T_ASSERT_EQ(value_in_B, expected_value_in_A, "(before step2-1) value in B is the same as in A");
+		*ptr_B = 2;
+		// check value in A
+		uint32_t value_in_A_step2 = *ptr_A;
+		if (cow) { // CoW option, only remapped copy should change
+			T_ASSERT_EQ(value_in_A_step2, expected_value_in_A, "(step2-1) value in CoW is unchanged");
+		} else { // share option, should be the same value
+			T_ASSERT_EQ(value_in_A_step2, 2, "(step2-1) value in the share A same as in changed B");
+		}
+
+		// now change value in A
+		*ptr_A = 3;
+		uint32_t value_in_B_step3 = *ptr_B;
+		// check what happened to value in B
+		if (cow) { // CoW option, B should not change
+			T_ASSERT_EQ(value_in_B_step3, 2, "(step3-1) value in CoW unchanged");
+		} else { // share option, B should be the same as A
+			T_ASSERT_EQ(value_in_B_step3, 3, "(step3-1) value in the share B is the same as in changed A");
+		}
+	} else { /* change_first_in_copy */
+		// change value from A
+		*ptr_A = 4;
+		// check value in B
+		uint32_t value_in_B_step2 = *ptr_B;
+		if (cow) { // CoW option, B should not change
+			T_ASSERT_EQ(value_in_B_step2, expected_value_in_A, "(step2-2) value CoW is unchanged");
+		} else { // share option, B should mirror change in A
+			T_ASSERT_EQ(value_in_B_step2, 4, "(step2-2) value in share B same as iun changed A");
+		}
+
+		// now change value in B
+		*ptr_B = 5;
+		uint32_t value_in_A_step3 = *ptr_A;
+		if (cow) { // CoW option, A should not change from step2
+			T_ASSERT_EQ(value_in_A_step3, 4, "(step3-2) value CoW is unchanged");
+		} else { // share option, A should mirror B
+			T_ASSERT_EQ(value_in_A_step3, 5, "(step3-2) value in share A is the same as in changed B");
+		}
+	}
+
+	// cleanup
+	kr = mach_port_deallocate(mach_task_self(), mem_ent);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_deallocate memory entry");
+	kr = mach_vm_deallocate(mach_task_self(), addr_A, size);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate A");
+	kr = mach_vm_deallocate(mach_task_self(), addr_B, size);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate B");
+	T_LOG("\n");
+}
+
+
+// create named-entry in either copy/share and then map it in either copy/share
+// then verify that CoW works
+T_DECL(manual_remap_all_copy_permutations,
+    "Test all 4 permutations of copy argument to making a memory entry and remapping it")
+{
+	for (int change_first_in_copy = 0; change_first_in_copy <= 1; ++change_first_in_copy) {
+		for (int pre_fault = 0; pre_fault <= 1; ++pre_fault) {
+			check_manual_remap(true, true, (bool)pre_fault, change_first_in_copy);
+			check_manual_remap(true, false, (bool)pre_fault, change_first_in_copy);
+			check_manual_remap(false, true, (bool)pre_fault, change_first_in_copy);
+			check_manual_remap(false, false, (bool)pre_fault, change_first_in_copy);
+		}
+	}
+}
+
+void
+make_memory_entry_clipping(bool pre_fault, bool first_entry_is_share, bool expect_clipped_second)
+{
+	T_LOG("case pre_fault=%d  first_entry_is_share=%d", (int)pre_fault, (int)first_entry_is_share);
+	kern_return_t kr;
+	mach_vm_address_t addr = 0;
+	mach_vm_size_t size = 2 * PAGE_SIZE;
+
+	// allocate memory
+	kr = mach_vm_allocate(mach_task_self(), &addr, size, VM_FLAGS_ANYWHERE);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_vm_allocate");
+
+	if (pre_fault) {
+		uint32_t* ptr = (uint32_t*)addr;
+		*ptr = 1;
+	}
+
+	// first memory entry maybe does the clipping to 1 page
+	mem_entry_name_port_t mem_ent1 = 0;
+	mach_vm_size_t entry1_size = 1 * PAGE_SIZE;
+	vm_prot_t flags = MAP_MEM_USE_DATA_ADDR | VM_PROT_DEFAULT;
+	if (first_entry_is_share) {
+		flags |= MAP_MEM_VM_SHARE;
+	} else {
+		flags |= MAP_MEM_VM_COPY;
+	}
+	kr = mach_make_memory_entry_64(mach_task_self(), &entry1_size, addr, flags, &mem_ent1, MACH_PORT_NULL);
+	T_ASSERT_MACH_SUCCESS(kr, "first mach_make_memory_entry");
+	T_ASSERT_EQ(entry1_size, (mach_vm_size_t)(1 * PAGE_SIZE), "memory-entry size same as requested size");
+
+	// now try to make an entry of 2 pages
+	mem_entry_name_port_t mem_ent2 = 0;
+	mach_vm_size_t entry2_size = 2 * PAGE_SIZE;
+	kr = mach_make_memory_entry_64(mach_task_self(), &entry2_size, addr,
+	    MAP_MEM_USE_DATA_ADDR | VM_PROT_DEFAULT,
+	    &mem_ent2, MACH_PORT_NULL);
+	T_ASSERT_MACH_SUCCESS(kr, "second mach_make_memory_entry");
+	// requested 2 pages but got 1
+	mach_vm_size_t expected_size = expect_clipped_second ? (1 * PAGE_SIZE) : (2 * PAGE_SIZE);
+	T_EXPECT_EQ(entry2_size, expected_size, "second memory-entry is %s", expect_clipped_second ? "clipped" : "not clipped");
+
+	// cleanup
+	kr = mach_port_deallocate(mach_task_self(), mem_ent1);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_deallocate memory entry1");
+	kr = mach_port_deallocate(mach_task_self(), mem_ent2);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_deallocate memory entry2");
+	kr = mach_vm_deallocate(mach_task_self(), addr, size);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_deallocate");
+	T_LOG("\n");
+}
+
+T_DECL(make_memory_entry_clipping,
+    "Test current behaviour of clipping and single-object named-entries")
+{
+	// if the first named-entry is share, clipping does NOT occurs in vm_map_remap_extract
+	// and not related to pre-faulting
+	make_memory_entry_clipping(false, true, false);
+	make_memory_entry_clipping(true, true, false);
+	// if the first named-entry is copy, clipping occurs only if we pre-fault.
+	// The fault causes the entry to have a non-null object. In that case the range lock needs to
+	// setup-cow, which locks exclusive and clips
+	make_memory_entry_clipping(true, false, true);
+	make_memory_entry_clipping(false, false, false);
 }

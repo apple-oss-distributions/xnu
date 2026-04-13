@@ -470,7 +470,7 @@ pmap_scale_shift(void)
 }
 
 LCK_GRP_DECLARE(pmap_lck_grp, "pmap");
-LCK_ATTR_DECLARE(pmap_lck_rw_attr, 0, LCK_ATTR_DEBUG);
+LCK_ATTR_DECLARE(pmap_lck_rw_attr, 0, LCK_ATTR_DEBUG | LCK_ATTR_RW_NO_SLEEP);
 
 /*
  *	Bootstrap the system enough to run with virtual memory.
@@ -529,7 +529,6 @@ pmap_bootstrap(
 	}
 
 	lck_rw_init(&kernel_pmap->pmap_rwl, &pmap_lck_grp, &pmap_lck_rw_attr);
-	kernel_pmap->pmap_rwl.lck_rw_can_sleep = FALSE;
 
 	pmap_cpu_init();
 
@@ -835,7 +834,7 @@ pmap_init(void)
 	vm_map_will_allocate_early_map(&pmap_struct_map);
 	pmap_struct_map = kmem_suballoc(kernel_map, &pmap_struct_range.min_address,
 	    pmap_struct_size, VM_MAP_CREATE_NEVER_FAULTS,
-	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL | KMS_PERMANENT,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL,
 	    VM_KERN_MEMORY_PMAP).kmr_submap;
 	kmem_alloc(pmap_struct_map, &addr, pmap_struct_size,
 	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_PERMANENT,
@@ -1102,12 +1101,6 @@ void
 pmap_lowmem_finalize(void)
 {
 	spl_t           spl;
-	int             i;
-
-	/*
-	 * Update wired memory statistics for early boot pages
-	 */
-	PMAP_ZINFO_PALLOC(kernel_pmap, bootstrap_wired_pages * PAGE_SIZE);
 
 	/*
 	 * Free pages in pmap regions below the base:
@@ -1120,9 +1113,7 @@ pmap_lowmem_finalize(void)
 	 * This is important for KASLR because up to 256*2MB = 512MB of space
 	 * needs has to be released to VM.
 	 */
-	for (i = 0;
-	    pmap_memory_regions[i].end < vm_kernel_base_page;
-	    i++) {
+	for (int i = 0; pmap_memory_regions[i].end < vm_kernel_base_page; i++) {
 		vm_offset_t     pbase = i386_ptob(pmap_memory_regions[i].base);
 		vm_offset_t     pend  = i386_ptob(pmap_memory_regions[i].end + 1);
 
@@ -1544,7 +1535,8 @@ pmap_is_empty(
 	 * .. the debug kernel ought to be checking perhaps by page table walk.
 	 */
 	if (pmap != kernel_pmap) {
-		ledger_get_balance(pmap->ledger, task_ledgers.phys_mem, &phys_mem);
+		ledger_get_balance(pmap->ledger,
+		    task_ledgers.phys_mem, LEO_SETTLE, &phys_mem);
 		if (phys_mem == 0) {
 			return TRUE;
 		}
@@ -1654,7 +1646,6 @@ pmap_create_options(
 	}
 
 	lck_rw_init(&p->pmap_rwl, &pmap_lck_grp, &pmap_lck_rw_attr);
-	p->pmap_rwl.lck_rw_can_sleep = FALSE;
 
 	os_ref_init(&p->ref_count, NULL);
 #if DEVELOPMENT || DEBUG
@@ -1803,7 +1794,6 @@ pmap_destroy(pmap_t     p)
 
 	if (c != 0) {
 		PMAP_TRACE(PMAP_CODE(PMAP__DESTROY) | DBG_FUNC_END);
-		pmap_assert(p == kernel_pmap);
 		return; /* still in use */
 	}
 
@@ -1826,7 +1816,9 @@ pmap_destroy(pmap_t     p)
 	vm_object_deallocate(p->pm_obj);
 
 	OSAddAtomic(-inuse_ptepages, &inuse_ptepages_count);
-	PMAP_ZINFO_PFREE(p, inuse_ptepages * PAGE_SIZE);
+	mp_disable_preemption();
+	pmap_ledger_debit(p, task_ledgers.tkm_private, ptoa(inuse_ptepages));
+	mp_enable_preemption();
 
 	pmap_check_ledgers(p);
 	ledger_dereference(p->ledger);
@@ -2137,12 +2129,12 @@ pmap_expand_pml4(
 
 	OSAddAtomic(1, &inuse_ptepages_count);
 	OSAddAtomic64(1, &alloc_ptepages_count);
-	PMAP_ZINFO_PALLOC(map, PAGE_SIZE);
 
 	/* Take the oject lock (mutex) before the PMAP_LOCK (spinlock) */
 	vm_object_lock(map->pm_obj_pml4);
 
 	PMAP_LOCK_EXCLUSIVE(map);
+
 	/*
 	 *	See if someone else expanded us first
 	 */
@@ -2153,9 +2145,9 @@ pmap_expand_pml4(
 		VM_PAGE_FREE(m);
 
 		OSAddAtomic(-1, &inuse_ptepages_count);
-		PMAP_ZINFO_PFREE(map, PAGE_SIZE);
 		return KERN_SUCCESS;
 	}
+	pmap_ledger_credit(map, task_ledgers.tkm_private, PAGE_SIZE);
 
 #if 0 /* DEBUG */
 	if (0 != vm_page_lookup(map->pm_obj_pml4, (vm_object_offset_t)i * PAGE_SIZE)) {
@@ -2243,12 +2235,12 @@ pmap_expand_pdpt(pmap_t map, vm_map_offset_t vaddr, unsigned int options)
 
 	OSAddAtomic(1, &inuse_ptepages_count);
 	OSAddAtomic64(1, &alloc_ptepages_count);
-	PMAP_ZINFO_PALLOC(map, PAGE_SIZE);
 
 	/* Take the oject lock (mutex) before the PMAP_LOCK (spinlock) */
 	vm_object_lock(map->pm_obj_pdpt);
 
 	PMAP_LOCK_EXCLUSIVE(map);
+
 	/*
 	 *	See if someone else expanded us first
 	 */
@@ -2259,9 +2251,9 @@ pmap_expand_pdpt(pmap_t map, vm_map_offset_t vaddr, unsigned int options)
 		VM_PAGE_FREE(m);
 
 		OSAddAtomic(-1, &inuse_ptepages_count);
-		PMAP_ZINFO_PFREE(map, PAGE_SIZE);
 		return KERN_SUCCESS;
 	}
+	pmap_ledger_credit(map, task_ledgers.tkm_private, PAGE_SIZE);
 
 #if 0 /* DEBUG */
 	if (0 != vm_page_lookup(map->pm_obj_pdpt, (vm_object_offset_t)i * PAGE_SIZE)) {
@@ -2367,7 +2359,6 @@ pmap_expand(
 
 	OSAddAtomic(1, &inuse_ptepages_count);
 	OSAddAtomic64(1, &alloc_ptepages_count);
-	PMAP_ZINFO_PALLOC(map, PAGE_SIZE);
 
 	/* Take the oject lock (mutex) before the PMAP_LOCK (spinlock) */
 	vm_object_lock(map->pm_obj);
@@ -2384,9 +2375,9 @@ pmap_expand(
 		VM_PAGE_FREE(m);
 
 		OSAddAtomic(-1, &inuse_ptepages_count); //todo replace all with inlines
-		PMAP_ZINFO_PFREE(map, PAGE_SIZE);
 		return KERN_SUCCESS;
 	}
+	pmap_ledger_credit(map, task_ledgers.tkm_private, PAGE_SIZE);
 
 #if 0 /* DEBUG */
 	if (0 != vm_page_lookup(map->pm_obj, (vm_object_offset_t)i * PAGE_SIZE)) {
@@ -2675,20 +2666,6 @@ dtrace_copyio_postflight(__unused addr64_t va)
 }
 #endif /* CONFIG_DTRACE */
 
-#include <mach_vm_debug.h>
-#if     MACH_VM_DEBUG
-#include <vm/vm_debug_internal.h>
-
-int
-pmap_list_resident_pages(
-	__unused pmap_t         pmap,
-	__unused vm_offset_t    *listp,
-	__unused int            space)
-{
-	return 0;
-}
-#endif  /* MACH_VM_DEBUG */
-
 
 #if CONFIG_COREDUMP
 /* temporary workaround */
@@ -2739,6 +2716,7 @@ pmap_switch(pmap_t tpmap, thread_t thread __unused)
 {
 	PMAP_TRACE_CONSTANT(PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(tpmap));
 	assert(ml_get_interrupts_enabled() == FALSE);
+	ledger_tab_open(&task_ledger_template, tpmap->ledger);
 	set_dirbase(tpmap, current_thread(), cpu_number());
 	PMAP_TRACE_CONSTANT(PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_END);
 }
@@ -3302,9 +3280,6 @@ pmap_permissions_verify(pmap_t ipmap, vm_map_t ivmmap, vm_offset_t sv, vm_offset
 }
 
 #if MACH_ASSERT
-extern int pmap_ledgers_panic;
-extern int pmap_ledgers_panic_leeway;
-
 static void
 pmap_check_ledgers(
 	pmap_t pmap)
@@ -3437,6 +3412,23 @@ pmap_cs_configuration(void)
 {
 	// Unsupported on this architecture.
 	return 0;
+}
+
+uint8_t* __attribute__((noreturn))
+pmap_ce_allocate_acceleration_buffer(
+	size_t __unused size)
+{
+	// Unsupported on this architecture.
+	panic("%s called on an unsupported platform.", __FUNCTION__);
+}
+
+void __attribute__((noreturn))
+pmap_ce_free_acceleration_buffer(
+	uint8_t __unused *data,
+	size_t __unused size)
+{
+	// Unsupported on this architecture.
+	panic("%s called on an unsupported platform.", __FUNCTION__);
 }
 
 bool

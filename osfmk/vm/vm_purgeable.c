@@ -1491,17 +1491,12 @@ vm_purgeable_accounting(
 	vm_object_t     object,
 	vm_purgable_t   old_state)
 {
-	task_t          owner;
-	int             resident_page_count;
-	int             wired_page_count;
-	int             compressed_page_count;
-	int             ledger_idx_volatile;
-	int             ledger_idx_nonvolatile;
-	int             ledger_idx_volatile_compressed;
-	int             ledger_idx_nonvolatile_compressed;
-	int             ledger_idx_composite;
-	int             ledger_idx_external_wired;
-	boolean_t       do_footprint;
+	task_t            owner;
+	ledger_t          ledger;
+	int               resident_page_count;
+	int               wired_page_count;
+	int               compressed_page_count;
+	vmo_ledgers_t     lidx;
 
 	vm_object_lock_assert_exclusive(object);
 	assert(object->purgable != VM_PURGABLE_DENY);
@@ -1512,15 +1507,9 @@ vm_purgeable_accounting(
 		return;
 	}
 
-	vm_object_ledger_tag_ledgers(object,
-	    &ledger_idx_volatile,
-	    &ledger_idx_nonvolatile,
-	    &ledger_idx_volatile_compressed,
-	    &ledger_idx_nonvolatile_compressed,
-	    &ledger_idx_composite,
-	    &ledger_idx_external_wired,
-	    &do_footprint);
-	assert(ledger_idx_external_wired == -1);
+	ledger = owner->ledger;
+	lidx   = vm_object_ledger_tag_ledgers(object);
+	assert(lidx.vmo_external_wired == LEDGER_ENTRY_ID_INVALID);
 
 	resident_page_count = object->resident_page_count;
 	wired_page_count = object->wired_page_count;
@@ -1532,76 +1521,60 @@ vm_purgeable_accounting(
 		compressed_page_count = 0;
 	}
 
+	disable_preemption();
 	if (old_state == VM_PURGABLE_VOLATILE ||
 	    old_state == VM_PURGABLE_EMPTY) {
 		/* less volatile bytes in ledger */
-		ledger_debit(owner->ledger,
-		    ledger_idx_volatile,
+		ledger_debit_nopreempt(ledger,
+		    lidx.vmo_volatile,
 		    ptoa_64(resident_page_count - wired_page_count));
 		/* less compressed volatile bytes in ledger */
-		ledger_debit(owner->ledger,
-		    ledger_idx_volatile_compressed,
+		ledger_debit_nopreempt(ledger,
+		    lidx.vmo_volatile_compressed,
 		    ptoa_64(compressed_page_count));
 
 		/* more non-volatile bytes in ledger */
-		ledger_credit(owner->ledger,
-		    ledger_idx_nonvolatile,
+		ledger_credit_nopreempt(ledger,
+		    lidx.vmo_nonvolatile,
 		    ptoa_64(resident_page_count - wired_page_count));
 		/* more compressed non-volatile bytes in ledger */
-		ledger_credit(owner->ledger,
-		    ledger_idx_nonvolatile_compressed,
+		ledger_credit_nopreempt(ledger,
+		    lidx.vmo_nonvolatile_compressed,
 		    ptoa_64(compressed_page_count));
-		if (do_footprint) {
-			/* more footprint */
-			ledger_credit(owner->ledger,
-			    task_ledgers.phys_footprint,
-			    ptoa_64(resident_page_count
-			    + compressed_page_count
-			    - wired_page_count));
-		} else if (ledger_idx_composite != -1) {
-			ledger_credit(owner->ledger,
-			    ledger_idx_composite,
-			    ptoa_64(resident_page_count
-			    + compressed_page_count
-			    - wired_page_count));
-		}
+		ledger_credit_nopreempt(ledger,
+		    lidx.vmo_footprint,
+		    ptoa_64(resident_page_count
+		    + compressed_page_count
+		    - wired_page_count));
 	} else if (old_state == VM_PURGABLE_NONVOLATILE) {
 		/* less non-volatile bytes in ledger */
-		ledger_debit(owner->ledger,
-		    ledger_idx_nonvolatile,
+		ledger_debit_nopreempt(ledger,
+		    lidx.vmo_nonvolatile,
 		    ptoa_64(resident_page_count - wired_page_count));
 		/* less compressed non-volatile bytes in ledger */
-		ledger_debit(owner->ledger,
-		    ledger_idx_nonvolatile_compressed,
+		ledger_debit_nopreempt(ledger,
+		    lidx.vmo_nonvolatile_compressed,
 		    ptoa_64(compressed_page_count));
-		if (do_footprint) {
-			/* less footprint */
-			ledger_debit(owner->ledger,
-			    task_ledgers.phys_footprint,
-			    ptoa_64(resident_page_count
-			    + compressed_page_count
-			    - wired_page_count));
-		} else if (ledger_idx_composite != -1) {
-			ledger_debit(owner->ledger,
-			    ledger_idx_composite,
-			    ptoa_64(resident_page_count
-			    + compressed_page_count
-			    - wired_page_count));
-		}
+		ledger_debit_nopreempt(ledger,
+		    lidx.vmo_footprint,
+		    ptoa_64(resident_page_count
+		    + compressed_page_count
+		    - wired_page_count));
 
 		/* more volatile bytes in ledger */
-		ledger_credit(owner->ledger,
-		    ledger_idx_volatile,
+		ledger_credit_nopreempt(ledger,
+		    lidx.vmo_volatile,
 		    ptoa_64(resident_page_count - wired_page_count));
 		/* more compressed volatile bytes in ledger */
-		ledger_credit(owner->ledger,
-		    ledger_idx_volatile_compressed,
+		ledger_credit_nopreempt(ledger,
+		    lidx.vmo_volatile_compressed,
 		    ptoa_64(compressed_page_count));
 	} else {
 		panic("vm_purgeable_accounting(%p): "
 		    "unexpected old_state=%d\n",
 		    object, old_state);
 	}
+	enable_preemption();
 
 	vm_object_lock_assert_exclusive(object);
 }
@@ -1647,41 +1620,26 @@ vm_purgeable_volatile_owner_update(
 }
 
 void
-vm_object_owner_compressed_update(
-	vm_object_t     object,
-	int             delta)
+vm_object_owner_compressed_update(vm_object_t object, int delta)
 {
-	task_t          owner;
-	int             ledger_idx_volatile;
-	int             ledger_idx_nonvolatile;
-	int             ledger_idx_volatile_compressed;
-	int             ledger_idx_nonvolatile_compressed;
-	int             ledger_idx_composite;
-	int             ledger_idx_external_wired;
-	boolean_t       do_footprint;
+	ledger_t      ledger;
+	vmo_ledgers_t lidx;
 
 	vm_object_lock_assert_exclusive(object);
-
-	owner = VM_OBJECT_OWNER(object);
 
 	if (delta == 0 ||
 	    !object->internal ||
 	    (object->purgable == VM_PURGABLE_DENY &&
 	    !object->vo_ledger_tag) ||
-	    owner == NULL) {
+	    (ledger = VM_OBJECT_LEDGER(object)) == LEDGER_NULL) {
 		/* not an owned purgeable (or tagged) VM object: nothing to update */
 		return;
 	}
 
-	vm_object_ledger_tag_ledgers(object,
-	    &ledger_idx_volatile,
-	    &ledger_idx_nonvolatile,
-	    &ledger_idx_volatile_compressed,
-	    &ledger_idx_nonvolatile_compressed,
-	    &ledger_idx_composite,
-	    &ledger_idx_external_wired,
-	    &do_footprint);
-	assert(ledger_idx_external_wired == -1);
+	lidx = vm_object_ledger_tag_ledgers(object);
+	assert(lidx.vmo_external_wired == LEDGER_ENTRY_ID_INVALID);
+
+	disable_preemption();
 
 	switch (object->purgable) {
 	case VM_PURGABLE_DENY:
@@ -1690,43 +1648,25 @@ vm_object_owner_compressed_update(
 		OS_FALLTHROUGH;
 	case VM_PURGABLE_NONVOLATILE:
 		if (delta > 0) {
-			ledger_credit(owner->ledger,
-			    ledger_idx_nonvolatile_compressed,
+			ledger_credit_nopreempt(ledger,
+			    lidx.vmo_nonvolatile_compressed, ptoa_64(delta));
+			ledger_credit_nopreempt(ledger, lidx.vmo_footprint,
 			    ptoa_64(delta));
-			if (do_footprint) {
-				ledger_credit(owner->ledger,
-				    task_ledgers.phys_footprint,
-				    ptoa_64(delta));
-			} else if (ledger_idx_composite != -1) {
-				ledger_credit(owner->ledger,
-				    ledger_idx_composite,
-				    ptoa_64(delta));
-			}
 		} else {
-			ledger_debit(owner->ledger,
-			    ledger_idx_nonvolatile_compressed,
-			    ptoa_64(-delta));
-			if (do_footprint) {
-				ledger_debit(owner->ledger,
-				    task_ledgers.phys_footprint,
-				    ptoa_64(-delta));
-			} else if (ledger_idx_composite != -1) {
-				ledger_debit(owner->ledger,
-				    ledger_idx_composite,
-				    ptoa_64(-delta));
-			}
+			ledger_debit_nopreempt(ledger,
+			    lidx.vmo_nonvolatile_compressed, ptoa_64(-delta));
+			ledger_debit_nopreempt(ledger,
+			    lidx.vmo_footprint, ptoa_64(-delta));
 		}
 		break;
 	case VM_PURGABLE_VOLATILE:
 	case VM_PURGABLE_EMPTY:
 		if (delta > 0) {
-			ledger_credit(owner->ledger,
-			    ledger_idx_volatile_compressed,
-			    ptoa_64(delta));
+			ledger_credit_nopreempt(ledger,
+			    lidx.vmo_volatile_compressed, ptoa_64(delta));
 		} else {
-			ledger_debit(owner->ledger,
-			    ledger_idx_volatile_compressed,
-			    ptoa_64(-delta));
+			ledger_debit_nopreempt(ledger,
+			    lidx.vmo_volatile_compressed, ptoa_64(-delta));
 		}
 		break;
 	default:
@@ -1734,4 +1674,6 @@ vm_object_owner_compressed_update(
 		    "unexpected purgable %d for object %p\n",
 		    object->purgable, object);
 	}
+
+	enable_preemption();
 }

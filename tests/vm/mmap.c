@@ -109,6 +109,7 @@ T_DECL(mmap_unaligned, "basic testing of mmap with various sizes and alignments"
 		    it->prot, it->flags, fd, it->offs, it->size);
 
 		if (it->flags & MAP_FIXED) {
+			f_addr = 0;
 			f_size = PAGE_SIZE * 2 + it->size;
 			kr = mach_vm_allocate(mach_task_self(), &f_addr, f_size,
 			    VM_FLAGS_ANYWHERE);

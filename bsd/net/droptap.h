@@ -140,6 +140,7 @@ struct droptap_header {
 	X(DROP_REASON_FSW_GSO_NOMEM_MBUF,           DROPTAP_SKYWALK, DROPTAP_FSW,  19, "Flowswitch GSO not enough mbuf memory")      \
 	X(DROP_REASON_FSW_DST_NXPORT_INVALID,       DROPTAP_SKYWALK, DROPTAP_FSW,  20, "Flowswitch dst nexus port invalid")          \
 	X(DROP_REASON_FSW_DEMUX_L2_MULTI_L3_UNI,    DROPTAP_SKYWALK, DROPTAP_FSW,  21, "Flowswitch demux l2 multicast l3 unicast")   \
+	X(DROP_REASON_FSW_FLOW_DISABLED,            DROPTAP_SKYWALK, DROPTAP_FSW,  22, "Flowswitch flow disabled")                   \
 	X(DROP_REASON_AQM_FULL,                     DROPTAP_SKYWALK, DROPTAP_AQM,  1,  "AQM full")                                   \
 	X(DROP_REASON_AQM_COMPRESSED,               DROPTAP_SKYWALK, DROPTAP_AQM,  2,  "AQM compressed")                             \
 	X(DROP_REASON_AQM_BK_SYS_THROTTLED,         DROPTAP_SKYWALK, DROPTAP_AQM,  3,  "AQM BK_SYS throttled")                       \
@@ -232,6 +233,8 @@ struct droptap_header {
 	X(DROP_REASON_TCP_REASS_MEMORY_PRESSURE,    DROPTAP_BSD,     DROPTAP_TCP,  40, "TCP reassembly queue memory pressure")       \
 	X(DROP_REASON_TCP_CREATE_SERVER_SOCKET,     DROPTAP_BSD,     DROPTAP_TCP,  41, "TCP create server socket failed")            \
 	X(DROP_REASON_TCP_INSEQ_MEMORY_PRESSURE,    DROPTAP_BSD,     DROPTAP_TCP,  42, "TCP in-seq input under memory pressure")     \
+	X(DROP_REASON_TCP_REASS_DUP_FIN,            DROPTAP_BSD,     DROPTAP_TCP,  43, "TCP duplicate FIN in reassembly queue")      \
+	X(DROP_REASON_TCP_REASS_DATA_AFTER_FIN,     DROPTAP_BSD,     DROPTAP_TCP,  44, "TCP data after FIN in reassembly queue")     \
 	/* IP */                                                                                                                     \
 	X(DROP_REASON_IP_UNKNOWN_MULTICAST_GROUP,   DROPTAP_BSD,     DROPTAP_IP,   2, "IP unknown multicast group join")             \
 	X(DROP_REASON_IP_INVALID_ADDR,              DROPTAP_BSD,     DROPTAP_IP,   3, "Invalid IP address")                          \

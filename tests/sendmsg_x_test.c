@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -39,7 +39,12 @@
 
 /* -*- compile-command: "xcrun --sdk macosx.internal make -C tests sendmsg_x_test" -*- */
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.net"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("vlubet")
+	);
 
 #define DATAGRAM_SIZE 64
 

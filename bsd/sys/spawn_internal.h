@@ -388,6 +388,7 @@ __options_decl(posix_spawn_options, uint32_t, {
 	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
 	PSA_OPTION_ALT_ROSETTA                  = 0x2,
 	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
+	PSA_OPTION_PAGEIN_TELEMETRY             = 0x8,
 });
 
 /*

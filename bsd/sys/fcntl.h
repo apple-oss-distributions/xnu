@@ -389,6 +389,10 @@
 /* See fcntl_private.h for additional command values */
 #endif /* PRIVATE */
 
+#ifdef PRIVATE
+#define F_DIRLSEEK              114      /* Move a directory's fd offset to the given dirent name */
+#endif // PRIVATE
+
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000
 
@@ -667,6 +671,15 @@ typedef struct fattributiontag {
 #define F_CREATE_TAG  0x00000001
 #define F_DELETE_TAG  0x00000002
 #define F_QUERY_TAG   0x00000004
+
+#ifdef PRIVATE
+/* fdirlseek_t used by F_DIRLSEEK */
+typedef struct fdirlseek {
+	user_addr_t fdls_name;   /* IN: directory entry name */
+	unsigned int fdls_flags; /* IN: flags */
+	off_t fdls_offset;       /* OUT: seek offset in directory */
+} fdirlseek_t;
+#endif // PRIVATE
 
 /*
  * For F_LOG2PHYS this information is passed back to user

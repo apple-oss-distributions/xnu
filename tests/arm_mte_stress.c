@@ -304,7 +304,7 @@ T_DECL(arm_mte_stress_cycler,
     "sysctls are used to ensure that the compressor is compressing and decompressing tag "
     "storage pages. Test can be enhanced to run more cycles, or add additional memory "
     "pressure when run at desk. ",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     /* For now, J8XX form-factor devices with WiFi are not available in BATS */
 #if TARGET_OS_OSX
     T_META_REQUIRES_NETWORK(true),

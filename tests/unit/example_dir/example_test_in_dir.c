@@ -27,16 +27,34 @@
  */
 
 #include <darwintest.h>
-#include "mocks/unit_test_utils.h"
+#include "mocks/osfmk/unit_test_utils.h"
 #include <vm/vm_object_internal.h>
 
 #define UT_MODULE osfmk
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.example_test_in_dir"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("misc"),
 	T_META_OWNER("s_shalom"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RUN_CONCURRENTLY(true)
 	);
+
+PMOCKS_START
+
+// this function is mocked both here and in libmocks. This one should win
+// because it appears later in OTHER_LDFLAGS in the makefile
+T_MOCK_PRIVATE(int, kernel_func11, (int a, char b), (a, b), {
+	return 5;
+});
+
+PMOCKS_END
+// test the pmocks mechanism works from a sub-folder
+T_DECL(test_private_mocks_work_in_dir, "test the the PMOCKS mechanism works")
+{
+	int r = kernel_func11(1, 2);
+	T_ASSERT_EQ(r, 5, "value should come from private mock");
+}
+
 
 
 // If this test fails to build or run to success it means that something broke

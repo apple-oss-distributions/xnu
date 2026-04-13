@@ -33,10 +33,10 @@
 
 #include <kern/sched_common.h>
 
-#if __AMP__
-
 SECURITY_READ_ONLY_LATE(uint8_t) sched_num_psets = UINT8_MAX;
 static_assert(MAX_PSETS < UINT8_MAX, "UINT8_MAX is used as a sentinel to indicate sched_num_psets is not initialized.");
+
+#if __AMP__
 
 void
 sched_pset_search_order_compute(sched_pset_search_order_t *search_order_out,
@@ -59,27 +59,6 @@ sched_pset_search_order_compute(sched_pset_search_order_t *search_order_out,
 	os_atomic_store_wide(&search_order_out->spso_packed, search_order.spso_packed, relaxed);
 }
 
-void
-sched_pset_search_order_init(processor_set_t src_pset, sched_pset_search_order_t *search_order_out)
-{
-	pset_id_t other_pset_id = 0;
-	sched_pset_search_order_t spill_order;
-	for (int i = 0; i < MAX_PSETS - 1; i++, other_pset_id++) {
-		if (i < sched_num_psets - 1) {
-			if (other_pset_id == src_pset->pset_id) {
-				/* Exclude the source pset */
-				other_pset_id++;
-			}
-			assert3u(other_pset_id, <, sched_num_psets);
-			spill_order.spso_search_order[i] = other_pset_id;
-		} else {
-			/* Mark unneeded slots with an invalid id, as they should not be accessed */
-			spill_order.spso_search_order[i] = PSET_ID_INVALID;
-		}
-	}
-	os_atomic_store_wide(&search_order_out->spso_packed, spill_order.spso_packed, relaxed);
-}
-
 static bool
 sched_iterate_psets_ordered_reversed(processor_set_t starting_pset,
     uint64_t candidate_map, sched_pset_iterate_state_t *istate)
@@ -94,9 +73,11 @@ sched_iterate_psets_ordered_reversed(processor_set_t starting_pset,
 			    && (istate->spis_valid_len <= (sched_num_psets - 2))) {
 				istate->spis_valid_len++;
 			}
-			istate->spis_search_index++;
+			istate->spis_search_index = 0;
 		}
-		if (istate->spis_search_index == istate->spis_valid_len) {
+		if (istate->spis_search_index > istate->spis_valid_len) {
+			return false;
+		} else if (istate->spis_search_index == istate->spis_valid_len) {
 			/* Return starting_pset last */
 			pset_id = starting_pset->pset_id;
 		} else {
@@ -155,6 +136,13 @@ sched_iterate_psets_ordered(processor_set_t starting_pset, sched_pset_search_ord
 		istate->spis_pset_id = PSET_ID_INVALID;
 		return false;
 	}
+}
+
+bool
+sched_is_standard_topology(void)
+{
+	extern bool cpu_config_modified;
+	return !cpu_config_modified;
 }
 
 #endif /* __AMP__ */

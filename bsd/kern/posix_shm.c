@@ -82,6 +82,10 @@
 #include <mach/vm_inherit.h>
 #include <mach/kern_return.h>
 
+#include <mach-o/loader.h>
+
+#include <os/log.h>
+
 #include <vm/vm_map_xnu.h>
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_protos.h>
@@ -332,6 +336,47 @@ pshm_get_name(pshm_info_t *pinfo, const user_addr_t user_addr)
 }
 
 /*
+ * The only accepted shm_open() flags, as documented in the shm_open(2) man page.
+ */
+#define SHM_OPEN_MASK (O_RDONLY | O_RDWR | O_CREAT | O_EXCL | O_TRUNC)
+
+/*
+ * For binary compatibility, we can't reject invalid flags for binaries
+ * built with SDKs that did not include the restriction.
+ */
+static bool
+shm_open_should_restrict_flags(void)
+{
+	proc_t   proc            = current_proc();
+	uint32_t platform        = proc_platform(proc);
+	uint32_t sdk_version     = proc_sdk(proc);
+
+	switch (platform) {
+	case PLATFORM_MACOS:
+	case PLATFORM_MACCATALYST:
+	case PLATFORM_IOSSIMULATOR:
+	case PLATFORM_IOS:
+	case PLATFORM_TVOSSIMULATOR:
+	case PLATFORM_TVOS:
+	case PLATFORM_WATCHOSSIMULATOR:
+	case PLATFORM_WATCHOS:
+	case PLATFORM_XROSSIMULATOR:
+	case PLATFORM_XROS:
+		/* macOS, iOS, tvOS, watchOS, visionOS: 26.4 */
+		return sdk_version >= ((26u << 16) | (4u << 8));
+	case PLATFORM_BRIDGEOS:
+		/* BridgeOS: 10.4 */
+		return sdk_version >= ((10u << 16) | (4u << 8));
+	case PLATFORM_DRIVERKIT:
+		/* driverKit: 25.4 */
+		return sdk_version >= ((25u << 16) | (4u << 8));
+	default:
+		/* Old binaries don't exist for new platforms. */
+		return true;
+	}
+}
+
+/*
  * Process a shm_open() system call.
  */
 int
@@ -375,6 +420,21 @@ shm_open(proc_t p, struct shm_open_args *uap, int32_t *retval)
 	}
 
 	cmode &= ALLPERMS;
+
+	/*
+	 * Check that no invalid flags were specified. For compatibility, we can't
+	 * reject these flags on old binaries, so they're silently cleared instead.
+	 */
+	if (uap->oflag & ~SHM_OPEN_MASK) {
+		if (shm_open_should_restrict_flags()) {
+			os_log(OS_LOG_DEFAULT, "rejected invalid flags to shm_open: 0x%0x",
+			    uap->oflag & ~SHM_OPEN_MASK);
+			error = EINVAL;
+			goto bad;
+		} else {
+			uap->oflag &= SHM_OPEN_MASK;
+		}
+	}
 
 	fmode = FFLAGS(uap->oflag);
 	if ((fmode & (FREAD | FWRITE)) == 0) {
@@ -918,7 +978,7 @@ out_deref:
 	PSHM_SUBSYS_UNLOCK();
 	if (kret != KERN_SUCCESS) {
 		if (mapped_size != 0) {
-			(void) mach_vm_deallocate(current_map(),
+			(void) mach_vm_deallocate_kernel(current_map(),
 			    user_start_addr,
 			    mapped_size);
 		}

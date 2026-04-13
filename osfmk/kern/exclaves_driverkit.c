@@ -1086,6 +1086,30 @@ exclaves_driverkit_upcall_notification_signal(const uint64_t id,
 }
 
 tb_error_t
+exclaves_driverkit_upcall_daemon_notification_signal(const uint64_t id,
+    tb_error_t (^completion)(xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_s))
+{
+	exclaves_resource_t *notification_resource =
+	    exclaves_resource_lookup_by_id(EXCLAVES_DOMAIN_KERNEL, id,
+	    XNUPROXY_RESOURCETYPE_DAEMONNOTIFICATION);
+
+	xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_s result = {};
+
+	if (notification_resource == NULL) {
+		exclaves_debug_printf(show_errors,
+		    "exclaves: No notification resource found for ID %llx\n", id);
+		xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_init_failure(
+			&result, XNUUPCALLSV2_NOTIFICATIONERROR_NOTFOUND);
+	} else {
+		exclaves_daemon_notification_signal(notification_resource);
+		xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_init_success(
+			&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
 exclaves_driverkit_upcall_lpw_createpowerassertion(
 	tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createpowerassertion__result_s))
 {
@@ -1094,6 +1118,9 @@ exclaves_driverkit_upcall_lpw_createpowerassertion(
 	struct IOExclaveLPWUpcallArgs args;
 	args.type = kIOExclaveLPWUpcallTypeCreateAssertion;
 	args.data.createassertion.id_out = 0;
+	args.data.createassertion.owner = 0;
+	args.data.createassertion.data = 0;
+	args.data.createassertion.types = 0;
 
 	xnuupcallsv2_lpwupcallsprivate_createpowerassertion__result_s result = {};
 	IOReturn ret = IOExclaveLPWUpcallHandler(&args);
@@ -1115,6 +1142,44 @@ exclaves_driverkit_upcall_lpw_createpowerassertion(
 
 	return completion(result);
 }
+
+tb_error_t
+exclaves_driverkit_upcall_lpw_createtypedpowerassertion(
+	const uint64_t owner, const uint64_t data, const uint64_t types,
+	tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_s))
+{
+	exclaves_debug_printf(show_iokit_upcalls,
+	    "[lpw_upcalls] createTypedPowerAssertion "
+	    "owner %llx data %llx types %llx\n", owner, data, types);
+
+	struct IOExclaveLPWUpcallArgs args;
+	args.type = kIOExclaveLPWUpcallTypeCreateAssertion;
+	args.data.createassertion.id_out = 0;
+	args.data.createassertion.owner = owner;
+	args.data.createassertion.data = data;
+	args.data.createassertion.types = types;
+
+	xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_s result = {};
+	IOReturn ret = IOExclaveLPWUpcallHandler(&args);
+	uint64_t assertionID = args.data.createassertion.id_out;
+	if (ret == kIOReturnSuccess && assertionID != 0) {
+		xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_init_success(
+			&result, assertionID);
+	} else if (ret == kIOReturnBusy) {
+		xnuupcallsv2_lpwerror_s err;
+		xnuupcallsv2_lpwerror_assertiondenied__init(&err);
+		xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_init_failure(
+			&result, err);
+	} else {
+		xnuupcallsv2_lpwerror_s err;
+		xnuupcallsv2_lpwerror_internalerror__init(&err);
+		xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_init_failure(
+			&result, err);
+	}
+
+	return completion(result);
+}
+
 
 tb_error_t
 exclaves_driverkit_upcall_lpw_releasepowerassertion(const uint64_t assertionID,

@@ -1582,4 +1582,80 @@ IOMemoryDescriptorCreateMTEMappingInKernelMapTest(void)
 }
 #endif /* HAS_MTE */
 
+extern "C" {
+#include <sys/vnode.h>
+#include <sys/vnode_internal.h>
+}
+
+/* testdata script
+ *  for ((i = 0; i <= 1300000; i+=4)); do
+ *  printf -v format '\\x%x' \
+ *   "$((         i & 0xff ))" \
+ *   "$(( (i >>  8) & 0xff ))" \
+ *   "$(( (i >> 16) & 0xff ))" \
+ *   "$(( (i >> 24) & 0xff ))"
+ *  printf "$format"
+ *  done
+ */
+
+IOReturn
+IOMemoryDescriptorVNodeTest(int __unused arg)
+{
+	struct vnode         *vp = NULL;
+	vfs_context_t           ctx;
+	IOMemoryDescriptor * md = NULL;
+	IOMemoryMap * map = NULL;
+	IOReturn kr = kIOReturnNotOpen;
+	errno_t error;
+
+	const char * name = "/private/var/root/testdata";
+
+	ctx = vfs_context_create(vfs_context_current());
+	error = vnode_open(name, (O_RDONLY | FREAD | O_NOFOLLOW),
+	    S_IRUSR | S_IRGRP | S_IROTH, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+
+	if (error != 0) {
+		IOLog("Failed(%d) to open the file %s\n", error, name);
+		goto exit;
+	}
+
+	for (uint64_t mdOffset = 0; mdOffset < 3 * page_size; mdOffset += (page_size / 2)) {
+		uint64_t size = mdOffset ? 4 * ptoa(1) : 0;
+		md = IOMemoryDescriptor::withVNode(vp, mdOffset, size, kIODirectionOut);
+		assert(md);
+		assert(md->getLength() >= (4 * ptoa(1)));
+
+		map = md->map(kIOMapReadOnly);
+		assert(map);
+
+		kr = md->prepare(kIODirectionOut);
+		assert(kIOReturnSuccess == kr);
+
+		uint32_t testdata;
+		for (int page = 0; page < 4; page++) {
+			uint64_t offset = ptoa(page) + 4 * page;
+
+			assert(sizeof(testdata) == md->readBytes(offset, &testdata, sizeof(testdata)));
+			assert(testdata == (mdOffset + offset));
+			testdata = ((uint32_t*)map->getVirtualAddress())[offset / 4];
+			assert(testdata == (mdOffset + offset));
+		}
+		kr = md->complete(kIODirectionOut);
+		assert(kIOReturnSuccess == kr);
+		OSSafeReleaseNULL(map);
+		OSSafeReleaseNULL(md);
+	}
+
+exit:
+	if (vp) {
+		vnode_close(vp, FREAD, ctx);
+	}
+	if (ctx) {
+		vfs_context_rele(ctx);
+	}
+
+	return kIOReturnSuccess;
+}
+
+
 #endif  /* DEVELOPMENT || DEBUG */

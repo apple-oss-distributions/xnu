@@ -6,8 +6,7 @@ void
 impl_init_runqueue(void)
 {
 	/* Init runqueue */
-	curr_hw_topo = single_core;
-	clutch_impl_init_topology(curr_hw_topo);
+	clutch_impl_init_topology(&single_core);
 	assert(processor_avail_count == 1);
 	increment_mock_time(100);
 	clutch_impl_init_params();
@@ -48,35 +47,35 @@ void
 impl_cpu_enqueue_thread(int cpu_id, test_thread_t thread)
 {
 	if (impl_get_thread_is_realtime(thread)) {
-		rt_runq_insert(cpus[cpu_id], cpus[cpu_id]->processor_set, (thread_t) thread);
+		rt_runq_insert(processor_array[cpu_id], processor_array[cpu_id]->processor_set, (thread_t) thread);
 	} else {
-		sched_clutch_processor_enqueue(cpus[cpu_id], (thread_t) thread, SCHED_TAILQ);
+		sched_clutch_processor_enqueue(processor_array[cpu_id], (thread_t) thread, SCHED_TAILQ);
 	}
 }
 
 test_thread_t
 impl_cpu_dequeue_thread(int cpu_id)
 {
-	test_thread_t chosen_thread = sched_rt_choose_thread(cpus[cpu_id]);
+	test_thread_t chosen_thread = sched_rt_choose_thread(processor_array[cpu_id]);
 	if (chosen_thread != THREAD_NULL) {
 		return chosen_thread;
 	}
 	/* No realtime threads. */
-	return sched_clutch_choose_thread(cpus[cpu_id], MINPRI, NULL, 0);
+	return sched_clutch_choose_thread(processor_array[cpu_id], MINPRI, NULL, 0);
 }
 
 test_thread_t
 impl_cpu_dequeue_thread_compare_current(int cpu_id)
 {
-	assert(cpus[cpu_id]->active_thread != NULL);
-	assert(impl_get_thread_is_realtime(cpus[cpu_id]->active_thread) == false); /* should not be called when realtime threads are running */
-	return sched_clutch_choose_thread(cpus[cpu_id], MINPRI, cpus[cpu_id]->active_thread, 0);
+	assert(processor_array[cpu_id]->active_thread != NULL);
+	assert(impl_get_thread_is_realtime(processor_array[cpu_id]->active_thread) == false); /* should not be called when realtime threads are running */
+	return sched_clutch_choose_thread(processor_array[cpu_id], MINPRI, processor_array[cpu_id]->active_thread, 0);
 }
 
 bool
 impl_processor_csw_check(int cpu_id)
 {
-	ast_t preempt_ast = sched_clutch_processor_csw_check(cpus[cpu_id]);
+	ast_t preempt_ast = sched_clutch_processor_csw_check(processor_array[cpu_id]);
 	return preempt_ast & AST_PREEMPT;
 }
 

@@ -77,6 +77,8 @@ thread_suspend
 thread_resume
 thread_abort
 thread_abort_safely
+thread_suspend2
+thread_resume2
 
 # mach_port_destroy() deprecation
 %{

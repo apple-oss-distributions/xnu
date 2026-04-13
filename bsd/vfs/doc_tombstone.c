@@ -97,6 +97,9 @@ doc_tombstone_clear(struct doc_tombstone *ut, vnode_t *old_vpp)
 		}
 	}
 
+	if (ut->t_lastop_item) {
+		vnode_drop(ut->t_lastop_item);
+	}
 	// last, clear these now that we're all done
 	ut->t_lastop_item     = NULL;
 	ut->t_lastop_fileid   = 0;
@@ -179,4 +182,8 @@ doc_tombstone_save(struct vnode *dvp, struct vnode *vp,
 	ut->t_lastop_document_id    = doc_id;
 
 	strlcpy((char *)&ut->t_lastop_filename[0], cnp->cn_nameptr, sizeof(ut->t_lastop_filename));
+
+	if (ut->t_lastop_item) {
+		vnode_hold(ut->t_lastop_item);
+	}
 }

@@ -149,6 +149,10 @@ proc_2020_fall_os_sdk_or_later(void)
 	switch (proc_platform(current_proc())) {
 	case PLATFORM_MACOS:
 		return proc_sdk_ver >= 0x000a1000; // DYLD_MACOSX_VERSION_10_16
+	case PLATFORM_XROS:
+	case PLATFORM_XROSSIMULATOR:
+		//all of XROS is new enough
+		return true;
 	case PLATFORM_IOS:
 	case PLATFORM_IOSSIMULATOR:
 	case PLATFORM_MACCATALYST:
@@ -397,13 +401,25 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 
 	if (flags & MAP_JIT) {
-		if ((flags & MAP_FIXED) ||
-		    (flags & MAP_SHARED) ||
+		if ((flags & MAP_SHARED) ||
 		    !(flags & MAP_ANON) ||
 		    (flags & MAP_RESILIENT_CODESIGN) ||
 		    (flags & MAP_RESILIENT_MEDIA) ||
 		    (flags & MAP_TPRO)) {
 			return EINVAL;
+		}
+		if (flags & MAP_FIXED) {
+#if __arm64__
+#if __ARM_MIXED_PAGE_SIZE__
+			if (vm_map_page_size(user_map) == 4096 &&
+			    !vm_map_is_exotic(user_map)) {
+				/* MAP_FIXED with MAP_JIT is allowed for arm64/4k */
+			} else
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
+#endif /* __arm64__ */
+			{
+				return EINVAL;
+			}
 		}
 	}
 
@@ -823,51 +839,6 @@ map_anon_retry:
 			goto bad;
 		}
 
-#if FBDP_DEBUG_OBJECT_NO_PAGER
-//#define FBDP_PATH_NAME1 "/private/var/db/timezone/tz/2022a.1.1/icutz/"
-#define FBDP_PATH_NAME1 "/private/var/db/timezone/tz/202"
-#define FBDP_FILE_NAME1 "icutz44l.dat"
-#define FBDP_PATH_NAME2 "/private/var/mobile/Containers/Data/InternalDaemon/"
-#define FBDP_FILE_NAME_START2 "com.apple.LaunchServices-"
-#define FBDP_FILE_NAME_END2 "-v2.csstore"
-		if (!strncmp(vp->v_name, FBDP_FILE_NAME1, strlen(FBDP_FILE_NAME1))) {
-			char *path;
-			int len;
-			bool already_tracked;
-			len = MAXPATHLEN;
-			path = zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_NOFAIL);
-			vn_getpath(vp, path, &len);
-			if (!strncmp(path, FBDP_PATH_NAME1, strlen(FBDP_PATH_NAME1))) {
-				if (memory_object_mark_as_tracked(control,
-				    true,
-				    &already_tracked) == KERN_SUCCESS &&
-				    !already_tracked) {
-					printf("FBDP %s:%d marked vp %p \"%s\" moc %p as tracked\n", __FUNCTION__, __LINE__, vp, path, control);
-				}
-			}
-			zfree(ZV_NAMEI, path);
-		} else if (!strncmp(vp->v_name, FBDP_FILE_NAME_START2, strlen(FBDP_FILE_NAME_START2)) &&
-		    strlen(vp->v_name) > strlen(FBDP_FILE_NAME_START2) + strlen(FBDP_FILE_NAME_END2) &&
-		    !strncmp(vp->v_name + strlen(vp->v_name) - strlen(FBDP_FILE_NAME_END2),
-		    FBDP_FILE_NAME_END2,
-		    strlen(FBDP_FILE_NAME_END2))) {
-			char *path;
-			int len;
-			bool already_tracked;
-			len = MAXPATHLEN;
-			path = zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_NOFAIL);
-			vn_getpath(vp, path, &len);
-			if (!strncmp(path, FBDP_PATH_NAME2, strlen(FBDP_PATH_NAME2))) {
-				if (memory_object_mark_as_tracked(control,
-				    true,
-				    &already_tracked) == KERN_SUCCESS &&
-				    !already_tracked) {
-					printf("FBDP %s:%d marked vp %p \"%s\" moc %p as tracked\n", __FUNCTION__, __LINE__, vp, path, control);
-				}
-			}
-			zfree(ZV_NAMEI, path);
-		}
-#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
 		/*
 		 *  Set credentials:
@@ -1143,7 +1114,7 @@ munmap(__unused proc_t p, struct munmap_args *uap, __unused int32_t *retval)
 		    KERN_INVALID_ARGUMENT);
 		return EINVAL;
 	}
-	if (mach_vm_deallocate(user_map, user_addr, user_size)) {
+	if (mach_vm_deallocate_kernel(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 	return 0;
@@ -1172,7 +1143,7 @@ mprotect_sanitize(
 	    VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH;
 
 #if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	flags |= VM_SANITIZE_FLAGS_STRIP_ADDR;
+	user_addr_u = vm_sanitize_canonicalize_ut_addr(user_map, user_addr_u);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 	result = vm_sanitize_addr_size(user_addr_u, user_size_u,
@@ -1330,14 +1301,12 @@ minherit_sanitize(
 	kern_return_t            result;
 	mach_vm_offset_t         addr_end;
 
-	vm_sanitize_flags_t flags = VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH;
-
 #if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	flags |= VM_SANITIZE_FLAGS_STRIP_ADDR;
+	addr_u = vm_sanitize_canonicalize_ut_addr(user_map, addr_u);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 	result = vm_sanitize_addr_size(addr_u, size_u, VM_SANITIZE_CALLER_MINHERIT,
-	    user_map, flags, addr, &addr_end, size);
+	    user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, addr, &addr_end, size);
 	if (__improbable(result != KERN_SUCCESS)) {
 		return result;
 	}
@@ -1406,14 +1375,12 @@ madvise_sanitize(
 	mach_vm_offset_t       *end,
 	mach_vm_size_t         *size)
 {
-	vm_sanitize_flags_t     flags = VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH;
-
 #if HAS_MTE || HAS_MTE_EMULATION_SHIMS
-	flags |= VM_SANITIZE_FLAGS_STRIP_ADDR;
+	addr_u = vm_sanitize_canonicalize_ut_addr(user_map, addr_u);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MADVISE,
-	           user_map, flags, start, end, size);
+	           user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, start, end, size);
 }
 
 int
@@ -1523,19 +1490,17 @@ mincore_sanitize(
 	mach_vm_offset_t        *end,
 	mach_vm_size_t          *size)
 {
-	vm_sanitize_flags_t flags = VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS;
 #if HAS_MTE || HAS_MTE_EMULATION_SHIMS
 	/*
 	 * mincore() purely accesses VM data structures, which are only composed of
-	 * canonicalized addresses. Request to strip the parameter in order
-	 * to allow userspace to call mincore with MTE/TBI/PAC'ed addresses.
+	 * canonicalized addresses.
 	 */
 	assert(!vm_kernel_map_is_kernel(map));
-	flags |= VM_SANITIZE_FLAGS_STRIP_ADDR;
+	addr_u = vm_sanitize_canonicalize_ut_addr(map, addr_u);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MINCORE,
-	           map, flags, addr, end, size);
+	           map, VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, addr, end, size);
 }
 
 int

@@ -777,6 +777,7 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, mbuf_ref_t m,
 	u_int32_t poll_thresh = 0, poll_ival = 0;
 	int iorefcnt = 0;
 	boolean_t skip_bridge_filter = FALSE;
+	bool io_pm_is_lpw_mode = is_net_lpw_mode();
 
 	KERNEL_DEBUG(DBG_FNC_DLIL_INPUT | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
@@ -789,6 +790,14 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, mbuf_ref_t m,
 		m = handle_bridge_early_input(ifp, m, cnt);
 		skip_bridge_filter = TRUE;
 	}
+	/* Increment LPW receive statistics at once if we have the interface */
+	if (__improbable(io_pm_is_lpw_mode)) {
+		if (ifp != NULL && cnt > 0 && (ifp->if_capabilities & IFCAP_SKYWALK) == 0) {
+			os_atomic_add(&ifp->if_data.ifi_lpw_ipackets, cnt, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_rx_packets, cnt, relaxed);
+		}
+	}
+
 	while (m != NULL) {
 		if_proto_ref_t ifproto = NULL;
 		uint32_t pktf_mask;     /* pkt flags to preserve */
@@ -798,6 +807,14 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, mbuf_ref_t m,
 
 		if (ifp_param == NULL) {
 			ifp = m->m_pkthdr.rcvif;
+
+			/* Increment LPW receive statistics when we can the count of packets */
+			if (__improbable(io_pm_is_lpw_mode)) {
+				if ((ifp->if_capabilities & IFCAP_SKYWALK) == 0) {
+					os_atomic_inc(&ifp->if_data.ifi_lpw_ipackets, relaxed);
+					os_atomic_inc(&if_ports_used_stats.ifpu_lpw_rx_packets, relaxed);
+				}
+			}
 		}
 
 		if ((ifp->if_eflags & IFEF_RXPOLL) &&
@@ -844,6 +861,15 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, mbuf_ref_t m,
 
 		/* make sure packet comes in clean */
 		m_classifier_init(m, pktf_mask);
+
+		/* indicate if the packet was received when LPW was enabled */
+		if (__improbable(io_pm_is_lpw_mode)) {
+			m->m_pkthdr.pkt_ext_flags |= PKTF_EXT_LPW;
+			if (cnt == 0 && (ifp->if_capabilities & IFCAP_SKYWALK) == 0) {
+				os_atomic_inc(&ifp->if_data.ifi_lpw_ipackets, relaxed);
+				os_atomic_inc(&if_ports_used_stats.ifpu_lpw_rx_packets, relaxed);
+			}
+		}
 
 		ifp_inc_traffic_class_in(ifp, m);
 
@@ -948,7 +974,12 @@ skip_clat:
 		 * Match the wake packet against the list of ports that has been
 		 * been queried by the driver before the device went to sleep
 		 */
-		if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if (__improbable(if_is_lpw_enabled(ifp))) {
+			if (protocol_family != PF_INET && protocol_family != PF_INET6) {
+				if_ports_used_match_mbuf(ifp, protocol_family, m);
+				if_exit_lpw(ifp, "dlil_input LPW not PF_INET or PF_INET6 protocol");
+			}
+		} else if (__improbable((m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT))) {
 			if (protocol_family != PF_INET && protocol_family != PF_INET6) {
 				if_ports_used_match_mbuf(ifp, protocol_family, m);
 			}
@@ -1884,3 +1915,133 @@ handle_bridge_early_input(ifnet_t ifp, mbuf_t m, u_int32_t cnt)
 	lck_mtx_unlock(&ifp->if_flt_lock);
 	return m;
 }
+
+/*
+ * Check if an mbuf packet is a Wake-on-LAN magic packet.
+ * A magic packet contains 6 bytes of 0xFF followed by 16 repetitions
+ * of the network interface MAC address. The pattern can appear anywhere
+ * within the packet data.
+ * The mbuf's rcvif field must be for an Ethernet interface.
+ *
+ * Returns: bool - true if it's a magic packet, false otherwise
+ */
+#define SYNC_STREAM_LEN 6
+#define MAGIC_MAC_COUNT 16
+#define MAGIC_PATTERN_LEN  (SYNC_STREAM_LEN + (MAGIC_MAC_COUNT * ETHER_ADDR_LEN))
+
+__attribute__((noinline))
+bool
+packet_has_magic_pattern(struct mbuf *m)
+{
+	static const u_char sync_stream[SYNC_STREAM_LEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	u_char if_mac[ETHER_ADDR_LEN];
+	u_char check_buf[MAGIC_PATTERN_LEN];  /* sync + 16 MAC addresses */
+	const int magic_len = MAGIC_PATTERN_LEN;
+	const int max_search_len = if_max_magic_search_len;
+	int pkt_len;
+	int search_len;
+	int pkt_offset;  /* Current offset in the packet */
+	int buf_offset;  /* Offset within check_buf */
+	int copy_len;
+	int i;
+
+	/* Check that mbuf has packet header */
+	if ((m->m_flags & M_PKTHDR) == 0) {
+		return false;
+	}
+
+	/* Check that rcvif is set */
+	if (m->m_pkthdr.rcvif == NULL) {
+		return false;
+	}
+
+	/* Check that interface is Ethernet */
+	if (m->m_pkthdr.rcvif->if_type != IFT_ETHER) {
+		return false;
+	}
+
+	/* Get the interface's MAC address */
+	if (ifnet_lladdr_copy_bytes(m->m_pkthdr.rcvif, if_mac, ETHER_ADDR_LEN) != 0) {
+		return false;
+	}
+
+	/* Increment LPW statistics: count of packet_has_magic_pattern invocations */
+	os_atomic_inc(&m->m_pkthdr.rcvif->if_data.ifi_lpw_magic_pkt_checked, relaxed);
+
+	pkt_len = m_pktlen(m);
+
+	/* Magic packet must be at least 102 bytes */
+	if (pkt_len < magic_len) {
+		return false;
+	}
+
+	/* Limit search to first 1500 bytes of packet */
+	search_len = (pkt_len < max_search_len) ? pkt_len : max_search_len;
+
+	/* First level loop: Iterate through packet in chunks */
+	pkt_offset = 0;
+	while (pkt_offset <= search_len - magic_len) {
+		int max_buf_offset;
+
+		/* Copy a chunk of data from the packet */
+		copy_len = (search_len - pkt_offset < (int)sizeof(check_buf)) ?
+		    (search_len - pkt_offset) : (int)sizeof(check_buf);
+		m_copydata(m, pkt_offset, copy_len, check_buf);
+
+		/* Second level loop: Search for sync_stream within check_buf */
+		/*
+		 * Calculate maximum offset in check_buf where we can start searching.
+		 * Limited by two constraints:
+		 * 1. Buffer constraint: need SYNC_STREAM_LEN bytes in buffer after offset
+		 * 2. Search space constraint: need magic_len bytes remaining in search area
+		 */
+		int buf_constraint = copy_len - SYNC_STREAM_LEN;
+		int search_constraint = search_len - magic_len - pkt_offset;
+		max_buf_offset = (buf_constraint < search_constraint) ? buf_constraint : search_constraint;
+
+		for (buf_offset = 0; buf_offset <= max_buf_offset; buf_offset++) {
+			/* Check for synchronization stream (6 bytes of 0xFF) */
+			if (memcmp(&check_buf[buf_offset], sync_stream, SYNC_STREAM_LEN) != 0) {
+				continue;
+			}
+
+			/* Sync stream found - check if we have enough data in check_buf */
+			if (buf_offset + magic_len <= copy_len) {
+				/* All data is in check_buf, verify MAC repetitions directly */
+				for (i = 0; i < MAGIC_MAC_COUNT; i++) {
+					if (memcmp(&check_buf[buf_offset + SYNC_STREAM_LEN + i * ETHER_ADDR_LEN],
+					    if_mac, ETHER_ADDR_LEN) != 0) {
+						break;
+					}
+				}
+			} else {
+				/* Need to copy MAC repetitions from packet into check_buf */
+				m_copydata(m, pkt_offset + buf_offset + SYNC_STREAM_LEN,
+				    MAGIC_MAC_COUNT * ETHER_ADDR_LEN, check_buf);
+
+				/* Verify 16 repetitions of MAC address */
+				for (i = 0; i < MAGIC_MAC_COUNT; i++) {
+					if (memcmp(&check_buf[i * ETHER_ADDR_LEN], if_mac, ETHER_ADDR_LEN) != 0) {
+						break;
+					}
+				}
+			}
+
+			/* If all 16 repetitions matched, we found the magic packet */
+			if (i == MAGIC_MAC_COUNT) {
+				/* Increment LPW statistics: count of magic packets found */
+				os_atomic_inc(&m->m_pkthdr.rcvif->if_data.ifi_lpw_magic_pkt_found, relaxed);
+				return true;
+			}
+		}
+
+		/* Move to next chunk, with overlap to catch patterns at boundaries */
+		pkt_offset += copy_len - SYNC_STREAM_LEN + 1;
+	}
+
+	return false;
+}
+
+#undef SYNC_STREAM_LEN
+#undef MAGIC_MAC_COUNT
+#undef MAGIC_PATTERN_LEN

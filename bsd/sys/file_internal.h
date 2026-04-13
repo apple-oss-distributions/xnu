@@ -81,7 +81,7 @@
 
 __BEGIN_DECLS
 
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 struct proc;
 struct uio;
@@ -566,7 +566,7 @@ int dup2(proc_t p, kauth_cred_t p_cred, int from, int to, int *fd);
 int close_nocancel(proc_t p, kauth_cred_t p_cred, int fd);
 int fchdir(proc_t p, vfs_context_t ctx, int fd, bool per_thread);
 
-#pragma GCC visibility pop
+__exported_pop
 
 __END_DECLS
 

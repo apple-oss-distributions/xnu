@@ -87,4 +87,8 @@ extern int key_sendup(struct socket *, struct sadb_msg *, u_int, int);
 extern int key_sendup_mbuf(struct socket *, struct mbuf *, int);
 #endif /* BSD_KERNEL_PRIVATE */
 
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
+#include <netkey/keysock_private.h>
+#endif /* PRIVATE && !MODULES_SUPPORTED */
+
 #endif /*_NETKEY_KEYSOCK_H_*/

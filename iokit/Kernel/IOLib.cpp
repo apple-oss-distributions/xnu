@@ -193,9 +193,9 @@ IOLibInit(void)
 	gIOKitPageableMap.map = kmem_suballoc(kernel_map,
 	    &gIOKitPageableFixedRange.min_address,
 	    kIOPageableMapSize,
-	    VM_MAP_CREATE_PAGEABLE,
+	    VM_MAP_CREATE_DEFAULT,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    (kms_flags_t)(KMS_PERMANENT | KMS_DATA | KMS_NOFAIL | KMS_NOSOFTLIMIT),
+	    (kms_flags_t)(KMS_DATA | KMS_NOFAIL | KMS_NOSOFTLIMIT),
 	    VM_KERN_MEMORY_IOKIT).kmr_submap;
 
 	gIOKitPageableMap.address = gIOKitPageableFixedRange.min_address;
@@ -518,7 +518,7 @@ vm_size_t alignment, zalloc_flags_t flags)
 		kma_flags = KMA_ZERO;
 	}
 
-	if (kheap == KHEAP_DATA_BUFFERS) {
+	if (kheap == KHEAP_DATA_PRIVATE) {
 		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
 	} else if (kheap == KHEAP_DATA_SHARED) {
 		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA_SHARED);
@@ -643,7 +643,7 @@ void *
 IOMallocAligned_external(
 	vm_size_t size, vm_size_t alignment)
 {
-	return IOMallocAligned_internal(GET_KEXT_KHEAP_DATA(), size, alignment,
+	return IOMallocAligned_internal(KHEAP_DATA_SHARED, size, alignment,
 	           Z_VM_TAG_BT_BIT);
 }
 
@@ -652,7 +652,7 @@ IOFreeAligned(
 	void                  * address,
 	vm_size_t               size)
 {
-	IOFreeAligned_internal(GET_KEXT_KHEAP_DATA(), address, size);
+	IOFreeAligned_internal(KHEAP_DATA_SHARED, address, size);
 }
 
 __typed_allocators_ignore_pop
@@ -740,7 +740,7 @@ IOKernelAllocateWithPhysicalRestrict(
 		kma_flags_t options = KMA_ZERO;
 		vm_offset_t virt;
 
-		if (kheap == KHEAP_DATA_BUFFERS) {
+		if (kheap == KHEAP_DATA_PRIVATE) {
 			options = (kma_flags_t) (options | KMA_DATA);
 		} else if (kheap == KHEAP_DATA_SHARED) {
 			options = (kma_flags_t) (options | KMA_DATA_SHARED);
@@ -1101,7 +1101,7 @@ IOMallocData_external(
 void *
 IOMallocData_external(vm_size_t size)
 {
-	return IOMalloc_internal(GET_KEXT_KHEAP_DATA(), size, Z_VM_TAG_BT_BIT);
+	return IOMalloc_internal(KHEAP_DATA_PRIVATE, size, Z_VM_TAG_BT_BIT);
 }
 
 void *
@@ -1110,23 +1110,23 @@ IOMallocZeroData_external(
 void *
 IOMallocZeroData_external(vm_size_t size)
 {
-	return IOMalloc_internal(GET_KEXT_KHEAP_DATA(), size, Z_ZERO_VM_TAG_BT_BIT);
+	return IOMalloc_internal(KHEAP_DATA_PRIVATE, size, Z_ZERO_VM_TAG_BT_BIT);
 }
 
 void *
-IOMallocDataSharable_external(
+IOMallocDataShareable_external(
 	vm_size_t size);
 void *
-IOMallocDataSharable_external(vm_size_t size)
+IOMallocDataShareable_external(vm_size_t size)
 {
 	return IOMalloc_internal(KHEAP_DATA_SHARED, size, Z_VM_TAG_BT_BIT);
 }
 
 void *
-IOMallocZeroDataSharable_external(
+IOMallocZeroDataShareable_external(
 	vm_size_t size);
 void *
-IOMallocZeroDataSharable_external(vm_size_t size)
+IOMallocZeroDataShareable_external(vm_size_t size)
 {
 	return IOMalloc_internal(KHEAP_DATA_SHARED, size, Z_ZERO_VM_TAG_BT_BIT);
 }
@@ -1134,11 +1134,11 @@ IOMallocZeroDataSharable_external(vm_size_t size)
 void
 IOFreeData(void * address, vm_size_t size)
 {
-	return IOFree_internal(GET_KEXT_KHEAP_DATA(), address, size);
+	return IOFree_internal(KHEAP_DATA_PRIVATE, address, size);
 }
 
 void
-IOFreeDataSharable(void * address, vm_size_t size)
+IOFreeDataShareable(void * address, vm_size_t size)
 {
 	return IOFree_internal(KHEAP_DATA_SHARED, address, size);
 }

@@ -331,7 +331,7 @@ read_frandom(void * buffer, u_int numBytes)
 void
 register_and_init_prng(struct cckprng_ctx *ctx, const struct cckprng_funcs *funcs)
 {
-	assert3s(cpu_number(), ==, master_cpu);
+	assert3s(cpu_number(), ==, boot_cpu_id);
 	assert(!prng_ready);
 
 	entropy_init(sizeof(entropyseed), entropyseed);
@@ -341,7 +341,7 @@ register_and_init_prng(struct cckprng_ctx *ctx, const struct cckprng_funcs *func
 
 	uint64_t nonce = ml_get_timebase();
 	prng_funcs.init_with_getentropy(prng_ctx, MAX_CPUS, sizeof(kprngseed), kprngseed, sizeof(nonce), &nonce, entropy_provide, NULL);
-	prng_funcs.initgen(prng_ctx, master_cpu);
+	prng_funcs.initgen(prng_ctx, boot_cpu_id);
 	prng_ready = 1;
 
 	// Reseed with a key that has been securely combined with kernel-sourced platform randomness, where it was available.
@@ -357,7 +357,7 @@ register_and_init_prng(struct cckprng_ctx *ctx, const struct cckprng_funcs *func
 void
 random_cpu_init(int cpu)
 {
-	assert3s(cpu, !=, master_cpu);
+	assert3s(cpu, !=, boot_cpu_id);
 
 	if (!prng_ready) {
 		panic("random_cpu_init: kernel prng has not been installed");

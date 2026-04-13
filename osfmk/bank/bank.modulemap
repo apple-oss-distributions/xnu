@@ -1,4 +1,4 @@
-module Darwin.bank [system] {
+module Darwin.bank {
   module bank_types {
     header "bank/bank_types.h"
     export *

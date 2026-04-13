@@ -4932,6 +4932,21 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 		goto out;
 	}
 	gotref = 1;
+
+#if CONFIG_MACF
+	vnode_t cvp = vfs_vnodecovered(mp);
+	if (cvp == NULLVP) {
+		error = ENOENT;
+		goto out;
+	}
+
+	error = mac_vnode_check_lookup_preflight(ctx, cvp, ".", 1);
+	vnode_put(cvp);
+	if (error != 0) {
+		goto out;
+	}
+#endif /* CONFIG_MACF */
+
 	/* reset so that the fs specific code can fetch it. */
 	req->newidx = 0;
 	/*
@@ -4959,6 +4974,7 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 			goto out;
 		}
 	}
+
 	switch (name[0]) {
 	case VFS_CTL_UMOUNT:
 #if CONFIG_MACF
@@ -8732,7 +8748,7 @@ vn_authorize_renamex_with_paths(struct vnode *fdvp, struct vnode *fvp, struct co
 			    (uintptr_t)fvp,
 			    (uintptr_t)to_path);
 		}
-		if (vnode_isdir(fvp)) {
+		if (vnode_isdir(fvp) && moving) {
 			if ((error = vnode_authorize(fvp, fdvp, KAUTH_VNODE_DELETE | KAUTH_VNODE_ADD_SUBDIRECTORY, ctx)) != 0) {
 				goto out;
 			}

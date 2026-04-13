@@ -25,14 +25,23 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#ifndef _ARM_PMAP_PUBLIC_H_
-#define _ARM_PMAP_PUBLIC_H_
+#ifndef _ARM64_SPTM_PMAP_PUBLIC_H_
+#define _ARM64_SPTM_PMAP_PUBLIC_H_
 
 #include <stddef.h>
 #include <mach/kern_return.h>
 #include <mach/vm_types.h>
 #include <mach/vm_prot.h>
-#include <arm64/sptm/sptm.h>
+
+/**
+ * The directory where SPTM headers is exported is interpreted differently from
+ * within XNU than from KEXTs.
+ */
+#if XNU_KERNEL_PRIVATE
+#include <sptm/sptm_xnu.h>
+#else
+#include <platform/sptm/sptm_xnu.h>
+#endif
 
 __BEGIN_DECLS
 
@@ -45,4 +54,4 @@ typedef uint32_t pmap_paddr_t __kernel_ptr_semantics; /* physical address (not p
 
 __END_DECLS
 
-#endif /* _ARM_PMAP_PUBLIC_H_ */
+#endif /* _ARM64_SPTM_PMAP_PUBLIC_H_ */

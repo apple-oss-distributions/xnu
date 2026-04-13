@@ -304,8 +304,8 @@ struct tcp_connection_info {
 };
 #endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <netinet/tcp_private.h>
-#endif
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif

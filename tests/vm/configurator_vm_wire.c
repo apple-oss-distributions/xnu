@@ -75,12 +75,21 @@ checker_perform_vm_unwire_with_holes(
 {
 	entry_checker_range_t limit = checker_list_find_range_including_holes(checker_list, start, size);
 
-	if (limit.head && limit.head->kind == Allocation &&
-	    checker_contains_address(limit.head, start)) {
-		/* range begins with an allocation - proceed normally */
+	if (is_new_vm()) {
+		FOREACH_CHECKER(checker, limit) {
+			/* new VM disallows holes anywhere */
+			if (checker->kind == Hole) {
+				return KERN_INVALID_ADDRESS;
+			}
+		}
 	} else {
-		/* range begins with a hole - do nothing, not even simplify */
-		return KERN_INVALID_ADDRESS;
+		if (limit.head && limit.head->kind == Allocation &&
+		    checker_contains_address(limit.head, start)) {
+			/* range begins with an allocation - proceed normally */
+		} else {
+			/* range begins with a hole - do nothing, not even simplify */
+			return KERN_INVALID_ADDRESS;
+		}
 	}
 
 	FOREACH_CHECKER(checker, limit) {
@@ -94,10 +103,23 @@ checker_perform_vm_unwire_with_holes(
 	return KERN_SUCCESS;
 }
 
-
 /*
- * Update checker state to mirrow a successful call to vm_wire.
+ * Update checker state to mirror a successful call to vm_wire.
  */
+extern void
+object_checker_allocate_pull_push_pages(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t start_page,
+	mach_vm_size_t end_page,
+	bool pull_from_shadow,
+	bool push_into_copy);
+extern void
+checker_get_object_page_bounds(
+	vm_entry_checker_t *checker,
+	mach_vm_size_t * const out_page_start,
+	mach_vm_size_t * const out_page_end);
+
+
 static void
 checker_perform_vm_wire(
 	checker_list_t *checker_list,
@@ -107,44 +129,91 @@ checker_perform_vm_wire(
 {
 	assert(wire_prot != VM_PROT_NONE);
 
-	entry_checker_range_t limit;
-
 	/*
-	 * Resolve null objects.
-	 * vm_wire does this before clipping
+	 * Find the entries without clipping.
+	 * vm_wire's clipping behavior is complicated.
 	 */
+	entry_checker_range_t limit;
 	limit = checker_list_find_range_including_holes(checker_list, start, size);
-	FOREACH_CHECKER(checker, limit) {
-		checker_resolve_null_vm_object(checker_list, checker);
+
+	/* new VM resolves all NULL objects before doing anything else */
+	if (is_new_vm()) {
+		FOREACH_CHECKER(checker, limit) {
+			checker_resolve_null_vm_object(checker_list, checker);
+		}
 	}
 
-	/*
-	 * Perform clipping.
-	 */
-	limit = checker_list_find_range(checker_list, start, size);
-	checker_clip_left(checker_list, limit.head, start);
-	checker_clip_right(checker_list, limit.tail, start + size);
-
-	/*
-	 * Fault and wire.
-	 */
-
 	FOREACH_CHECKER(checker, limit) {
+		checker_clip_and_resolve_cow_for_wire(checker_list,
+		    checker, start, size);
 		checker->user_wired_count++;
-		checker_fault_for_prot_not_cow(checker_list, checker, wire_prot);
+
+		/*
+		 * Fault.
+		 * Unconditionally pull pages from the shadow object.
+		 * Zerofill missing pages.
+		 * Don't push pages to the copy object because we don't have one.
+		 */
+		assert(checker->object->vo_copy == NULL);
+		mach_vm_size_t start_page, end_page;
+		checker_get_object_page_bounds(checker, &start_page, &end_page);
+		object_checker_allocate_pull_push_pages(
+			checker->object, start_page, end_page,
+			true /* pull_from_shadow */, false /* push_to_copy */);
 	}
 	checker_list_simplify(checker_list, start, size);
 }
 
 
 static void
-checker_perform_failed_vm_wire(
+checker_perform_failed_vm_wire_newvm(
 	checker_list_t *checker_list,
 	mach_vm_address_t start,
 	mach_vm_size_t size,
 	vm_prot_t wire_prot)
 {
-	assert(wire_prot != VM_PROT_NONE);
+	assert(is_new_vm());
+
+	entry_checker_range_t limit =
+	    checker_list_find_range_including_holes(checker_list, start, size);
+	FOREACH_CHECKER(checker, limit) {
+		if (checker->kind != Allocation) {
+			/* stop at holes */
+			break;
+		}
+
+		/* wire of executable entry fails early */
+		if (prot_contains_all(checker->protection, VM_PROT_EXECUTE)) {
+			// (fixme jit, tpro)
+			break;
+		}
+
+		if (!prot_contains_all(checker->protection, wire_prot)) {
+			/* stop at protection failures */
+			break;
+		}
+
+		/* null vm_objects are resolved before clipping */
+		checker_resolve_null_vm_object(checker_list, checker);
+
+		if (checker == limit.head) {
+			checker_clip_left(checker_list, checker, start);
+		}
+		if (checker == limit.tail) {
+			checker_clip_right(checker_list, checker, start + size);
+		}
+	}
+}
+
+
+static void
+checker_perform_failed_vm_wire_oldvm(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size,
+	vm_prot_t wire_prot)
+{
+	assert(!is_new_vm());
 
 	/*
 	 * failed vm_wire clips entries and resolves null vm_objects
@@ -193,14 +262,30 @@ checker_perform_failed_vm_wire(
 		 * failed vm_wire simplifies and faults in,
 		 * except for the cases already short-circuited above
 		 */
-		checker_fault_for_prot_not_cow(checker_list, checker, wire_prot);
+		checker_fault_all(checker_list, checker, wire_prot);
 		checker_simplify_left(checker_list, checker);
 	}
 }
 
 
+static void
+checker_perform_failed_vm_wire(
+	checker_list_t *checker_list,
+	mach_vm_address_t start,
+	mach_vm_size_t size,
+	vm_prot_t wire_prot)
+{
+	assert(wire_prot != VM_PROT_NONE);
+	if (is_new_vm()) {
+		return checker_perform_failed_vm_wire_newvm(checker_list, start, size, wire_prot);
+	} else {
+		return checker_perform_failed_vm_wire_oldvm(checker_list, start, size, wire_prot);
+	}
+}
+
+
 static test_result_t
-successful_vm_wire_read_not_cow(
+successful_vm_wire_read(
 	checker_list_t *checker_list,
 	mach_vm_address_t start,
 	mach_vm_size_t size)
@@ -233,7 +318,7 @@ successful_vm_wire_read_not_cow(
 }
 
 static test_result_t
-failed_vm_wire_read_not_cow(
+failed_vm_wire_read(
 	checker_list_t *checker_list,
 	mach_vm_address_t start,
 	mach_vm_size_t size)
@@ -251,157 +336,20 @@ failed_vm_wire_read_not_cow(
 }
 
 static test_result_t
-wire_shared_entry(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	/* two entries each sharing the same object */
-	vm_entry_checker_t *right_checker = checker_list_nth(checker_list, 1);
-
-	kern_return_t kr;
-
-	/*
-	 * Wire the left entry. The right entry also faults in but
-	 * stays at wire count zero.
-	 */
-	checker_perform_vm_wire(checker_list, start, size, VM_PROT_READ);
-	checker_fault_for_prot_not_cow(checker_list, right_checker, VM_PROT_READ);
-	kr = mach_vm_wire(host_priv(), mach_task_self(), start, size, VM_PROT_READ);
-	assert(kr == 0);
-
-	return verify_vm_state(checker_list, "after vm_wire shared");
-}
-
-static test_result_t
-wire_shared_entry_discontiguous(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	/*
-	 * two entries each sharing the same object
-	 * but only partially overlap inside that object.
-	 * Wiring the left entry does not affect the right entry,
-	 * so this looks like an ordinary vm_wire test.
-	 */
-	return successful_vm_wire_read_not_cow(checker_list, start, size);
-}
-
-static test_result_t
-wire_shared_entry_partial(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	/*
-	 * two entries each sharing the same object
-	 * but only partially overlap inside that object
-	 */
-	vm_entry_checker_t *right_checker = checker_list_nth(checker_list, 1);
-	mach_vm_address_t right_offset = DEFAULT_PARTIAL_ENTRY_SIZE;
-
-	kern_return_t kr;
-
-	/*
-	 * Wire the left entry. The right entry stays at wire count zero
-	 * and only the overlapping section faults in.
-	 */
-	checker_perform_vm_wire(checker_list, start, size, VM_PROT_READ);
-	right_checker->pages_resident = (uint32_t)((size - right_offset) / PAGE_SIZE);
-	kr = mach_vm_wire(host_priv(), mach_task_self(), start, size, VM_PROT_READ);
-	assert(kr == 0);
-
-	return verify_vm_state(checker_list, "after vm_wire shared partial");
-}
-
-static void
-checker_make_cow_private(
-	checker_list_t *checker_list,
-	vm_entry_checker_t *checker)
-{
-	if (checker->object->self_ref_count == 1) {
-		/*
-		 * COW but not shared with anything else.
-		 * VM resolves COW by using the same object.
-		 */
-		checker->needs_copy = false;
-		return;
-	}
-
-	/* make new object */
-	vm_object_checker_t *obj_checker = object_checker_clone(checker->object);
-	checker_list_append_object(checker_list, obj_checker);
-
-	/* change object and entry to private */
-	checker->needs_copy = false;
-
-	/* set new object (decreasing previous object's self_ref_count) */
-	checker_set_object(checker, obj_checker);
-}
-
-static test_result_t
-wire_cow_entry(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	/* Wiring a COW entry resolves COW but has no effect on other copies. */
-
-	vm_entry_checker_t *left_checker = checker_list_nth(checker_list, 0);
-	checker_make_cow_private(checker_list, left_checker);
-
-	return successful_vm_wire_read_not_cow(checker_list, start, size);
-}
-
-static test_result_t
-wire_cow_nocow(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	vm_entry_checker_t *left_checker = checker_list_nth(checker_list, 0);
-	checker_make_cow_private(checker_list, left_checker);
-
-	return successful_vm_wire_read_not_cow(checker_list, start, size);
-}
-
-static test_result_t
-wire_nocow_cow(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	vm_entry_checker_t *left_checker = checker_list_nth(checker_list, 0);
-	vm_entry_checker_t *right_checker = left_checker->next;
-	checker_make_cow_private(checker_list, right_checker);
-
-	return successful_vm_wire_read_not_cow(checker_list, start, size);
-}
-
-static test_result_t
 wire_cow_unreadable(
 	checker_list_t *checker_list,
 	mach_vm_address_t start,
 	mach_vm_size_t size)
 {
-	vm_entry_checker_t *checker = checker_list_nth(checker_list, 0);
-	checker_make_shadow_object(checker_list, checker);
-	return failed_vm_wire_read_not_cow(checker_list, start, size);
+	if (is_new_vm()) {
+		/* new VM doesn't touch COW when permission is denied */
+		return failed_vm_wire_read(checker_list, start, size);
+	} else {
+		vm_entry_checker_t *checker = checker_list_nth(checker_list, 0);
+		checker_make_shadow_object(checker_list, checker);
+		return failed_vm_wire_read(checker_list, start, size);
+	}
 }
-
-static test_result_t
-wire_cow_unwriteable(
-	checker_list_t *checker_list,
-	mach_vm_address_t start,
-	mach_vm_size_t size)
-{
-	vm_entry_checker_t *checker = checker_list_nth(checker_list, 0);
-	checker_make_cow_private(checker_list, checker);
-
-	return successful_vm_wire_read_not_cow(checker_list, start, size);
-}
-
 
 /*
  * Test vm_unwire with a range that includes holes.
@@ -469,60 +417,65 @@ T_DECL(vm_wire,
     "run vm_wire with various vm configurations")
 {
 	vm_tests_t tests = {
-		.single_entry_1 = successful_vm_wire_read_not_cow,
-		.single_entry_2 = successful_vm_wire_read_not_cow,
-		.single_entry_3 = successful_vm_wire_read_not_cow,
-		.single_entry_4 = successful_vm_wire_read_not_cow,
+		.single_entry_1 = successful_vm_wire_read,
+		.single_entry_2 = successful_vm_wire_read,
+		.single_entry_3 = successful_vm_wire_read,
+		.single_entry_4 = successful_vm_wire_read,
 
-		.multiple_entries_1 = successful_vm_wire_read_not_cow,
-		.multiple_entries_2 = successful_vm_wire_read_not_cow,
-		.multiple_entries_3 = successful_vm_wire_read_not_cow,
-		.multiple_entries_4 = successful_vm_wire_read_not_cow,
-		.multiple_entries_5 = successful_vm_wire_read_not_cow,
-		.multiple_entries_6 = successful_vm_wire_read_not_cow,
+		.single_entry_nonnull_1 = successful_vm_wire_read,
+		.single_entry_nonnull_2 = successful_vm_wire_read,
+		.single_entry_nonnull_3 = successful_vm_wire_read,
+		.single_entry_nonnull_4 = successful_vm_wire_read,
 
-		.some_holes_1 = failed_vm_wire_read_not_cow,
-		.some_holes_2 = failed_vm_wire_read_not_cow,
-		.some_holes_3 = failed_vm_wire_read_not_cow,
-		.some_holes_4 = failed_vm_wire_read_not_cow,
-		.some_holes_5 = failed_vm_wire_read_not_cow,
-		.some_holes_6 = failed_vm_wire_read_not_cow,
-		.some_holes_7 = failed_vm_wire_read_not_cow,
-		.some_holes_8 = failed_vm_wire_read_not_cow,
-		.some_holes_9 = failed_vm_wire_read_not_cow,
-		.some_holes_10 = failed_vm_wire_read_not_cow,
-		.some_holes_11 = failed_vm_wire_read_not_cow,
-		.some_holes_12 = failed_vm_wire_read_not_cow,
+		.multiple_entries_1 = successful_vm_wire_read,
+		.multiple_entries_2 = successful_vm_wire_read,
+		.multiple_entries_3 = successful_vm_wire_read,
+		.multiple_entries_4 = successful_vm_wire_read,
+		.multiple_entries_5 = successful_vm_wire_read,
+		.multiple_entries_6 = successful_vm_wire_read,
 
-		.all_holes_1 = failed_vm_wire_read_not_cow,
-		.all_holes_2 = failed_vm_wire_read_not_cow,
-		.all_holes_3 = failed_vm_wire_read_not_cow,
-		.all_holes_4 = failed_vm_wire_read_not_cow,
+		.some_holes_1 = failed_vm_wire_read,
+		.some_holes_2 = failed_vm_wire_read,
+		.some_holes_3 = failed_vm_wire_read,
+		.some_holes_4 = failed_vm_wire_read,
+		.some_holes_5 = failed_vm_wire_read,
+		.some_holes_6 = failed_vm_wire_read,
+		.some_holes_7 = failed_vm_wire_read,
+		.some_holes_8 = failed_vm_wire_read,
+		.some_holes_9 = failed_vm_wire_read,
+		.some_holes_10 = failed_vm_wire_read,
+		.some_holes_11 = failed_vm_wire_read,
+		.some_holes_12 = failed_vm_wire_read,
 
-		.null_entry        = successful_vm_wire_read_not_cow,
-		.nonresident_entry = successful_vm_wire_read_not_cow,
-		.resident_entry    = successful_vm_wire_read_not_cow,
+		.all_holes_1 = failed_vm_wire_read,
+		.all_holes_2 = failed_vm_wire_read,
+		.all_holes_3 = failed_vm_wire_read,
+		.all_holes_4 = failed_vm_wire_read,
 
-		.shared_entry               = wire_shared_entry,
-		.shared_entry_discontiguous = wire_shared_entry_discontiguous,
-		.shared_entry_partial       = wire_shared_entry_partial,
-		.shared_entry_pairs         = successful_vm_wire_read_not_cow,
-		.shared_entry_x1000         = successful_vm_wire_read_not_cow,
+		.null_entry        = successful_vm_wire_read,
+		.nonresident_entry = successful_vm_wire_read,
+		.resident_entry    = successful_vm_wire_read,
 
-		.cow_entry = wire_cow_entry,
-		.cow_unreferenced = wire_cow_entry,
-		.cow_nocow = wire_cow_nocow,
-		.nocow_cow = wire_nocow_cow,
+		.shared_entry               = successful_vm_wire_read,
+		.shared_entry_discontiguous = successful_vm_wire_read,
+		.shared_entry_partial       = successful_vm_wire_read,
+		.shared_entry_pairs         = successful_vm_wire_read,
+		.shared_entry_x1000         = successful_vm_wire_read,
+
+		.cow_entry = successful_vm_wire_read,
+		.cow_unreferenced = successful_vm_wire_read,
+		.cow_nocow = successful_vm_wire_read,
+		.nocow_cow = successful_vm_wire_read,
 		.cow_unreadable = wire_cow_unreadable,
-		.cow_unwriteable = wire_cow_unwriteable,
+		.cow_unwriteable = successful_vm_wire_read,
 
-		.permanent_entry = successful_vm_wire_read_not_cow,
-		.permanent_before_permanent = successful_vm_wire_read_not_cow,
-		.permanent_before_allocation = successful_vm_wire_read_not_cow,
-		.permanent_before_allocation_2 = successful_vm_wire_read_not_cow,
-		.permanent_before_hole = failed_vm_wire_read_not_cow,
-		.permanent_after_allocation = successful_vm_wire_read_not_cow,
-		.permanent_after_hole = failed_vm_wire_read_not_cow,
+		.permanent_entry = successful_vm_wire_read,
+		.permanent_before_permanent = successful_vm_wire_read,
+		.permanent_before_allocation = successful_vm_wire_read,
+		.permanent_before_allocation_2 = successful_vm_wire_read,
+		.permanent_before_hole = failed_vm_wire_read,
+		.permanent_after_allocation = successful_vm_wire_read,
+		.permanent_after_hole = failed_vm_wire_read,
 
 		/* TODO: wire vs submaps */
 		.single_submap_single_entry = test_is_unimplemented,
@@ -549,32 +502,32 @@ T_DECL(vm_wire,
 		.submap_allocation_submap_two_entries_ro = test_is_unimplemented,
 		.submap_allocation_submap_three_entries_ro = test_is_unimplemented,
 
-		.protection_single_000_000 = failed_vm_wire_read_not_cow,
-		.protection_single_000_r00 = failed_vm_wire_read_not_cow,
-		.protection_single_000_0w0 = failed_vm_wire_read_not_cow,
-		.protection_single_000_rw0 = failed_vm_wire_read_not_cow,
-		.protection_single_r00_r00 = successful_vm_wire_read_not_cow,
-		.protection_single_r00_rw0 = successful_vm_wire_read_not_cow,
-		.protection_single_0w0_0w0 = failed_vm_wire_read_not_cow,
-		.protection_single_0w0_rw0 = failed_vm_wire_read_not_cow,
-		.protection_single_rw0_rw0 = successful_vm_wire_read_not_cow,
+		.protection_single_000_000 = failed_vm_wire_read,
+		.protection_single_000_r00 = failed_vm_wire_read,
+		.protection_single_000_0w0 = failed_vm_wire_read,
+		.protection_single_000_rw0 = failed_vm_wire_read,
+		.protection_single_r00_r00 = successful_vm_wire_read,
+		.protection_single_r00_rw0 = successful_vm_wire_read,
+		.protection_single_0w0_0w0 = failed_vm_wire_read,
+		.protection_single_0w0_rw0 = failed_vm_wire_read,
+		.protection_single_rw0_rw0 = successful_vm_wire_read,
 
-		.protection_pairs_000_000 = failed_vm_wire_read_not_cow,
-		.protection_pairs_000_r00 = failed_vm_wire_read_not_cow,
-		.protection_pairs_000_0w0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_000_rw0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_r00_000 = failed_vm_wire_read_not_cow,
-		.protection_pairs_r00_r00 = successful_vm_wire_read_not_cow,
-		.protection_pairs_r00_0w0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_r00_rw0 = successful_vm_wire_read_not_cow,
-		.protection_pairs_0w0_000 = failed_vm_wire_read_not_cow,
-		.protection_pairs_0w0_r00 = failed_vm_wire_read_not_cow,
-		.protection_pairs_0w0_0w0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_0w0_rw0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_rw0_000 = failed_vm_wire_read_not_cow,
-		.protection_pairs_rw0_r00 = successful_vm_wire_read_not_cow,
-		.protection_pairs_rw0_0w0 = failed_vm_wire_read_not_cow,
-		.protection_pairs_rw0_rw0 = successful_vm_wire_read_not_cow,
+		.protection_pairs_000_000 = failed_vm_wire_read,
+		.protection_pairs_000_r00 = failed_vm_wire_read,
+		.protection_pairs_000_0w0 = failed_vm_wire_read,
+		.protection_pairs_000_rw0 = failed_vm_wire_read,
+		.protection_pairs_r00_000 = failed_vm_wire_read,
+		.protection_pairs_r00_r00 = successful_vm_wire_read,
+		.protection_pairs_r00_0w0 = failed_vm_wire_read,
+		.protection_pairs_r00_rw0 = successful_vm_wire_read,
+		.protection_pairs_0w0_000 = failed_vm_wire_read,
+		.protection_pairs_0w0_r00 = failed_vm_wire_read,
+		.protection_pairs_0w0_0w0 = failed_vm_wire_read,
+		.protection_pairs_0w0_rw0 = failed_vm_wire_read,
+		.protection_pairs_rw0_000 = failed_vm_wire_read,
+		.protection_pairs_rw0_r00 = successful_vm_wire_read,
+		.protection_pairs_rw0_0w0 = failed_vm_wire_read,
+		.protection_pairs_rw0_rw0 = successful_vm_wire_read,
 	};
 
 	run_vm_tests("vm_wire", __FILE__, &tests, argc, argv);
@@ -589,6 +542,11 @@ T_DECL(vm_unwire,
 		.single_entry_2 = test_is_unimplemented,
 		.single_entry_3 = test_is_unimplemented,
 		.single_entry_4 = test_is_unimplemented,
+
+		.single_entry_nonnull_1 = test_is_unimplemented,
+		.single_entry_nonnull_2 = test_is_unimplemented,
+		.single_entry_nonnull_3 = test_is_unimplemented,
+		.single_entry_nonnull_4 = test_is_unimplemented,
 
 		.multiple_entries_1 = test_is_unimplemented,
 		.multiple_entries_2 = test_is_unimplemented,

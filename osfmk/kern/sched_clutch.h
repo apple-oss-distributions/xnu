@@ -52,10 +52,10 @@
 #define SCHED_CLUTCH_THREAD_ELIGIBLE(thread)    ((thread->bound_processor) == PROCESSOR_NULL)
 
 #if CONFIG_SCHED_EDGE
-#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       (thread->th_bound_cluster_id != THREAD_BOUND_CLUSTER_NONE)
+#define SCHED_CLUTCH_THREAD_PSET_BOUND(thread)       (thread->th_bound_pset_id != THREAD_BOUND_PSET_NONE)
 
 #else /* CONFIG_SCHED_EDGE */
-#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       (0)
+#define SCHED_CLUTCH_THREAD_PSET_BOUND(thread)       (0)
 #endif /* CONFIG_SCHED_EDGE */
 
 /*
@@ -161,7 +161,7 @@ struct sched_clutch_root {
 	uint16_t                        scr_shared_rsrc_load_runnable[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 #endif /* CONFIG_SCHED_EDGE */
 
-	uint32_t                        scr_cluster_id;
+	pset_id_t                       scr_pset_id;
 	/* (I) processor set this hierarchy belongs to */
 	processor_set_t                 scr_pset;
 	/*
@@ -311,8 +311,8 @@ struct sched_clutch_bucket_group {
 	uint32_t _Atomic                scbg_timeshare_tick;
 	/* (A) priority shifts for threads in the clutch_bucket_group */
 	uint32_t _Atomic                scbg_pri_shift;
-	/* (A) preferred cluster ID for clutch bucket */
-	uint32_t _Atomic                scbg_preferred_cluster;
+	/* (A) preferred pset ID for clutch bucket */
+	pset_id_t _Atomic               scbg_preferred_pset;
 	/* (I) clutch to which this clutch bucket_group belongs */
 	struct sched_clutch             *scbg_clutch;
 	/* (A) holds blocked timestamp and runnable/running count */
@@ -362,7 +362,7 @@ void sched_clutch_destroy(sched_clutch_t);
 
 /* Clutch thread membership management */
 void sched_clutch_thread_clutch_update(thread_t, sched_clutch_t, sched_clutch_t);
-uint32_t sched_edge_thread_preferred_cluster(thread_t);
+pset_id_t sched_edge_thread_preferred_pset(thread_t);
 
 /* Clutch timesharing stats management */
 uint32_t sched_clutch_thread_run_bucket_incr(thread_t, sched_bucket_t);
@@ -390,7 +390,7 @@ extern kern_return_t sched_clutch_thread_group_cpu_time_for_thread(thread_t thre
  */
 void sched_edge_matrix_get(sched_clutch_edge *edge_matrix, bool *edge_request_bitmap, uint64_t flags, uint64_t num_psets);
 void sched_edge_matrix_set(sched_clutch_edge *edge_matrix, bool *edge_changes_bitmap, uint64_t flags, uint64_t num_psets);
-void sched_edge_tg_preferred_cluster_change(struct thread_group *tg, uint32_t *tg_bucket_preferred_cluster, sched_perfcontrol_preferred_cluster_options_t options);
+void sched_edge_tg_preferred_pset_change(struct thread_group *tg, pset_id_t tg_bucket_preferred_pset[TH_BUCKET_SCHED_MAX], sched_perfcontrol_preferred_cluster_options_t options);
 
 /*
  * Iterate through the entire edge matrix by src pset, dst pset, and scheduling
@@ -405,7 +405,7 @@ void sched_edge_tg_preferred_cluster_change(struct thread_group *tg, uint32_t *t
 	    } \
 	}
 
-uint16_t sched_edge_cluster_cumulative_count(sched_clutch_root_t root_clutch, sched_bucket_t bucket);
+uint16_t sched_edge_pset_cumulative_count(sched_clutch_root_t root_clutch, sched_bucket_t bucket);
 uint16_t sched_edge_shared_rsrc_runnable_load(sched_clutch_root_t root_clutch, cluster_shared_rsrc_type_t load_type);
 
 /*
@@ -421,8 +421,10 @@ extern int (*sched_edge_search_order_weight_then_locality_cmp)(const void *a, co
  * Used to keep stir-the-pot state up-to-date for the current
  * processor, as new threads come on-core.
  */
-extern void sched_edge_stir_the_pot_update_registry_state(thread_t thread);
+extern void sched_edge_stir_the_pot_update_registry_state(thread_t thread, bool thread_is_new);
 extern void sched_edge_stir_the_pot_clear_registry_entry(void);
+
+extern void sched_edge_update_running_foreign_state(processor_t processor, thread_t thread);
 
 #endif /* CONFIG_SCHED_EDGE */
 

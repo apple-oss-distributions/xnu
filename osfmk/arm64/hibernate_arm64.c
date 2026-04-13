@@ -292,7 +292,7 @@ hibernate_page_list_set_volatile(hibernate_page_list_t * page_list,
 kern_return_t
 hibernate_processor_setup(IOHibernateImageHeader * header)
 {
-	cpu_datap(master_cpu)->cpu_hibernate = 1;
+	cpu_datap(boot_cpu_id)->cpu_hibernate = 1;
 	header->processorFlags = 0;
 	return KERN_SUCCESS;
 }

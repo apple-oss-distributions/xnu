@@ -12,6 +12,7 @@
  */
 
 #include <libkern/libkern.h>
+#include <os/base.h>
 #include <sys/errno.h>
 #include <sys/unicode.h>
 #include "vfs_unicode_data.h"
@@ -50,7 +51,7 @@ int32_t u32CharToUTF8Bytes(uint32_t u32char, uint8_t utf8Bytes[kMaxUTF8BytesPerC
 void
 utf8_normalizeOptCaseFoldGetUVersion(unsigned char version[4])
 {
-	version[0] = 16;
+	version[0] = 17;
 	version[1] = 0;
 	version[2] = 0;
 	version[3] = 0;
@@ -848,6 +849,7 @@ utf8ToU32Code(int32_t u32char, const char** srcPtr, const char* srcLimit)
 				if (u32char >= 0x110 || trail > 0X3F) {
 					break;
 				}
+				OS_FALLTHROUGH;
 			case 2:
 				trail = *src++ - (char)0X80;
 				u32char = (u32char << 6) | trail;
@@ -858,6 +860,7 @@ utf8ToU32Code(int32_t u32char, const char** srcPtr, const char* srcLimit)
 				if (((u32char & 0xFFE0) == 0x360) || trail > 0X3F) {
 					break;
 				}
+				OS_FALLTHROUGH;
 			case 1:
 				trail = *src++ - (char)0X80;
 				u32char = (u32char << 6) | trail;

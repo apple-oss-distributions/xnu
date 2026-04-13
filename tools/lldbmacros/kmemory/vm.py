@@ -4,6 +4,7 @@ from abc import (
     abstractproperty,
 )
 import argparse
+import itertools
 import re
 import struct
 from typing import (
@@ -24,11 +25,11 @@ from core.standard import (
 from core.kernelcore import (
     KernelTarget,
 )
-from core.iterators import (
-    RB_HEAD,
+from core.caching import (
+    LazyTarget,
 )
 
-from .kmem   import MemoryRange
+from .kmem   import MemoryRange, KMem
 from .btlog  import BTLog, BTLibrary
 from .whatis import *
 
@@ -316,16 +317,21 @@ class VMMap(object):
     """ Helper class to manipulate a vm_map_t"""
 
     def __init__(self, vm_map, name=None):
-        self.sbv  = vm_map
-        self.name = name
-        self.rb   = RB_HEAD(
-            vm_map.chkGetValueForExpressionPath(".hdr.rb_head_store"),
-            "entry",
-            self.entry_compare
-        )
+        kmem = KMem.get_shared()
 
-        vme_type = gettype('struct vm_map_entry')
-        self.to_entry = vme_type.xContainerOfTransform('store')
+        self.sbv        = vm_map
+        self.name       = name
+        self.root       = vm_map.chkGetChildMemberWithName("root")
+        self.shift      = vm_map.xGetScalarByPath('.hdr.page_shift')
+
+        self.vmn_type   = gettype('struct vm_map_store_node')
+        self.vmn_unpack = kmem.vmn_packing.unpack
+        self.vmn_make   = kmem.vmn_packing.make_value
+
+        self.vmc_type   = gettype('struct vm_guard_object_chunk')
+        self.vme_type   = gettype('struct vm_map_entry')
+        self.vme_unpack = kmem.vme_packing.unpack
+        self.vme_make   = kmem.vme_packing.make_value
 
     def entry_compare(self, rb_entry, address):
         vme = self.to_entry(rb_entry)
@@ -336,9 +342,267 @@ class VMMap(object):
             return -1
         return 0
 
-    def find(self, address):
-        ent = self.rb.find(address)
-        return self.to_entry(ent) if ent else None
+    def find(self, addr):
+        node = self.vmn_make(
+            self.root.xGetScalarByPath('.vmsr_root.vmsp_packed'),
+            self.vmn_type
+        )
+
+        while True:
+            for i in range(0, node.xGetScalarByName('vmsn_count')):
+                key = node.xGetScalarByPath(f'.vmsn_keys[{i}]')
+                if addr < key:  i -= 1
+                if addr <= key: break
+
+            if node.xGetScalarByName('vmsn_leaf'):
+                ptr   = node.xGetScalarByPath(f'.vmsl_ptrs[{i}].vmsp_packed')
+                chunk = node.xGetScalarByPath(f'.vmsl_ptrs[{i}].vmsp_chunk')
+
+                if not ptr:
+                    return None
+
+                if not chunk:
+                    return self.vme_make(ptr, self.vme_type)
+
+                chunk = self.vme_make(ptr, self.vmc_type)
+                ptr   = chunk.xGetScalarByPath(f'.vgoc_ptrs[0].vmsp_packed')
+                vme   = self.vme_make(ptr, self.vme_type) if ptr else None
+
+                while vme and vme.xGetScalarByPath('.links.end') <= addr:
+                    vme = vme.chkGetValueForExpressionPath('.links.next[0]')
+
+                if vme and vme.xGetScalarByPath('.links.start') <= addr:
+                    return vme
+                return None
+
+            ptr  = node.xGetScalarByPath(f'.vmsn_ptrs[{i}].vmsp_packed')
+            node = self.vmn_make(ptr, self.vmn_type)
+
+    def _dump_chunk_slot(self, chunk, end, sep):
+        start       = chunk.xGetScalarByName('vgoc_start') << 16
+        if start & (1 << 47): start |= 0xffff000000000000
+
+        count       = chunk.xGetScalarByName('vgoc_count')
+        size_shift  = chunk.xGetScalarByName('vgoc_granule')
+        granule     = 1 << size_shift
+        bitmap      = chunk.xGetScalarByName('vgoc_bitmap')
+        slab        = chunk.xGetScalarByName('vgoc_slab')
+        used        = count - bin(bitmap).count('1')
+        qtn         = chunk.xGetScalarByName('vgoc_quarantined')
+        avail       = chunk.xGetScalarByName('vgoc_available')
+        guards      = max(count // 4, 1)
+
+        print(f"  {sep} │")
+        print(f"  {sep} │ slab:     {slab:#018x}")
+        print(f"  {sep} │ config:   {count} x "
+              f"{1 << (size_shift % 10)}{'BKMGT'[size_shift // 10]}, "
+              f"{guards} guards")
+        print(f"  {sep} │ avail:    {avail}")
+        print(f"  {sep} │ used:     {used}")
+        print(f"  {sep} │ qtn:      {qtn}")
+        print(f"  {sep} │")
+
+        ptr = chunk.xGetScalarByPath(f'.vgoc_ptrs[0].vmsp_packed')
+        vme = self.vme_make(ptr, self.vme_type) if ptr else None
+
+        for idx in range(count):
+            cur  = start + idx * granule
+            end  = cur + granule
+            sep2 = None
+            lbl  = f"{sep} │{' ' if (bitmap >> idx) & 1 else '•'}{idx:>2}"
+
+            if idx + 1 == count:
+                lbl = f"{sep} ╰{' ' if (bitmap >> idx) & 1 else '•'}{idx:>2}"
+
+            while cur < end:
+                if vme:
+                    vme_start = vme.xGetScalarByPath('.links.start')
+                    vme_end   = vme.xGetScalarByPath('.links.end')
+                    if cur < vme_start:
+                        lim = min(end, vme_start)
+                    else:
+                        lim = min(end, vme_end)
+                else:
+                    vme_start = vme_end = lim = end
+                pgs = (lim - cur) >> self.shift
+
+                if sep2 and lim == end:
+                    sep2 = "╰"
+
+                if sep2 and idx + 1 == count:
+                    lbl = f"{lbl[:2]}   {sep2}"
+                elif sep2:
+                    lbl = f"{lbl[:3]}  {sep2}"
+
+                if not vme or cur < vme_start:
+                    print(f"  {lbl} ------------------ "
+                          f"{cur:#018x}:{lim:#018x} {pgs:9,d}")
+                else:
+                    print(f"  {lbl} {vme.GetLoadAddress():#018x} "
+                          f"{cur:#018x}:{lim:#018x} {pgs:9,d}")
+
+                cur = lim
+                if vme and cur >= vme_end:
+                    vme = vme.chkGetValueForExpressionPath('.links.next[0]')
+
+                sep2 = "│"
+
+    def dump(self, as_dict=False):
+        """
+        Dump the VM map structure either as formatted output or as a dictionary.
+
+        Args:
+            as_dict (bool): If True, return a dictionary. If False, print formatted output.
+
+        Returns:
+            dict or None: Dictionary if as_dict=True, None if as_dict=False
+        """
+
+        data = self.dump_as_dict()
+        if as_dict:
+            return data
+
+        # Format and print the structured data
+        for row in data.get("rows", []):
+            depth = row["depth"]
+            print(f"row {depth}")
+
+            for node in row.get("nodes", []):
+                idx = node["index"]
+                address = node["address"]
+                start = node["start"]
+                end = node["end"]
+
+                print(f"  {depth}.{idx:<3}─ "
+                      f"{address:#018x} "
+                      f"{start:#018x}:{end:#018x}")
+
+                for entry in node.get("entries", []):
+                    i = entry["entry_index"]
+                    nstart = entry["start"]
+                    nend = entry["end"]
+
+                    # Determine separator
+                    if i + 1 == node["count"]:
+                        sep = "╰"
+                    else:
+                        sep = "│"
+
+                    if "error" in entry:
+                        print(f"  {sep} {i:<2}   Error: {entry['error']}")
+                        continue
+
+                    if entry["type"] == "node":
+                        n = entry["pointer"]
+                        h = entry["holes"]
+
+                        print(f"  {sep} {i:<2}   "
+                              f"{n:#018x} {nstart:#018x}:{nend:#018x} {h:#010x}")
+
+                    else:  # leaf
+                        v   = entry["vme_address"]
+                        pgs = entry["pages"]
+
+                        if v is not None:
+                            print(f"  {sep} {i:<2}   "
+                                  f"{v:#018x} {nstart:#018x}:{nend:#018x} "
+                                  f"{pgs:9,d}")
+                        else:
+                            print(f"  {sep} {i:<2}   "
+                                  f"------------------ {nstart:#018x}:{nend:#018x} "
+                                  f"{pgs:9,d}")
+
+                    # Update separator for next iteration
+                    if i + 1 == node["count"]:
+                        sep = ' '
+
+                    if entry["type"] == "leaf" and entry["is_chunk"]:
+                        c = self.vme_make(entry["packed"], self.vmc_type)
+                        self._dump_chunk_slot(c, nend, sep)
+
+
+    def dump_as_dict(self):
+        """Return the VM map structure as a dictionary instead of printing it"""
+        # Check if root is properly initialized
+        root_packed = self.root.xGetScalarByPath('.vmsr_root.vmsp_packed')
+        node = self.vmn_make(root_packed, self.vmn_type)
+
+        result = {"rows": []}
+
+        for depth in itertools.count():
+
+            leaf = node.xGetScalarByName('vmsn_leaf')
+            if not leaf:
+                child = self.vmn_make(node.xGetScalarByPath('.vmsn_ptrs[0].vmsp_packed'), self.vmn_type)
+
+            row_data = {
+                "depth": depth,
+                "nodes": []
+            }
+
+            for idx in itertools.count():
+                spacked = node.xGetScalarByPath('.vmsn_next_sibling.vmsp_packed')
+                sibling = self.vmn_make(spacked, gettype('struct vm_map_store_node')) if spacked else 0
+                start   = node.xGetScalarByPath('.vmsn_keys[0]')
+                end     = sibling.xGetScalarByPath('.vmsn_keys[0]') if spacked else 0xffffffffffffffff
+                count   = node.xGetScalarByName('vmsn_count')
+
+                node_data = {
+                    "index": idx,
+                    "address": int(node.GetLoadAddress()),
+                    "start": int(start),
+                    "end": int(end),
+                    "count": int(count),
+                    "entries": []
+                }
+
+                for i in range(0, count):
+                    nstart = node.xGetScalarByPath(f'.vmsn_keys[{i}]')
+                    if i + 1 < count:
+                        nend = node.xGetScalarByPath(f'.vmsn_keys[{i + 1}]')
+                    else:
+                        nend = end
+
+                    entry_data = {
+                        "entry_index": i,
+                        "start": int(nstart),
+                        "end": int(nend)
+                    }
+
+                    if not leaf:
+                        n = node.xGetScalarByPath(f'.vmsn_ptrs[{i}].vmsp_packed')
+                        n = self.vmn_unpack(n)
+                        h = node.xGetScalarByPath(f'.vmsn_holes[{i}]')
+
+                        entry_data.update({
+                            "type": "node",
+                            "pointer": int(n),
+                            "holes": int(h),
+                        })
+                    else:
+                        p = node.xGetScalarByPath(f'.vmsl_ptrs[{i}].vmsp_packed')
+                        c = node.xGetScalarByPath(f'.vmsl_ptrs[{i}].vmsp_chunk')
+                        v = self.vme_unpack(p) if p else 0
+                        pgs = (nend - nstart) >> self.shift
+
+                        entry_data.update({
+                            "type": "leaf",
+                            "vme_address": int(v) if p and v else None,
+                            "packed": int(p) if p else None,
+                            "is_chunk": int(c),
+                            "pages": int(pgs),
+                        })
+                    node_data["entries"].append(entry_data)
+
+                row_data["nodes"].append(node_data)
+                if not spacked: break
+                node = sibling
+
+            result["rows"].append(row_data)
+            if leaf: break
+            node = child
+
+        return result
 
     def describe(self, verbose=False):
         fmt = (
@@ -435,14 +699,19 @@ class VMMapEntry(MemoryObject):
                 "({0.pages:,d} pages)\n"
             " vm tag               : {$v.vme_alias|vm_kern_tag}\n"
         )
+        go = self.sbv.xGetScalarByPath('.links.chunk.vmsp_packed')
+        if go:
+            fmt += (
+                f" go chunk             : {self.kmem.vme_packing.unpack(go):#x}\n"
+            )
         range_id = next((
-            i
+            i + 1
             for i, r in enumerate(self.kmem.kmem_ranges)
             if r.contains(self.address)
         ), None)
         if range_id:
             fmt += (
-                " vm range id          : {range_id}\n"
+                " vm range id          : {range_id|vm_kern_range_id}\n"
             )
         fmt += (
             " protection           : "
@@ -762,7 +1031,7 @@ class MTECommand(object, metaclass=ABCMeta):
         end_addr   = args.end
 
         stride = 16 * 32
-        start  = start_addr & -stride;
+        start  = start_addr & -stride
         marks  = {}
 
         if end_addr is None:

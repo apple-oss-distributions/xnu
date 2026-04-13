@@ -28,6 +28,8 @@
 
 #if CONFIG_EXCLAVES
 
+#include <arm64/sptm/sptm.h>
+
 #include <vm/pmap.h>
 
 #include <vm/vm_page_internal.h>
@@ -138,7 +140,7 @@ get_conclave_mem_ledger(exclaves_memory_pagekind_t kind)
 		if (current_thread()->conclave_stop_task != NULL) {
 			ledger = current_thread()->conclave_stop_task->ledger;
 		} else {
-			ledger = current_task()->ledger;
+			ledger = current_thread()->t_ledger;
 		}
 		break;
 	default:
@@ -170,13 +172,16 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const exclaves_mem
 	 * Otherwise, sptm_retype() will panic if asked to produce a tagged SK page
 	 * without tag storage space to back it.
 	 */
-	if ((flags & EXCLAVES_MEMORY_PAGE_FLAGS_MTE_TAGGED) && is_mte_enabled) {
+	if ((flags & EXCLAVES_MEMORY_PAGE_FLAGS_MTE_TAGGED) && mte_enabled()) {
 		kma_flags |= KMA_TAG;
 		vm_obj = exclaves_object_tagged;
 	}
 #else /* !HAS_MTE */
 	(void)flags;
 #endif /* HAS_MTE */
+#if DEBUG || DEVELOPMENT
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START, ptoa(npages), 0, 0, 0);
+#endif /* DEBUG || DEVELOPMENT */
 
 	while (pages_left) {
 		vm_page_t next;
@@ -222,6 +227,9 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const exclaves_mem
 
 	vm_page_free_list(sequestered, FALSE);
 
+#if DEBUG || DEVELOPMENT
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END, npages, 0, 0, 0);
+#endif /* DEBUG || DEVELOPMENT */
 	uint64_t elapsed_time = mach_continuous_approximate_time() - start_time;
 
 	os_atomic_add(&exclaves_allocation_statistics.pages_alloced, npages, relaxed);
@@ -230,14 +238,8 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const exclaves_mem
 	os_atomic_add(&exclaves_allocation_statistics.alloc_latency_byhighbit[ffsll(elapsed_time) / 4], elapsed_time, relaxed);
 
 	ledger_t ledger = get_conclave_mem_ledger(kind);
-	kern_return_t ledger_ret = ledger_credit(ledger,
-	    task_ledgers.conclave_mem,
+	ledger_credit(ledger, task_ledgers.conclave_mem,
 	    (ledger_amount_t) (npages * PAGE_SIZE));
-	if (ledger_ret != KERN_SUCCESS) {
-		panic("Ledger credit failed. count %u error code %d",
-		    npages,
-		    ledger_ret);
-	}
 }
 
 void
@@ -284,14 +286,8 @@ exclaves_memory_free(const uint32_t npages, const uint32_t *pages, const exclave
 	os_atomic_add(&exclaves_allocation_statistics.pages_freed, npages, relaxed);
 
 	ledger_t ledger = get_conclave_mem_ledger(kind);
-	kern_return_t ledger_ret = ledger_debit(ledger,
-	    task_ledgers.conclave_mem,
+	ledger_debit(ledger, task_ledgers.conclave_mem,
 	    (ledger_amount_t) (npages * PAGE_SIZE));
-	if (ledger_ret != KERN_SUCCESS) {
-		panic("Ledger debit failed. count %u error code %d",
-		    npages,
-		    ledger_ret);
-	}
 }
 
 static void
@@ -371,7 +367,7 @@ exclaves_memory_map(uint32_t npages, const uint32_t *pages, vm_prot_t prot,
 	kr = vm_map_wire_kernel(kernel_map, start, start + size, prot,
 	    VM_KERN_MEMORY_EXCLAVES_SHARED, false);
 	if (kr != KERN_SUCCESS) {
-		mach_vm_deallocate(kernel_map, start, size);
+		mach_vm_deallocate_kernel(kernel_map, start, size);
 		return kr;
 	}
 
@@ -389,7 +385,7 @@ exclaves_memory_unmap(char *address, size_t size)
 		return kr;
 	}
 
-	kr = mach_vm_deallocate(kernel_map, (mach_vm_address_t)address, size);
+	kr = mach_vm_deallocate_kernel(kernel_map, (mach_vm_address_t)address, size);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -631,13 +627,9 @@ initialize_exclaves_bundle_bytes(void)
 	 * Credit the carveout size to kernel_task's conclave_mem ledger so that
 	 * exclaves memory accounting includes the initial carveout allocation.
 	 */
-	kern_return_t ledger_ret = ledger_credit(kernel_task->ledger,
+	ledger_credit(kernel_task->ledger,
 	    task_ledgers.conclave_mem,
 	    (ledger_amount_t)exclaves_carveout_size);
-	if (ledger_ret != KERN_SUCCESS) {
-		panic("Ledger credit failed for exclaves carveout, error code %d",
-		    ledger_ret);
-	}
 }
 
 STARTUP(EXCLAVES, STARTUP_RANK_MIDDLE, initialize_exclaves_bundle_bytes);

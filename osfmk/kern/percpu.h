@@ -37,7 +37,7 @@ __BEGIN_DECLS
 #if XNU_KERNEL_PRIVATE
 #include <libkern/section_keywords.h>
 
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*!
  * @macro PERCPU_DECL
@@ -302,7 +302,7 @@ percpu_section_size(void)
 	return ((percpu_section_end() - percpu_section_start()) + PAGE_MASK) & ~((vm_size_t)PAGE_MASK);
 }
 
-#pragma GCC visibility pop
+__exported_pop
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

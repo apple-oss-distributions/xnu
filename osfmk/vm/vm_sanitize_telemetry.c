@@ -101,6 +101,7 @@ static const char *vm_sanitize_triage_strings[] =
 	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_RANGE_CREATE]       = "mach_vm_range_create\n",
 	[KDBG_TRIAGE_VM_SANITIZE_SHARED_REGION_MAP_AND_SLIDE_2_NP] = "shared_region_map_and_slide_2_np\n",
 	[KDBG_TRIAGE_VM_SANITIZE_TEST]                       = "vm_sanitize_run_test\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_REALLOCATE]          = "vm_map_reallocate\n",
 };
 
 static ktriage_strings_t ktriage_vm_sanitize_subsystem_strings = {VM_SANITIZE_MAX_TRIAGE_STRINGS, vm_sanitize_triage_strings};
@@ -278,7 +279,7 @@ vm_sanitize_ktriage_record(
 
 #pragma mark Entry point implementation
 
-void
+__mockable void
 vm_sanitize_send_telemetry(
 	vm_sanitize_method_t method,
 	vm_sanitize_checker_t checker,

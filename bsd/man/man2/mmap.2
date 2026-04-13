@@ -150,11 +150,13 @@ the following values:
 Synonym for
 .Dv MAP_ANON.
 .It Dv MAP_ANON
-Map anonymous memory not associated with any specific file.
-The
+Map zero-filled anonymous memory not associated with any specific file. The
 .Fa offset
 argument is ignored.
-Mac OS X specific: the file descriptor used for creating
+.Pp
+Mac OS X specific: the
+.Fa fd
+used for creating
 .Dv MAP_ANON
 regions can be used to pass some Mach VM flags, and can
 be specified as \-1 if no such flags are associated with

@@ -277,9 +277,9 @@ thread_switch(
 		/* This may return a different thread if the target is pushing on something */
 		thread_t pulled_thread = thread_run_queue_remove_for_handoff(thread);
 
-		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SWITCH) | DBG_FUNC_NONE,
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SWITCH) | DBG_FUNC_NONE,
 		    thread_tid(thread), thread->state,
-		    pulled_thread ? TRUE : FALSE, 0, 0);
+		    pulled_thread ? TRUE : FALSE);
 
 		if (pulled_thread != THREAD_NULL) {
 #if DEVELOPMENT || DEBUG
@@ -365,9 +365,9 @@ thread_handoff_internal(thread_t thread, thread_continue_t continuation,
 
 		thread_t pulled_thread = thread_prepare_for_handoff(thread, option);
 
-		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SWITCH) | DBG_FUNC_NONE,
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SWITCH) | DBG_FUNC_NONE,
 		    thread_tid(thread), thread->state,
-		    pulled_thread ? TRUE : FALSE, 0, 0);
+		    pulled_thread ? TRUE : FALSE);
 
 		/* Deallocate thread ref if needed */
 		if (continuation == NULL || (option & THREAD_HANDOFF_SETRUN_NEEDED)) {

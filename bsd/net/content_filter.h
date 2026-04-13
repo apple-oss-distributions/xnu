@@ -173,6 +173,7 @@ typedef struct cfil_crypto_data {
 #define CFM_OP_DROP 17                  /* shutdown socket, no more data */
 #define CFM_OP_BLESS_CLIENT 18          /* mark a client flow as already filtered, passes a uuid */
 #define CFM_OP_SET_CRYPTO_KEY 19        /* assign client crypto key for message signing */
+#define CFM_OP_QUALIFY_FLOW 20          /* qualify this flow for this provider */
 
 /*
  * struct cfil_msg_hdr
@@ -371,6 +372,24 @@ struct cfil_msg_bless_client {
 struct cfil_msg_set_crypto_key {
 	struct cfil_msg_hdr     cfb_msghdr;
 	cfil_crypto_key         crypto_key;
+};
+
+/*
+ * struct cfil_msg_qualify_flow
+ *
+ * Filter qualify flow for traffic, data path will drop traffic
+ * until all filter qualifications have been received
+ *
+ * Valid Type: CFM_TYPE_ACTION
+ *
+ * Valid Ops: CFM_OP_QUALIFY_FLOW
+ */
+struct cfil_msg_qualify_flow {
+	struct cfil_msg_hdr     cfb_msghdr;
+	uuid_t                  flow_uuid;
+	int                     flow_protocol;
+	union sockaddr_in_4_6   flow_local;
+	union sockaddr_in_4_6   flow_remote;
 };
 
 #define CFM_MAX_OFFSET  UINT64_MAX

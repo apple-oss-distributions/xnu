@@ -639,7 +639,7 @@ pmap_ttne(pmap_t pmap, unsigned int target_level, vm_map_address_t addr)
 			break;
 		}
 
-		tte = *ttep;
+		tte = os_atomic_load(ttep, relaxed);
 
 #if MACH_ASSERT
 		if (tte_is_valid_block(tte)) {

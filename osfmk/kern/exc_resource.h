@@ -152,7 +152,7 @@
  * |[63:61] RESOURCE |[60:58] FLAVOR_HIGH_ |[57:32] |
  * |_TYPE_MEMORY     |WATERMARK            |Unused  |
  * +------------------------------------------------+
- * |[31:16] Unused           | [15:0] HWM limit (MB)|
+ * |[31:17] Unused | [16] Active | [15:0] HWM limit |
  * +------------------------------------------------+
  *
  * subcode:
@@ -162,10 +162,13 @@
  *
  */
 
-#define EXC_RESOURCE_HWM_LIMIT_MASK 0xFFFFULL
+#define EXC_RESOURCE_HWM_LIMIT_MASK  0xFFFFULL     /* Bits 0-15 */
+#define EXC_RESOURCE_HWM_ACTIVE_BIT (0x1ULL << 16) /* Bit 16 */
 
 #define EXC_RESOURCE_HWM_DECODE_LIMIT(code) \
 	((code) & EXC_RESOURCE_HWM_LIMIT_MASK)
+#define EXC_RESOURCE_HWM_IS_ACTIVE(code) \
+	(!!((code) & EXC_RESOURCE_HWM_ACTIVE_BIT))
 
 /* RESOURCE_TYPE_IO flavors */
 #define FLAVOR_IO_PHYSICAL_WRITES               1

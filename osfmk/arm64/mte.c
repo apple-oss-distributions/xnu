@@ -47,10 +47,12 @@
 #include <vm/vm_page.h>
 #include <vm/vm_memtag.h>
 #include <vm/vm_map_xnu.h>
+#include <vm/vm_map_lock_internal.h>
 #include <vm/pmap.h>
 
 #include <sys/reason.h>
 
+#include <arm64/mte.h>
 #include <arm64/mte_xnu.h>
 
 #if DEVELOPMENT || DEBUG
@@ -211,7 +213,7 @@ mte_disable_user_checking(task_t task)
 void
 vm_memtag_bzero_fast_checked(void *tagged_buf, vm_size_t n)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_kern_enabled()) {
 		mte_bzero_fast_checked(tagged_buf, n);
 	} else {
 		bzero(tagged_buf, n);
@@ -221,7 +223,7 @@ vm_memtag_bzero_fast_checked(void *tagged_buf, vm_size_t n)
 void
 vm_memtag_bzero_unchecked(void *tagged_buf, vm_size_t n)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_kern_enabled()) {
 		mte_bzero_unchecked(tagged_buf, n);
 	} else {
 		bzero(tagged_buf, n);
@@ -231,7 +233,7 @@ vm_memtag_bzero_unchecked(void *tagged_buf, vm_size_t n)
 vm_map_address_t
 vm_memtag_load_tag(vm_map_address_t naked_address)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_enabled()) {
 		return (vm_map_address_t)mte_load_tag((caddr_t)naked_address);
 	} else {
 		return naked_address;
@@ -241,7 +243,7 @@ vm_memtag_load_tag(vm_map_address_t naked_address)
 void
 vm_memtag_store_tag(caddr_t tagged_address, vm_size_t size)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_enabled()) {
 		mte_store_tag(tagged_address, size);
 	}
 }
@@ -249,7 +251,7 @@ vm_memtag_store_tag(caddr_t tagged_address, vm_size_t size)
 caddr_t
 vm_memtag_generate_and_store_tag(caddr_t address, vm_size_t size)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_kern_enabled()) {
 		return mte_generate_and_store_tag(address, size);
 	}
 
@@ -259,7 +261,7 @@ vm_memtag_generate_and_store_tag(caddr_t address, vm_size_t size)
 void
 vm_memtag_verify_tag(vm_map_address_t tagged_address)
 {
-	if (__probable(is_mte_enabled)) {
+	if (mte_enabled()) {
 		asm volatile ("ldrb wzr, [%0]" : : "r"(tagged_address) : "memory");
 	}
 }
@@ -267,7 +269,7 @@ vm_memtag_verify_tag(vm_map_address_t tagged_address)
 void
 vm_memtag_relocate_tags(vm_address_t new_address, vm_address_t old_address, vm_size_t size)
 {
-	if (__improbable(!is_mte_enabled)) {
+	if (!mte_kern_enabled()) {
 		return;
 	}
 
@@ -319,68 +321,9 @@ mte_guard_ast(
 		return;
 	}
 
-	/* All exceptions past this point are fatal. */
-	kern_return_t sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode, /* fatal */ true);
-
-	int flags = 0;
-	exception_info_t info = {
-		.os_reason = OS_REASON_GUARD,
-		.exception_type = EXC_GUARD,
-		.mx_code = code,
-		.mx_subcode = subcode
-	};
-
-	if (sync_exception_result == KERN_SUCCESS) {
-		flags |= PX_PSIGNAL;
-	}
-	exit_with_mach_exception(current_proc(), info, flags);
-}
-
-/*
- * Special MTE AST handler for asyncronous traps raised while in a kernel thread
- * context. For these traps we have to synthesize from thin air the exception, as
- * the only thing we saved at the time of the fault was the faulting address.
- *
- * There's also no notion of a thread to blame, due to the disjoint nature of
- * registering for some work (e.g. IOMD) and later performing it. This leads to
- * the special AST_SYNTHESIZE_MACH ast to be flagged on all threads of the
- * victim task. We use magic sentinel values to avoid delivering to more than
- * a single target, but the picked one is completely random and likely entirely
- * unrelated at its execution point.
- */
-void
-mte_synthesize_async_tag_check_fault(thread_t thread, vm_map_t map)
-{
-	task_t task = get_threadtask(thread);
-	assert(task == current_task_early());
-
-	/* Bail out if we have a wrong task. */
-	if (task == NULL || task == kernel_task) {
-		return;
-	}
-
-	vm_map_offset_t address = os_atomic_load(&map->async_tag_fault_address, relaxed);
-
-	/* Report only once, so that we don't send this for more than a single thread in the task. */
-	if ((address != 0) && (address != VM_ASYNC_TAG_FAULT_ALREADY_REPORTED)) {
-		if (os_atomic_cmpxchg(&map->async_tag_fault_address, address, VM_ASYNC_TAG_FAULT_ALREADY_REPORTED, relaxed)) {
-			/*
-			 * Some kernel thread doing work on behalf of our task asynchronously
-			 * reported an MTE tag check fault.
-			 */
-			mach_exception_code_t code = 0;
-			mach_exception_subcode_t subcode = address;
-			EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
-			EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_KERN_FAULT);
-			/* Hardcoded as we should never be in a canonical tag check fault scenario. */
-			EXC_GUARD_ENCODE_TARGET(code, EXC_ARM_MTE_TAGCHECK_FAIL);
-
-			if (task_has_sec_soft_mode(task)) {
-				code |= kGUARD_EXC_MTE_SOFT_MODE;
-			}
-			mte_guard_ast(thread, code, subcode);
-		}
-	}
+	/* Perform fatal exception logic. */
+	exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_GUARD,
+	    EXC_GUARD, code, subcode, PX_FLAGS_NONE);
 }
 
 

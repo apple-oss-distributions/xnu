@@ -107,7 +107,7 @@ mach_vm_reclaim_ring_allocate(
 {
 	kern_return_t kr;
 	mach_vm_address_t vm_addr = 0;
-	uint64_t sampling_period_abs;
+	uint64_t next_deadline = 0, now;
 
 	if (ring_out == NULL || max_capacity < initial_capacity ||
 	    initial_capacity == 0 || max_capacity == 0) {
@@ -118,17 +118,18 @@ mach_vm_reclaim_ring_allocate(
 	}
 
 	*ring_out = NULL;
+	now = mach_absolute_time();
 	kr = mach_vm_deferred_reclamation_buffer_allocate(mach_task_self(),
-	    &vm_addr, &sampling_period_abs, initial_capacity, max_capacity);
+	    &vm_addr, &next_deadline, initial_capacity, max_capacity);
 	if (kr == ERR_SUCCESS) {
 		mach_vm_reclaim_ring_t ring =
 		    (mach_vm_reclaim_ring_t)vm_addr;
-		ring->last_sample_abs = mach_absolute_time();
-		ring->reclaimable_bytes = 0;
-		ring->reclaimable_bytes_min = 0;
 		ring->len = initial_capacity;
 		ring->max_len = max_capacity;
-		ring->sampling_period_abs = sampling_period_abs;
+		os_atomic_store(&ring->last_sample_abs, now, relaxed);
+		os_atomic_store(&ring->reclaimable_bytes, 0, relaxed);
+		os_atomic_store(&ring->reclaimable_bytes_min, 0, relaxed);
+		os_atomic_store(&ring->next_sample_deadline_abs, next_deadline, relaxed);
 		*ring_out = ring;
 	}
 	return kr;
@@ -141,6 +142,7 @@ mach_vm_reclaim_ring_resize(
 {
 	mach_error_t err;
 	mach_vm_size_t bytes_reclaimed = 0;
+	uint64_t next_deadline;
 
 	if (ring == NULL) {
 		return VM_RECLAIM_INVALID_RING;
@@ -150,14 +152,13 @@ mach_vm_reclaim_ring_resize(
 	}
 
 	err = mach_vm_deferred_reclamation_buffer_resize(mach_task_self(),
-	    capacity, &bytes_reclaimed);
+	    capacity, &bytes_reclaimed, &next_deadline);
 	if (err == ERR_SUCCESS) {
 		ring->len = capacity;
-		/* Reset the accounting now that we've flushed the buffer */
-		ring->last_sample_abs = mach_absolute_time();
+		size_t reclaimable_bytes = os_atomic_sub(&ring->reclaimable_bytes, bytes_reclaimed, relaxed);
+		os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
+		os_atomic_max(&ring->next_sample_deadline_abs, next_deadline, relaxed);
 	}
-	size_t reclaimable_bytes = os_atomic_sub(&ring->reclaimable_bytes, bytes_reclaimed, relaxed);
-	os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
 	return err;
 }
 
@@ -262,7 +263,7 @@ mach_vm_reclaim_try_enter(
 	os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
 
 	uint64_t now = mach_absolute_time();
-	if (now - ring->last_sample_abs >= ring->sampling_period_abs) {
+	if (now >= os_atomic_load(&ring->next_sample_deadline_abs, relaxed)) {
 		*should_update_kernel_accounting = true;
 	}
 	return VM_RECLAIM_SUCCESS;
@@ -356,7 +357,7 @@ mach_vm_reclaim_try_cancel(
 	os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
 
 	uint64_t now = mach_absolute_time();
-	if (now - ring->last_sample_abs >= ring->sampling_period_abs) {
+	if (now >= os_atomic_load(&ring->next_sample_deadline_abs, relaxed)) {
 		*should_update_kernel_accounting = true;
 	}
 	*state = VM_RECLAIM_UNRECLAIMED;
@@ -404,20 +405,36 @@ mach_vm_reclaim_query_state(
 mach_vm_reclaim_error_t
 mach_vm_reclaim_update_kernel_accounting(const mach_vm_reclaim_ring_t ring)
 {
-	mach_error_t err;
-	uint64_t bytes_reclaimed = 0;
-	uint64_t now, last_sample;
-
+	/*
+	 * The rmw on last_sample is an optimization to prevent a herd of threads
+	 * all calling into the kernel and contending on the kernel lock after the
+	 * deadline has expired and before any (potentially slow) reclamation
+	 * operations have completed
+	 */
+	uint64_t last_sample;
+	uint64_t now = mach_absolute_time();
+	uint64_t prev_deadline = os_atomic_load(&ring->next_sample_deadline_abs, relaxed);
 	os_atomic_rmw_loop(&ring->last_sample_abs, last_sample, now, relaxed, {
-		now = mach_absolute_time();
-		if (now - last_sample < ring->sampling_period_abs) {
+		if (last_sample >= prev_deadline) {
+		        /* Another thread beat us to taking a sample */
 		        os_atomic_rmw_loop_give_up(return VM_RECLAIM_SUCCESS; );
 		}
 	});
+
+	mach_error_t err;
+	uint64_t bytes_reclaimed = 0;
+	uint64_t next_deadline = 0;
 	err = mach_vm_reclaim_update_kernel_accounting_trap(current_task(),
-	    &bytes_reclaimed);
-	size_t reclaimable_bytes = os_atomic_sub(&ring->reclaimable_bytes, bytes_reclaimed, relaxed);
+	    &bytes_reclaimed, &next_deadline);
+
+	mach_vm_size_t reclaimable_bytes = os_atomic_sub(&ring->reclaimable_bytes,
+	    bytes_reclaimed, relaxed);
 	os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
+
+	if (err == ERR_SUCCESS) {
+		os_atomic_max(&ring->next_sample_deadline_abs, next_deadline, relaxed);
+	}
+
 	return err;
 }
 
@@ -425,7 +442,16 @@ bool
 mach_vm_reclaim_is_reusable(
 	mach_vm_reclaim_state_t state)
 {
-	return state == VM_RECLAIM_FREED || state == VM_RECLAIM_UNRECLAIMED;
+	switch (state) {
+	case VM_RECLAIM_FREED:
+	case VM_RECLAIM_UNRECLAIMED:
+		return true;
+	case VM_RECLAIM_DEALLOCATED:
+	case VM_RECLAIM_BUSY:
+		return false;
+	default:
+		return false;
+	}
 }
 
 mach_vm_reclaim_error_t
@@ -447,7 +473,9 @@ mach_vm_reclaim_ring_flush(
 	mach_vm_reclaim_count_t num_entries_to_reclaim)
 {
 	mach_vm_size_t bytes_reclaimed;
+	uint64_t next_deadline;
 	mach_error_t err;
+
 	if (ring == NULL) {
 		return VM_RECLAIM_INVALID_RING;
 	}
@@ -456,10 +484,11 @@ mach_vm_reclaim_ring_flush(
 	}
 
 	err = mach_vm_deferred_reclamation_buffer_flush(mach_task_self(),
-	    num_entries_to_reclaim, &bytes_reclaimed);
+	    num_entries_to_reclaim, &bytes_reclaimed, &next_deadline);
 	if (err == ERR_SUCCESS) {
 		size_t reclaimable_bytes = os_atomic_sub(&ring->reclaimable_bytes, bytes_reclaimed, relaxed);
-		os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, release);
+		os_atomic_min(&ring->reclaimable_bytes_min, reclaimable_bytes, relaxed);
+		os_atomic_max(&ring->next_sample_deadline_abs, next_deadline, relaxed);
 	}
 	return err;
 }

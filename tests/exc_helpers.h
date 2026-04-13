@@ -46,7 +46,7 @@ extern bool verbose_exc_helper;
  * received.
  *
  * @param task      the task causing the exception
- * @param thread    the task causing the exception
+ * @param thread    the thread causing the exception
  * @param type      exception type received from the kernel
  * @param codes     exception codes received from the kernel
  * @param pc        the (ptrauth-stripped) program counter of the exception
@@ -56,18 +56,46 @@ extern bool verbose_exc_helper;
  *              exception); OR the special value EXC_HELPER_HALT to
  *              let the process crash instead of continuing.
  */
-typedef size_t (*exc_handler_callback_t)(mach_port_t task, mach_port_t thread,
-    exception_type_t type, mach_exception_data_t codes, uint64_t pc);
 
-typedef size_t (*exc_handler_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
-    exception_type_t type, mach_exception_data_t codes);
+/* EXCEPTION_STATE_IDENTITY (the default for exc_helpers) */
+typedef size_t (*exc_handler_callback_t)(
+	mach_port_t task,
+	mach_port_t thread,
+	exception_type_t type,
+	mach_exception_data_t codes,
+	uint64_t pc);
 
-typedef size_t (*exc_handler_state_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
-    exception_type_t type, mach_exception_data_t codes, thread_state_t in_state,
-    mach_msg_type_number_t in_state_count, thread_state_t out_state, mach_msg_type_number_t *out_state_count);
+/* EXCEPTION_STATE */
+typedef size_t (*exc_handler_state_callback_t)(
+	exception_type_t type,
+	mach_exception_data_t codes,
+	uint64_t pc,
+	thread_state_t in_state,
+	mach_msg_type_number_t in_state_count);
 
-typedef kern_return_t (*exc_handler_backtrace_callback_t)(kcdata_object_t kcdata_object,
-    exception_type_t type, mach_exception_data_t codes);
+/* EXCEPTION_IDENTITY_PROTECTED */
+typedef size_t (*exc_handler_protected_callback_t)(
+	task_id_token_t token,
+	uint64_t thread_id,
+	exception_type_t type,
+	mach_exception_data_t codes);
+
+/* EXCEPTION_STATE_IDENTITY_PROTECTED */
+typedef size_t (*exc_handler_state_protected_callback_t)(
+	task_id_token_t token,
+	uint64_t thread_id,
+	exception_type_t type,
+	mach_exception_data_t codes,
+	thread_state_t in_state,
+	mach_msg_type_number_t in_state_count,
+	thread_state_t out_state,
+	mach_msg_type_number_t *out_state_count);
+
+/* MACH_EXCEPTION_BACKTRACE_PREFERRED */
+typedef kern_return_t (*exc_handler_backtrace_callback_t)(
+	kcdata_object_t kcdata_object,
+	exception_type_t type,
+	mach_exception_data_t codes);
 
 #define EXC_HELPER_HALT ((size_t)INTPTR_MAX)
 
@@ -97,7 +125,7 @@ set_thread_exception_port_behavior64(mach_port_t exc_port, exception_mask_t exce
 
 /**
  * Handles one exception received on the provided Mach port, by running the
- * provided callback.
+ * provided callback. The default behavior is EXCEPTION_STATE_IDENTITY.
  *
  * @param exc_port Mach port configured to receive exception messages
  * @param callback callback to run when an exception is received
@@ -106,17 +134,27 @@ void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
 
 void
-run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback, void *callback,
-    exception_behavior_t behavior, bool run_once);
+run_exception_handler_behavior64(
+	mach_port_t exc_port,
+	const void *preferred_callback,
+	const void *callback,
+	exception_behavior_t behavior,
+	bool run_once);
 
 /**
  * Handles every exception received on the provided Mach port, by running the
- * provided callback.
+ * provided callback. The default behavior is EXCEPTION_STATE_IDENTITY.
  *
  * @param exc_port Mach port configured to receive exception messages
  * @param callback callback to run when an exception is received
  */
 void
 repeat_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
+
+void
+repeat_exception_handler_behavior64(
+	mach_port_t exc_port,
+	const void *callback,
+	exception_behavior_t behavior);
 
 #endif /* EXC_HELPERS_H */

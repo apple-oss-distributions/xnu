@@ -52,12 +52,12 @@ core_analytics_family_match()
 	if (dict) {
 		service = IOService::waitForMatchingService(dict.get());
 	} else {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "No service matching %s", kCoreAnalyticsMatchingClassName);
+		os_log_with_startup_serial(OS_LOG_DEFAULT, "No service matching %s\n", kCoreAnalyticsMatchingClassName);
 	}
 	if (service) {
 		return service.detach();
 	} else {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "Unable to match CoreAnalyticsHub");
+		os_log_with_startup_serial(OS_LOG_DEFAULT, "Unable to match CoreAnalyticsHub\n");
 		return nullptr;
 	}
 }
@@ -200,5 +200,5 @@ core_analytics_hub_register(core_analytics_hub_functions_t *fns)
 		panic("CoreAnalyticsHub is out of sync with xnu. CoreAnalyticsHub table version: %d. xnu table version: %d", fns->version, CORE_ANALYTICS_FUNCTIONS_TABLE_VERSION);
 	}
 	core_analytics_hub_functions = fns;
-	os_log_with_startup_serial(OS_LOG_DEFAULT, "Registered CoreAnalyticsHub functions with xnu.");
+	os_log_with_startup_serial(OS_LOG_DEFAULT, "Registered CoreAnalyticsHub functions with xnu.\n");
 }

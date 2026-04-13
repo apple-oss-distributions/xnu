@@ -3,44 +3,52 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <kern/kern_types.h>
+
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
 #include "sched_migration_harness.h"
 #include "sched_harness_impl.h"
 
-void
+test_sched_topology_t
 init_migration_harness(test_hw_topology_t hw_topology)
 {
 	/* Sets up _log and ATEND to close it */
 	init_harness_logging(T_NAME);
 	assert(_log != NULL);
-	assert(hw_topology.num_psets > 0 && hw_topology.total_cpus > 0);
+	assert(hw_topology->num_cpus > 0);
 
 	fprintf(_log, "\tinitializing migration harness\n");
-	set_hw_topology(hw_topology);
-	impl_init_migration_harness(hw_topology);
+	return impl_init_migration_harness(hw_topology);
 }
 
 void
-set_tg_sched_bucket_preferred_pset(struct thread_group *tg, int sched_bucket, int cluster_id)
+set_tg_sched_bucket_preferred_pset(struct thread_group *tg, int sched_bucket, pset_id_t pset_id)
 {
-	fprintf(_log, "\tset TG %p bucket %d recommended for pset %d\n", (void *)tg, sched_bucket, cluster_id);
-	impl_set_tg_sched_bucket_preferred_pset(tg, sched_bucket, cluster_id);
+	fprintf(_log, "\tset TG %p bucket %d recommended for pset %u\n", (void *)tg, sched_bucket, pset_id);
+	impl_set_tg_sched_bucket_preferred_pset(tg, sched_bucket, pset_id);
 }
 
 void
-set_thread_cluster_bound(test_thread_t thread, int cluster_id)
+set_thread_pset_bound(test_thread_t thread, pset_id_t pset_id)
 {
-	fprintf(_log, "\tset thread %p bound to cluster %d\n", (void *)thread, cluster_id);
-	impl_set_thread_cluster_bound(thread, cluster_id);
+	fprintf(_log, "\tset thread %p bound to pset %u\n", (void *)thread, pset_id);
+	impl_set_thread_pset_bound(thread, pset_id);
 }
 
 int
 choose_pset_for_thread(test_thread_t thread)
 {
-	int chosen_pset_id = impl_choose_pset_for_thread(thread);
-	fprintf(_log, "for thread %p we chose pset_id %d\n", (void *)thread, chosen_pset_id);
+	return choose_pset_for_thread_options(thread, TEST_SCHED_NONE);
+}
+
+int
+choose_pset_for_thread_options(test_thread_t thread, test_sched_options_t options)
+{
+	int chosen_pset_id = impl_choose_pset_for_thread(thread, options);
+	fprintf(_log, "for thread %p, with options (%x), we chose pset_id %d\n",
+	    (void *)thread, (uint32_t)options, chosen_pset_id);
 	return chosen_pset_id;
 }
 
@@ -86,6 +94,13 @@ cpu_processor_balance(int cpu_id)
 }
 
 void
+cpu_clear_pending_ast_bits(int cpu_id)
+{
+	fprintf(_log, "on cpu %d cleared pending AST bits\n", cpu_id);
+	impl_cpu_clear_pending_ast_bits(cpu_id);
+}
+
+void
 set_current_processor(int cpu_id)
 {
 	fprintf(_log, "\tset current_processor() to cpu id %d\n", cpu_id);
@@ -93,7 +108,7 @@ set_current_processor(int cpu_id)
 }
 
 void
-set_pset_load_avg(int cluster_id, int QoS, uint64_t load_avg)
+set_pset_load_avg(int cluster_id, int QoS, uint32_t load_avg)
 {
 	fprintf(_log, "\tset pset_load_avg for cluster %d QoS %d to %llu\n", cluster_id, QoS, load_avg);
 	impl_set_pset_load_avg(cluster_id, QoS, load_avg);

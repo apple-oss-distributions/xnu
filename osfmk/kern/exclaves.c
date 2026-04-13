@@ -31,6 +31,7 @@
 #include <kern/misc_protos.h>
 #include <kern/assert.h>
 #include <kern/recount.h>
+#include <kern/queue.h>
 #include <kern/startup.h>
 
 #if CONFIG_EXCLAVES
@@ -84,7 +85,6 @@
 #include "exclaves_memory.h"
 #include "exclaves_internal.h"
 #include "exclaves_aoe.h"
-#include "exclaves_sensor.h"
 
 LCK_GRP_DECLARE(exclaves_lck_grp, "exclaves");
 
@@ -221,9 +221,19 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	mach_vm_address_t ubuffer = uap->buffer;
 	mach_vm_size_t usize = uap->size;
 	mach_vm_size_t uoffset = (mach_vm_size_t)uap->identifier;
-	mach_vm_size_t usize2 = uap->size2;
-	mach_vm_size_t uoffset2 = uap->offset;
+	mach_vm_size_t usize2 = (mach_vm_size_t)uap->param1;
+	mach_vm_size_t uoffset2 = (mach_vm_size_t)uap->param2;
+	uint64_t uparam1 = uap->param1;
+	uint64_t uparam2 = uap->param2;
 	mach_vm_address_t ustatus = uap->status;
+
+	exclaves_debug_printf(show_progress,
+	    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu",
+	    name,
+	    uap->operation_and_flags,
+	    ubuffer,
+	    usize
+	    );
 
 	task_t task = current_task();
 
@@ -239,32 +249,76 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	uint8_t operation = EXCLAVES_CTL_OP(uap->operation_and_flags);
 	uint32_t flags = EXCLAVES_CTL_FLAGS(uap->operation_and_flags);
 	if (flags != 0) {
+		exclaves_debug_printf(show_errors,
+		    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: Invalid flags.",
+		    name,
+		    uap->operation_and_flags,
+		    ubuffer,
+		    usize
+		    );
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	/*
-	 * Deal with OP_BOOT up-front as it has slightly different restrictions
-	 * than the other operations.
+	 * Privilege checks for different operations.
 	 */
-	if (operation == EXCLAVES_CTL_OP_BOOT) {
+	switch (operation) {
+	case EXCLAVES_CTL_OP_BOOT:
 		return operation_boot(name, (uint32_t)identifier);
-	}
 
-	/*
-	 * All other operations are restricted to properly entitled tasks which
-	 * can operate in the kernel domain, or those which have joined
-	 * conclaves (which has its own entitlement check).
-	 * If requirements are relaxed during development, tasks with no
-	 * conclaves are also allowed.
-	 */
-	if (operation == EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME) {
+	case EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME:
 		if (!exclaves_has_priv(task, EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME)) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME KERN_DENIED.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_DENIED;
 		}
-	} else if (task_get_conclave(task) == NULL &&
-	    !exclaves_has_priv(task, EXCLAVES_PRIV_KERNEL_DOMAIN) &&
-	    !exclaves_requirement_is_relaxed(EXCLAVES_R_CONCLAVE_RESOURCES)) {
-		return KERN_DENIED;
+		break;
+
+	case EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_REGISTER:
+	case EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_DEREGISTER:
+		/*
+		 * Only launchd is allowed to register/deregister daemon
+		 * notifications. On DEVELOPMENT/DEBUG kernels, tasks with
+		 * the kernel-domain entitlement are also allowed for testing.
+		 */
+#if !(DEVELOPMENT || DEBUG)
+		if (!task_is_initproc(task)) {
+			return KERN_NO_ACCESS;
+		}
+#else
+		if (!task_is_initproc(task) &&
+		    !exclaves_has_priv(task, EXCLAVES_PRIV_KERNEL_DOMAIN)) {
+			return KERN_NO_ACCESS;
+		}
+#endif
+		break;
+
+	default:
+		/*
+		 * All other operations are restricted to properly entitled
+		 * tasks which can operate in the kernel domain, or those which
+		 * have joined conclaves (which has its own entitlement check).
+		 * If requirements are relaxed during development, tasks with no
+		 * conclaves are also allowed.
+		 */
+		if (task_get_conclave(task) == NULL &&
+		    !exclaves_has_priv(task, EXCLAVES_PRIV_KERNEL_DOMAIN) &&
+		    !exclaves_requirement_is_relaxed(EXCLAVES_R_CONCLAVE_RESOURCES)) {
+			exclaves_debug_printf(show_errors,
+			    "unpriviledged exclaves access denied! _exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: KERN_DENIED.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
+			return KERN_DENIED;
+		}
+		break;
 	}
 
 	/*
@@ -273,6 +327,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	 */
 	kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVECORE);
 	if (kr != KERN_SUCCESS) {
+		exclaves_debug_printf(show_errors,
+		    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. Exclavecore exclaves_boot_wait error: %d.",
+		    name,
+		    uap->operation_and_flags,
+		    ubuffer,
+		    usize,
+		    kr
+		    );
 		return kr;
 	}
 
@@ -287,6 +349,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		 */
 		kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVEKIT);
 		if (kr != KERN_SUCCESS) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. Exclavekit exclaves_boot_wait error: %d.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    kr
+			    );
 			return kr;
 		}
 	}
@@ -294,11 +364,25 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	switch (operation) {
 	case EXCLAVES_CTL_OP_ENDPOINT_CALL: {
 		if (name != MACH_PORT_NULL) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: name != MACH_PORT_NULL",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			/* Only accept MACH_PORT_NULL for now */
 			return KERN_INVALID_CAPABILITY;
 		}
 		if (ubuffer == USER_ADDR_NULL || usize == 0 ||
 		    usize != Exclaves_L4_IpcBuffer_Size) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: Invalid ubuffer",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -314,6 +398,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		}
 
 		if (identifier >= CONCLAVE_SERVICE_MAX) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: identifier'%llu' >= CONCLAVE_SERVICE_MAX",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    identifier
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -323,6 +415,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		 */
 		if (!exclaves_conclave_has_service(task_get_conclave(task),
 		    identifier)) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: exclaves_conclave_has_service false for identifier '%llu'",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    identifier
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -334,6 +434,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		 */
 		task_stop_conclave_upcall_complete();
 		if (error) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: task_stop_conclave_upcall_complete error: '%d'",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    error
+			    );
 			return error;
 		}
 		break;
@@ -344,6 +452,9 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			/* Only accept MACH_PORT_NULL for now */
 			return KERN_INVALID_CAPABILITY;
 		}
+		if (identifier == 0) {
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		size_t len = 0;
 		char id_name[EXCLAVES_RESOURCE_NAME_MAX] = "";
@@ -352,7 +463,7 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return KERN_INVALID_ARGUMENT;
 		}
 
-		exclaves_buffer_perm_t perm = (exclaves_buffer_perm_t)usize2;
+		exclaves_buffer_perm_t perm = (exclaves_buffer_perm_t)uparam1;
 		const exclaves_buffer_perm_t supported =
 		    EXCLAVES_BUFFER_PERM_READ | EXCLAVES_BUFFER_PERM_WRITE;
 		if ((perm & supported) == 0 || (perm & ~supported) != 0) {
@@ -384,6 +495,7 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 	case EXCLAVES_CTL_OP_NAMED_BUFFER_COPYIN: {
 		exclaves_resource_t *resource = NULL;
+
 		kr = exclaves_resource_from_port_name(current_space(), name,
 		    &resource);
 		if (kr != KERN_SUCCESS) {
@@ -408,8 +520,8 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 	case EXCLAVES_CTL_OP_NAMED_BUFFER_COPYOUT: {
 		exclaves_resource_t *resource = NULL;
-		kr = exclaves_resource_from_port_name(current_space(), name,
-		    &resource);
+
+		kr = exclaves_resource_from_port_name(current_space(), name, &resource);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}
@@ -435,6 +547,13 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			/* Only accept MACH_PORT_NULL for now */
 			return KERN_INVALID_CAPABILITY;
 		}
+		Exclaves_L4_IpcBuffer_t *ipcb = exclaves_get_ipc_buffer();
+		/* TODO (rdar://123728529) - IPC buffer isn't freed until thread exit */
+		if (!ipcb && (error = exclaves_allocate_ipc_buffer((void**)&ipcb))) {
+			return error;
+		}
+		assert(ipcb != NULL);
+
 		kr = task_launch_conclave(name);
 
 		/*
@@ -446,6 +565,13 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 	case EXCLAVES_CTL_OP_LOOKUP_SERVICES: {
 		if (name != MACH_PORT_NULL) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: name != MACH_PORT_NULL.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			/* Only accept MACH_PORT_NULL for now */
 			return KERN_INVALID_CAPABILITY;
 		}
@@ -453,29 +579,72 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 		if (usize > (MAX_CONCLAVE_RESOURCE_NUM * sizeof(struct exclaves_resource_user)) ||
 		    (usize % sizeof(struct exclaves_resource_user) != 0)) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: Invalid usize.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
 		if ((ubuffer == USER_ADDR_NULL && usize != 0) ||
 		    (usize == 0 && ubuffer != USER_ADDR_NULL)) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: Invalid ubuffer.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
 		if (ubuffer == USER_ADDR_NULL) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: ubuffer == USER_ADDR_NULL.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
 		/* For the moment we only ever have to deal with one request. */
 		if (usize != sizeof(struct exclaves_resource_user)) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: usize != sizeof(struct exclaves_resource_user).",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 		error = copyin(ubuffer, &uresource, usize);
 		if (error) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. copyin(ubuffer, &uresource, usize) error:'%d'.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    error
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
 		const size_t name_buf_len = sizeof(uresource.r_name);
 		if (strnlen(uresource.r_name, name_buf_len) == name_buf_len) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu. error: strnlen(uresource.r_name, name_buf_len) == name_buf_len.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize
+			    );
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -499,6 +668,15 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		}
 
 		if (id == EXCLAVES_INVALID_ID) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu, domain=%s, r_name=%s. error: EXCLAVES_INVALID_ID.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    domain,
+			    uresource.r_name
+			    );
 			return KERN_NOT_FOUND;
 		}
 
@@ -507,6 +685,15 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		 * doesn't return the id since communication with it is not possible
 		 */
 		if (id > EXCLAVES_FORWARDING_RESOURCE_ID_BASE) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu, domain=%s, r_name=%s. error: id > EXCLAVES_FORWARDING_RESOURCE_ID_BASE.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    domain,
+			    uresource.r_name
+			    );
 			return KERN_NAME_EXISTS;
 		}
 
@@ -515,6 +702,16 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 		error = copyout(&uresource, ubuffer, usize);
 		if (error) {
+			exclaves_debug_printf(show_errors,
+			    "_exclaves_ctl_trap: name=%u, opf=%u, buffer=%llu, size=%llu, domain=%s, r_name=%s. copyout(&uresource, ubuffer, usize) error:'%d'.",
+			    name,
+			    uap->operation_and_flags,
+			    ubuffer,
+			    usize,
+			    domain,
+			    uresource.r_name,
+			    error
+			    );
 			return KERN_INVALID_ADDRESS;
 		}
 
@@ -522,7 +719,12 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		break;
 	}
 
-	case EXCLAVES_CTL_OP_AUDIO_BUFFER_CREATE: {
+	case EXCLAVES_CTL_OP_AUDIO_BUFFER_CREATE:
+	case EXCLAVES_CTL_OP_ARBITRATED_BUFFER_CREATE: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
 		if (identifier == 0) {
 			return KERN_INVALID_ARGUMENT;
 		}
@@ -534,10 +736,15 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return KERN_INVALID_ARGUMENT;
 		}
 
+		xnuproxy_resourcetype_s type = (
+			operation == EXCLAVES_CTL_OP_AUDIO_BUFFER_CREATE ?
+			XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY :
+			XNUPROXY_RESOURCETYPE_ARBITRATEDMEMORY);
+
 		const char *domain = exclaves_conclave_get_domain(task_get_conclave(task));
 		exclaves_resource_t *resource = NULL;
-		kr = exclaves_resource_audio_memory_map(domain, id_name, usize,
-		    &resource);
+		kr = exclaves_resource_arbitrated_memory_map(type, domain, id_name,
+		    usize, &resource);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}
@@ -557,7 +764,8 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		break;
 	}
 
-	case EXCLAVES_CTL_OP_AUDIO_BUFFER_COPYOUT: {
+	case EXCLAVES_CTL_OP_AUDIO_BUFFER_COPYOUT:
+	case EXCLAVES_CTL_OP_ARBITRATED_BUFFER_COPYOUT: {
 		exclaves_resource_t *resource;
 
 		kr = exclaves_resource_from_port_name(current_space(), name, &resource);
@@ -565,14 +773,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return kr;
 		}
 
-		if (resource->r_type !=
-		    XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY) {
+		if (resource->r_type != XNUPROXY_RESOURCETYPE_ARBITRATEDMEMORY &&
+		    resource->r_type != XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY) {
 			exclaves_resource_release(resource);
 			return KERN_INVALID_CAPABILITY;
 		}
 
-		kr = exclaves_resource_audio_memory_copyout(resource,
-		    ubuffer, usize, uoffset, usize2, uoffset2, ustatus);
+		kr = exclaves_resource_arbitrated_memory_copyout(resource,
+		    ubuffer, usize, uoffset, uparam1, uparam2, ustatus);
 
 		exclaves_resource_release(resource);
 
@@ -829,6 +1037,260 @@ notification_resource_lookup_out:
 			return KERN_INVALID_ADDRESS;
 		}
 
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_REGISTER: {
+		exclaves_resource_t *notification_resource = NULL;
+		struct exclaves_daemon_notification *register_args = NULL;
+
+		if (usize != sizeof(struct exclaves_daemon_notification) ||
+		    ubuffer == USER_ADDR_NULL) {
+			kr = KERN_INVALID_ARGUMENT;
+			break;
+		}
+
+		register_args = kalloc_type(struct exclaves_daemon_notification,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+		error = copyin(ubuffer, register_args, usize);
+		if (error) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto daemon_notification_register_out;
+		}
+
+		if (strnlen(register_args->conclave_name, sizeof(register_args->conclave_name)) >=
+		    sizeof(register_args->conclave_name) ||
+		    strnlen(register_args->notification_name, sizeof(register_args->notification_name)) >=
+		    sizeof(register_args->notification_name)) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto daemon_notification_register_out;
+		}
+
+		ipc_port_t send_right = IPC_PORT_NULL;
+		kr = ipc_object_copyin(current_space(),
+		    (mach_port_name_t)register_args->send_right,
+		    MACH_MSG_TYPE_COPY_SEND,
+		    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND,
+		    IPC_COPYIN_REASON_NONE,
+		    NULL,
+		    &send_right);
+
+		if (kr != KERN_SUCCESS || !IP_VALID(send_right)) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto daemon_notification_register_out;
+		}
+
+		/*
+		 * Look up daemon notification by name in requesting domain.
+		 * Note: One notification resource per ID, accessible by name from multiple
+		 * domains. Resource is indexed in kernel domain's ID table for upcalls.
+		 */
+		notification_resource = exclaves_resource_lookup_by_name(register_args->conclave_name,
+		    register_args->notification_name, XNUPROXY_RESOURCETYPE_DAEMONNOTIFICATION);
+		if (notification_resource == NULL) {
+			ipc_port_release_send(send_right);
+			kr = KERN_NOT_FOUND;
+			goto daemon_notification_register_out;
+		}
+
+		/* Allocate and add new daemon_notification_port_entry_t */
+		daemon_notification_port_entry_t *new_entry = kalloc_type(daemon_notification_port_entry_t,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		new_entry->port = send_right;
+
+		lck_mtx_lock(&notification_resource->r_mutex);
+		exclaves_resource_retain(notification_resource);
+		enqueue_tail(&notification_resource->r_daemon_notification.registered_ports,
+		    &new_entry->link);
+		lck_mtx_unlock(&notification_resource->r_mutex);
+
+		/* Success - don't release the resource, keep it retained while port is registered */
+		notification_resource = NULL;
+
+daemon_notification_register_out:
+		/* Only release the resource on error paths */
+		if (notification_resource != NULL) {
+			exclaves_resource_release(notification_resource);
+		}
+		if (register_args != NULL) {
+			kfree_type(struct exclaves_daemon_notification, register_args);
+		}
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_DEREGISTER: {
+		exclaves_resource_t *notification_resource = NULL;
+		struct exclaves_daemon_notification *deregister_args = NULL;
+		ipc_port_t port_to_match_out = IPC_PORT_NULL;
+		daemon_notification_port_entry_t *found_entry = NULL;
+
+		if (usize != sizeof(struct exclaves_daemon_notification) ||
+		    ubuffer == USER_ADDR_NULL) {
+			kr = KERN_INVALID_ARGUMENT;
+			break;
+		}
+
+		deregister_args = kalloc_type(struct exclaves_daemon_notification,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+		error = copyin(ubuffer, deregister_args, usize);
+		if (error) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto daemon_notification_deregister_out;
+		}
+
+		if (strnlen(deregister_args->conclave_name, sizeof(deregister_args->conclave_name)) >=
+		    sizeof(deregister_args->conclave_name) ||
+		    strnlen(deregister_args->notification_name, sizeof(deregister_args->notification_name)) >=
+		    sizeof(deregister_args->notification_name)) {
+			kr = KERN_INVALID_ARGUMENT;
+			goto daemon_notification_deregister_out;
+		}
+
+		/* Translate the port name to get the port pointer for matching */
+		kr = ipc_port_translate_send(current_space(),
+		    deregister_args->send_right, &port_to_match_out);
+		if (kr != KERN_SUCCESS) {
+			goto daemon_notification_deregister_out;
+		}
+		/* port_to_match_out is now locked, unlock it as we just need the pointer */
+		ip_mq_unlock(port_to_match_out);
+
+		notification_resource = exclaves_resource_lookup_by_name(deregister_args->conclave_name,
+		    deregister_args->notification_name, XNUPROXY_RESOURCETYPE_DAEMONNOTIFICATION);
+		if (notification_resource == NULL) {
+			kr = KERN_NOT_FOUND;
+			goto daemon_notification_deregister_out;
+		}
+
+		lck_mtx_lock(&notification_resource->r_mutex);
+
+		/* Find and remove the entry matching this port */
+		daemon_notification_port_entry_t *entry = NULL;
+		qe_foreach_element(entry, &notification_resource->r_daemon_notification.registered_ports, link) {
+			if (entry->port == port_to_match_out) {
+				found_entry = entry;
+				break;
+			}
+		}
+
+		if (found_entry != NULL) {
+			remqueue(&found_entry->link);
+			ipc_port_release_send(found_entry->port);
+			kfree_type(daemon_notification_port_entry_t, found_entry);
+		} else {
+			kr = KERN_NOT_FOUND;
+		}
+
+		lck_mtx_unlock(&notification_resource->r_mutex);
+
+		/*
+		 * Release the resource reference that was taken during registration.
+		 * Must be outside the lock since exclaves_resource_release() may
+		 * need to acquire it.
+		 */
+		if (found_entry != NULL) {
+			exclaves_resource_release(notification_resource);
+		}
+
+daemon_notification_deregister_out:
+		if (deregister_args != NULL) {
+			kfree_type(struct exclaves_daemon_notification, deregister_args);
+		}
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_ENUMERATE_AND_SETUP_SERVICES: {
+		uint8_t num_services = 0;
+
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_enumerate_and_setup_services(&num_services);
+		if (kr != KERN_SUCCESS) {
+			break;
+		}
+
+		error = copyout(&num_services, ubuffer, sizeof(num_services));
+		if (error != 0) {
+			kr = KERN_INVALID_ADDRESS;
+			break;
+		}
+
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_GET_ALL_SERVICE_INFOS: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (ubuffer == USER_ADDR_NULL || usize == 0
+		    || (usize % sizeof(exclaves_aoe_service_info_t) != 0)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		size_t n_services = usize / sizeof(exclaves_aoe_service_info_t);
+		if (n_services > UINT8_MAX) {
+			kr = KERN_INVALID_ARGUMENT;
+			break;
+		}
+		exclaves_aoe_service_info_t *sinfos = (exclaves_aoe_service_info_t *)
+		    kalloc_data(usize, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		kr = exclaves_aoe_get_all_service_infos(sinfos, (uint8_t) n_services);
+		if (kr != KERN_SUCCESS) {
+			break;
+		}
+
+		error = copyout(sinfos, ubuffer, usize);
+		if (error) {
+			return KERN_INVALID_ADDRESS;
+		}
+
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_MESSAGE_LOOP_WITH_SERVICE_ID: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_message_loop_with_service_id(uparam1);
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_WORK_LOOP_WITH_SERVICE_ID: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_work_loop_with_service_id(uparam1);
 		break;
 	}
 
@@ -1116,7 +1578,6 @@ exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset)
 }
 
 /* -------------------------------------------------------------------------- */
-
 #pragma mark exclaves ipc internals
 
 #if CONFIG_EXCLAVES
@@ -1261,6 +1722,10 @@ exclaves_enter(void)
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES, MACH_EXCLAVES_SWITCH)
 	    | DBG_FUNC_START);
 
+#if NEEDS_MTE_IRG_RESEED
+	ml_mte_irg_reseed();
+#endif
+
 	recount_enter_secure();
 
 	/* xnu_return_to_gl2 relies on this flag being present to correctly return
@@ -1282,6 +1747,10 @@ exclaves_enter(void)
 	thread->th_exclaves_intstate &= ~TH_EXCLAVES_EXECUTION;
 
 	recount_leave_secure();
+
+#if NEEDS_MTE_IRG_RESEED
+	ml_mte_irg_reseed();
+#endif
 
 #if CONFIG_SPTM
 	/**
@@ -1346,7 +1815,6 @@ exclaves_bootinfo(uint64_t *out_boot_info, bool *early_enter)
 }
 
 /* -------------------------------------------------------------------------- */
-
 #pragma mark exclaves scheduler communication
 
 static XrtHosted_Buffer_t * PERCPU_DATA(exclaves_request);
@@ -2562,11 +3030,10 @@ exclaves_scheduler_request_watchdog_panic(void)
 }
 
 /* -------------------------------------------------------------------------- */
-
 #pragma mark exclaves xnu proxy communication
 
 static kern_return_t
-exclaves_hosted_error(bool success, XrtHosted_Error_t *error)
+exclaves_hosted_error(bool success, XrtHosted_Error_t * error)
 {
 	if (success) {
 		return KERN_SUCCESS;
@@ -2582,6 +3049,7 @@ exclaves_hosted_error(bool success, XrtHosted_Error_t *error)
 	}
 }
 
+/* -------------------------------------------------------------------------- */
 #pragma mark exclaves privilege management
 
 /*
@@ -2739,7 +3207,7 @@ exclaves_has_priv_vnode(void *vnode, int64_t off, exclaves_priv_t priv)
 	}
 }
 
-
+/* -------------------------------------------------------------------------- */
 #pragma mark exclaves stackshot range
 
 /* Unslid pointers defining the range of code which switches threads into
@@ -2791,7 +3259,7 @@ exclaves_scheduler_request_in_range(uintptr_t addr, bool slid)
 }
 
 uint32_t
-exclaves_stack_offset(const uintptr_t *addr, size_t nframes, bool slid)
+exclaves_stack_offset(const uintptr_t * addr, size_t nframes, bool slid)
 {
 	size_t i = 0;
 
@@ -2832,6 +3300,9 @@ exclaves_stack_offset(const uintptr_t *addr, size_t nframes, bool slid)
 	}
 	return (uint32_t)i;
 }
+
+/* -------------------------------------------------------------------------- */
+#pragma mark exclaves startup
 
 #if DEVELOPMENT || DEBUG
 
@@ -2875,32 +3346,12 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, tightbeam_startup);
 
 #endif /* __has_include(<Tightbeam/tightbeam.h> */
 
-#ifndef CONFIG_EXCLAVES
-/* stubs for sensor functions which are not compiled in from exclaves.c when
- * CONFIG_EXCLAVE is disabled */
-
-kern_return_t
-exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
-    exclaves_sensor_status_t *status)
+#if CONFIG_EXCLAVES
+__attribute__((noreturn))
+void
+exclaves_assert_invalid_th_exclaves_state(void)
 {
-#pragma unused(sensor_type, flags, status)
-	return KERN_NOT_SUPPORTED;
+	panic("th_exclaves_state expected to be zero but was actually 0x%04hX\n",
+	    current_thread()->th_exclaves_state);
 }
-
-kern_return_t
-exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
-    exclaves_sensor_status_t *status)
-{
-#pragma unused(sensor_type, flags, status)
-	return KERN_NOT_SUPPORTED;
-}
-
-kern_return_t
-exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
-    exclaves_sensor_status_t *status)
-{
-#pragma unused(sensor_type, flags, status)
-	return KERN_NOT_SUPPORTED;
-}
-
-#endif /* ! CONFIG_EXCLAVES */
+#endif /* CONFIG_EXCLAVES */

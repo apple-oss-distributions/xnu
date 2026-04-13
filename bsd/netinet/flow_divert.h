@@ -113,4 +113,12 @@ errno_t         flow_divert_pcb_init(struct socket *so);
 errno_t         flow_divert_connect_out(struct socket *so, struct sockaddr *to, proc_t p);
 errno_t         flow_divert_implicit_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr *to, mbuf_t control, struct proc *p);
 
+#define FLOW_DIVERT_GUARD_PROXY_CTL_UNIT_RST    0
+#define FLOW_DIVERT_ORDER_GUARD_PROXY           1
+#define GUARD_PROXY_DELTA                       FLOW_DIVERT_ORDER_GUARD_PROXY + 1
+#define FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP    1
+#define FLOW_DIVERT_GUARD_PROXY_VERDICT_PASS    2
+
+void     flow_divert_handle_cfil_verdict(struct socket *so, uint32_t verdict);
+
 #endif /* __FLOW_DIVERT_H__ */

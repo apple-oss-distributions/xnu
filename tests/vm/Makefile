@@ -119,5 +119,11 @@ vm/vm_memory_entry: CODE_SIGN_ENTITLEMENTS=vm/memory-ownership-transfer.entitlem
 
 vm/vm_reclaim: OTHER_CFLAGS += -Wno-language-extension-token -Wno-c++98-compat memorystatus_assertion_helpers.c
 vm/vm_reclaim: OTHER_LDFLAGS += -ldarwintest_utils
-vm/vm_reclaim: INVALID_ARCHS = armv7k arm64_32
 vm/vm_reclaim: CODE_SIGN_ENTITLEMENTS = vm/vm_reclaim.entitlements
+
+vm/upl: CODE_SIGN_ENTITLEMENTS = ./vm/upl.entitlements
+
+vm/vm_test_154722329: OTHER_LDFLAGS += -framework Foundation
+
+vm/wire_missing_pages: OTHER_LDFLAGS += -framework CoreFoundation -framework IOSurface
+vm/wire_missing_pages: CODE_SIGN_ENTITLEMENTS = ./vm/wire_missing_pages.entitlements

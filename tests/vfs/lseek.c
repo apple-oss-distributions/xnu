@@ -32,7 +32,12 @@
 #include <fcntl.h>
 #include <util.h>
 
-T_GLOBAL_META(T_META_TAG_VM_PREFERRED);
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vfs"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("vfs"),
+	T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED);
 
 T_DECL(
 	lseek_not_allowed_on_pipe,

@@ -273,7 +273,7 @@ T_DECL(
 	"Tests behavior of core dump when process has MTE hard mode enabled and MTE mapping with active tags",
 	T_META_ASROOT(true),
 	T_META_IGNORECRASHES("proc_core_name_mte.*"),
-	T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE", 1),
+	T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
 #if TARGET_OS_OSX
 	T_META_ENABLED(true)
 #else

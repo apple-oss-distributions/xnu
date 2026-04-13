@@ -38,6 +38,47 @@
 #include "vm_configurator.h"
 
 /*
+ * rdar://143341561 FIXED | OVERWRITE sometimes provokes EXC_GUARD
+ * Remove this when that bug is fixed.
+ *
+ * normal workaround: run the function with the EXC_GUARD catcher in place
+ *     when the test is expected to hit rdar://143341561
+ * Rosetta workaround: EXC_GUARD catcher doesn't work on Rosetta, so don't run
+ *     vm_allocate when the test is expected to hit rdar://143341561
+ */
+#define workaround_rdar_143341561 1
+
+/*
+ * Return true if flags has VM_FLAGS_FIXED
+ * This is non-trivial because VM_FLAGS_FIXED is zero;
+ * the real value is the absence of VM_FLAGS_ANYWHERE.
+ */
+static inline bool
+is_fixed(int flags)
+{
+	static_assert(VM_FLAGS_FIXED == 0, "this test requires VM_FLAGS_FIXED be zero");
+	static_assert(VM_FLAGS_ANYWHERE != 0, "this test requires VM_FLAGS_ANYWHERE be nonzero");
+	return !(flags & VM_FLAGS_ANYWHERE);
+}
+
+/* Return true if flags has VM_FLAGS_FIXED and VM_FLAGS_OVERWRITE set. */
+static inline bool
+is_fixed_overwrite(int flags)
+{
+	return is_fixed(flags) && (flags & VM_FLAGS_OVERWRITE);
+}
+
+/*
+ * Overwrite of permanent entries provokes a different error
+ * with the range locking VM versus the previous VM.
+ */
+static inline kern_return_t
+overwrite_permanent_error(void)
+{
+	return is_new_vm() ? KERN_PROTECTION_FAILURE : KERN_NO_SPACE;
+}
+
+/*
  * Clear some bits from EXC_GUARD behavior, then set some bits.
  * Halt with T_FAIL if task_get/set_exc_guard_behavior() fails.
  */

@@ -1348,7 +1348,7 @@ timer_longterm_enqueue_unlocked(timer_call_t    call,
 		 * alone does not involve locking the topo lock.
 		 */
 		timer_call_nosync_cpu(
-			master_cpu,
+			boot_cpu_id,
 			(void (*)(void *))timer_longterm_update,
 			(void *)tlp);
 	}
@@ -1382,7 +1382,7 @@ timer_longterm_scan(timer_longterm_t    *tlp,
 	mpqueue_head_t  *timer_master_queue;
 
 	assert(!ml_get_interrupts_enabled());
-	assert(cpu_number() == master_cpu);
+	assert(cpu_number() == boot_cpu_id);
 
 	if (tlp->threshold.interval != TIMER_LONGTERM_NONE) {
 		threshold = time_start + tlp->threshold.interval;
@@ -1395,7 +1395,7 @@ timer_longterm_scan(timer_longterm_t    *tlp,
 		return;
 	}
 
-	timer_master_queue = timer_queue_cpu(master_cpu);
+	timer_master_queue = timer_queue_cpu(boot_cpu_id);
 	timer_queue_lock_spin(timer_master_queue);
 
 	qe_foreach_element_safe(call, &timer_longterm_queue->head, tc_qlink) {
@@ -1549,7 +1549,7 @@ timer_longterm_update(timer_longterm_t *tlp)
 
 	timer_queue_lock_spin(timer_longterm_queue);
 
-	if (cpu_number() != master_cpu) {
+	if (cpu_number() != boot_cpu_id) {
 		panic("timer_longterm_update_master() on non-boot cpu");
 	}
 
@@ -1682,7 +1682,7 @@ timer_master_scan(timer_longterm_t      *tlp,
 		threshold = TIMER_LONGTERM_NONE;
 	}
 
-	timer_master_queue = timer_queue_cpu(master_cpu);
+	timer_master_queue = timer_queue_cpu(boot_cpu_id);
 	timer_queue_lock_spin(timer_master_queue);
 
 	qe_foreach_element_safe(call, &timer_master_queue->head, tc_qlink) {
@@ -1790,7 +1790,7 @@ timer_sysctl_set(__unused int oid, __unused uint64_t value)
 	switch (oid) {
 	case THRESHOLD:
 		timer_call_cpu(
-			master_cpu,
+			boot_cpu_id,
 			timer_sysctl_set_threshold,
 			(void *) value);
 		return KERN_SUCCESS;

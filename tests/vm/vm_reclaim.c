@@ -10,6 +10,7 @@
 #include <spawn_private.h>
 #include <time.h>
 #include <unistd.h>
+#include <TargetConditionals.h>
 
 #include <darwintest.h>
 #include <darwintest_multiprocess.h>
@@ -36,6 +37,8 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(false),
 	T_META_CHECK_LEAKS(false)
 	);
+
+#if __LP64__
 
 static mach_vm_reclaim_ring_t
 ringbuffer_init(void)
@@ -98,7 +101,7 @@ try_cancel(mach_vm_reclaim_ring_t ringbuffer, mach_vm_reclaim_id_t id, mach_vm_a
 static mach_vm_reclaim_id_t
 allocate_and_defer_free(size_t size, mach_vm_reclaim_ring_t ringbuffer,
     unsigned char val, mach_vm_reclaim_action_t behavior,
-    mach_vm_address_t *addr /* OUT */)
+    mach_vm_address_t *addr /* IN/OUT */)
 {
 	kern_return_t kr = mach_vm_map(mach_task_self(), addr, size, 0, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
 	bool should_update_kernel_accounting = false;
@@ -116,7 +119,7 @@ allocate_and_defer_free(size_t size, mach_vm_reclaim_ring_t ringbuffer,
 }
 
 static mach_vm_reclaim_id_t
-allocate_and_defer_deallocate(size_t size, mach_vm_reclaim_ring_t ringbuffer, unsigned char val, mach_vm_address_t *addr /* OUT */)
+allocate_and_defer_deallocate(size_t size, mach_vm_reclaim_ring_t ringbuffer, unsigned char val, mach_vm_address_t *addr /* IN/OUT */)
 {
 	return allocate_and_defer_free(size, ringbuffer, val, VM_RECLAIM_DEALLOCATE, addr);
 }
@@ -126,7 +129,7 @@ T_DECL(vm_reclaim_single_entry, "Place a single entry in the buffer and call syn
     T_META_TAG_VM_PREFERRED)
 {
 	static const size_t kAllocationSize = (1UL << 20); // 1MB
-	mach_vm_address_t addr;
+	mach_vm_address_t addr = 0;
 	mach_vm_reclaim_ring_t ringbuffer = ringbuffer_init();
 
 	mach_vm_reclaim_id_t idx = allocate_and_defer_deallocate(kAllocationSize, ringbuffer, 1, &addr);
@@ -196,7 +199,7 @@ check_buffer(mach_vm_address_t addr, size_t size, unsigned char expected)
 static void
 read_buffer(mach_vm_address_t addr, size_t size)
 {
-	volatile uint8_t byte;
+	__unused volatile uint8_t byte;
 	uint8_t *buffer = (uint8_t *)addr;
 	for (size_t i = 0; i < size; i++) {
 		byte = buffer[i];
@@ -232,7 +235,7 @@ reuse_reclaimed_entry(mach_vm_reclaim_action_t behavior)
 {
 	kern_return_t kr;
 	static const size_t kAllocationSize = (1UL << 20); // 1MB
-	mach_vm_address_t addr;
+	mach_vm_address_t addr = 0;
 	static const unsigned char kValue = 220;
 
 	mach_vm_reclaim_ring_t ringbuffer = ringbuffer_init();
@@ -519,7 +522,7 @@ T_HELPER_DECL(deallocate_buffer,
 {
 	kern_return_t kr;
 	static const size_t kAllocationSize = (1UL << 20); // 1MB
-	mach_vm_address_t addr;
+	mach_vm_address_t addr = 0;
 
 	mach_vm_reclaim_ring_t ringbuffer = ringbuffer_init();
 
@@ -553,7 +556,7 @@ T_HELPER_DECL(dealloc_gap, "Put a bad entry in the buffer")
 {
 	kern_return_t kr;
 	static const size_t kAllocationSize = (1UL << 20); // 1MB
-	mach_vm_address_t addr;
+	mach_vm_address_t addr = 0;
 	bool should_update_kernel_accounting = false;
 
 	kr = task_set_exc_guard_behavior(mach_task_self(), TASK_EXC_GUARD_ALL);
@@ -678,6 +681,7 @@ T_DECL(inherit_buffer_after_fork, "Ensure reclaim buffer is inherited across a f
 
 	buffer_4fork_inherit = ringbuffer_init();
 
+	addr_4fork_inherit = 0;
 	mach_vm_reclaim_id_t idx = allocate_and_defer_deallocate(
 		allocation_size_4fork_inherit, buffer_4fork_inherit, value_4fork_inherit, &addr_4fork_inherit);
 	T_QUIET; T_ASSERT_EQ(idx, 0ULL, "Entry placed at start of buffer");
@@ -784,6 +788,7 @@ T_DECL(resize_buffer,
 		ids[i] = allocate_and_defer_deallocate(vm_page_size, ringbuffer, 'A', &addrs[i]);
 		T_QUIET; T_ASSERT_NE(ids[i], VM_RECLAIM_ID_NULL, "Able to defer deallocation");
 	}
+	addr_tmp = 0;
 	id_tmp = allocate_and_defer_deallocate(vm_page_size, ringbuffer, 'X', &addr_tmp);
 	T_ASSERT_EQ(id_tmp, VM_RECLAIM_ID_NULL, "Unable to over-fill buffer");
 	uint64_t initial_tail = os_atomic_load(&ringbuffer->tail, relaxed);
@@ -836,11 +841,13 @@ T_DECL(resize_after_drain,
 	int ret;
 	mach_vm_reclaim_error_t err;
 	mach_vm_reclaim_ring_t ring;
-	uint64_t sampling_period_ns;
-	size_t sampling_period_size = sizeof(sampling_period_ns);
+	uint64_t sampling_period_ns = 0;
 
-	ret = sysctlbyname("vm.reclaim.sampling_period_ns", &sampling_period_ns, &sampling_period_size, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl(vm.reclaim.sampling_period_ns)");
+#if !TARGET_OS_IOS || TARGET_OS_VISION
+	size_t sampling_period_size = sizeof(sampling_period_ns);
+	ret = sysctlbyname("vm.reclaim.sampling_period_normal_ns", &sampling_period_ns, &sampling_period_size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl(vm.reclaim.sampling_period_normal_ns)");
+#endif
 
 	T_LOG("Initializing ring");
 	mach_vm_reclaim_count_t initial_len = mach_vm_reclaim_round_capacity(512);
@@ -851,7 +858,7 @@ T_DECL(resize_after_drain,
 	// Fill the buffer with some memory
 	T_LOG("Allocating and deferring memory");
 	for (mach_vm_reclaim_count_t i = 0; i < 128; i++) {
-		mach_vm_address_t addr;
+		mach_vm_address_t addr = 0;
 		mach_vm_reclaim_id_t id = allocate_and_defer_deallocate(vm_page_size, ring, 'A', &addr);
 		T_QUIET; T_ASSERT_NE(id, VM_RECLAIM_ID_NULL, "Able to defer deallocation");
 	}
@@ -864,13 +871,15 @@ T_DECL(resize_after_drain,
 	err = mach_vm_reclaim_ring_resize(ring, 2 * initial_len);
 	T_ASSERT_MACH_SUCCESS(err, "mach_vm_reclaim_ring_resize()");
 
-	T_LOG("Sleeping for 1 sampling period...");
-	struct timespec ts = {
-		.tv_sec = sampling_period_ns / NSEC_PER_SEC,
-		.tv_nsec = sampling_period_ns % NSEC_PER_SEC,
-	};
-	ret = nanosleep(&ts, NULL);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "nanosleep()");
+	if (sampling_period_ns) {
+		T_LOG("Sleeping for 1 sampling period...");
+		struct timespec ts = {
+			.tv_sec = sampling_period_ns / NSEC_PER_SEC,
+			.tv_nsec = sampling_period_ns % NSEC_PER_SEC,
+		};
+		ret = nanosleep(&ts, NULL);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "nanosleep()");
+	}
 
 	err = mach_vm_reclaim_update_kernel_accounting(ring);
 	T_ASSERT_MACH_SUCCESS(err, "mach_vm_reclaim_update_kernel_accounting()");
@@ -986,3 +995,32 @@ T_DECL(copy_and_query_buffer,
 	rr = mach_vm_reclaim_copied_ring_free(&copied_ring);
 	T_ASSERT_MACH_SUCCESS(rr, "free reclaim ring");
 }
+
+T_DECL(reclaim_no_fault,
+    "Test reclamation from a buffer which cannot be faulted",
+    T_META_VM_RECLAIM_ENABLED,
+    T_META_TAG_VM_PREFERRED)
+{
+	mach_vm_reclaim_ring_t ring = ringbuffer_init();
+
+	// Populate a few entries in the ring
+	mach_vm_address_t addr = 0;
+	(void)allocate_and_defer_free(vm_page_size, ring, 0xAB, VM_RECLAIM_FREE, &addr);
+
+	// Evict the page backing the ring
+	int ret = madvise((void *)ring, vm_page_size, MADV_PAGEOUT);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+
+	pid_t pid = getpid();
+	ret = sysctlbyname("vm.reclaim.drain_pid_no_fault", NULL, NULL, &pid, sizeof(pid));
+	T_EXPECT_POSIX_FAILURE(ret, EFAULT, "Drain should fail due to EFAULT");
+}
+
+#else // __LP64__
+
+T_DECL(skip, "Skip all tests on arm64_32")
+{
+	T_SKIP("Deferred reclaim unsupported");
+}
+
+#endif // __LP64__

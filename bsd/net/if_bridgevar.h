@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -154,6 +154,7 @@
 #define BRDGSHOSTFILTER         35      /* set host filter (ifbrhostfilter) */
 #define BRDGGMACNATLIST         36      /* get MAC NAT list (ifbrmnelist) */
 #define BRDGGIFSTATS            37      /* member stats (ifbrmreq+ifbrmstats) */
+#define BRDGGDHCPXIDLIST        38      /* get DHCP XID list (ifbrdxelist) */
 
 /*
  * Generic bridge control request.
@@ -612,6 +613,44 @@ struct ifbrmnelist64 {
 
 #endif /* XNU_KERNEL_PRIVATE */
 
+/*
+ * DHCP XID list
+ */
+
+struct ifbrdxe {
+	char            ifbdxe_ifname[IFNAMSIZ]; /* member if name */
+	uint64_t        ifbdxe_expire;           /* expiration time */
+	uint8_t         ifbdxe_mac[ETHER_ADDR_LEN];/* MAC address */
+	uint8_t         ifbdxe_reserved[2];
+	uint32_t        ifbdxe_xid;             /* DHCP XID */
+};
+
+#ifndef XNU_KERNEL_PRIVATE
+
+struct ifbrdxelist {
+	uint32_t        ifbdl_len;      /* buffer size (multiple of elsize) */
+	uint16_t        ifbdl_elsize;   /* sizeof(ifbrdxe) */
+	uint16_t        ifbdl_pad;
+	caddr_t         ifbdl_buf;
+};
+
+#else /* XNU_KERNEL_PRIVATE */
+
+struct ifbrdxelist32 {
+	uint32_t        ifbdl_len;      /* buffer size */
+	uint16_t        ifbdl_elsize;   /* sizeof(ifbrdxe) */
+	uint16_t        ifbdl_pad;
+	user32_addr_t   ifbdl_buf;
+};
+
+struct ifbrdxelist64 {
+	uint32_t        ifbdl_len;      /* buffer size */
+	uint16_t        ifbdl_elsize;   /* sizeof(ifbrdxe) */
+	uint16_t        ifbdl_pad;
+	user64_addr_t   ifbdl_buf;
+};
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*
  * Bridge member-specific request structure

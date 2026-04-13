@@ -207,6 +207,10 @@ extern tb_error_t
     tb_error_t (^completion)(xnuupcallsv2_notificationupcallsprivate_notificationsignal__result_s));
 
 extern tb_error_t
+    exclaves_driverkit_upcall_daemon_notification_signal(const uint64_t id,
+    tb_error_t (^completion)(xnuupcallsv2_notificationupcallsprivate_daemonnotificationsignal__result_s));
+
+extern tb_error_t
     exclaves_driverkit_upcall_ane_setpowerstate(const uint64_t id,
     const uint32_t desiredState,
     tb_error_t (^completion)(xnuupcallsv2_aneupcallsprivate_anesetpowerstate__result_s));
@@ -228,6 +232,11 @@ extern tb_error_t
 extern tb_error_t
     exclaves_driverkit_upcall_lpw_createpowerassertion(
 	tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createpowerassertion__result_s));
+
+extern tb_error_t
+    exclaves_driverkit_upcall_lpw_createtypedpowerassertion(
+	const uint64_t owner, const uint64_t data, const uint64_t types,
+	tb_error_t (^completion)(xnuupcallsv2_lpwupcallsprivate_createtypedpowerassertion__result_s));
 
 extern tb_error_t
     exclaves_driverkit_upcall_lpw_releasepowerassertion(const uint64_t assertionID,

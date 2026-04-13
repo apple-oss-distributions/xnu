@@ -189,8 +189,33 @@
 	ldr		$1, [$0, ACT_CPUDATAP]
 	str		$0, [$1, CPU_ACTIVE_THREAD]
 
-	ldr	    $2, [$1, CPU_TPIDR_EL0]             // Write encoded CPU info to TPIDR_EL0
-	msr		TPIDR_EL0, $2
+	/*
+	 * This code *only* sets the lower TPIDR_EL0 bits that indicate
+	 * what core and cluster we are now running on. It does not touch
+	 * any higher bits, e.g. the bit that indicates whether x18 should
+	 * be preserved on context switch in user space.
+	 *
+	 * There are only three cases why we are here:
+	 *
+	 * 1. During bootstrap, loading the initial bootstrap thread.
+	 * 2. Coming back from sleep/wfi, loading the idle thread that we were in before.
+	 * 3. In a regular context switch, going from any thread to any other.
+	 *
+	 * For case 1 and 2, the bootstrap and idle thread respectively
+	 * never care about any of the higher bits right now. The early bootstrap path
+	 * will have zeroed them.
+	 *
+	 * For case 3, we will already have passed through
+	 * machine_switch_pmap_and_extended_context(), which will have
+	 * restored TPIDR_EL0 in its entirety.
+	 *
+	 * Note that if any bits are added to TPIDR_EL0 that the bootstrap
+	 * or idle thread may care about, this will need to change.
+	 */
+	ldr		$2, [$1, CPU_TPIDR_EL0]             // Load encoded CPU info ...
+	mrs		$1, TPIDR_EL0
+	bfi		$1, $2, #0, #MACHDEP_TPIDR_CPU_DATA_COUNT
+	msr		TPIDR_EL0, $1                       // ... into the lower bits.
 
 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
 	msr		TPIDRRO_EL0, $1

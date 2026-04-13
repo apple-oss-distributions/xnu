@@ -342,10 +342,16 @@ kern_return_t mapping_free_prime_internal(void);
  * created and the system will panic if this calculation wasn't correct.
  *
  */
-#define PMAP_LEDGER_DATA_BYTES \
-	(((sizeof(task_ledgers) / sizeof(int) - TASK_LEDGER_NUM_SMALL_INDICES) * sizeof(struct ledger_entry) \
-	  + TASK_LEDGER_NUM_SMALL_INDICES * sizeof(struct ledger_entry_small)) \
-	  + sizeof(struct ledger))
+#define PMAP_LEDGER_SMALL_COUNT \
+	(offsetof(struct _task_ledger_indices, last_small_ledger_entry) / sizeof(ledger_entry_id_t))
+#define PMAP_LEDGER_LARGE_COUNT \
+	(sizeof(struct _task_ledger_indices) / sizeof(ledger_entry_id_t) - \
+	PMAP_LEDGER_SMALL_COUNT)
+
+#define PMAP_LEDGER_DATA_BYTES  (\
+	LEDGER_HEADER_SIZE + \
+	PMAP_LEDGER_SMALL_COUNT * LEDGER_ENTRY_SMALL_SIZE + \
+	PMAP_LEDGER_LARGE_COUNT * LEDGER_ENTRY_SIZE)
 
 /**
  * Opaque data structure that contains the exact number of bytes required to
@@ -384,13 +390,6 @@ typedef struct pmap_ledger {
 	 */
 	unsigned long array_index;
 } pmap_ledger_t;
-
-/**
- * This variable is used to ensure that the size of the ledger objects being
- * allocated by the PPL match up with the actual size of the ledger objects
- * before objects start being allocated.
- */
-static SECURITY_READ_ONLY_LATE(bool) pmap_ledger_size_verified = false;
 
 /* Ledger free list lock. */
 static MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pmap_ledger_lock, 0);
@@ -1224,22 +1223,25 @@ pmap_release_ppl_pages_to_kernel_internal(void)
  * of pages is exposed to the debugger through the Low Globals, where it's used
  * to ensure that all pmap data is saved in an active core dump.
  *
- * @param mem The head of the queue of VM pages to add to the pmap's VM object.
+ * @param list The head of the queue of VM pages to add to the pmap's VM object.
  */
 void
-pmap_enqueue_pages(vm_page_t mem)
+pmap_enqueue_pages(vm_page_t list)
 {
-	vm_page_t m_prev;
+	struct vmpi_acct delayed_acct = { };
+	vm_page_t mem;
+
 	vm_object_lock(pmap_object);
-	while (mem != VM_PAGE_NULL) {
+
+	_vm_page_list_foreach_consume(mem, &list) {
 		const vm_object_offset_t offset =
 		    (vm_object_offset_t) ((ptoa(VM_PAGE_GET_PHYS_PAGE(mem))) - gPhysBase);
 
-		vm_page_insert_wired(mem, pmap_object, offset, VM_KERN_MEMORY_PTE);
-		m_prev = mem;
-		mem = NEXT_PAGE(m_prev);
-		*(NEXT_PAGE_PTR(m_prev)) = VM_PAGE_NULL;
+		vm_page_insert_internal(mem, pmap_object, offset,
+		    VM_KERN_MEMORY_PTE, VMPI_NONE, &delayed_acct);
 	}
+
+	vm_page_insert_flush_accounting(pmap_object, &delayed_acct);
 	vm_object_unlock(pmap_object);
 }
 
@@ -1309,7 +1311,6 @@ pmap_pages_alloc_zeroed(pmap_paddr_t *pa, unsigned size, unsigned options)
 	}
 #else /* XNU_MONITOR */
 	vm_page_t mem = VM_PAGE_NULL;
-	thread_t self = current_thread();
 
 	/**
 	 * It's not possible to allocate memory from the VM in a preemption disabled
@@ -1328,21 +1329,16 @@ pmap_pages_alloc_zeroed(pmap_paddr_t *pa, unsigned size, unsigned options)
 	 * This field should only be modified by the local thread itself, so no lock
 	 * needs to be taken.
 	 */
-	uint16_t thread_options = self->options;
-	self->options |= TH_OPT_VMPRIV;
+	const boolean_t thread_vm_privileged = set_vm_privilege(true);
 
 	if (__probable(size == PAGE_SIZE)) {
 		/**
 		 * If we're only allocating a single page, just grab one off the VM's
 		 * global page free list.
 		 */
-		while ((mem = vm_page_grab()) == VM_PAGE_NULL) {
-			if (options & PMAP_PAGES_ALLOCATE_NOWAIT) {
-				break;
-			}
-
-			VM_PAGE_WAIT();
-		}
+		vm_grab_options_t grab_options = ((options & PMAP_PAGES_ALLOCATE_NOWAIT) ?
+		    VM_PAGE_GRAB_NOPAGEWAIT : VM_PAGE_GRAB_OPTIONS_NONE);
+		mem = vm_page_grab_options(grab_options);
 
 		if (mem != VM_PAGE_NULL) {
 			vm_page_lock_queues();
@@ -1366,7 +1362,7 @@ pmap_pages_alloc_zeroed(pmap_paddr_t *pa, unsigned size, unsigned options)
 		panic("%s: invalid size %u", __func__, size);
 	}
 
-	self->options = thread_options;
+	set_vm_privilege(thread_vm_privileged);
 
 	/**
 	 * If the normal method of allocating pages failed, then potentially fall
@@ -1428,7 +1424,14 @@ pmap_alloc_page_for_kern(unsigned int options)
 		return 0;
 	}
 
-	while ((mem = vm_page_grab()) == VM_PAGE_NULL) {
+	vm_grab_options_t grab_options = ((options & PMAP_PAGES_ALLOCATE_NOWAIT) ?
+	    VM_PAGE_GRAB_NOPAGEWAIT : VM_PAGE_GRAB_OPTIONS_NONE);
+	while ((mem = vm_page_grab_options(grab_options)) == VM_PAGE_NULL) {
+		/**
+		 * Not all callers of this function set TH_OPT_VMPRIV, and without
+		 * that vm_page_grab_options() will never wait, so we need to retry
+		 * in a loop here unless PMAP_PAGES_ALLOCATE_NOWAIT was passed.
+		 */
 		if (options & PMAP_PAGES_ALLOCATE_NOWAIT) {
 			return 0;
 		}
@@ -1475,8 +1478,6 @@ pmap_alloc_page_for_kern(unsigned int options)
 void
 pmap_alloc_page_for_ppl(unsigned int options)
 {
-	thread_t self = current_thread();
-
 	/**
 	 * We qualify for allocating reserved memory so set TH_OPT_VMPRIV to inform
 	 * the VM of this.
@@ -1484,10 +1485,9 @@ pmap_alloc_page_for_ppl(unsigned int options)
 	 * This field should only be modified by the local thread itself, so no lock
 	 * needs to be taken.
 	 */
-	uint16_t thread_options = self->options;
-	self->options |= TH_OPT_VMPRIV;
+	const boolean_t thread_vm_privileged = set_vm_privilege(true);
 	pmap_paddr_t pa = pmap_alloc_page_for_kern(options);
-	self->options = thread_options;
+	set_vm_privilege(thread_vm_privileged);
 
 	if (pa != 0) {
 		pmap_mark_page_as_ppl_page(pa);
@@ -2330,7 +2330,6 @@ pmap_enter_pv(
 	}
 #endif /* XNU_MONITOR */
 
-
 #ifdef PVH_FLAG_CPU
 	/**
 	 * An IOMMU mapping may already be present for a page that hasn't yet had a
@@ -2493,7 +2492,6 @@ pmap_remove_pv(
 		    __func__, pai, pvh_flags);
 	}
 #endif /* XNU_MONITOR */
-
 
 	if (pvh_test_type(pvh, PVH_TYPE_PTEP)) {
 		if (__improbable((ptep != pvh_ptep(pvh)))) {
@@ -2681,6 +2679,8 @@ ptd_bootstrap(pt_desc_t *ptdp, unsigned int num_pages)
  * and don't associate the PTD with a specific pmap (that's what "unlinked"
  * means here).
  *
+ * @param pmap the pmap whose ledger needs to be updated or NULL.
+ *
  * @note Until a page table's descriptor object is added to the page table list,
  *       that table won't be eligible for reclaiming by pmap_page_reclaim().
  *
@@ -2689,7 +2689,7 @@ ptd_bootstrap(pt_desc_t *ptdp, unsigned int num_pages)
  *         for new nodes).
  */
 MARK_AS_PMAP_TEXT pt_desc_t*
-ptd_alloc_unlinked(void)
+ptd_alloc_unlinked(pmap_t pmap)
 {
 	pt_desc_t *ptdp = PTD_ENTRY_NULL;
 
@@ -2771,7 +2771,11 @@ ptd_alloc_unlinked(void)
 
 	ptd_free_count--;
 
-	pmap_simple_unlock(&ptd_free_list_lock);
+	pmap_simple_unlock_nopreempt(&ptd_free_list_lock);
+	if (pmap) {
+		pmap_tt_ledger_credit(pmap, sizeof(*ptdp), false);
+	}
+	pmap_simple_enable_preemption();
 
 	ptdp->pt_page.next = NULL;
 	ptdp->pt_page.prev = NULL;
@@ -2820,7 +2824,7 @@ ptd_alloc_unlinked(void)
 MARK_AS_PMAP_TEXT pt_desc_t*
 ptd_alloc(pmap_t pmap)
 {
-	pt_desc_t *ptdp = ptd_alloc_unlinked();
+	pt_desc_t *ptdp = ptd_alloc_unlinked(pmap);
 
 	if (ptdp == NULL) {
 		return NULL;
@@ -2837,7 +2841,6 @@ ptd_alloc(pmap_t pmap)
 		pmap_simple_unlock(&pt_pages_lock);
 	}
 
-	pmap_tt_ledger_credit(pmap, sizeof(*ptdp));
 	return ptdp;
 }
 
@@ -2871,15 +2874,16 @@ ptd_deallocate(pt_desc_t *ptdp)
 	(*(void **)ptdp) = (void *)ptd_free_list;
 	ptd_free_list = (pt_desc_t *)ptdp;
 	ptd_free_count++;
-	pmap_simple_unlock(&ptd_free_list_lock);
+	pmap_simple_unlock_nopreempt(&ptd_free_list_lock);
 
 	/**
 	 * If this PTD was being used to represent an IOMMU page then there won't be
 	 * an associated pmap, and therefore no ledger statistics to update.
 	 */
 	if (pmap != NULL) {
-		pmap_tt_ledger_debit(pmap, sizeof(*ptdp));
+		pmap_tt_ledger_debit(pmap, sizeof(*ptdp), false);
 	}
+	pmap_simple_enable_preemption();
 }
 
 /**
@@ -2990,41 +2994,6 @@ pmap_ledger_validate(const volatile void *ledger)
 }
 
 /**
- * The size of the ledgers being allocated by the PPL need to be large enough
- * to handle ledgers produced by the task_ledgers ledger template. That template
- * is dynamically created at runtime so this function is used to verify that the
- * real size of a ledger based on the task_ledgers template matches up with the
- * amount of space the PPL calculated is required for a single ledger.
- *
- * @note See the definition of PMAP_LEDGER_DATA_BYTES for more information.
- *
- * @note This function needs to be called before any ledgers can be allocated.
- *
- * @param size The actual size that each pmap ledger should be. This is
- *             calculated based on the task_ledgers template which should match
- *             up with PMAP_LEDGER_DATA_BYTES.
- */
-MARK_AS_PMAP_TEXT void
-pmap_ledger_verify_size_internal(size_t size)
-{
-	pmap_simple_lock(&pmap_ledger_lock);
-
-	if (pmap_ledger_size_verified) {
-		panic("%s: ledger size already verified, size=%lu", __func__, size);
-	}
-
-	if ((size == 0) || (size > sizeof(pmap_ledger_data_t)) ||
-	    ((sizeof(pmap_ledger_data_t) - size) % sizeof(struct ledger_entry))) {
-		panic("%s: size mismatch, expected %lu, size=%lu", __func__,
-		    PMAP_LEDGER_DATA_BYTES, size);
-	}
-
-	pmap_ledger_size_verified = true;
-
-	pmap_simple_unlock(&pmap_ledger_lock);
-}
-
-/**
  * Allocate a ledger object from the pmap ledger free list and associate it with
  * the ledger pointer array so it can be validated when passed into the PPL.
  *
@@ -3038,9 +3007,9 @@ pmap_ledger_alloc_internal(void)
 	 * Ensure that we've double checked the size of the ledger objects we're
 	 * allocating before we allocate anything.
 	 */
-	if (!pmap_ledger_size_verified) {
-		panic_plain("%s: Attempted to allocate a pmap ledger before verifying "
-		    "the ledger size", __func__);
+	if (PMAP_LEDGER_DATA_BYTES < task_ledger_template.lt_size) {
+		panic("%s: size mismatch, expected %lu, size=%u", __func__,
+		    PMAP_LEDGER_DATA_BYTES, task_ledger_template.lt_size);
 	}
 
 	pmap_simple_lock(&pmap_ledger_lock);
@@ -3178,114 +3147,17 @@ pmap_ledger_release(ledger_t ledger)
 }
 
 /**
- * This function is used to check a ledger that was recently updated (usually
- * from within the PPL) and potentially take actions based on the new ledger
- * balances (e.g., set an AST).
- *
- * @note On non-PPL systems this checking occurs automatically every time a
- *       ledger is credited/debited. Due to that, this function only needs to
- *       get called on PPL-enabled systems.
- *
- * @note This function can ONLY be called from *outside* of the PPL due to its
- *       usage of current_thread(). The TPIDR register is kernel-modifiable, and
- *       hence can't be trusted. This also means we don't need to pull all of
- *       the logic used to check ledger balances into the PPL.
- *
- * @param pmap The pmap whose ledger should be checked.
+ * Propagate setting AST_LEDGER on a thread if a call to
+ * ledger_credit_scalable_ppl() or ledger_debit_scalable_ppl() needed it.
  */
+__attribute__((always_inline))
 void
-pmap_ledger_check_balance(pmap_t pmap)
+pmap_ledger_flush(void)
 {
-	/* This function should only be called from outside of the PPL. */
-	assert((pmap != NULL) && !pmap_in_ppl());
-
-	ledger_t ledger = pmap->ledger;
-
-	if (ledger == NULL) {
-		return;
-	}
-
-	thread_t cur_thread = current_thread();
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.alternate_accounting);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.alternate_accounting_compressed);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.internal);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.internal_compressed);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.page_table);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.phys_footprint);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.phys_mem);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.tkm_private);
-	ledger_check_new_balance(cur_thread, ledger, task_ledgers.wired_mem);
+	ledger_propagate_ast_ppl();
 }
 
 #endif /* XNU_MONITOR */
-
-/**
- * Credit a specific ledger entry within the passed in pmap's ledger object.
- *
- * @note On PPL-enabled systems this operation will not automatically check the
- *       ledger balances after updating. A call to pmap_ledger_check_balance()
- *       will need to occur outside of the PPL to handle this.
- *
- * @param pmap The pmap whose ledger should be updated.
- * @param entry The specifc ledger entry to update. This needs to be one of the
- *              task_ledger entries.
- * @param amount The amount to credit from the ledger.
- *
- * @return The return value from the credit operation.
- */
-kern_return_t
-pmap_ledger_credit(pmap_t pmap, int entry, ledger_amount_t amount)
-{
-	assert(pmap != NULL);
-
-#if XNU_MONITOR
-	/**
-	 * On PPL-enabled systems the "nocheck" variant MUST be called to ensure
-	 * that the ledger balance doesn't automatically get checked after being
-	 * updated.
-	 *
-	 * That checking process is unsafe to perform within the PPL due to its
-	 * reliance on current_thread().
-	 */
-	return ledger_credit_nocheck(pmap->ledger, entry, amount);
-#else /* XNU_MONITOR */
-	return ledger_credit(pmap->ledger, entry, amount);
-#endif /* XNU_MONITOR */
-}
-
-/**
- * Debit a specific ledger entry within the passed in pmap's ledger object.
- *
- * @note On PPL-enabled systems this operation will not automatically check the
- *       ledger balances after updating. A call to pmap_ledger_check_balance()
- *       will need to occur outside of the PPL to handle this.
- *
- * @param pmap The pmap whose ledger should be updated.
- * @param entry The specifc ledger entry to update. This needs to be one of the
- *              task_ledger entries.
- * @param amount The amount to debit from the ledger.
- *
- * @return The return value from the debit operation.
- */
-kern_return_t
-pmap_ledger_debit(pmap_t pmap, int entry, ledger_amount_t amount)
-{
-	assert(pmap != NULL);
-
-#if XNU_MONITOR
-	/**
-	 * On PPL-enabled systems the "nocheck" variant MUST be called to ensure
-	 * that the ledger balance doesn't automatically get checked after being
-	 * updated.
-	 *
-	 * That checking process is unsafe to perform within the PPL due to its
-	 * reliance on current_thread().
-	 */
-	return ledger_debit_nocheck(pmap->ledger, entry, amount);
-#else /* XNU_MONITOR */
-	return ledger_debit(pmap->ledger, entry, amount);
-#endif /* XNU_MONITOR */
-}
 
 #if XNU_MONITOR
 

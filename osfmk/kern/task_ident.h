@@ -87,7 +87,10 @@ ipc_port_t convert_task_id_token_to_port(task_id_token_t token);
 task_id_token_t convert_port_to_task_id_token(ipc_port_t port);
 
 #if MACH_KERNEL_PRIVATE
-kern_return_t task_identity_token_get_task_grp(task_id_token_t token, task_t *taskp, task_grp_t grp);
+kern_return_t task_identity_token_get_task_grp(
+	task_id_token_t token,
+	task_t *taskp,
+	task_grp_t grp);
 #endif /* MACH_KERNEL_PRIVATE */
 
 #else  /* !XNU_KERNEL_PRIVATE */

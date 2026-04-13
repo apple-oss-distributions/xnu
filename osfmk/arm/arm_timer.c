@@ -230,11 +230,11 @@ timer_queue_assign(
 		/*
 		 * No timers should be armed by powered down CPUs, except
 		 * already badly behaved code in the hibernation path, and
-		 * that is running on master_cpu.
+		 * that is running on the boot CPU.
 		 */
 		assert(ml_is_quiescing());
 
-		queue = &cpu_datap(master_cpu)->rtclock_timer.queue;
+		queue = &cpu_datap(boot_cpu_id)->rtclock_timer.queue;
 	}
 
 	return queue;

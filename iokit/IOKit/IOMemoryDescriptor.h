@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2020, 2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -103,6 +103,7 @@ enum {
 #ifdef __LP64__
 	kIOMemoryTypeVirtual64      = kIOMemoryTypeVirtual,
 	kIOMemoryTypePhysical64     = kIOMemoryTypePhysical,
+	kIOMemoryTypeVnode          = 0x00000060,
 #else /* !__LP64__ */
 	kIOMemoryTypeVirtual64      = 0x00000060,
 	kIOMemoryTypePhysical64     = 0x00000070,
@@ -210,6 +211,7 @@ enum {
 	kIOMapperUncached      = 0x0001,
 #ifdef KERNEL_PRIVATE
 	kIOMapperTransient     = 0x0002,
+	kIOMapperPriorityMap   = 0x0010,
 #endif
 };
 
@@ -259,7 +261,7 @@ struct IOMDDMAWalkSegmentArgs {
 	UInt8 fMapped;                  // Input Variable, Require mapped IOVMA
 	UInt64 fMappedBase;             // Input base of mapping
 };
-typedef UInt8 IOMDDMAWalkSegmentState[128];
+typedef UInt8 IOMDDMAWalkSegmentState[64];
 
 #endif /* KERNEL_PRIVATE */
 
@@ -276,7 +278,6 @@ enum{
 #ifdef XNU_KERNEL_PRIVATE
 struct IOMemoryReference;
 #endif
-
 
 /*! @class IOMemoryDescriptor : public OSObject
  *   @abstract An abstract base class defining common methods for describing physical or virtual memory.
@@ -581,6 +582,15 @@ public:
 		UInt32           rangeCount,
 		IOOptionBits     options,
 		task_t           task);
+
+#if PRIVATE
+	static OSPtr<IOMemoryDescriptor>  withVNode(
+		struct vnode    *vnode,
+		uint64_t         offset,
+		uint64_t         size,
+		IOOptionBits     options);
+#define IOMEMORYDESCRIPTORWITHVNODE_DEFINED     1
+#endif
 
 /*! @function withOptions
  *   @abstract Master initialiser for all variants of memory descriptors.
@@ -1146,6 +1156,9 @@ public:
 		uint64_t                    * mapLength);
 	bool initMemoryEntries(size_t size, IOMapper * mapper);
 
+
+	vm_prot_t memoryReferenceProt(IOOptionBits options);
+
 	IOMemoryReference * memoryReferenceAlloc(uint32_t capacity,
 	    IOMemoryReference * realloc);
 	void memoryReferenceFree(IOMemoryReference * ref);
@@ -1153,6 +1166,13 @@ public:
 
 	IOReturn memoryReferenceCreate(
 		IOOptionBits         options,
+		IOMemoryReference ** reference);
+
+	IOReturn memoryReferenceCreate(
+		IOOptionBits         options,
+		ipc_port_t           entry,
+		uint64_t             offset,
+		uint64_t             size,
 		IOMemoryReference ** reference);
 
 	IOReturn memoryReferenceMap(IOMemoryReference * ref,

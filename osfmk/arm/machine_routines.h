@@ -42,6 +42,7 @@
 #include <sys/appleapiopts.h>
 
 #include <stdarg.h>
+#include <stdint.h>
 
 #ifdef XNU_KERNEL_PRIVATE
 #include <kern/sched_hygiene.h>
@@ -378,7 +379,7 @@ struct  tbd_ops {
 };
 typedef struct tbd_ops        *tbd_ops_t;
 typedef struct tbd_ops        tbd_ops_data_t;
-#endif
+#endif /* defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE) */
 
 
 /*!
@@ -694,23 +695,25 @@ void bzero_phys_with_options(addr64_t src, vm_size_t bytes, int options);
 
 #if MACH_KERNEL_PRIVATE
 #ifdef __arm64__
-/* Pattern-fill buffer with zeros or a 32-bit pattern;
+bool cpu_interrupt_is_pending(void);
+
+/**
+ * Pattern-fill buffer with zeros or a 32-bit pattern;
  * target must be 128-byte aligned and sized a multiple of 128
  * Both variants emit stores with non-temporal properties.
  */
 void fill32_dczva(addr64_t, vm_size_t);
 void fill32_nt(addr64_t, vm_size_t, uint32_t);
-bool cpu_interrupt_is_pending(void);
 
-#endif // __arm64__
-#endif // MACH_KERNEL_PRIVATE
+#endif /* __arm64__ */
+#endif /* MACH_KERNEL_PRIVATE */
 
 void ml_thread_policy(
 	thread_t thread,
 	unsigned policy_id,
 	unsigned policy_info);
 
-#define MACHINE_GROUP                                   0x00000001
+#define MACHINE_GROUP                           0x00000001
 #define MACHINE_NETWORK_GROUP                   0x10000000
 #define MACHINE_NETWORK_WORKLOOP                0x00000001
 #define MACHINE_NETWORK_NETISR                  0x00000002
@@ -1171,45 +1174,62 @@ extern const char* sched_perfcontrol_thread_group_get_name(void *data);
 /*
  * Edge Scheduler-CLPC Interface
  *
- * sched_perfcontrol_thread_group_preferred_clusters_set()
+ * sched_perfcontrol_thread_group_preferred_psets_set()
  *
- * The Edge scheduler expects thread group recommendations to be specific clusters rather
- * than just E/P. In order to allow more fine grained control, CLPC can specify an override
- * preferred cluster per QoS bucket. CLPC passes a common preferred cluster `tg_preferred_cluster`
- * and an array of size [PERFCONTROL_CLASS_MAX] with overrides for specific perfctl classes.
- * The scheduler translates these preferences into sched_bucket
- * preferences and applies the changes.
+ * The Edge scheduler expects thread group recommendations to be specific psets
+ * rather than just E/P. In order to allow more fine grained control, CLPC can
+ * specify an override preferred pset per QoS bucket. CLPC passes a common
+ * preferred pset `tg_preferred_pset` and an array of size
+ * [PERFCONTROL_CLASS_MAX] with overrides for specific perfctl classes.  The
+ * scheduler translates these preferences into sched_bucket preferences and
+ * applies the changes.
  *
+ * sched_perfcontrol_thread_group_preferred_clusters_set() is the legacy
+ * interface which accepts recommendations in terms of clusters. Cluster
+ * recommendations are translated by the scheduler into pset recommendations.
  */
 /* Token to indicate a particular perfctl class is not overriden */
-#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE         ((uint32_t)~0)
-
+#define SCHED_PERFCONTROL_PREFERRED_PSET_OVERRIDE_NONE         PSET_ID_INVALID
 /*
- * CLPC can also indicate if there should be an immediate rebalancing of threads of this TG as
- * part of this preferred cluster change. It does that by specifying the following options.
+ * CLPC can also indicate if there should be an immediate rebalancing of threads
+ * of this TG as part of this preferred pset change. It does that by specifying
+ * the following options.
  */
-#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_MIGRATE_RUNNING       0x1
-#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_MIGRATE_RUNNABLE      0x2
-typedef uint64_t sched_perfcontrol_preferred_cluster_options_t;
+#define SCHED_PERFCONTROL_PREFERRED_PSET_MIGRATE_RUNNING       0x1
+#define SCHED_PERFCONTROL_PREFERRED_PSET_MIGRATE_RUNNABLE      0x2
+typedef uint64_t sched_perfcontrol_preferred_pset_options_t;
 
-extern void sched_perfcontrol_thread_group_preferred_clusters_set(void *machine_data, uint32_t tg_preferred_cluster,
-    uint32_t overrides[PERFCONTROL_CLASS_MAX], sched_perfcontrol_preferred_cluster_options_t options);
+extern void sched_perfcontrol_thread_group_preferred_psets_set(
+	void *machine_data, pset_id_t tg_preferred_pset,
+	pset_id_t overrides[PERFCONTROL_CLASS_MAX],
+	sched_perfcontrol_preferred_pset_options_t options);
+
+#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_OVERRIDE_NONE      UINT32_MAX
+#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_MIGRATE_RUNNING    SCHED_PERFCONTROL_PREFERRED_PSET_MIGRATE_RUNNING
+#define SCHED_PERFCONTROL_PREFERRED_CLUSTER_MIGRATE_RUNNABLE   SCHED_PERFCONTROL_PREFERRED_PSET_MIGRATE_RUNNABLE
+typedef sched_perfcontrol_preferred_pset_options_t sched_perfcontrol_preferred_cluster_options_t;
+
+extern void sched_perfcontrol_thread_group_preferred_clusters_set(
+	void *machine_data, uint32_t tg_preferred_cluster,
+	uint32_t overrides[PERFCONTROL_CLASS_MAX],
+	sched_perfcontrol_preferred_cluster_options_t options);
 
 /*
  * Edge Scheduler-CLPC Interface
  *
  * sched_perfcontrol_edge_matrix_by_qos_get()/sched_perfcontrol_edge_matrix_by_qos_set()
  *
- * For each QoS, the Edge scheduler uses edges between clusters to define the likelihood of
- * migrating threads of that QoS across the clusters. The edge config between any two clusters
- * defines the edge weight and whether migation and steal operations are allowed across that
- * edge. The getter and setter allow CLPC to query and configure edge properties between various
- * clusters on the platform.
+ * For each QoS, the Edge scheduler uses edges between psets to define the
+ * likelihood of migrating threads of that QoS across the psets. The edge config
+ * between any two psets defines the edge weight and whether migation and steal
+ * operations are allowed across that edge. The getter and setter allow CLPC to
+ * query and configure edge properties between various psets on the platform.
  *
- * The edge_matrix is a flattened array of dimension num_psets X num_psets X num_classes, where
- * num_classes equals PERFCONTROL_CLASS_MAX and the scheduler will map perfcontrol classes onto
- * QoS buckets. For perfcontrol classes lacking an equivalent QoS bucket, the "set" operation is
- * a no-op, and the "get" operation returns zeroed edges.
+ * The edge_matrix is a flattened array of dimension num_psets X num_psets X
+ * num_classes, where num_classes equals PERFCONTROL_CLASS_MAX and the scheduler
+ * will map perfcontrol classes onto QoS buckets. For perfcontrol classes
+ * lacking an equivalent QoS bucket, the "set" operation is a no-op, and the
+ * "get" operation returns zeroed edges.
  */
 
 extern void sched_perfcontrol_edge_matrix_by_qos_get(sched_clutch_edge *edge_matrix, bool *edge_requested, uint64_t flags, uint64_t num_psets, uint64_t num_classes);
@@ -1233,15 +1253,16 @@ extern void sched_perfcontrol_edge_matrix_set(sched_clutch_edge *edge_matrix, bo
 /*
  * sched_perfcontrol_edge_cpu_rotation_bitmasks_get()/sched_perfcontrol_edge_cpu_rotation_bitmasks_set()
  *
- * In order to drive intra-cluster core rotation CLPC supplies the edge scheduler with a pair of
- * per-cluster bitmasks. The preferred_bitmask is a bitmask of CPU cores where if a bit is set,
- * CLPC would prefer threads to be scheduled on that core if it is idle. The migration_bitmask
- * is a bitmask of CPU cores where if a bit is set, CLPC would prefer threads no longer continue
- * running on that core if there is any other non-avoided idle core in the cluster that is available.
+ * In order to drive intra-pset core rotation CLPC supplies the edge scheduler
+ * with per-pset bitmasks. The preferred_bitmask is a bitmask of CPU cores where
+ * if a bit is set, CLPC would prefer threads to be scheduled on that core if it
+ * is idle. The migration_bitmask is a bitmask of CPU cores where if a bit is
+ * set, CLPC would prefer threads no longer continue running on that core if
+ * there is any other non-avoided idle core in the cluster that is available.
  */
 
-extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t cluster_id, uint64_t preferred_bitmask, uint64_t migration_bitmask);
-extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t cluster_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask);
+extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t pset_id, uint64_t preferred_bitmask, uint64_t migration_bitmask);
+extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_get(uint32_t pset_id, uint64_t *preferred_bitmask, uint64_t *migration_bitmask);
 
 /*
  * Update the deadline after which sched_perfcontrol_deadline_passed will be called.
@@ -1309,6 +1330,7 @@ uint8_t ml_task_get_disable_user_jop(task_t task);
 void ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop);
 void ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop);
 void ml_thread_set_jop_pid(thread_t thread, task_t task);
+
 
 #if !__has_ptrcheck
 
@@ -1415,6 +1437,7 @@ void ml_disable_user_jop_key(uint64_t user_jop_key, uint64_t saved_jop_state);
 #endif /* defined(HAS_APPLE_PAC) */
 
 void ml_enable_monitor(void);
+boolean_t ml_device_is_prod_fused(void);
 
 #endif /* KERNEL_PRIVATE */
 
@@ -1505,6 +1528,11 @@ bool ml_task_uses_1ghz_timebase(const task_t task);
 #if HAS_MTE && XNU_KERNEL_PRIVATE
 bool ml_thread_get_sec_override(thread_t thread);
 void ml_thread_set_sec_override(thread_t thread, bool sec_override);
+
+
+#if CONFIG_EXCLAVES && NEEDS_MTE_IRG_RESEED
+void ml_mte_irg_reseed(void);
+#endif /* CONFIG_EXCLAVES && NEEDS_MTE_IRG_RESEED */
 #endif /* HAS_MTE && XNU_KERNEL_PRIVATE */
 
 __END_DECLS

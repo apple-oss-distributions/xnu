@@ -153,6 +153,7 @@ T_DECL(memory_share_tests,
 	mach_client();
 }
 
+#if 0 /* rdar://133462123 */
 /*
  * This posix spawn attribute used in the 4K test should only be valid on apple
  * silicon macs. But we've had issues in the past where it would accidently
@@ -163,6 +164,6 @@ T_DECL(memory_share_tests,
  */
 T_DECL_REF(memory_share_tests_4k, memory_share_tests, "vm memory sharing with 4k processes",
     T_META_ENVVAR("USE4K=YES"),
-    T_META_ASROOT(true),
-    T_META_ENABLED(false /* rdar://133462123 */)
+    T_META_ASROOT(true)
     );
+#endif

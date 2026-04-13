@@ -537,7 +537,9 @@ IOSKMapper::initWithTask(
 	assert(regionOffset == size);
 	assert(IOSK_SIZE_OK(size));
 
-	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
+	// rdar://171661345 (Remove guard object optout from IOSKMapper)
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE(
+		.vmf_guard_object_optout = true);
 	vmk_flags.vm_tag = getVMTagForMap(fTaskMap);
 
 	// reserve address space on given task with PROT_NONE

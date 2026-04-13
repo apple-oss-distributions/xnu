@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -29,49 +29,90 @@
 #ifndef KERN_KPC_H
 #define KERN_KPC_H
 
-/* Kernel interfaces to KPC PMC infrastructure. */
+/*
+ * Kernel interfaces for the legacy KPC PMC infrastructure, superceded by
+ * CPC.
+ */
 
 #include <kern/thread.h> /* thread_* */
-#include <machine/machine_kpc.h>
+
+#if XNU_KERNEL_PRIVATE
+#include <machine/machine_cpc.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
 
+#if CONFIG_CPU_COUNTERS
+#if __arm64__
+/* Defer to CPC on this. */
+#define KPC_MAX_COUNTERS (CPMU_PMC_COUNT)
+#elif __x86_64__
+#define KPC_MAX_COUNTERS (8)
+#endif // !__arm64__ && !__x86_64__
+#else // CONFIG_CPU_COUNTERS
+#define KPC_MAX_COUNTERS (0)
+#endif // !CONFIG_CPU_COUNTERS
+
+/**
+ * A configuration word that's understood by KPC and supplied to the
+ * underlying hardware.
+ *
+ * The low bits are passed as-is on Apple silicon, but higher bits encode
+ * EL filtering attributes.
+ */
 typedef uint64_t kpc_config_t;
 
-/* cross-platform class constants */
+/*
+ * KPC calls groups of similar counters "classes" and restructures arrays of
+ * counter values and configuration to only include those counters.
+ */
+
+/*
+ * The fixed instructions and cycles (and on Intel, reference cycles) counters.
+ */
 #define KPC_CLASS_FIXED         (0)
+/*
+ * The configurable counters that can be programmed with microarchitecture-
+ * specific events.
+ */
 #define KPC_CLASS_CONFIGURABLE  (1)
+/*
+ * The set of configurable counters reserved by power management services.
+ */
 #define KPC_CLASS_POWER         (2)
+/*
+ * Only for configuration, allows setting extra CPMU registers as if they
+ * were counter configurations.
+ */
 #define KPC_CLASS_RAWPMU        (3)
 
+/*
+ * The bit masks for the classes, to allow constraining the interfaces to just
+ * the requested classes.
+ */
 #define KPC_CLASS_FIXED_MASK         (1u << KPC_CLASS_FIXED)
 #define KPC_CLASS_CONFIGURABLE_MASK  (1u << KPC_CLASS_CONFIGURABLE)
 #define KPC_CLASS_POWER_MASK         (1u << KPC_CLASS_POWER)
 #define KPC_CLASS_RAWPMU_MASK        (1u << KPC_CLASS_RAWPMU)
 
+/*
+ * The kinds of "PMUs" that KPC supports.
+ *
+ * This was only used for Intel.
+ */
 #define KPC_PMU_ERROR     (0)
 #define KPC_PMU_INTEL_V3  (1)
 #define KPC_PMU_ARM_APPLE (2)
 #define KPC_PMU_INTEL_V2  (3)
 #define KPC_PMU_ARM_V2    (4)
 
+/*
+ * Whether the request for counter values through sysctl should collect
+ * information for all CPUs.
+ *
+ * It's unclear how useful just getting the current CPU is for user space.
+ */
 #define KPC_ALL_CPUS (1u << 31)
-
-/* action id setters/getters */
-#define FIXED_ACTIONID(ctr)                     (kpc_actionid[(ctr)])
-#define CONFIGURABLE_ACTIONID(ctr)              (kpc_actionid[(ctr) + kpc_fixed_count()])
-
-/* reload counter setters/getters */
-#define FIXED_RELOAD(ctr)                       (current_cpu_datap()->cpu_kpc_reload[(ctr)])
-#define FIXED_RELOAD_CPU(cpu, ctr)              (cpu_datap(cpu)->cpu_kpc_reload[(ctr)])
-#define CONFIGURABLE_RELOAD(ctr)                (current_cpu_datap()->cpu_kpc_reload[(ctr) + kpc_fixed_count()])
-#define CONFIGURABLE_RELOAD_CPU(cpu, ctr)       (cpu_datap(cpu)->cpu_kpc_reload[(ctr) + kpc_fixed_count()])
-
-/* shadow counter setters/getters */
-#define FIXED_SHADOW(ctr)                       (current_cpu_datap()->cpu_kpc_shadow[(ctr)])
-#define FIXED_SHADOW_CPU(cpu, ctr)              (cpu_datap(cpu)->cpu_kpc_shadow[(ctr)])
-#define CONFIGURABLE_SHADOW(ctr)                (current_cpu_datap()->cpu_kpc_shadow[(ctr) + kpc_fixed_count()])
-#define CONFIGURABLE_SHADOW_CPU(cpu, ctr)       (cpu_datap(cpu)->cpu_kpc_shadow[(ctr) + kpc_fixed_count()])
 
 /**
  * Callback for notification when PMCs are acquired/released by a task. The
@@ -79,12 +120,6 @@ typedef uint64_t kpc_config_t;
  * Otherwise, the argument is equal to FALSE.
  */
 typedef void (*kpc_pm_handler_t)(boolean_t);
-
-struct cpu_data;
-extern void kpc_register_cpu(struct cpu_data *cpu_data);
-extern void kpc_unregister_cpu(struct cpu_data *cpu_data);
-
-extern bool kpc_supported;
 
 /* bootstrap */
 extern void kpc_init(void);
@@ -109,10 +144,6 @@ extern int kpc_set_running(uint32_t classes);
 /* Read CPU counters */
 extern int kpc_get_cpu_counters(boolean_t all_cpus, uint32_t classes,
     int *curcpu, uint64_t *buf);
-
-/* Read shadow counters */
-extern int kpc_get_shadow_counters( boolean_t all_cpus, uint32_t classes,
-    int *curcpu, uint64_t *buf );
 
 /* Read current thread's counter accumulations */
 extern int kpc_get_curthread_counters(uint32_t *inoutcount, uint64_t *buf);
@@ -153,7 +184,10 @@ extern int kpc_threads_counting;
 extern void kpc_thread_ast_handler( thread_t thread );
 
 #if XNU_KERNEL_PRIVATE
+
+int kpc_set_running_kernel(uint32_t classes);
 int kpc_set_config_kernel(uint32_t classes, kpc_config_t *new_config);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef MACH_KERNEL_PRIVATE
@@ -178,11 +212,6 @@ kpc_off_cpu(thread_t thread)
 /* acquire/release the counters used by the Power Manager */
 extern int kpc_force_all_ctrs( task_t task, int val );
 extern int kpc_get_force_all_ctrs( void );
-
-/* arch-specific routine for acquire/release the counters used by the Power Manager */
-extern int kpc_force_all_ctrs_arch( task_t task, int val );
-
-extern int kpc_set_sw_inc( uint32_t mask );
 
 /*
  * Register the Power Manager as a PMCs user.
@@ -233,19 +262,10 @@ extern void kpc_release_pm_counters(void);
  *
  * @param available_to_pm Whether the counters were made available to power
  * management in the callback.  Pass in whatever was passed into the handler
- * function.  After this point, power management is able to use POWER_CLASS
- * counters.
+ * function.  After this point, if the value is TRUE, power management is able
+ * to use POWER_CLASS counters.
  */
 extern void kpc_pm_acknowledge(boolean_t available_to_pm);
-
-/*
- * Is the PMU used by both the power manager and userspace?
- *
- * This is true when the power manager has been registered. It disables certain
- * counter configurations (like RAWPMU) that are incompatible with sharing
- * counters.
- */
-extern boolean_t kpc_multiple_clients(void);
 
 /*
  * Is kpc controlling the fixed counters?
@@ -255,36 +275,14 @@ extern boolean_t kpc_multiple_clients(void);
  */
 extern boolean_t kpc_controls_fixed_counters(void);
 
-/*
- * Is kpc controlling a specific PMC ?
- */
-extern boolean_t kpc_controls_counter(uint32_t ctr);
-
-
 extern void kpc_idle(void);
 extern void kpc_idle_exit(void);
-
 
 /*
  * KPC PRIVATE
  */
 
-extern uint32_t kpc_actionid[KPC_MAX_COUNTERS];
-
-/* handler for mp operations */
-struct kpc_config_remote {
-	uint32_t classes;
-	kpc_config_t *configv;
-	uint64_t pmc_mask;
-	bool secure;
-};
-
-/* handler for mp operations */
-struct kpc_running_remote {
-	uint32_t        classes;                /* classes to run */
-	uint64_t        cfg_target_mask;        /* configurable counters selected */
-	uint64_t        cfg_state_mask;         /* configurable counters new state */
-};
+#if XNU_KERNEL_PRIVATE && CONFIG_CPU_COUNTERS
 
 /* handler for mp operations */
 struct kpc_get_counters_remote {
@@ -310,8 +308,8 @@ int kpc_get_configurable_config(kpc_config_t *configv, uint64_t pmc_mask);
 int kpc_get_rawpmu_config(kpc_config_t *configv);
 uint64_t kpc_fixed_max(void);
 uint64_t kpc_configurable_max(void);
-int kpc_set_config_arch(struct kpc_config_remote *mp_config);
-int kpc_set_period_arch(struct kpc_config_remote *mp_config);
+cpc_event_flags_t kpc_config_arch_flags(kpc_config_t config);
+kpc_config_t kpc_config_arch_process(kpc_config_t config);
 
 __options_decl(kperf_kpc_flags_t, uint16_t, {
 	KPC_KERNEL_PC = 0x01, // the PC is a kernel address
@@ -323,9 +321,6 @@ __options_decl(kperf_kpc_flags_t, uint16_t, {
 void kpc_sample_kperf(uint32_t actionid, uint32_t counter, uint64_t config,
     uint64_t count, uintptr_t pc, kperf_kpc_flags_t flags);
 
-int kpc_set_running_arch(struct kpc_running_remote *mp_config);
-
-
 /*
  * Helpers
  */
@@ -335,6 +330,37 @@ extern uint8_t kpc_popcount(uint64_t value);
 
 /* for a set of classes, retrieve the configurable PMCs mask */
 extern uint64_t kpc_get_configurable_pmc_mask(uint32_t classes);
+
+#endif /* XNU_KERNEL_PRIVATE && CONFIG_CPU_COUNTERS */
+
+/*
+ * Backwards-compatible declarations for CLPC.
+ */
+
+#if defined(__arm64__)
+
+#include <pexpert/arm64/board_config.h>
+
+#define KPC_ARM64_FIXED_COUNT        (2)
+#define KPC_ARM64_CONFIGURABLE_COUNT (CPMU_PMC_COUNT - KPC_ARM64_FIXED_COUNT)
+
+#if CPMU_64BIT_PMCS
+#define KPC_ARM64_COUNTER_WIDTH    (63)
+#define KPC_ARM64_COUNTER_OVF_BIT  (63)
+#else // CPMU_64BIT_PMCS
+#define KPC_ARM64_COUNTER_WIDTH    (47)
+#define KPC_ARM64_COUNTER_OVF_BIT  (47)
+#endif // !CPMU_64BIT_PMCS
+
+#define KPC_ARM64_COUNTER_MASK     ((UINT64_C(1) << KPC_ARM64_COUNTER_WIDTH) - 1)
+#define KPC_ARM64_COUNTER_OVF_MASK (UINT64_C(1) << KPC_ARM64_COUNTER_OVF_BIT)
+
+/* arm64 uses fixed counter shadows */
+#define FIXED_COUNTER_SHADOW (1)
+
+#define KPC_ARM64_PMC_COUNT (KPC_ARM64_FIXED_COUNT + KPC_ARM64_CONFIGURABLE_COUNT)
+
+#endif /* defined(__arm64__) */
 
 __END_DECLS
 

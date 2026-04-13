@@ -77,6 +77,10 @@ extern uint64_t xcall_ack_timeout_abstime;
 extern unsigned int gFastIPI;
 #endif /* defined(HAS_IPI) */
 
+#if DEVELOPMENT || DEBUG
+static _Atomic(void (*)(void)) cpu_signal_test_vector = NULL;
+#endif /* DEVELOPMENT || DEBUG */
+
 cpu_data_t *
 cpu_datap(int cpu)
 {
@@ -159,7 +163,7 @@ cpu_info(processor_flavor_t flavor, int slot_num, processor_info_t info,
 		cpu_stat->data_ex_cnt = cpu_data_ptr->cpu_stat.data_ex_cnt;
 		cpu_stat->instr_ex_cnt = cpu_data_ptr->cpu_stat.instr_ex_cnt;
 #if CONFIG_CPU_COUNTERS
-		cpu_stat->pmi_cnt = cpu_data_ptr->cpu_monotonic.mtc_npmis;
+		cpu_stat->pmi_cnt = cpu_data_ptr->cpu_cpc.ccp_cpmu_pmi_count;
 #endif /* CONFIG_CPU_COUNTERS */
 
 		*count = PROCESSOR_CPU_STAT64_COUNT;
@@ -419,7 +423,11 @@ cpu_signal_internal(cpu_data_t *target_proc,
 
 	/* We'll mandate that only IPIs meant to kick a core out of idle may ever be deferred. */
 	if (defer) {
+#if DEVELOPMENT || DEBUG
+		assert(signal == SIGPnop || signal == SIGPdeferred || signal == SIGPtest);
+#else
 		assert(signal == SIGPnop || signal == SIGPdeferred);
+#endif /* DEVELOPMENT || DEBUG */
 	}
 
 	if ((signal == SIGPxcall) || (signal == SIGPxcallImm)) {
@@ -541,6 +549,18 @@ cpu_signal_deferred(cpu_data_t *target_proc, cpu_signal_t signal)
 	return cpu_signal_internal(target_proc, signal, NULL, NULL, TRUE);
 }
 
+#if DEVELOPMENT || DEBUG
+/*
+ * Sets a test vector to be dispatched when SIGPtest is received by
+ * a CPU.
+ */
+void
+cpu_signal_set_test_vector(void (*func)(void))
+{
+	os_atomic_store(&cpu_signal_test_vector, func, release);
+}
+#endif /* DEVELOPMENT || DEBUG */
+
 void
 cpu_signal_cancel(cpu_data_t *target_proc, cpu_signal_t signal)
 {
@@ -548,6 +568,17 @@ cpu_signal_cancel(cpu_data_t *target_proc, cpu_signal_t signal)
 
 	current_signals = os_atomic_andnot(&target_proc->cpu_signal, signal, acq_rel);
 
+	/*
+	 * Don't cancel the last deferred IPI sent if any other deferred signals are pending.
+	 */
+	if (current_signals & SIGPdeferred) {
+		return;
+	}
+#if DEVELOPMENT || DEBUG
+	if (current_signals & SIGPtest) {
+		return;
+	}
+#endif
 
 	if (!(current_signals & SIGPdisabled)) {
 #if defined(HAS_IPI)
@@ -605,6 +636,15 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	}
 
 	while (cpu_signal & ~SIGPdisabled) {
+#if DEVELOPMENT || DEBUG
+		if (cpu_signal & SIGPtest) {
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPtest, acquire);
+			void (*test_vector)(void) = os_atomic_load(&cpu_signal_test_vector, acquire);
+			if (test_vector != NULL) {
+				test_vector();
+			}
+		}
+#endif /* DEVELOPMENT || DEBUG */
 		if (cpu_signal & SIGPdebug) {
 			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdebug, acquire);
 			ml_interrupt_masked_debug_start(DebuggerXCall, DBG_INTR_TYPE_IPI);
@@ -622,6 +662,12 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 #endif /* KPERF */
 		if (cpu_signal & (SIGPxcall | SIGPxcallImm)) {
 			cpu_handle_xcall(cpu_data_ptr);
+		}
+		if (cpu_signal & SIGPMaintenance) {
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPMaintenance, acquire);
+			ml_interrupt_masked_debug_start(maintenance_ack_ipi, DBG_INTR_TYPE_IPI);
+			maintenance_ack_ipi(cpu_data_ptr->cpu_number);
+			ml_interrupt_masked_debug_end();
 		}
 		if (cpu_signal & SIGPast) {
 			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPast, acquire);
@@ -681,7 +727,7 @@ cpu_exit_wait(int cpu_id)
 #endif /* USE_APPLEARMSMP */
 #endif /* !APPLEVIRTUALPLATFORM */
 
-	if (cpu_id != master_cpu || (support_bootcpu_shutdown && !ml_is_quiescing())) {
+	if (cpu_id != boot_cpu_id || (support_bootcpu_shutdown && !ml_is_quiescing())) {
 		// For S2R, ml_arm_sleep() will do some extra polling after setting ARM_CPU_ON_SLEEP_PATH.
 		cpu_data_t      *cpu_data_ptr;
 
@@ -741,7 +787,7 @@ processor_to_cpu_datap(processor_t processor)
 }
 
 __startup_func
-static void
+__static_testable void
 cpu_data_startup_init(void)
 {
 	vm_size_t size = percpu_section_size() * (ml_get_cpu_count() - 1);
@@ -892,7 +938,7 @@ ml_cpu_can_exit(__unused int cpu_id)
 
 	bool cpu_supported = true;
 
-	if (cpu_id == master_cpu && !support_bootcpu_shutdown) {
+	if (cpu_id == boot_cpu_id && !support_bootcpu_shutdown) {
 		cpu_supported = false;
 	}
 

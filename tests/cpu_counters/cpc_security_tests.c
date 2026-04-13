@@ -34,11 +34,34 @@ T_GLOBAL_META(
 	T_META_ENABLED(HAS_CPC_SECURITY),
 	_T_META_REQUIRES_CPC_SUPPORT);
 
+const char *ignore_list[] = {
+};
+
+#define IGNORE_LIST_COUNT (sizeof(ignore_list) / sizeof(ignore_list[0]))
+
 // Several of these tests have two variants to support running on development and release kernels.
 // Tests prefixed with `secure_` put the development kernel into a secure CPC mode while tests prefixed with `release_` can run on the RELEASE build variant.
 
 // Metadata for running on a development kernel in CPC secure mode.
 #define _T_META_CPC_SECURE_ON_DEV T_META_SYSCTL_INT("kern.cpc.secure=1"), XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL
+
+static char *
+cpc_get_state(void)
+{
+	size_t state_size = 128 << 10;
+	char *state_str = malloc(state_size);
+	if (!state_str) {
+		return NULL;
+	}
+	int ret = sysctlbyname("kern.cpc.state", state_str, &state_size, NULL, 0);
+	T_EXPECT_POSIX_SUCCESS(ret, "sysctl kern.cpc.state");
+	if (ret == 0) {
+		return state_str;
+	} else {
+		free(state_str);
+		return NULL;
+	}
+}
 
 static void
 _assert_kpep_ok(int kpep_err, const char *fmt, ...)
@@ -126,6 +149,7 @@ check_secure_cpmu(void)
 
 	unsigned int tested = 0;
 	unsigned int filtered = 0;
+	unsigned int ignored = 0;
 	unsigned int public_tested = 0;
 	for (size_t i = 0; i < internal_event_count; i++) {
 		kpep_event_t event = internal_events[i];
@@ -187,7 +211,18 @@ check_secure_cpmu(void)
 			}
 			filtered++;
 		} else if (internal_only) {
-			T_FAIL("configured internal-only event %s (0x%04llx) with secure CPC", name, kpc_config);
+			bool should_ignore = false;
+			for (size_t i = 0; i < IGNORE_LIST_COUNT; i++) {
+				if (strcmp(name, ignore_list[i]) == 0) {
+					should_ignore = true;
+					ignored += 1;
+					break;
+				}
+			}
+			if (!should_ignore) {
+				T_FAIL("did not return EPERM for internal-only event %s (0x%04llx) with secure CPC, returned %s",
+				    name, kpc_config, kpep_strerror(ret));
+			}
 		} else {
 			public_tested++;
 		}
@@ -197,6 +232,7 @@ check_secure_cpmu(void)
 	}
 
 	T_LOG("tested %u internal/public events", tested);
+	T_LOG("ignored %u unknown public events", ignored);
 	T_LOG("correctly permitted to configure %u public events", public_tested);
 	T_LOG("correctly not permitted to configure %u internal-only events",
 	    filtered);
@@ -273,6 +309,9 @@ check_event_coverage(kpep_db_flags_t flag, const char *kind)
 {
 	kpep_db_t db = NULL;
 	int ret = kpep_db_createx(NULL, flag, &db);
+	if (ret != KPEP_ERR_NONE) {
+		_skip_for_db(kind, ret);
+	}
 	_assert_kpep_ok(ret, "creating %s event database", kind);
 
 	size_t event_count = 0;
@@ -375,6 +414,9 @@ T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel whe
 {
 	kpep_db_t db = NULL;
 	int ret = kpep_db_createx(NULL, KPEP_DB_FLAG_PUBLIC_ONLY, &db);
+	if (ret != KPEP_ERR_NONE) {
+		_skip_for_db("public", ret);
+	}
 	_assert_kpep_ok(ret, "creating public event database");
 
 	size_t event_count = 0;
@@ -394,7 +436,6 @@ T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel whe
 	ret = kpep_config_force_counters(config);
 	_assert_kpep_ok(ret, "forcing counters with configuration");
 
-
 	kpep_event_t event = NULL;
 	const char *name = NULL;
 	for (size_t i = 0; i < event_count; i++) {
@@ -412,6 +453,13 @@ T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel whe
 
 	ret = kpep_config_apply(config);
 	_assert_kpep_ok(ret, "applying configuration with event %s", name);
+
+	ret = kpc_set_counting(KPC_CLASS_CONFIGURABLE_MASK);
+	T_EXPECT_POSIX_SUCCESS(ret, "started counting");
+
+	char *cpc_state = cpc_get_state();
+	T_LOG("%s", cpc_state);
+	free(cpc_state);
 
 	uint32_t config_count = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
 	uint64_t *configs = calloc(config_count, sizeof(configs[0]));

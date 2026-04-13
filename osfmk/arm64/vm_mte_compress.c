@@ -26,8 +26,6 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include "vm_mte_compress.h"
-
 #ifndef COMPRESSOR_TESTER
 // this file is included by the tester but having these includes there conflicts with the SDK includes
 #include <pexpert/arm64/board_config.h>
@@ -40,6 +38,8 @@
 #endif // COMPRESSOR_TESTER
 
 #if HAS_MTE
+#include <arm64/mte.h>
+#include "vm_mte_compress.h"
 
 // Run Length Encoding (RLE) algorithm for compressing MTE tags
 // ======================================

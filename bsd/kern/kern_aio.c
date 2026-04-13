@@ -34,6 +34,7 @@
 #include <sys/fcntl.h>
 #include <sys/file_internal.h>
 #include <sys/filedesc.h>
+#include <sys/guarded.h>
 #include <sys/kdebug.h>
 #include <sys/kernel.h>
 #include <sys/vnode_internal.h>
@@ -316,7 +317,7 @@ static int              do_aio_read(aio_workq_entry *entryp);
 static int              do_aio_write(aio_workq_entry *entryp);
 static void             do_munge_aiocb_user32_to_user(struct user32_aiocb *my_aiocbp, struct user_aiocb *the_user_aiocbp);
 static void             do_munge_aiocb_user64_to_user(struct user64_aiocb *my_aiocbp, struct user_aiocb *the_user_aiocbp);
-static aio_workq_entry *aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t);
+static int              aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t, aio_workq_entry **);
 static int              aio_copy_in_list(proc_t, user_addr_t, user_addr_t *, int);
 
 static void             workq_aio_prepare(struct proc *p);
@@ -867,7 +868,8 @@ aio_return(proc_t p, struct aio_return_args *uap, user_ssize_t *retval)
 			aio_proc_remove_done_locked(p, entryp);
 
 			*retval = entryp->returnval;
-			error = 0;
+			error = (entryp->returnval == -1) ? entryp->errorval : 0;
+
 			aio_proc_unlock(p);
 
 			aio_entry_unref(entryp);
@@ -1651,9 +1653,8 @@ lio_listio(proc_t p, struct lio_listio_args *uap, int *retval __unused)
 			continue;
 		}
 
-		entryp = aio_create_queue_entry(p, aiocbpp[i], AIO_LIO);
-		if (entryp == NULL) {
-			result = EAGAIN;
+		result = aio_create_queue_entry(p, aiocbpp[i], AIO_LIO, &entryp);
+		if (result) {
 			goto ExitRoutine;
 		}
 
@@ -1921,9 +1922,10 @@ aio_delay_fsync_request(aio_workq_entry *entryp)
 	return TRUE;
 }
 
-static aio_workq_entry *
-aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags)
+int
+aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags, aio_workq_entry **entrypp)
 {
+	int error;
 	aio_workq_entry *entryp;
 
 	entryp = zalloc_flags(aio_workq_zonep, Z_WAITOK | Z_ZERO);
@@ -1936,21 +1938,21 @@ aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags
 	if (proc_is64bit(procp)) {
 		struct user64_aiocb aiocb64;
 
-		if (copyin(aiocbp, &aiocb64, sizeof(aiocb64)) != 0) {
+		if ((error = copyin(aiocbp, &aiocb64, sizeof(aiocb64))) != 0) {
 			goto error_exit;
 		}
 		do_munge_aiocb_user64_to_user(&aiocb64, &entryp->aiocb);
 	} else {
 		struct user32_aiocb aiocb32;
 
-		if (copyin(aiocbp, &aiocb32, sizeof(aiocb32)) != 0) {
+		if ((error = copyin(aiocbp, &aiocb32, sizeof(aiocb32))) != 0) {
 			goto error_exit;
 		}
 		do_munge_aiocb_user32_to_user(&aiocb32, &entryp->aiocb);
 	}
 
 	/* do some more validation on the aiocb and embedded file descriptor */
-	if (aio_validate(procp, entryp) != 0) {
+	if ((error = aio_validate(procp, entryp)) != 0) {
 		goto error_exit;
 	}
 
@@ -1967,11 +1969,13 @@ aio_create_queue_entry(proc_t procp, user_addr_t aiocbp, aio_entry_flags_t flags
 		entryp->aio_map = get_task_map(proc_task(procp));
 		vm_map_reference(entryp->aio_map);
 	}
-	return entryp;
+
+	*entrypp = entryp;
+	return 0;
 
 error_exit:
 	zfree(aio_workq_zonep, entryp);
-	return NULL;
+	return error;
 }
 
 
@@ -1988,9 +1992,8 @@ aio_queue_async_request(proc_t procp, user_addr_t aiocbp,
 	aio_workq_entry *entryp;
 	int              result;
 
-	entryp = aio_create_queue_entry(procp, aiocbp, flags);
-	if (entryp == NULL) {
-		result = EAGAIN;
+	result = aio_create_queue_entry(procp, aiocbp, flags, &entryp);
+	if (result) {
 		goto error_noalloc;
 	}
 
@@ -2106,6 +2109,9 @@ aio_validate(proc_t p, aio_workq_entry *entryp)
 	} else if ((fp->fp_glob->fg_flag & flag) == 0) {
 		/* we don't have read or write access */
 		result = EBADF;
+	} else if ((entryp->flags & AIO_WRITE) && fp_isguarded(fp, GUARD_WRITE)) {
+		/* Check for write guard on write operations */
+		result = fp_guard_exception(p, entryp->aiocb.aio_fildes, fp, kGUARD_EXC_WRITE);
 	} else if (FILEGLOB_DTYPE(fp->fp_glob) != DTYPE_VNODE) {
 		/* this is not a file */
 		result = ESPIPE;
@@ -2630,7 +2636,6 @@ filt_aioprocess(struct knote *kn, struct kevent_qos_s *kev)
 	assert(entryp);
 	p = entryp->procp;
 
-	lck_mtx_lock(&aio_klist_lock);
 	if (kn->kn_fflags) {
 		/* Propagate the error status and return value back to the user. */
 		kn->kn_ext[0] = entryp->errorval;
@@ -2644,7 +2649,6 @@ filt_aioprocess(struct knote *kn, struct kevent_qos_s *kev)
 
 		res = FILTER_ACTIVE;
 	}
-	lck_mtx_unlock(&aio_klist_lock);
 
 	return res;
 }
@@ -2944,7 +2948,7 @@ workq_aio_open(struct proc *p)
 			goto out;
 		}
 
-		wq_aio = kalloc_type(workq_aio_s, Z_WAITOK | Z_ZERO);
+		wq_aio = kalloc_type(workq_aio_s, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		wq_aio->wa_proc = p;
 

@@ -67,10 +67,10 @@
 
 #include <kern/cpu_data.h>
 #include <kern/machine.h>
-#include <kern/monotonic.h>
 #include <kern/timer_queue.h>
 #include <console/serial_protos.h>
 #include <machine/pal_routines.h>
+#include <machine/machine_cpc.h>
 #include <vm/vm_page.h>
 
 #if HIBERNATION
@@ -218,7 +218,7 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 #endif
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_down(cdp);
+	cpc_cpu_transition(CPC_CPU_OFFLINE, cdp);
 #endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
@@ -373,7 +373,7 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	rtc_timer_start();
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_up(cdp);
+	cpc_cpu_transition(CPC_CPU_ONLINE, cdp);
 #endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_curcpu_up();
@@ -432,10 +432,10 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 	kprintf("acpi_idle_kernel, cpu=%d, interrupts %s\n",
 	    cpu_number(), istate ? "enabled" : "disabled");
 
-	assert(cpu_number() == master_cpu);
+	assert(cpu_number() == boot_cpu_id);
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_down(cpu_datap(0));
+	cpc_cpu_transition(CPC_CPU_OFFLINE, cpu_datap(0));
 #endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
@@ -507,7 +507,7 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 		acpi_wake_abstime, acpi_wake_abstime - acpi_idle_abstime, 0, 0, 0);
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_up(cpu_datap(0));
+	cpc_cpu_transition(CPC_CPU_ONLINE, cpu_datap(0));
 #endif /* CONFIG_CPU_COUNTERS */
 
 	/* Like S3 sleep, turn on tracing if trace_wake boot-arg is present */

@@ -699,7 +699,7 @@ class CLionProject(TargetsProject):
             for conf in comp:
                 if conf.tag != "configuration":
                     continue
-                if conf.attrib["name"] == t:  # already has this target
+                if "name" in conf.attrib and conf.attrib["name"] == t:  # already has this target
                     print(f"Found existing configuration named '{t}', not adding it")
                     break
             else:

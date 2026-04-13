@@ -10,7 +10,14 @@
 #include <darwintest.h>
 #include <unistd.h>
 
+
 #include "net_test_lib.h"
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("vidhi_goel"));
 
 int g_start = 0;
 int g_client = 0;

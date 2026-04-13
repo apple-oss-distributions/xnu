@@ -39,6 +39,8 @@
 #include <stdbool.h>
 #include <mach/boolean.h>
 
+__BEGIN_DECLS
+
 // This file defines some function from libc that are used by the mocks.
 // The testers are built with -nostdlibinc so the system headers folders (from the SDK) are not available when
 // compiling these files.
@@ -54,32 +56,48 @@
 extern void *calloc(size_t count, size_t size);
 extern void *aligned_alloc(size_t alignment, size_t size);
 extern void free(void *ptr);
+extern void *malloc(size_t size);
+extern void *realloc(void *ptr, size_t size);
+extern size_t malloc_size(const void * __unsafe_indexable ptr);
 extern int rand(void);
 extern void srand(unsigned seed);
+extern int rand_r(unsigned *seed);
+extern uint32_t arc4random(void);
 extern __attribute__((noreturn)) void exit(int status);
 extern __attribute__((noreturn)) void abort(void);
 extern char * getenv(const char *name);
 extern int atoi(const char *str);
+extern int atexit(void (*)(void));
 
-extern void * calloc(size_t count, size_t size);
-extern void free(void *ptr);
-extern void * malloc(size_t size);
-extern void *realloc(void *ptr, size_t size);
+// from sys/cdefs.h
+#if __STDC_VERSION__ < 199901 // this also includes C++
+#define __restrict
+#else
+#define __restrict      restrict
+#endif
 
 // from stdio.h
-extern int vsnprintf(char * str, size_t size, const char * format, va_list ap);
-extern int snprintf(char * str, size_t size, const char * format, ...);
+extern int vsnprintf(char * __restrict str, size_t size, const char * __restrict format, va_list ap) __printflike(3, 0);
+extern int snprintf(char * __restrict str, size_t size, const char * __restrict format, ...) __printflike(3, 4);
+extern int vasprintf(char ** __restrict str, const char * __restrict format, va_list ap) __printflike(2, 0);
+extern int asprintf(char ** __restrict str, const char * __restrict format, ...) __printflike(2, 3);
 
 // from string.h
-extern void *memcpy(void *restrict dst, const void *restrict src, size_t n);
+extern void *memcpy(void *__restrict dst, const void *__restrict src, size_t n);
 extern void *memset(void *b, int c, size_t len);
 extern int strcmp(const char *s1, const char *s2);
 extern char *strstr(const char *haystack, const char *needle);
 extern char *strdup(const char *s1);
+extern size_t strlen(const char *s);
 
 // from unistd.h
 extern size_t write(int fildes, const void *buf, size_t nbyte);
 #define STDOUT_FILENO 1
+#define S_IRWXU         0000700         /* [XSI] RWX mask for owner */
+extern int close(int fildes);
+extern int mkstemp(char *templ);
+extern int unlink(const char *path);
+extern int fchmod(int fildes, int mode);
 
 // from pthread.h
 #if defined(__LP64__)
@@ -197,3 +215,9 @@ extern void longjmp(jmp_buf, int) __attribute__((__noreturn__));
 // from time.h
 #include <sys/time.h>
 extern time_t time(time_t *tloc);
+
+// from dlfcn.h
+#define RTLD_DEFAULT    ((void *) -2)
+extern void *dlsym(void *handle, const char *symbol);
+
+__END_DECLS

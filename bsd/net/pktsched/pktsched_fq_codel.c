@@ -2690,6 +2690,8 @@ fq_if_getqstats(struct ifclassq *ifq, uint8_t gid, u_int32_t qid,
 	fq_cl = &FQS_CLASSQ(fqs, gid, qid);
 	grp = fq_if_find_grp(fqs, gid);
 
+	ifqs->ifqs_maxlen = fqs->fqs_pkt_droplimit;
+
 	fcls->fcls_pri = fq_cl->fcl_pri;
 	fcls->fcls_service_class = fq_cl->fcl_service_class;
 	fcls->fcls_quantum = fq_cl->fcl_quantum;

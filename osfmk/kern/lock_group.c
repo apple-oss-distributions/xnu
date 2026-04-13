@@ -356,7 +356,7 @@ host_lockgroup_info(
 	size    = needed * sizeof(lockgroup_info_t);
 	vmsize = vm_map_round_page(size, VM_MAP_PAGE_MASK(ipc_kernel_map));
 	kr     = kmem_alloc(ipc_kernel_map, &addr, vmsize,
-	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IPC);
+	    KMA_DATA_SHARED | KMA_ZERO, VM_KERN_MEMORY_IPC);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -572,9 +572,9 @@ __lck_grp_ticket_update_spin(lck_grp_t *grp, uint64_t time)
 #endif /* LOCK_STATS */
 
 void
-lck_mtx_time_stat_record(
+lck_time_stat_record(
 	enum lockstat_probe_id  pid,
-	lck_mtx_t              *mtx,
+	const void             *lock,
 	uint32_t                grp_attr_id,
 	uint64_t                start)
 {
@@ -587,7 +587,26 @@ lck_mtx_time_stat_record(
 #if __x86_64__
 		delta = tmrCvt(delta, tscFCvtt2n);
 #endif
-		dtrace_probe(id, (uintptr_t)mtx, delta, (uintptr_t)grp, 0, 0);
+		dtrace_probe(id, (uintptr_t)lock, delta, (uintptr_t)grp, 0, 0);
+	}
+}
+
+void
+lck_time_stat_record_grp(
+	enum lockstat_probe_id  pid,
+	const void             *lock,
+	lck_grp_t              *grp,
+	uint64_t                start)
+{
+	uint32_t id = lockstat_probemap[pid];
+
+	if (__improbable(start && id)) {
+		uint64_t delta = ml_get_timebase() - start;
+
+#if __x86_64__
+		delta = tmrCvt(delta, tscFCvtt2n);
+#endif
+		dtrace_probe(id, (uintptr_t)lock, delta, (uintptr_t)grp, 0, 0);
 	}
 }
 

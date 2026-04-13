@@ -228,6 +228,26 @@ vn_open_auth_do_create(struct nameidata *ndp, struct vnode_attr *vap, int fmode,
 
 #if NAMEDRSRCFORK
 	if (ndp->ni_cnd.cn_flags & CN_WANTSRSRCFORK) {
+		/* Resource fork creation - check additional read permissions if FREAD is set */
+		if (fmode & FREAD) {
+#if CONFIG_MACF
+			/* Need MAC getextattr check for read access */
+			error = mac_vnode_check_getextattr(ctx, dvp, XATTR_RESOURCEFORK_NAME, NULL);
+			if (error) {
+				goto out;
+			}
+#endif /* CONFIG_MACF */
+
+			/* Need read extended attribute permission for read access */
+			if ((error = vnode_authorize(dvp, NULL, KAUTH_VNODE_READ_EXTATTRIBUTES, ctx)) != 0) {
+				goto out;
+			}
+		}
+
+		/*
+		 * vn_authorize_create will unconditionally check POSIX/MAC write permissions
+		 * (regardless of FWRITE) because we are creating the file.
+		 */
 		if ((error = vn_authorize_create(dvp, &ndp->ni_cnd, vap, ctx, NULL)) != 0) {
 			goto out;
 		}
@@ -435,7 +455,7 @@ again:
 		ndp->ni_cnd.cn_flags &= (USEDVP | NOCROSSMOUNT);
 		ndp->ni_cnd.cn_flags |= LOCKPARENT | LOCKLEAF | AUDITVNPATH1;
 		/* Inherit NAMEI_ROOTDIR flag only */
-		ndp->ni_flag &= NAMEI_ROOTDIR;
+		ndp->ni_flag &= NAMEI_ROOTDIR | NAMEI_ATFD;
 		ndp->ni_flag |= NAMEI_COMPOUNDOPEN;
 #if NAMEDRSRCFORK
 		/* open calls are allowed for resource forks. */
@@ -563,7 +583,7 @@ continue_create_lookup:
 			ndp->ni_cnd.cn_flags |= CN_RAW_ENCRYPTED | CN_SKIPNAMECACHE;
 		}
 		/* Inherit NAMEI_ROOTDIR flag only */
-		ndp->ni_flag &= NAMEI_ROOTDIR;
+		ndp->ni_flag &= NAMEI_ROOTDIR | NAMEI_ATFD;
 		ndp->ni_flag |= NAMEI_COMPOUNDOPEN;
 
 		/* preserve NOFOLLOW from vnode_open() */

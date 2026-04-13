@@ -332,7 +332,7 @@ droptap_bpf_tap_packet(kern_packet_t pkt, uint32_t flags,
 		hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
 	}
 	/* Need to check the packet flag in case full wake has been requested */
-	if (kern_packet_get_lpw_flag(pkt) || if_is_lpw_enabled(ifp)) {
+	if (kern_packet_get_lpw_flag(pkt) || is_net_lpw_mode()) {
 		hdr->pth_flags |= PTH_FLAG_LPW;
 	}
 	hdr->pth_trace_tag = kern_packet_get_trace_tag(pkt);
@@ -436,7 +436,7 @@ droptap_bpf_tap_mbuf(struct mbuf *m, uint16_t flags,
 	if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
 		hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
 	}
-	if (m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW || if_is_lpw_enabled(ifp)) {
+	if (m->m_pkthdr.pkt_ext_flags & PKTF_EXT_LPW || is_net_lpw_mode()) {
 		hdr->pth_flags |= PTH_FLAG_LPW;
 	}
 

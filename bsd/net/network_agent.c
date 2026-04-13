@@ -2842,7 +2842,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 	    message_type != NETAGENT_MESSAGE_TYPE_CLOSE_NEXUS &&
 	    message_type != NETAGENT_MESSAGE_TYPE_ABORT_NEXUS &&
 	    message_type != NETAGENT_MESSAGE_TYPE_ADD_GROUP_MEMBERS &&
-	    message_type != NETAGENT_MESSAGE_TYPE_REMOVE_GROUP_MEMBERS) {
+	    message_type != NETAGENT_MESSAGE_TYPE_REMOVE_GROUP_MEMBERS &&
+	    message_type != NETAGENT_MESSAGE_TYPE_UPDATE_NEXUS) {
 		NETAGENTLOG(LOG_ERR, "Client netagent message type (%d) is invalid", message_type);
 		return EINVAL;
 	}
@@ -2881,7 +2882,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 		}
 	} else if (message_type == NETAGENT_MESSAGE_TYPE_REQUEST_NEXUS ||
 	    message_type == NETAGENT_MESSAGE_TYPE_CLOSE_NEXUS ||
-	    message_type == NETAGENT_MESSAGE_TYPE_ABORT_NEXUS) {
+	    message_type == NETAGENT_MESSAGE_TYPE_ABORT_NEXUS ||
+	    message_type == NETAGENT_MESSAGE_TYPE_UPDATE_NEXUS) {
 		bool is_nexus_agent = ((registration->netagent->netagent_flags &
 		    (NETAGENT_FLAG_NEXUS_PROVIDER |
 		    NETAGENT_FLAG_NEXUS_LISTENER |

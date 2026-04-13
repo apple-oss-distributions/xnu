@@ -140,7 +140,6 @@ struct if_packet_stats {
 /*
  * Structure to report link heuristics
  */
-#define HAS_IF_LINK_HEURISTICS_STATS 1
 struct if_linkheuristics {
 	u_int64_t       iflh_link_heuristics_cnt;  /* Count of congested link indications */
 	u_int64_t       iflh_link_heuristics_time; /* Duration of congested link indications (msec) */
@@ -167,6 +166,17 @@ struct if_linkheuristics {
 	u_int64_t       iflh_tcp_linkheur_rxmtfloor;
 
 	u_int64_t       iflh_udp_linkheur_stealthdrop;
+};
+
+/*
+ * Structure to report LPW (Low Power Wake) statistics
+ */
+#define HAS_IF_LPW_STATS 1
+struct if_lpw_stats {
+	u_int64_t       iflpw_ipackets; /* packets received in LPW mode */
+	u_int64_t       iflpw_opackets; /* packets sent in LPW mode */
+	u_int64_t       iflpw_magic_pkt_checked; /* Count of packet_has_magic_pattern invocations */
+	u_int64_t       iflpw_magic_pkt_found;   /* Count of magic packets found */
 };
 
 struct if_description {
@@ -224,6 +234,7 @@ struct if_netem_params {
 
 	/* random packet reordering */
 	uint32_t        ifnetem_reordering_p;/* reorder probability */
+	uint32_t        ifnetem_reordering_ms;/* reorder delay in ms */
 
 	/*
 	 * NetEm output scheduler by default is waken up upon input event as
@@ -486,6 +497,10 @@ struct if_data_internal {
 	u_int64_t       ifi_lqm_min_viable_time; /* Duration of lqm minimally viable (msec) */
 	u_int64_t       ifi_lqm_bad_cnt;  /* Count of lqm bad */
 	u_int64_t       ifi_lqm_bad_time; /* Duration of lqm bad (msec) */
+	u_int64_t       ifi_lpw_ipackets; /* packets received in LPW mode */
+	u_int64_t       ifi_lpw_opackets; /* packets sent in LPW mode */
+	u_int64_t       ifi_lpw_magic_pkt_checked; /* Count of packet_has_magic_pattern invocations */
+	u_int64_t       ifi_lpw_magic_pkt_found; /* Count of magic packets found */
 	struct timeval  ifi_lastchange; /* time of last administrative change */
 	struct timeval  ifi_lastupdown; /* time of last up/down event */
 	u_int32_t       ifi_hwassist;   /* HW offload capabilities */
@@ -1712,6 +1727,9 @@ __private_extern__ void if_copy_netif_stats(struct ifnet *ifp,
 
 extern void if_copy_link_heuristics_stats(struct ifnet *ifp,
     struct if_linkheuristics *if_lh);
+
+extern void if_copy_lpw_stats(struct ifnet *ifp,
+    struct if_lpw_stats *if_lpw_stats);
 
 __private_extern__ struct rtentry *ifnet_cached_rtlookup_inet(struct ifnet *,
     struct in_addr);

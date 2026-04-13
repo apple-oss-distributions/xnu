@@ -3369,9 +3369,7 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 	case RUSAGE_INFO_V6:
 		ru->ri_neural_footprint = get_task_neural_nofootprint_total(proc_task(p));
 		ru->ri_lifetime_max_neural_footprint = get_task_neural_nofootprint_total_lifetime_max(proc_task(p));
-#if CONFIG_LEDGER_INTERVAL_MAX
 		ru->ri_interval_max_neural_footprint = get_task_neural_nofootprint_total_interval_max(proc_task(p), FALSE);
-#endif
 		/* Any P-specific resource counters are captured in fill_task_rusage. */
 		OS_FALLTHROUGH;
 
@@ -3386,9 +3384,7 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 	case RUSAGE_INFO_V4:
 		ru->ri_logical_writes = get_task_logical_writes(proc_task(p), false);
 		ru->ri_lifetime_max_phys_footprint = get_task_phys_footprint_lifetime_max(proc_task(p));
-#if CONFIG_LEDGER_INTERVAL_MAX
 		ru->ri_interval_max_phys_footprint = get_task_phys_footprint_interval_max(proc_task(p), FALSE);
-#endif
 		OS_FALLTHROUGH;
 
 	case RUSAGE_INFO_V3:
@@ -3517,10 +3513,8 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 	uint32_t cpumon_flags;
 	uint32_t cpulimits_flags;
 	kauth_cred_t my_cred, target_cred;
-#if CONFIG_LEDGER_INTERVAL_MAX
 	uint32_t footprint_interval_flags;
 	uint64_t interval_max_footprint;
-#endif /* CONFIG_LEDGER_INTERVAL_MAX */
 
 	/* -1 implicitly means our own process (perhaps even the current thread for per-thread attributes) */
 	if (uap->pid == -1) {
@@ -3578,7 +3572,6 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 		error = mach_to_bsd_rv(thread_set_cpulimit(THREAD_CPULIMIT_BLOCK, percent, ns_refill));
 		break;
 
-#if CONFIG_LEDGER_INTERVAL_MAX
 	case RLIMIT_FOOTPRINT_INTERVAL:
 		footprint_interval_flags = (uint32_t)uap->arg; // XXX temporarily stashing flags in argp (12592127)
 		/*
@@ -3592,7 +3585,6 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 		interval_max_footprint = get_task_neural_nofootprint_total_interval_max(proc_task(targetp), TRUE);
 		break;
 
-#endif /* CONFIG_LEDGER_INTERVAL_MAX */
 	default:
 		error = EINVAL;
 		break;

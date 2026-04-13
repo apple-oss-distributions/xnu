@@ -674,6 +674,7 @@ class OperatingSystemPlugIn(object):
 
             # Configure explicit pointer stripping
             is_tagged = self._target.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
+            is_tagged |= self._target.FindFirstGlobalVariable('mte_config_kern_enabled_jump_key').IsValid()
 
             if is_tagged:
 

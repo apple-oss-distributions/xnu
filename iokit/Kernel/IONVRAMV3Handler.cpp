@@ -414,7 +414,7 @@ IONVRAMV3Handler::reloadInternal(void)
 
 	_currentBank = controllerBank;
 
-	controllerImage = (uint8_t *)IOMallocData(_bankSize);
+	controllerImage = (uint8_t *)IOMallocZeroData(_bankSize);
 
 	_nvramController->select(_currentBank);
 	_nvramController->read(0, controllerImage, _bankSize);
@@ -549,8 +549,7 @@ IONVRAMV3Handler::setEntryForRemove(struct nvram_v3_var_entry *v3Entry, bool sys
 		if (_provider->_diags) {
 			_provider->_diags->logVariable(getPartitionTypeForGUID(v3Entry->header.guid),
 			    kIONVRAMOperationDelete,
-			    variableName,
-			    nullptr);
+			    variableName);
 		}
 	}
 
@@ -733,15 +732,16 @@ IONVRAMV3Handler::unserializeVariables(void)
 		    propSymbol, propObject)) {
 			OSSharedPtr<const OSSymbol> canonicalKey = keyWithGuidAndCString(v3Entry->header.guid, (const char *)v3Entry->header.name_data_buf);
 
-			DEBUG_INFO("adding %s, dataLength=%u, system=%d\n",
-			    canonicalKey->getCStringNoCopy(), v3Entry->header.dataSize, system);
+			DEBUG_INFO("adding %s, variableLength=%zu, dataLength=%u, system=%d\n",
+			    canonicalKey->getCStringNoCopy(), variable_length(header), v3Entry->header.dataSize, system);
 
 			_varDict->setObject(canonicalKey.get(), propObject.get());
 
 			if (_provider->_diags) {
 				_provider->_diags->logVariable(getPartitionTypeForGUID(v3Entry->header.guid),
 				    kIONVRAMOperationInit, propSymbol.get()->getCStringNoCopy(),
-				    (void *)(uintptr_t)(header->name_data_buf + header->nameSize));
+				    (void *)(uintptr_t)v3Entry->header.dataSize,
+				    (void *)(uintptr_t)offset);
 			}
 		}
 		IOFreeData(v3Entry, nvram_v3_var_container_size(header));
@@ -995,7 +995,7 @@ IONVRAMV3Handler::reclaim(void)
 	DEBUG_INFO("called\n");
 	NVRAMLOCKASSERTHELD(_controllerLock);
 
-	bankData = (uint8_t *)IOMallocData(_bankSize);
+	bankData = (uint8_t *)IOMallocZeroData(_bankSize);
 	require_action(bankData != nullptr, exit, ret = kIOReturnNoMemory);
 
 	ret = _nvramController->select(next_bank);
@@ -1096,7 +1096,6 @@ IONVRAMV3Handler::syncRaw(void)
 	size_t                    *invalidateOffsets = nullptr;
 	size_t                    invalidateOffsetsCount = 0;
 	size_t                    invalidateOffsetIndex = 0;
-	size_t                    invalidatedSize = 0;
 
 	require_action(_nvramController != nullptr, exit, DEBUG_INFO("No _nvramController\n"));
 	require_action(_newData == true, exit, DEBUG_INFO("No _newData to sync\n"));
@@ -1109,11 +1108,11 @@ IONVRAMV3Handler::syncRaw(void)
 		// No reclaim, build append and invalidate list
 		remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
 
-		appendBuffer = (uint8_t *)IOMallocData(_bankSize);
+		appendBuffer = (uint8_t *)IOMallocZeroData(_bankSize);
 		require_action(appendBuffer, unlock, ret = kIOReturnNoMemory);
 
 		invalidateOffsetsCount = _varEntries->getCount();
-		invalidateOffsets = (size_t *)IOMallocData(invalidateOffsetsCount * sizeof(size_t));
+		invalidateOffsets = (size_t *)IOMallocZeroData(invalidateOffsetsCount * sizeof(size_t));
 		require_action(invalidateOffsets, unlock, ret = kIOReturnNoMemory);
 
 		for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
@@ -1141,16 +1140,13 @@ IONVRAMV3Handler::syncRaw(void)
 
 				if (prevOffset) {
 					invalidateOffsets[invalidateOffsetIndex++] = prevOffset;
-					invalidatedSize += variable_length((struct v3_var_header *)prevOffset);
 				}
 
 				remainingEntries->setObject(entryContainer);
 			} else if (varEntry->new_state == VAR_NEW_STATE_REMOVE) {
 				if (varEntry->existing_offset) {
 					DEBUG_INFO("marking entry at offset %#lx deleted\n", varEntry->existing_offset);
-
 					invalidateOffsets[invalidateOffsetIndex++] = varEntry->existing_offset;
-					invalidatedSize += variable_length((struct v3_var_header *)varEntry->existing_offset);
 				} else {
 					DEBUG_INFO("No existing_offset , removing\n");
 				}
@@ -1222,7 +1218,7 @@ IONVRAMV3Handler::syncBlock(void)
 	require_action(_newData == true, exit, DEBUG_INFO("No _newData to sync\n"));
 	require_action(_bankSize != 0, exit, DEBUG_INFO("No nvram size info\n"));
 
-	block = (uint8_t *)IOMallocData(_bankSize);
+	block = (uint8_t *)IOMallocZeroData(_bankSize);
 
 	NVRAMREADLOCK(_variableLock);
 	remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
@@ -1265,6 +1261,10 @@ IONVRAMV3Handler::syncBlock(void)
 			DEBUG_INFO("Dropping %s\n", varEntry->header.name_data_buf);
 		}
 	}
+
+	// 0xFF out the remaining space, this will allow banks to switch between append mode and
+	// block mode if ever needed
+	memset(block + new_bank_offset, 0xFF, _bankSize - (uint32_t)new_bank_offset);
 
 	ret = _nvramController->write(0, block, _bankSize);
 	verify_noerr_action(ret, DEBUG_ERROR("w fail, ret=%#x\n", ret));

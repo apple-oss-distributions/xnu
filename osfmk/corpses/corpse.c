@@ -681,6 +681,8 @@ task_generate_corpse_internal(
 	corpse_flags_t kc_u_flags = CORPSE_CRASHINFO_HAS_REF;
 	void *corpse_proc = NULL;
 	thread_t self = current_thread();
+	int pid = task_pid(task);
+	const char *proc_name;
 
 #if CONFIG_MACF
 	struct label *label = NULL;
@@ -692,7 +694,7 @@ task_generate_corpse_internal(
 	}
 
 	if (task_corpse_forking_disabled(task)) {
-		os_log(OS_LOG_DEFAULT, "corpse for pid %d disabled via SPI\n", task_pid(task));
+		os_log(OS_LOG_DEFAULT, "corpse for pid %d disabled via SPI\n", pid);
 		ktriage_record(thread_tid(self), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_CORPSE, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_CORPSE_DISABLED_FOR_PROC), 0 /* arg */);
 		return KERN_FAILURE;
 	}
@@ -707,11 +709,15 @@ task_generate_corpse_internal(
 	}
 
 	/* Having a task reference does not guarantee a proc reference */
-	p = proc_find(task_pid(task));
+	p = proc_find(pid);
 	if (p == NULL) {
+		os_log(OS_LOG_DEFAULT, "Failed to generate corpse: proc_find returned \
+			NULL for task pid %d\n", pid);
 		kr = KERN_INVALID_TASK;
 		goto error_task_generate_corpse;
 	}
+	proc_name = proc_best_name(p);
+
 
 	is_64bit_addr = IS_64BIT_PROCESS(p);
 	is_64bit_data = (task == TASK_NULL) ? is_64bit_addr : task_get_64bit_data(task);
@@ -742,6 +748,8 @@ task_generate_corpse_internal(
 	    TWF_NONE,
 	    new_task);
 	if (kr != KERN_SUCCESS) {
+		os_log(OS_LOG_DEFAULT, "Failed to generate corpse for %s[%d]: \
+			task_create_internal returned %#x\n", proc_name, pid, kr);
 		new_task = TASK_NULL;
 		goto error_task_generate_corpse;
 	}
@@ -757,6 +765,8 @@ task_generate_corpse_internal(
 	kr = task_duplicate_map_and_threads(task, p, new_task, &thread,
 	    &udata_buffer, &size, &num_udata, (etype != 0));
 	if (kr != KERN_SUCCESS) {
+		os_log(OS_LOG_DEFAULT, "Failed to generate corpse for %s[%d]: \
+			task_duplicate_map_and_threads returned %#x\n", proc_name, pid, kr);
 		goto error_task_generate_corpse;
 	}
 
@@ -766,6 +776,8 @@ task_generate_corpse_internal(
 #endif
 	    TRUE);
 	if (kr != KERN_SUCCESS) {
+		os_log(OS_LOG_DEFAULT, "Failed to generate corpse for %s[%d]: \
+			task_collect_crash_info returned %#x\n", proc_name, pid, kr);
 		goto error_task_generate_corpse;
 	}
 
@@ -776,6 +788,8 @@ task_generate_corpse_internal(
 
 	kr = task_start_halt(new_task);
 	if (kr != KERN_SUCCESS) {
+		os_log(OS_LOG_DEFAULT, "Failed to generate corpse for %s[%d]: \
+			task_start_halt returned %#x\n", proc_name, pid, kr);
 		goto error_task_generate_corpse;
 	}
 

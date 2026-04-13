@@ -102,6 +102,22 @@ static_assert((1u << HW_LCK_TICKET_LOCK_VALID_BIT) ==
     ((hw_lck_ticket_t){ .lck_valid = 1 }).lck_value);
 #endif
 
+#if CONFIG_DTRACE
+__attribute__((noinline))
+static void
+hw_lck_ticket_lock_release(hw_lck_ticket_t *lck)
+{
+	LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_RELEASE, lck);
+}
+
+#define LCK_TICKET_DTRACE_CALL(...)   ({                                        \
+	if (__improbable(lck_debug_state.lds_value)) {                          \
+	        __VA_ARGS__;                                                    \
+	}                                                                       \
+})
+#else
+#define LCK_TICKET_DTRACE_CALL(...)   ((void)0)
+#endif
 __header_always_inline int
 equal_tickets(uint8_t t0, uint8_t t1)
 {
@@ -422,7 +438,7 @@ hw_lck_ticket_unlock_inner_pv(hw_lck_ticket_t *lck)
 #endif /* CONFIG_PV_TICKET */
 
 __header_always_inline void
-hw_lck_ticket_unlock_inner(hw_lck_ticket_t *lck)
+hw_lck_ticket_unlock_inner(hw_lck_ticket_t *lck, memory_order mo)
 {
 	_Atomic uint8_t *ctp = (_Atomic uint8_t *)&lck->cticket;
 	uint8_t cticket;
@@ -432,31 +448,28 @@ hw_lck_ticket_unlock_inner(hw_lck_ticket_t *lck)
 	 * so that the compiler can codegen an `incb` on Intel.
 	 */
 	cticket = atomic_load_explicit(ctp, memory_order_relaxed);
-	atomic_store_explicit(ctp, cticket +
-	    HW_LCK_TICKET_LOCK_INCREMENT, memory_order_release);
+	atomic_store_explicit(ctp, cticket + HW_LCK_TICKET_LOCK_INCREMENT, mo);
 }
 
 __header_always_inline void
-hw_lck_ticket_unlock_internal_nopreempt(hw_lck_ticket_t *lck)
+hw_lck_ticket_unlock_internal_nopreempt(hw_lck_ticket_t *lck, memory_order mo)
 {
 #if CONFIG_PV_TICKET
 	if (lck->lck_is_pv) {
 		hw_lck_ticket_unlock_inner_pv(lck);
 	} else {
-		hw_lck_ticket_unlock_inner(lck);
+		hw_lck_ticket_unlock_inner(lck, mo);
 	}
 #else
-	hw_lck_ticket_unlock_inner(lck);
+	hw_lck_ticket_unlock_inner(lck, mo);
 #endif
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_RELEASE, lck);
-#endif /* CONFIG_DTRACE */
+	LCK_TICKET_DTRACE_CALL(hw_lck_ticket_lock_release(lck));
 }
 
 __header_always_inline void
 hw_lck_ticket_unlock_internal(hw_lck_ticket_t *lck)
 {
-	hw_lck_ticket_unlock_internal_nopreempt(lck);
+	hw_lck_ticket_unlock_internal_nopreempt(lck, memory_order_release);
 	lock_enable_preemption();
 }
 
@@ -927,15 +940,27 @@ hw_lck_ticket_invalidate(hw_lck_ticket_t *lck)
 void
 hw_lck_ticket_unlock_nopreempt(hw_lck_ticket_t *lck)
 {
-	HW_LCK_TICKET_VERIFY(lck);
-	hw_lck_ticket_unlock_internal_nopreempt(lck);
+	hw_lck_ticket_unlock_internal_nopreempt(lck, memory_order_release);
 }
 
 void
 hw_lck_ticket_unlock(hw_lck_ticket_t *lck)
 {
-	HW_LCK_TICKET_VERIFY(lck);
 	hw_lck_ticket_unlock_internal(lck);
+}
+
+void
+hw_lck_ticket_unlock_after_lookup_nopreempt(hw_lck_ticket_t *lck, lck_dep_value_t value)
+{
+	lck = os_atomic_inject_dependency(lck, value);
+	hw_lck_ticket_unlock_internal_nopreempt(lck, memory_order_relaxed);
+}
+
+void
+hw_lck_ticket_unlock_after_lookup(hw_lck_ticket_t *lck, lck_dep_value_t value)
+{
+	hw_lck_ticket_unlock_after_lookup_nopreempt(lck, value);
+	lock_enable_preemption();
 }
 
 void
@@ -944,7 +969,7 @@ lck_ticket_unlock_nopreempt(lck_ticket_t *tlock)
 	LCK_TICKET_VERIFY(tlock);
 	LCK_TICKET_UNLOCK_VERIFY(tlock);
 	os_atomic_store(&tlock->lck_ticket_owner, 0, relaxed);
-	hw_lck_ticket_unlock_internal_nopreempt(&tlock->tu);
+	hw_lck_ticket_unlock_internal_nopreempt(&tlock->tu, memory_order_release);
 }
 
 void

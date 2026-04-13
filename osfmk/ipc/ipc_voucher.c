@@ -1188,6 +1188,13 @@ ipc_execute_voucher_recipe_command(
 		}
 		break;
 
+#ifdef __BUILDING_XNU_LIB_UNITTEST__
+	case MACH_VOUCHER_ATTR_UNIT_TEST_VECTOR_ALLOWED:
+	case MACH_VOUCHER_ATTR_UNIT_TEST_VECTOR_DISALLOWED:
+		/* Nothing to do... */
+		break;
+#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
+
 	/*
 	 * MACH_VOUCHER_ATTR_SET_VALUE_HANDLE
 	 *	Use key-privilege to set a value handle for the attribute directly,
@@ -1413,11 +1420,26 @@ ipc_create_mach_voucher_internal(
 	ipc_voucher_t prev_iv;
 	bool key_priv = false;
 	kern_return_t kr = KERN_SUCCESS;
+	ipc_space_t space = current_space();
+	ipc_space_policy_t pol = ipc_space_policy(space);
 
 	/* if nothing to do ... */
 	if (0 == recipe_size) {
 		*new_voucher = IV_NULL;
 		return KERN_SUCCESS;
+	}
+
+	/* Impose an upper bound on recipe size under ESv3 (in telemetry mode for now) */
+	if (ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V3) &&
+	    recipe_size >= IPC_MACH_VOUCHER_RECIPE_SIZE_SOFT_LIMIT) {
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_VOUCHER_RECIPE_SIZE,
+			space,
+			0,
+			0,
+			0,
+			(int)recipe_size
+			);
 	}
 
 	/* allocate a voucher */
@@ -1446,6 +1468,23 @@ ipc_create_mach_voucher_internal(
 		if (is_user_recipe) {
 			sub_recipe_user =
 			    (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
+
+			/*
+			 * We'd like to restrict certain voucher operations from being used by ESv3 userspace.
+			 * As a first step towards this, emit telemetry when ESv3 userspace requests
+			 * an 'unexpected' voucher operation.
+			 */
+			if (ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V3) &&
+			    !ipc_pol_is_user_voucher_command_permitted(sub_recipe_user->command)) {
+				ipc_triage_policy_violation_and_expect_continue(
+					IPC_SEC_POLICY_RESTRICT_VOUCHER_OPERATIONS,
+					space,
+					0,
+					0,
+					0,
+					(int)sub_recipe_user->command
+					);
+			}
 
 			if (recipe_size - recipe_used - recipe_struct_size <
 			    sub_recipe_user->content_size) {

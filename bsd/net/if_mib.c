@@ -64,6 +64,7 @@
 
 #include <net/if.h>
 #include <net/if_mib.h>
+#include <net/if_mib_private.h>
 #include <net/if_var.h>
 #include <net/net_sysctl.h>
 
@@ -222,6 +223,25 @@ make_ifmibdata(struct ifnet *ifp, int *__counted_by(2) name, struct sysctl_req *
 		    req->oldlen));
 
 		kfree_type(struct if_linkheuristics, ifmd_lh);
+		break;
+	}
+
+	case IFDATA_LPWSTATS: {
+		struct if_lpw_stats *ifmd_lpw;
+
+		ifmd_lpw = kalloc_type(struct if_lpw_stats,
+		    Z_WAITOK_ZERO_NOFAIL);
+
+		if_copy_lpw_stats(ifp, ifmd_lpw);
+
+		if (req->oldptr == USER_ADDR_NULL) {
+			req->oldlen = sizeof(struct if_lpw_stats);
+		}
+
+		error = SYSCTL_OUT(req, ifmd_lpw, MIN(sizeof(struct if_lpw_stats),
+		    req->oldlen));
+
+		kfree_type(struct if_lpw_stats, ifmd_lpw);
 		break;
 	}
 	}

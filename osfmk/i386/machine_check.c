@@ -195,8 +195,8 @@ mca_cpu_alloc(cpu_data_t        *cdp)
 	 * If the boot processor is yet have its allocation made,
 	 * do this now.
 	 */
-	if (cpu_datap(master_cpu)->cpu_mca_state == NULL) {
-		mca_cpu_alloc(cpu_datap(master_cpu));
+	if (cpu_datap(boot_cpu_id)->cpu_mca_state == NULL) {
+		mca_cpu_alloc(cpu_datap(boot_cpu_id));
 	}
 }
 

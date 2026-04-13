@@ -10,7 +10,7 @@ DATAFILES = \
 	keysock.h
 
 PRIVATE_DATAFILES = \
-	key_debug.h keydb.h key_var.h
+	key_debug.h keydb.h key_var.h keysock_private.h
 
 PRIVATE_KERNELFILES = \
 	 key.h

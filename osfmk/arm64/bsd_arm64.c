@@ -58,7 +58,6 @@
 #endif
 
 extern void throttle_lowpri_io(int);
-extern arm_debug_state64_t *find_or_allocate_debug_state64(thread_t thread);
 void mach_syscall(struct arm_saved_state*);
 typedef kern_return_t (*mach_call_t)(void *);
 
@@ -131,14 +130,25 @@ arm_get_mach_syscall_args(struct arm_saved_state *state, struct mach_call_args *
  *
  *  @returns KERN_SUCCESS if the status is successfully set or KERN_FAILURE if
  *           it fails for any reason.
+ *
+ *  @discussion Called with nothing locked.
  */
 kern_return_t
 thread_setsinglestep(thread_t thread, int on)
 {
-	arm_debug_state64_t *thread_state = find_or_allocate_debug_state64(thread);
+	arm_debug_state_t *new_state;
+	arm_debug_state64_t *thread_state;
 
+	/* Pessimistically allocate before taking the lock (won't fail). */
+	new_state = allocate_debug_state64();
+
+	thread_mtx_lock(thread);
+
+	thread_state = find_debug_state64(thread);
 	if (thread_state == NULL) {
-		return KERN_FAILURE;
+		thread->machine.DebugData = new_state;
+		thread_state = find_debug_state64(thread);
+		new_state = NULL; /* Don't free */
 	}
 
 	if (on) {
@@ -150,6 +160,13 @@ thread_setsinglestep(thread_t thread, int on)
 	if (thread == current_thread()) {
 		arm_debug_set64(thread->machine.DebugData);
 	}
+
+	thread_mtx_unlock(thread);
+
+	if (new_state != NULL) {
+		free_debug_state(new_state);
+	}
+
 	return KERN_SUCCESS;
 }
 

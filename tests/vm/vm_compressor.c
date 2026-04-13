@@ -42,10 +42,10 @@ T_DECL(host_statistics_q_lens, "Check that the compressor queue lens sysctl work
 	T_EXPECT_EQ(vm_qlen_count, (uint32_t)VM_COMPRESSOR_Q_LENS_COUNT, "check output is the expected length");
 }
 
-size_t read_big_sysctl(const int *mib, size_t mib_len, const char* name, char **buf);
+size_t read_big_sysctl(int *mib, size_t mib_len, const char* name, char **buf);
 
 size_t
-read_big_sysctl(const int *mib, size_t mib_len, const char* name, char **buf)
+read_big_sysctl(int *mib, size_t mib_len, const char* name, char **buf)
 {
 	size_t len = 0;
 	int rc = sysctl(mib, mib_len, NULL, &len, NULL, 0);
@@ -100,18 +100,23 @@ T_DECL(sysctl_vm_object_dump, "Check that the sysctl that dumps the metadata of 
 	mib[mib_len++] = getpid();
 
 	char *buf = NULL;
-	size_t sz = read_big_sysctl(mib, mib_len, "vm.compressor_segments.<pid>", &buf);
+	size_t sz = read_big_sysctl(mib, mib_len, "vm.task_vm_objects_slotmap.<pid>", &buf);
 
 	size_t offset = 0;
-	T_ASSERT_GE_ULONG(sz, sizeof(uint32_t), "got buffer shorter than the magic value");
+	T_ASSERT_GE_ULONG(sz, sizeof(uint32_t), "magic value check, buffer size=%zu", sz);
 	uint32_t hdr_magic = *((uint32_t*)buf);
-	T_ASSERT_EQ_UINT(hdr_magic, VM_MAP_ENTRY_INFO_MAGIC, "match magic value");
+	T_ASSERT_EQ_UINT(hdr_magic, VM_MAP_ENTRY_INFO_MAGIC, "match magic value %x, sizeof(struct vm_map_entry_info)=%lu",
+	    VM_MAP_ENTRY_INFO_MAGIC, sizeof(struct vm_map_entry_info));
 	offset += sizeof(uint32_t);
 
-	T_ASSERT_LE(offset + sizeof(struct vm_map_info_hdr), sz, "vm_map_info_hdr size");
-	struct vm_map_info_hdr* hdr = (struct vm_map_info_hdr*)(buf + offset);
-	for (int i = 0; i < hdr->vmi_nentries; ++i) {
-		T_QUIET; T_ASSERT_LE(offset + sizeof(struct vm_map_entry_info), sz, "vm_map_entry_info size");
+	int count = 0;
+	while (offset < sz) {
+		T_QUIET; T_ASSERT_LE(offset + sizeof(struct vm_map_entry_info), sz, "vm_map_entry_info size %zu", offset);
+		struct vm_map_entry_info *inf = (struct vm_map_entry_info *)(buf + offset);
+		T_LOG("entry %d  offset=%zu  start=%llx  end=%llx", count, offset, inf->vmei_start, inf->vmei_end);
+
 		offset += sizeof(struct vm_map_entry_info);
+		++count;
 	}
+	T_LOG("iterated %d entries", count);
 }

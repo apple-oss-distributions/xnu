@@ -135,7 +135,7 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_allocate)) (
  *	address space of the target virtual memory map.
  */
 #if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
-routine PREFIX(mach_vm_deallocate) (
+routine PREFIX(KERNEL_SERVER_SUFFIX(mach_vm_deallocate)) (
 		target		: vm_task_entry_t;
 		address		: mach_vm_address_t;
 		size		: mach_vm_size_t);
@@ -552,14 +552,15 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
 routine mach_vm_deferred_reclamation_buffer_allocate(
 		target_task	: task_t;
 	out	address	   	: mach_vm_address_t;
-	out	sampling_period : uint64_t;
+	out	next_deadline 	: uint64_t;
 		len		: uint32_t;
 		max_len		: uint32_t);
 
 routine mach_vm_deferred_reclamation_buffer_flush(
 		target_task		: task_t;
 		num_entries_to_reclaim	: uint32_t;
-	out	bytes_reclaimed		: mach_vm_size_t);
+	out	bytes_reclaimed		: uint64_t;
+	out	next_deadline 		: uint64_t);
 
 skip; /* was: mach_vm_deferred_reclamation_buffer_update_reclaimable_bytes() */
 #else
@@ -581,7 +582,8 @@ skip;
 routine mach_vm_deferred_reclamation_buffer_resize(
 		target_task		: task_t;
 		new_len			: uint32_t;
-	out	bytes_reclaimed		: mach_vm_size_t);
+	out	bytes_reclaimed		: uint64_t;
+	out	next_deadline 		: uint64_t);
 #else
 skip;
 #endif
@@ -604,5 +606,22 @@ routine mach_vm_deferred_reclamation_buffer_query(
 skip;
 #endif
 
+/*
+ * Relocate the pages of the source range of the specified map to a new range
+ * of the given size in bytes within the same map.
+ */
+#if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
+routine PREFIX(mach_vm_reallocate) (
+#else /* !defined(_MACH_VM_PUBLISH_AS_LOCAL_) */
+routine PREFIX(vm_reallocate) (
+#endif /* !defined(_MACH_VM_PUBLISH_AS_LOCAL_) */
+			target_task		: vm_map_t;
+			src				: mach_vm_address_t;
+			src_size		: mach_vm_size_t;
+    inout	dst				: mach_vm_address_t;
+  			dst_size 		: mach_vm_size_t;
+			align_mask		: mach_vm_offset_t;
+			options		    : int;
+			flags			: int);
 
 /* vim: set ft=c : */

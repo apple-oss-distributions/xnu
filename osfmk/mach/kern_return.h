@@ -339,6 +339,10 @@
 /* A search or query operation did not return a result
  */
 
+#define KERN_INVALID_GUARD_OBJECT_SLOT  57
+/* Access to an guarded object slot attempted
+ */
+
 #define KERN_RETURN_MAX                 0x100
 /* Maximum return value allowable
  */

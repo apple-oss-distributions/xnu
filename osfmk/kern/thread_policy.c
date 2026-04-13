@@ -1907,33 +1907,6 @@ thread_policy_update_internal_spinlocked(thread_t thread, bool recompute_priorit
 	}
 }
 
-
-/*
- * Initiate a thread policy state transition on a thread with its TID
- * Useful if you cannot guarantee the thread won't get terminated
- * Precondition: No locks are held
- * Will take task lock - using the non-tid variant is faster
- * if you already have a thread ref.
- */
-void
-proc_set_thread_policy_with_tid(task_t     task,
-    uint64_t   tid,
-    int        category,
-    int        flavor,
-    int        value)
-{
-	/* takes task lock, returns ref'ed thread or NULL */
-	thread_t thread = task_findtid(task, tid);
-
-	if (thread == THREAD_NULL) {
-		return;
-	}
-
-	proc_set_thread_policy(thread, category, flavor, value);
-
-	thread_deallocate(thread);
-}
-
 /*
  * Initiate a thread policy transition on a thread
  * This path supports networking transitions (i.e. darwinbg transitions)

@@ -142,6 +142,9 @@ utimensat(int fd, const char *path, const struct timespec _times_in[2], int flag
 	if (flags & AT_RESOLVE_BENEATH) {
 		flags_out |= FSOPT_RESOLVE_BENEATH;
 	}
+	if (flags & AT_UNIQUE) {
+		flags_out |= FSOPT_UNIQUE;
+	}
 
 	return setattrlistat(fd, path, &a, &times_out, attrbuf_size, flags_out);
 }

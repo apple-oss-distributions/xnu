@@ -59,9 +59,10 @@ Values for
 .Fa request
 are entirely filesystem-specific except for the following, defined in
 .Ao Pa sys/fsctl.h Ac :
-.Bd -literal  -offset indent
-FSGETMOUNTINFOSIZE	/* Return size of mount info data */
-.Ed
+.Bl -tag -width FSGETMOUNTINFOSIZE
+.It FSGETMOUNTINFOSIZE
+Return size of mount info data.
+.El
 .Pp
 Macros and defines used in specifying an fsctl
 .Fa request
@@ -74,14 +75,34 @@ may specify special flags for the processing of the
 .Fn fsctl
 call.  The options are specified by
 .Em or Ns 'ing
-the option values.  The only option currently defined is
-.Bd -literal -offset indent
-#define FSOPT_NOFOLLOW	0x00000001	/* Don't follow symlinks */
-.Ed
-.Pp
-which is interpreted by the
+the option values.  The following option bits are defined:
+.
+.Bl -tag -width FSOPT_NOFOLLOW_ANY
+.
+.It FSOPT_NOFOLLOW
+If this bit is set,
 .Fn fsctl
-call to prevent following of symlinks.  The
+will not follow a symlink if it occurs as
+the last component of
+.Fa path .
+.
+.It FSOPT_NOFOLLOW_ANY
+If this bit is set,
+.Fn fsctl
+will not follow a symlink if it occurs as
+the last component of
+.Fa path .
+In addition an error is returned if a symlink
+is encountered before the last component of
+.Fa path .
+.
+.It FSOPT_UNIQUE
+If this bit is set, the path lookup will fail if the target file has multiple
+hard links.
+.
+.El
+.Pp
+The
 .Fa options
 argument is passed to the filesystem, which may define and handle
 additional
@@ -124,6 +145,10 @@ error occurred while reading from or writing to the file system.
 or
 .Fa data
 is not valid.
+.It Bq Er ENOTCAPABLE
+if FSOPT_UNIQUE was passed and
+.Fa path
+has multiple hard links.
 .El
 .Sh SEE ALSO
 .Xr getattrlist 2 ,

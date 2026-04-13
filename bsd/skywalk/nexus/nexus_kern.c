@@ -1931,6 +1931,14 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 		}
 	}
 
+	if (req & NXPREQ_USER_PACKET_POOL) {
+		if (nxp0->nxp_capabilities & NXPCAP_USER_PACKET_POOL) {
+			capabs |= NXPCAP_USER_PACKET_POOL;
+		} else {
+			capabs &= ~NXPCAP_USER_PACKET_POOL;
+		}
+	}
+
 	if (NXDOM_MIN(nxdom_min, capabilities) != 0 &&
 	    !(capabs & NXDOM_MIN(nxdom_min, capabilities))) {
 		SK_ERR("%s: caps 0x%x < min 0x%x", nxdom_prov->nxdom_prov_name,
@@ -2157,7 +2165,7 @@ nxprov_params_adjust(struct kern_nexus_domain_provider *nxdom_prov,
 
 	/* flow advisory region size */
 	if (flowadv_max != 0) {
-		static_assert(NX_FLOWADV_DEFAULT * sizeof(struct __flowadv_entry) <= SKMEM_MIN_SEG_SIZE);
+		srp[SKMEM_REGION_FLOWADV].srp_r_seg_size = NX_FLOWADV_DEFAULT * sizeof(struct __flowadv_entry);
 		MUL(sizeof(struct __flowadv_entry), flowadv_max, &tmp1);
 		srp[SKMEM_REGION_FLOWADV].srp_r_obj_size = tmp1;
 		srp[SKMEM_REGION_FLOWADV].srp_r_obj_cnt = 1;

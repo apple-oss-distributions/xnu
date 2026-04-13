@@ -274,10 +274,10 @@ MARK_AS_FIXUP_TEXT void
 __static_if_key_delta(static_if_key_t key, int delta)
 {
 	/*
-	 * On SPTM configuration, static_if_init() is called by
-	 * arm_static_if_init() during the XNU fixup phase,
-	 * before the XNU kernel text is retyped to SPTM_XNU_CODE
-	 * and can't be modified anymore.
+	 * On arm64 targets, static_if_init() is called by arm_static_if_init()
+	 * during the XNU fixup phase. For SPTM targets this happens before the
+	 * XNU kernel text is retyped to SPTM_XNU_CODE and can't be modified
+	 * anymore.
 	 *
 	 * For other platforms, this is called from kernel_startup_bootstrap()
 	 */

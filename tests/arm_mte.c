@@ -162,7 +162,7 @@ do_mte_tag_check(void)
 
 T_DECL(mte_tag_check,
     "Test MTE2 tag check fault handling",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -174,7 +174,7 @@ T_DECL(mte_tag_check,
 
 T_DECL(mte_tag_check_child,
     "Test MTE2 tag check fault in a child process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -197,7 +197,7 @@ T_DECL(mte_tag_check_child,
 
 T_DECL(mte_canonical_tag_check,
     "Test MTE4 Canonical Tag Check fault handling",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -316,7 +316,7 @@ run_mte_copyio_tests(bool tag_check_faults_enabled)
 T_DECL(mte_copyio,
     "Test MTE tag handling during copyin/copyout operations",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	run_mte_copyio_tests(true);
@@ -324,7 +324,7 @@ T_DECL(mte_copyio,
 
 T_DECL(mte_malloc_footprint_test,
     "Test footprint across malloc() and free()",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(false) /* rdar://131390446 */)
 {
@@ -360,7 +360,7 @@ T_DECL(mte_malloc_footprint_test,
 
 T_DECL(mte_tagged_memory_direct_io,
     "Test direct I/O on tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -391,7 +391,7 @@ T_DECL(mte_tagged_memory_direct_io,
 
 T_DECL(mte_tagged_memory_copy_io,
     "Test direct I/O on tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -565,7 +565,7 @@ do_fork_test(vm_size_t vm_alloc_sz, int flags)
 
 T_DECL(mte_tag_check_fork_after_alloc_less_page_sz,
     "Test MTE2 tag check fault in a child process after vm_allocate(ALLOC_SIZE, MTE)",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	static const size_t ALLOC_SIZE = MTE_GRANULE_SIZE * 2;
@@ -574,7 +574,7 @@ T_DECL(mte_tag_check_fork_after_alloc_less_page_sz,
 
 T_DECL(mte_tag_check_fork_after_alloc_page_sz,
     "Test MTE2 tag check fault in a child process after vm_allocate(PAGE_SIZE, MTE)",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, 0);
@@ -583,7 +583,7 @@ T_DECL(mte_tag_check_fork_after_alloc_page_sz,
 /* NOTE: These following tests matter for when we switch to MEMORY_OBJECT_COPY_DELAY_FORK */
 T_DECL(mte_tag_check_fork_child_fault_write,
     "Test MTE2 tag check fault in a child process after vm_allocate(MTE) and child writes to tagged memory first",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, FORK_TEST_CHILD_WRITES_FIRST);
@@ -591,7 +591,7 @@ T_DECL(mte_tag_check_fork_child_fault_write,
 
 T_DECL(mte_tag_check_fork_child_double_fork,
     "Test MTE2 tag check fault in a child process after vm_allocate(MTE) and child writes to tagged memory first and then forks again",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, FORK_TEST_CHILD_WRITES_FIRST | FORK_TEST_CHILD_FORKS);
@@ -603,7 +603,7 @@ T_DECL(mte_tag_check_fork_child_double_fork,
  */
 T_DECL(mte_tag_check_fork_child_retag,
     "Test MTE2 tag check fault in a child process after vm_allocate(MTE) and child changes tags",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, FORK_TEST_CHILD_RETAGS);
@@ -611,7 +611,7 @@ T_DECL(mte_tag_check_fork_child_retag,
 
 T_DECL(mte_tag_check_fork_child_fault_write_retag,
     "Test MTE2 tag check fault in a child process after vm_allocate(MTE) and child changes tags and writes to tagged memory first",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, FORK_TEST_CHILD_WRITES_FIRST | FORK_TEST_CHILD_RETAGS);
@@ -619,7 +619,7 @@ T_DECL(mte_tag_check_fork_child_fault_write_retag,
 
 T_DECL(mte_tag_check_fork_child_fault_write_retag_double_fork,
     "Test MTE2 tag check fault in a child process after vm_allocate(MTE) and child changes tags, writes to tagged memory first, and then forks again",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	do_fork_test(PAGE_SIZE, FORK_TEST_CHILD_WRITES_FIRST | FORK_TEST_CHILD_RETAGS | FORK_TEST_CHILD_FORKS);
@@ -628,7 +628,7 @@ T_DECL(mte_tag_check_fork_child_fault_write_retag_double_fork,
 
 T_DECL(mte_userland_uses_fake_kernel_pointer,
     "Test that VM correctly rejects kernel-looking pointer from userspace",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -770,7 +770,7 @@ mte_mach_vm_read(mach_vm_size_t sz)
 
 T_DECL(mte_mach_vm_read_16b,
     "mach_vm_read 16 bytes of tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -781,7 +781,7 @@ T_DECL(mte_mach_vm_read_16b,
 
 T_DECL(mte_mach_vm_read_32k,
     "mach_vm_read 32k bytes of tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -792,7 +792,7 @@ T_DECL(mte_mach_vm_read_32k,
 
 T_DECL(mte_mach_vm_read_over_32k,
     "mach_vm_read 32k + 1 bytes of tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -804,7 +804,7 @@ T_DECL(mte_mach_vm_read_over_32k,
 
 T_DECL(mte_vm_map_copyinout_in_kernel,
     "Test that the VM handles vm_map_copyin correctly for kernel-to-kernel tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(__arm64__))
@@ -891,7 +891,7 @@ do_remap_test(bool own_memory)
 
 T_DECL(mte_vm_map_remap_self,
     "mach_vm_remap_new() on a tagged memory of the same process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -900,7 +900,7 @@ T_DECL(mte_vm_map_remap_self,
 
 T_DECL(mte_vm_map_remap_other,
     "mach_vm_remap_new() on a tagged memory of a different process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
 {
@@ -911,7 +911,7 @@ T_DECL(mte_vm_map_remap_other,
 
 T_DECL(vm_allocate_zero_tags,
     "Ensure tags are zeroed when tagged memory is allocated from userspace",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -972,7 +972,7 @@ T_DECL(vm_allocate_zero_tags,
  */
 T_DECL(mte_copy_range_checks,
     "Test that VM range checks operate on canonicalized pointers",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -1036,7 +1036,7 @@ T_DECL(mte_copy_range_checks,
  */
 T_DECL(mte_copy_range_math,
     "Test that pointer values are not canonicalized after range math",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 #if !__arm64__
@@ -1092,7 +1092,7 @@ T_DECL(mte_copy_range_math,
  */
 T_DECL(mte_vm_reject_tagged_pointers,
     "Test that most VM APIs reject tagged pointers",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true) /* to be able to get host_priv port for mach_vm_wire */)
 {
@@ -1342,7 +1342,7 @@ T_DECL(mte_vm_reject_tagged_pointers,
 
 T_DECL(mte_tagged_page_relocation,
     "Test that VM copies tags on page relocation for tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(__arm64__))
@@ -1500,7 +1500,7 @@ run_helper_with_sec_bypass(char *helper_name)
 T_DECL(mte_tag_bypass,
     "Test MTE2 tag check bypass works with posix_spawnattr",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	run_helper_with_sec_bypass("mte_tag_violate");
@@ -1509,7 +1509,7 @@ T_DECL(mte_tag_bypass,
 T_DECL(mte_copyio_bypass,
     "Test MTE2 tag check bypass with copyio operations",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	run_helper_with_sec_bypass("mte_copyio_bypass_helper");
@@ -1518,7 +1518,7 @@ T_DECL(mte_copyio_bypass,
 #ifdef __arm64__
 T_DECL(mte_read_only,
     "Verify that setting tags on a read-only mapping results in SIGBUS",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	uint64_t mask;
@@ -1548,7 +1548,7 @@ T_DECL(mte_read_only,
 
 T_DECL(mte_inherit_share,
     "Verify that you can't set VM_INHERIT_SHARE on tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	const mach_vm_size_t ALLOC_SIZE = PAGE_SIZE;
@@ -1612,7 +1612,7 @@ get_object_id(mach_port_t task, vm_address_t addr)
 
 T_DECL(mte_corpse_fork,
     "Verify that corpse-fork sharing paths work normally on tagged memory",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     /* rdar://138528295 (Provide a mechanism to guarantee availability of corpse slots for tests) */
     T_META_RUN_CONCURRENTLY(false))
@@ -1745,7 +1745,7 @@ T_DECL(mte_corpse_fork,
 
 T_DECL(mte_aio,
     "Test MTE asynchronous access faults when the kernel does copyio on behalf of a process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(false) /* rdar://154801490 */) {
 	const mach_vm_size_t BUF_SIZE = MTE_GRANULE_SIZE;
@@ -1845,7 +1845,7 @@ T_HELPER_DECL(mte_tag_violate_aio, "child process to trigger an asynchronous MTE
 
 T_DECL(mte_aio_tag_bypass,
     "Test nonfatal MTE asynchronous access faults with tag check bypass",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	run_helper_with_sec_bypass("mte_tag_violate_aio");
 }
@@ -1861,7 +1861,7 @@ run_iokit_sysctl_test(int vector)
 T_DECL(mte_iomd_cpu_map,
     "Test that IOMemoryDescriptor::map() of userspace memory is mapped as untagged in the kernel",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -1871,7 +1871,7 @@ T_DECL(mte_iomd_cpu_map,
 T_DECL(mte_iomd_read_write_bytes,
     "Test that IOMemoryDescriptor::read/writeBytes() of tagged memory works",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	run_iokit_sysctl_test(334);
@@ -1880,7 +1880,7 @@ T_DECL(mte_iomd_read_write_bytes,
 T_DECL(iomd_read_write_bytes_non_mte,
     "Test that IOMemoryDescriptor::read/writeBytes() of untagged memory works",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	run_iokit_sysctl_test(335);
@@ -1889,7 +1889,7 @@ T_DECL(iomd_read_write_bytes_non_mte,
 T_DECL(iomd_read_bytes_with_tcf,
     "Test that tag mismatches during IOMemoryDescriptor::readBytes() get detected",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	/* The iokit test will generate an artificial tag check mismatch midway through the buffer */
@@ -1902,7 +1902,7 @@ T_DECL(iomd_read_bytes_with_tcf,
 T_DECL(iomd_write_bytes_with_tcf,
     "Test that tag mismatches during IOMemoryDescriptor::writeBytes() continue to work out of the box",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	/* The iokit test will generate an artificial tag check mismatch midway through the buffer */
@@ -1915,7 +1915,7 @@ T_DECL(iomd_write_bytes_with_tcf,
 T_DECL(iomd_create_alias_mapping_in_this_map,
     "Test that IOMemoryDescriptor::createMappingInTask() of tagged memory in the current task works",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	run_iokit_sysctl_test(340);
@@ -1924,7 +1924,7 @@ T_DECL(iomd_create_alias_mapping_in_this_map,
 T_DECL(iomd_create_alias_mapping_in_kernel_map,
     "Test that IOMemoryDescriptor::createMappingInTask() of tagged memory in the kernel is allowed",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC) {
 	run_iokit_sysctl_test(342);
@@ -1933,7 +1933,7 @@ T_DECL(iomd_create_alias_mapping_in_kernel_map,
 T_DECL(mte_cpu_map_pageout,
     "Test correct behavior of kernel CPU mapping after userspace mapping is paged out",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -1953,7 +1953,7 @@ T_DECL(mte_cpu_map_pageout,
 T_DECL(vm_region_recurse_mte_info,
     "Ensure metadata returned by vm_region_recurse correct reflects MTE status",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -1971,7 +1971,11 @@ T_DECL(vm_region_recurse_mte_info,
 		mach_task_self(),
 		&untagged_buffer_addr,
 		alloc_size,
-		VM_FLAGS_FIXED );
+		VM_FLAGS_FIXED);
+	if (kr == KERN_NO_SPACE) {
+		/* Skip gracefully if we fail to grab the VA space we need. */
+		T_SKIP("Cannot grab required VA space, skipping...");
+	}
 	T_ASSERT_MACH_SUCCESS(kr, "Allocated untagged page");
 	/* (And write to it to be sure we populate a VM object) */
 	memset((uint8_t*)untagged_buffer_addr, 0, alloc_size);
@@ -2036,7 +2040,7 @@ T_DECL(vm_region_recurse_mte_info,
 T_DECL(mach_vm_read_of_remote_proc,
     "Verify that mach_vm_read of a remote MTE-enabled process works",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     /* rdar://151142487: gcore won't work on iOS without unrestricting task_read_for_pid */
     T_META_BOOTARGS_SET("amfi_unrestrict_task_for_pid=1"),
@@ -2102,7 +2106,7 @@ do_local_vm_copyin_with_invalid_tag_test(vm_size_t size)
 T_DECL(local_vm_copyin_with_invalid_tag,
     "Verify that copyin of local memory with an invalid tag is denied",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -2121,7 +2125,7 @@ T_DECL(local_vm_copyin_with_invalid_tag,
 T_DECL(local_vm_copyin_with_large_non_mte_object_with_adjacent_mte_object,
     "Ensure a large copyin with a non-MTE object and adjacent MTE object fails",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -2173,14 +2177,14 @@ T_DECL(local_vm_copyin_with_large_non_mte_object_with_adjacent_mte_object,
 T_DECL(local_vm_copyin_with_large_mte_object_with_invalid_size,
     "Ensure a large copyin with a non-MTE object but an invalid size fails",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
 	/* Given an MTE-enabled object (which is large enough that it exceeds `msg_ool_size_small`) */
 	vm_address_t mte_object_address = 0;
 	vm_size_t mte_object_size = PAGE_SIZE * 3;
-	kern_return_t kr = vm_allocate(mach_task_self(), &mte_object_address, mte_object_size, VM_FLAGS_ANYWHERE | VM_FLAGS_MTE);
+	kern_return_t kr = vm_allocate(mach_task_self(), &mte_object_address, mte_object_size, VM_FLAGS_ANYWHERE | VM_FLAGS_MTE | VM_FLAGS_RANDOM_ADDR);
 	T_ASSERT_MACH_SUCCESS(kr, "vm_allocate(MTE)");
 	/* And ensure it's present */
 	memset((void *)mte_object_address, 0, mte_object_size);
@@ -2206,7 +2210,7 @@ T_DECL(local_vm_copyin_with_large_mte_object_with_invalid_size,
 T_DECL(local_vm_copyin_with_large_mte_object_with_hole_in_region,
     "Ensure a large copyin with an MTE object, but with a hole in the middle, is rejected",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -2248,14 +2252,14 @@ T_DECL(local_vm_copyin_with_large_mte_object_with_hole_in_region,
 T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_large_mte_object_same_tags,
     "Ensure a large copyin with two MTE objects with the same tag succeeds",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
 	/* Given an MTE-enabled object */
 	vm_address_t mte_object1_address = 0;
 	vm_size_t mte_object1_size = PAGE_SIZE;
-	kern_return_t kr = vm_allocate(mach_task_self(), &mte_object1_address, mte_object1_size, VM_FLAGS_ANYWHERE | VM_FLAGS_MTE);
+	kern_return_t kr = vm_allocate(mach_task_self(), &mte_object1_address, mte_object1_size, VM_FLAGS_ANYWHERE | VM_FLAGS_MTE | VM_FLAGS_RANDOM_ADDR);
 	T_ASSERT_MACH_SUCCESS(kr, "vm_allocate(MTE)");
 	/* And ensure it's present */
 	memset((void *)mte_object1_address, 0, mte_object1_size);
@@ -2294,7 +2298,7 @@ T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_large_mte_object_same
 T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_large_mte_object_different_tags,
     "Ensure a large copyin with two MTE objects with a different tag in the second object fails",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -2352,7 +2356,7 @@ T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_large_mte_object_diff
 T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_non_mte_object,
     "Ensure a large copyin with an MTE object and adjacent non-MTE object fails",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {
@@ -2404,7 +2408,7 @@ T_DECL(local_vm_copyin_with_large_mte_object_with_adjacent_non_mte_object,
 T_DECL(make_memory_entry_handles_kernel_buffers,
     "Ensure mach_make_memory_entry does not panic when handed an MTE copy",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true))
 {

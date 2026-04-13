@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -28,6 +28,7 @@
 
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
+#include <machine/machine_cpc.h>
 #include <kern/processor.h>
 #include <kern/kalloc.h>
 #include <sys/errno.h>
@@ -45,226 +46,161 @@
 
 #if CONFIG_CPU_COUNTERS
 
-uint32_t kpc_actionid[KPC_MAX_COUNTERS];
-
 #define COUNTERBUF_SIZE_PER_CPU (KPC_MAX_COUNTERS * sizeof(uint64_t))
 #define COUNTERBUF_SIZE (machine_info.logical_cpu_max * \
 	                 COUNTERBUF_SIZE_PER_CPU)
 
-/* locks */
+/* The maximum number of RAWPMU configuration values. */
+#define RAWPMU_CONFIG_COUNT (17)
+
+/*
+ * The configuration lock is held whenever KPC's configuration is being updated
+ * by user space.
+ */
 static LCK_GRP_DECLARE(kpc_config_lckgrp, "kpc");
 static LCK_MTX_DECLARE(kpc_config_lock, &kpc_config_lckgrp);
 
-/* state specifying if all counters have been requested by kperf */
-static boolean_t force_all_ctrs = FALSE;
-
-/* power manager */
-static kpc_pm_handler_t kpc_pm_handler;
-static boolean_t kpc_pm_has_custom_config;
-static uint64_t kpc_pm_pmc_mask;
-
-boolean_t kpc_context_switch_active = FALSE;
-bool kpc_supported = true;
-
-static uint64_t *
-kpc_percpu_alloc(void)
-{
-	return kalloc_data_tag(COUNTERBUF_SIZE_PER_CPU, Z_WAITOK | Z_ZERO,
-	           VM_KERN_MEMORY_DIAG);
-}
-
-static void
-kpc_percpu_free(uint64_t *buf)
-{
-	kfree_data(buf, COUNTERBUF_SIZE_PER_CPU);
-}
-
-void
-kpc_register_cpu(struct cpu_data *cpu_data)
-{
-	assert(cpu_data);
-	assert(cpu_data->cpu_kpc_buf[0] == NULL);
-	assert(cpu_data->cpu_kpc_buf[1] == NULL);
-	assert(cpu_data->cpu_kpc_shadow == NULL);
-	assert(cpu_data->cpu_kpc_reload == NULL);
+struct kpc_globals {
+	/*
+	 * Requested KPC state for user space getters.
+	 */
+	kpc_config_t configs[KPC_MAX_COUNTERS + RAWPMU_CONFIG_COUNT];
+	uint32_t actionids[KPC_MAX_COUNTERS];
+	uint64_t periods[KPC_MAX_COUNTERS];
 
 	/*
-	 * Buffers allocated through kpc_counterbuf_alloc() are large enough to
-	 * store all PMCs values from all CPUs. This mimics the userspace API.
-	 * This does not suit well with the per-CPU kpc buffers, since:
-	 *      1. Buffers don't need to be this large.
-	 *      2. The actual number of CPUs is not known at this point.
-	 *
-	 * CPUs are asked to callout into kpc when being registered, we'll
-	 * allocate the memory here.
+	 * The actively running classes and PMCs.
+	 */
+	uint32_t running_class_mask;
+	uint64_t running_pmc_mask;
+
+	/*
+	 * Power management sharing.
+	 */
+	bool pwr_mgmt_custom_config;
+	uint64_t pwr_mgmt_pmc_mask;
+
+	/*
+	 * CPC management structures and state.
 	 */
 
-	if ((cpu_data->cpu_kpc_buf[0] = kpc_percpu_alloc()) == NULL) {
-		goto error;
-	}
-	if ((cpu_data->cpu_kpc_buf[1] = kpc_percpu_alloc()) == NULL) {
-		goto error;
-	}
-	if ((cpu_data->cpu_kpc_shadow = kpc_percpu_alloc()) == NULL) {
-		goto error;
-	}
-	if ((cpu_data->cpu_kpc_reload = kpc_percpu_alloc()) == NULL) {
-		goto error;
-	}
+	/*
+	 * Events requested by KPC, for use with `set`.
+	 */
+	struct cpc_event_select event_selects[KPC_MAX_COUNTERS + RAWPMU_CONFIG_COUNT];
+	unsigned int event_count;
+	/*
+	 * Cyclics requested by KPC, for use with `set`.
+	 */
+	struct cpc_cyclic_info cyclics[KPC_MAX_COUNTERS];
+	unsigned int cyclic_count;
 
-	/* success */
-	return;
+	/*
+	 * The CPC counter set in use when KPC starts running.
+	 */
+	cpc_set_t set;
+	/*
+	 * The current set is out of date and will be re-created when counters
+	 * start running.
+	 */
+	bool set_out_of_date;
+	/*
+	 * The set has been applied to the system and must be torn down by KPC.
+	 */
+	bool set_applied;
+};
 
-error:
-	panic("kpc_percpu_alloc failed");
-}
+/*
+ * Access protected by `kpc_config_lock`.
+ */
+static struct kpc_globals g_kpc = { 0 };
 
-void
-kpc_unregister_cpu(struct cpu_data *cpu_data)
-{
-	assert(cpu_data);
-	if (cpu_data->cpu_kpc_buf[0] != NULL) {
-		kpc_percpu_free(cpu_data->cpu_kpc_buf[0]);
-		cpu_data->cpu_kpc_buf[0] = NULL;
-	}
-	if (cpu_data->cpu_kpc_buf[1] != NULL) {
-		kpc_percpu_free(cpu_data->cpu_kpc_buf[1]);
-		cpu_data->cpu_kpc_buf[1] = NULL;
-	}
-	if (cpu_data->cpu_kpc_shadow != NULL) {
-		kpc_percpu_free(cpu_data->cpu_kpc_shadow);
-		cpu_data->cpu_kpc_shadow = NULL;
-	}
-	if (cpu_data->cpu_kpc_reload != NULL) {
-		kpc_percpu_free(cpu_data->cpu_kpc_reload);
-		cpu_data->cpu_kpc_reload = NULL;
-	}
-}
-
+/*
+ * Update the kpc state with inputs to the `cpc_set_t`, marking it out of date.
+ */
 static void
-kpc_task_set_forced_all_ctrs(task_t task, boolean_t state)
+_update_kpc_set_inputs(void (^update_blk)(void))
 {
-	assert(task);
-
-	task_lock(task);
-	if (state) {
-		task->t_kpc |= TASK_KPC_FORCED_ALL_CTRS;
-	} else {
-		task->t_kpc &= ~TASK_KPC_FORCED_ALL_CTRS;
-	}
-	task_unlock(task);
-}
-
-bool kpc_task_get_forced_all_ctrs(task_t task);
-
-bool
-kpc_task_get_forced_all_ctrs(task_t task)
-{
-	return task->t_kpc & TASK_KPC_FORCED_ALL_CTRS;
+	lck_mtx_lock(&kpc_config_lock);
+	update_blk();
+	g_kpc.set_out_of_date = true;
+	lck_mtx_unlock(&kpc_config_lock);
 }
 
 int
 kpc_force_all_ctrs(task_t task, int val)
 {
-	boolean_t new_state = val ? TRUE : FALSE;
-	boolean_t old_state = kpc_get_force_all_ctrs();
-
-	/*
-	 * Refuse to do the operation if the counters are already forced by
-	 * another task.
-	 */
-	if (kpc_get_force_all_ctrs() && !kpc_task_get_forced_all_ctrs(task)) {
-		return EACCES;
-	}
-
-	/* nothing to do if the state is not changing */
-	if (old_state == new_state) {
-		return 0;
-	}
-
-#if CONFIG_CPU_COUNTERS
-	mt_ownership_change(new_state);
-#endif /* CONFIG_CPU_COUNTERS */
-
-	/* notify the power manager */
-	if (kpc_pm_handler) {
-		kpc_pm_handler(new_state ? FALSE : TRUE);
-	}
-
-	/*
-	 * This is a force -- ensure that counters are forced, even if power
-	 * management fails to acknowledge it.
-	 */
-	if (force_all_ctrs != new_state) {
-		force_all_ctrs = new_state;
-	}
-
-	/* update the task bits */
-	kpc_task_set_forced_all_ctrs(task, new_state);
-
-	return 0;
+	return cpc_task_set_owner(&task->t_cpc, val != 0);
 }
 
 void
 kpc_pm_acknowledge(boolean_t available_to_pm)
 {
-	/*
-	 * Force-all-counters should still be true when the counters are being
-	 * made available to power management and false when counters are going
-	 * to be taken away.
-	 */
-	assert(force_all_ctrs == available_to_pm);
-	/*
-	 * Make sure power management isn't playing games with us.
-	 */
-
-	/*
-	 * Counters being available means no one is forcing all counters.
-	 */
-	force_all_ctrs = available_to_pm ? FALSE : TRUE;
+	cpc_sharing_set_exclusive_locked(!available_to_pm);
 }
 
 int
 kpc_get_force_all_ctrs(void)
 {
-	return force_all_ctrs;
+	return cpc_sharing_is_exclusive();
 }
 
 boolean_t
+kpc_register_pm_handler(kpc_pm_handler_t handler)
+{
+	return kpc_reserve_pm_counters(0x38, handler, TRUE);
+}
+
+boolean_t
+kpc_reserve_pm_counters(
+	uint64_t pmc_mask,
+	kpc_pm_handler_t handler,
+	boolean_t custom_config)
+{
+	uint64_t const all_mask = (1ULL << kpc_configurable_count()) - 1;
+	uint64_t const req_mask = pmc_mask & all_mask;
+
+	assert(handler != NULL);
+
+	/*
+	 * Power management provides thread-safety for writing these values.
+	 */
+	g_kpc.pwr_mgmt_custom_config = custom_config;
+	g_kpc.pwr_mgmt_pmc_mask = req_mask;
+	cpc_sharing_start(handler);
+
+	printf("kpc: pm registered pmc_mask=0x%llx custom_config=%d\n",
+	    req_mask, custom_config);
+
+	/*
+	 * The requested power management mask should match the mask expected
+	 * by KPC.
+	 */
+	uint32_t __assert_only cfg_count = kpc_get_counter_count(KPC_CLASS_CONFIGURABLE_MASK);
+	uint32_t __assert_only pwr_count = kpc_popcount(req_mask);
+	assert3u((cfg_count + pwr_count), ==, kpc_configurable_count());
+
+	return !cpc_sharing_is_exclusive();
+}
+
+void
+kpc_release_pm_counters(void)
+{
+	g_kpc.pwr_mgmt_custom_config = false;
+	g_kpc.pwr_mgmt_pmc_mask = 0;
+	cpc_sharing_stop();
+}
+
+static bool
 kpc_multiple_clients(void)
 {
-	return kpc_pm_handler != NULL;
+	return cpc_sharing_available();
 }
 
 boolean_t
 kpc_controls_fixed_counters(void)
 {
-	return !kpc_pm_handler || force_all_ctrs || !kpc_pm_has_custom_config;
-}
-
-boolean_t
-kpc_controls_counter(uint32_t ctr)
-{
-	uint64_t pmc_mask = 0ULL;
-
-	assert(ctr < (kpc_fixed_count() + kpc_configurable_count()));
-
-	if (ctr < kpc_fixed_count()) {
-		return kpc_controls_fixed_counters();
-	}
-
-	/*
-	 * By default kpc manages all PMCs, but if the Power Manager registered
-	 * with custom_config=TRUE, the Power Manager manages its reserved PMCs.
-	 * However, kpc takes ownership back if a task acquired all PMCs via
-	 * force_all_ctrs.
-	 */
-	pmc_mask = (1ULL << (ctr - kpc_fixed_count()));
-	if ((pmc_mask & kpc_pm_pmc_mask) && kpc_pm_has_custom_config && !force_all_ctrs) {
-		return FALSE;
-	}
-
-	return TRUE;
+	return !cpc_sharing_available() || kpc_get_force_all_ctrs() || !g_kpc.pwr_mgmt_custom_config;
 }
 
 uint32_t
@@ -301,7 +237,6 @@ kpc_get_curcpu_counters(uint32_t classes, int *curcpu, uint64_t *buf)
 
 	enabled = ml_set_interrupts_enabled(FALSE);
 
-	/* grab counters and CPU number as close as possible */
 	if (curcpu) {
 		*curcpu = cpu_number();
 	}
@@ -347,62 +282,6 @@ kpc_get_cpu_counters(boolean_t all_cpus, uint32_t classes,
 	}
 }
 
-int
-kpc_get_shadow_counters(boolean_t all_cpus, uint32_t classes,
-    int *curcpu, uint64_t *buf)
-{
-	int curcpu_id = cpu_number();
-	uint32_t cfg_count = kpc_configurable_count(), offset = 0;
-	uint64_t pmc_mask = 0ULL;
-	boolean_t enabled;
-
-	assert(buf);
-
-	enabled = ml_set_interrupts_enabled(FALSE);
-
-	curcpu_id = cpu_number();
-	if (curcpu) {
-		*curcpu = curcpu_id;
-	}
-
-	for (int cpu = 0; cpu < machine_info.logical_cpu_max; ++cpu) {
-		/* filter if the caller did not request all cpus */
-		if (!all_cpus && (cpu != curcpu_id)) {
-			continue;
-		}
-
-		if (classes & KPC_CLASS_FIXED_MASK) {
-			uint32_t count = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
-			memcpy(&buf[offset], &FIXED_SHADOW_CPU(cpu, 0), count * sizeof(uint64_t));
-			offset += count;
-		}
-
-		if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
-			pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
-
-			for (uint32_t cfg_ctr = 0; cfg_ctr < cfg_count; ++cfg_ctr) {
-				if ((1ULL << cfg_ctr) & pmc_mask) {
-					buf[offset++] = CONFIGURABLE_SHADOW_CPU(cpu, cfg_ctr);
-				}
-			}
-		}
-
-		if (classes & KPC_CLASS_POWER_MASK) {
-			pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
-
-			for (uint32_t cfg_ctr = 0; cfg_ctr < cfg_count; ++cfg_ctr) {
-				if ((1ULL << cfg_ctr) & pmc_mask) {
-					buf[offset++] = CONFIGURABLE_SHADOW_CPU(cpu, cfg_ctr);
-				}
-			}
-		}
-	}
-
-	ml_set_interrupts_enabled(enabled);
-
-	return offset;
-}
-
 uint32_t
 kpc_get_counter_count(uint32_t classes)
 {
@@ -421,6 +300,8 @@ kpc_get_counter_count(uint32_t classes)
 	return count;
 }
 
+#pragma mark - Configuration State Getters and Setters
+
 uint32_t
 kpc_get_config_count(uint32_t classes)
 {
@@ -436,7 +317,7 @@ kpc_get_config_count(uint32_t classes)
 	}
 
 	if ((classes & KPC_CLASS_RAWPMU_MASK) &&
-	    (!kpc_multiple_clients() || force_all_ctrs)) {
+	    (!kpc_multiple_clients() || kpc_get_force_all_ctrs())) {
 		count += kpc_rawpmu_config_count();
 	}
 
@@ -447,8 +328,6 @@ int
 kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 {
 	uint32_t count = 0;
-
-	assert(current_config);
 
 	if (classes & KPC_CLASS_FIXED_MASK) {
 		kpc_get_fixed_config(&current_config[count]);
@@ -468,10 +347,12 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 	}
 
 	if (classes & KPC_CLASS_RAWPMU_MASK) {
-		// Client shouldn't ask for config words that aren't available.
-		// Most likely, they'd misinterpret the returned buffer if we
-		// allowed this.
-		if (kpc_multiple_clients() && !force_all_ctrs) {
+		/*
+		 * Clients shouldn't ask for config words that aren't available.
+		 * Most likely, they'd misinterpret the returned buffer if we
+		 * allowed this.
+		 */
+		if (kpc_multiple_clients() && !kpc_get_force_all_ctrs()) {
 			return EPERM;
 		}
 		kpc_get_rawpmu_config(&current_config[count]);
@@ -482,55 +363,119 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 }
 
 static int
-_kpc_set_config_internal(uint32_t classes, kpc_config_t *configv, bool secure)
+_validate_kpc_config(uint32_t classes, kpc_config_t *configs)
 {
-	int ret = 0;
-	struct kpc_config_remote mp_config = {
-		.classes = classes, .configv = configv,
-		.pmc_mask = kpc_get_configurable_pmc_mask(classes),
-		.secure = secure,
-	};
+	uint64_t const cfg_pmc_mask = kpc_get_configurable_pmc_mask(classes);
+	unsigned int const cfg_count = kpc_configurable_count();
 
-	assert(configv);
-
-	/* don't allow RAWPMU configuration when sharing counters */
+	/*
+	 * RAWPMU registers can't be shared; they alter behavior to arbitrary PMCs.
+	 */
 	if ((classes & KPC_CLASS_RAWPMU_MASK) && kpc_multiple_clients() &&
-	    !force_all_ctrs) {
-		return EPERM;
+	    !kpc_get_force_all_ctrs()) {
+		printf("kpc: kpc_set_config: cannot set RAWPMU when counters are shared\n");
+		return EXDEV;
 	}
 
-	/* no clients have the right to modify both classes */
-	if ((classes & (KPC_CLASS_CONFIGURABLE_MASK)) &&
-	    (classes & (KPC_CLASS_POWER_MASK))) {
-		return EPERM;
+	if ((classes & KPC_CLASS_CONFIGURABLE_MASK) &&
+	    (classes & KPC_CLASS_POWER_MASK)) {
+		printf("kpc: kpc_set_config: cannot configure power with configurable\n");
+		return EINVAL;
 	}
 
-	lck_mtx_lock(&kpc_config_lock);
+#if __x86_64__
+	if ((classes & KPC_CLASS_RAWPMU_MASK)) {
+		printf("kpc: kpc_set_config: power is unsupported\n");
+		return ENOTSUP;
+	}
+#endif /* __x86_64__ */
 
-	/* translate the power class for the machine layer */
-	if (classes & KPC_CLASS_POWER_MASK) {
-		mp_config.classes |= KPC_CLASS_CONFIGURABLE_MASK;
+	/*
+	 * Find any disallowed events to return an error here instead of set-running
+	 * where the CPC set is created.
+	 */
+	unsigned int i_configs = 0;
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if (((1ULL << i) & cfg_pmc_mask) == 0) {
+			continue;
+		}
+		uint16_t selector = configs[i_configs] & 0xffff;
+		cpc_event_t event = cpc_find_event(CPC_HW_CPMU, selector);
+		if (event == CPC_EVENT_INVALID) {
+			printf("kpc: kpc_set_config: not allowed to count event 0x%04x\n",
+			    selector);
+			return EPERM;
+		}
+		i_configs += 1;
+	}
+	return 0;
+}
+
+static int
+_kpc_set_config_internal(uint32_t classes, kpc_config_t *configs)
+{
+	unsigned int fix_count = kpc_fixed_count();
+	unsigned int cfg_count = kpc_configurable_count();
+	uint64_t const cfg_pmc_mask = kpc_get_configurable_pmc_mask(classes);
+
+	int error = _validate_kpc_config(classes, configs);
+	if (error != 0) {
+		return error;
 	}
 
-	ret = kpc_set_config_arch( &mp_config );
+	/* BEGIN IGNORE CODESTYLE */
+	_update_kpc_set_inputs(^{
+		unsigned int event_index = 0;
+		for (unsigned int i = 0; i < cfg_count; i++) {
+			if (((1ULL << i) & cfg_pmc_mask) == 0) {
+				continue;
+			}
 
-	lck_mtx_unlock(&kpc_config_lock);
+			struct cpc_event_select *select = &g_kpc.event_selects[event_index];
+			kpc_config_t config = kpc_config_arch_process(configs[event_index]);
+			select->ces_selector = config & 0xffff;
+			select->ces_flags = kpc_config_arch_flags(config);
+			select->ces_slot = fix_count + i;
+			g_kpc.configs[fix_count + i] = config;
+			event_index += 1;
+		}
 
-	return ret;
+#if __arm64__
+		if (classes & KPC_CLASS_RAWPMU_MASK) {
+			for (unsigned int i = 0; i < RAWPMU_CONFIG_COUNT; i++) {
+				struct cpc_event_select *select = &g_kpc.event_selects[event_index];
+				kpc_config_t config = configs[event_index];
+				cpc_legacy_rawpmu_t rawpmu = (cpc_legacy_rawpmu_t)(-1 - i);
+				select->ces_slot = (cpc_slot_t)rawpmu;
+				select->ces_selector = config;
+				event_index += 1;
+			}
+		}
+#endif /* __arm64__ */
+
+		g_kpc.event_count = event_index;
+	});
+	/* END IGNORE CODESTYLE */
+
+	return 0;
 }
 
 int
 kpc_set_config_kernel(uint32_t classes, kpc_config_t * configv)
 {
-	return _kpc_set_config_internal(classes, configv, true);
+	// User space always forces all counters when shimmed to CPC.
+	(void)kpc_force_all_ctrs(current_task(), 1);
+	return _kpc_set_config_internal(classes, configv);
 }
 
 int kpc_set_config_external(uint32_t classes, kpc_config_t *configv);
 int
 kpc_set_config_external(uint32_t classes, kpc_config_t *configv)
 {
-	return _kpc_set_config_internal(classes, configv, false);
+	return _kpc_set_config_internal(classes, configv);
 }
+
+#pragma mark - Buffer Management
 
 uint32_t
 kpc_get_counterbuf_size(void)
@@ -542,8 +487,7 @@ kpc_get_counterbuf_size(void)
 uint64_t *
 kpc_counterbuf_alloc(void)
 {
-	return kalloc_data_tag(COUNTERBUF_SIZE, Z_WAITOK | Z_ZERO,
-	           VM_KERN_MEMORY_DIAG);
+	return kalloc_data_tag(COUNTERBUF_SIZE, Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_DIAG);
 }
 
 void
@@ -551,6 +495,8 @@ kpc_counterbuf_free(uint64_t *buf)
 {
 	kfree_data(buf, COUNTERBUF_SIZE);
 }
+
+#pragma mark kperf and CPC Interfaces
 
 void
 kpc_sample_kperf(uint32_t actionid, uint32_t counter, uint64_t config,
@@ -578,89 +524,146 @@ kpc_sample_kperf(uint32_t actionid, uint32_t counter, uint64_t config,
 	BUF_INFO(PERF_KPC_HNDLR | DBG_FUNC_END, r);
 }
 
-
-int
-kpc_set_period(uint32_t classes, uint64_t *val)
+static void
+_kpc_cyclic_handler(
+	struct cpc_cyclic_info *info,
+	uint64_t count,
+	uint64_t __unused extra_count,
+	uintptr_t pc,
+	cpc_call_source_t source,
+	cpc_call_flags_t flags)
 {
-	struct kpc_config_remote mp_config = {
-		.classes = classes, .configv = val,
-		.pmc_mask = kpc_get_configurable_pmc_mask(classes)
-	};
+	kpc_config_t config = g_kpc.configs[info->cci_slot];
+	kperf_kpc_flags_t kpc_flags = (source == CPC_CS_KERNEL) ? KPC_KERNEL_PC : 0;
+	kpc_flags |= (flags & CPC_CF_PC_PRECISE) ? KPC_CAPTURED_PC : 0;
+	kpc_flags |= KPC_USER_COUNTING | KPC_KERNEL_COUNTING;
+	if ((flags & CPC_EF_NO_USER)) {
+		kpc_flags &= ~KPC_USER_COUNTING;
+	}
+	if ((flags & CPC_EF_NO_KERNEL)) {
+		kpc_flags &= ~KPC_KERNEL_COUNTING;
+	}
+	kpc_sample_kperf(g_kpc.actionids[info->cci_slot], info->cci_slot,
+	    config & 0xffff, count, pc, kpc_flags);
+}
 
-	assert(val);
+#pragma mark Other State Getters and Setters
 
-	/* no clients have the right to modify both classes */
+static int
+_validate_set_periods(uint32_t classes, uint64_t *periods_in, uint64_t periods_out[KPC_MAX_COUNTERS])
+{
+	uint64_t const cfg_pmc_mask = kpc_get_configurable_pmc_mask(classes);
+	bool const fixed = (classes & KPC_CLASS_FIXED_MASK) != 0;
+	unsigned int const fix_count = kpc_fixed_count();
+	unsigned int const cfg_count = kpc_configurable_count();
+
+	/*
+	 * No clients have the right to modify both classes.
+	 */
 	if ((classes & (KPC_CLASS_CONFIGURABLE_MASK)) &&
 	    (classes & (KPC_CLASS_POWER_MASK))) {
 		return EPERM;
 	}
 
-	lck_mtx_lock(&kpc_config_lock);
-
-#ifdef FIXED_COUNTER_SHADOW
-	if ((classes & KPC_CLASS_FIXED_MASK) && !kpc_controls_fixed_counters()) {
-		lck_mtx_unlock(&kpc_config_lock);
-		return EPERM;
+	/*
+	 * Translate the periods requested for the classes into their respective
+	 * counters.
+	 */
+	uint64_t max_period = cpc_hw_max_period(CPC_HW_CPMU);
+	unsigned int val_index = 0;
+	if (fixed) {
+		for (unsigned int i = 0; i < fix_count; i++) {
+			if (periods_in[i] > max_period) {
+				printf("kpc: period %d is too large, %llu > %llu\n", i,
+				    periods_in[i], max_period);
+				return EINVAL;
+			}
+		}
+		memcpy(periods_out, periods_in, fix_count * sizeof(periods_out[0]));
+		val_index += fix_count;
 	}
-# else
-	if (classes & KPC_CLASS_FIXED_MASK) {
-		lck_mtx_unlock(&kpc_config_lock);
-		return EINVAL;
+	for (unsigned int i = 0; i < cfg_count; i++) {
+		if (cfg_pmc_mask & (1ULL << i)) {
+			if (periods_in[val_index] > max_period) {
+				printf("kpc: period %d is too large, %llu > %llu\n", val_index,
+				    periods_in[val_index], max_period);
+				return EINVAL;
+			}
+			periods_out[fix_count + i] = periods_in[val_index];
+			val_index += 1;
+		}
 	}
-#endif
-
-	/* translate the power class for the machine layer */
-	if (classes & KPC_CLASS_POWER_MASK) {
-		mp_config.classes |= KPC_CLASS_CONFIGURABLE_MASK;
-	}
-
-	kprintf("setting period %u\n", classes);
-	kpc_set_period_arch( &mp_config );
-
-	lck_mtx_unlock(&kpc_config_lock);
 
 	return 0;
 }
 
 int
-kpc_get_period(uint32_t classes, uint64_t *val)
+kpc_set_period(uint32_t classes, uint64_t *periods)
 {
-	uint32_t count = 0;
-	uint64_t pmc_mask = 0ULL;
-
-	assert(val);
-
-	lck_mtx_lock(&kpc_config_lock);
-
-	if (classes & KPC_CLASS_FIXED_MASK) {
-		/* convert reload values to periods */
-		count = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
-		for (uint32_t i = 0; i < count; ++i) {
-			*val++ = kpc_fixed_max() - FIXED_RELOAD(i);
-		}
+	uint64_t valid_periods[KPC_MAX_COUNTERS] = { 0 };
+	static_assert(sizeof(valid_periods) == sizeof(g_kpc.periods));
+	int error = _validate_set_periods(classes, periods, valid_periods);
+	if (error != 0) {
+		return error;
 	}
+	uint64_t *valid_periods_arr = valid_periods;
 
+	/* BEGIN IGNORE CODESTYLE */
+	_update_kpc_set_inputs(^{
+		unsigned int const all_count = kpc_fixed_count() + kpc_configurable_count();
+
+		memcpy(g_kpc.periods, valid_periods_arr, sizeof(valid_periods));
+
+		/*
+		 * Start configuring CPC cyclics for the periods.
+		 */
+		assert3u(all_count, <=, sizeof(g_kpc.cyclics) / sizeof(g_kpc.cyclics[0]));
+		memset(g_kpc.cyclics, 0, sizeof(g_kpc.cyclics));
+		g_kpc.cyclic_count = 0;
+
+		for (unsigned int i = 0; i < all_count; i++) {
+			uint64_t period = g_kpc.periods[i];
+			if (period != 0) {
+				struct cpc_cyclic_info *cyclic = &g_kpc.cyclics[g_kpc.cyclic_count];
+				cyclic->cci_period = period;
+				cyclic->cci_func = _kpc_cyclic_handler;
+				cyclic->cci_slot = i;
+				g_kpc.cyclic_count += 1;
+			}
+		}
+	});
+	/* END IGNORE CODESTYLE */
+
+	return 0;
+}
+
+int
+kpc_get_period(uint32_t classes, uint64_t *periods_out)
+{
+	uint32_t fix_count = kpc_fixed_count();
+	uint32_t cfg_count = kpc_configurable_count();
+	uint64_t pmc_mask = 0ULL;
 	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
 		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
-
-		/* convert reload values to periods */
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				*val++ = kpc_configurable_max() - CONFIGURABLE_RELOAD(i);
-			}
-		}
+	} else if (classes & KPC_CLASS_POWER_MASK) {
+		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
 	}
 
-	if (classes & KPC_CLASS_POWER_MASK) {
-		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
+	lck_mtx_lock(&kpc_config_lock);
 
-		/* convert reload values to periods */
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				*val++ = kpc_configurable_max() - CONFIGURABLE_RELOAD(i);
-			}
+	uint32_t i_periods = 0;
+	if (classes & KPC_CLASS_FIXED_MASK) {
+		memcpy(periods_out, g_kpc.periods, fix_count * sizeof(periods_out[0]));
+		i_periods += fix_count;
+	}
+
+	/*
+	 * Only return one or the other, preferring the configurable class.
+	 */
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if ((1ULL << i) & pmc_mask) {
+			periods_out[i_periods] = g_kpc.periods[fix_count + i];
+			i_periods += 1;
 		}
 	}
 
@@ -670,42 +673,31 @@ kpc_get_period(uint32_t classes, uint64_t *val)
 }
 
 int
-kpc_set_actionid(uint32_t classes, uint32_t *val)
+kpc_set_actionid(uint32_t classes, uint32_t *actionids)
 {
-	uint32_t count = 0;
+	unsigned int const fix_count = kpc_fixed_count();
 	uint64_t pmc_mask = 0ULL;
-
-	assert(val);
+	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
+		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
+	} else if (classes & KPC_CLASS_POWER_MASK) {
+		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
+	}
 
 	/* NOTE: what happens if a pmi occurs while actionids are being
 	 * set is undefined. */
 	lck_mtx_lock(&kpc_config_lock);
 
+	uint32_t i_actionids = 0;
 	if (classes & KPC_CLASS_FIXED_MASK) {
-		count = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
-		memcpy(&FIXED_ACTIONID(0), val, count * sizeof(uint32_t));
-		val += count;
+		memcpy(&g_kpc.actionids, actionids, fix_count * sizeof(actionids[0]));
+		i_actionids += fix_count;
 	}
 
-	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
-		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
-
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				CONFIGURABLE_ACTIONID(i) = *val++;
-			}
-		}
-	}
-
-	if (classes & KPC_CLASS_POWER_MASK) {
-		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
-
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				CONFIGURABLE_ACTIONID(i) = *val++;
-			}
+	uint32_t cfg_count = kpc_configurable_count();
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if ((1ULL << i) & pmc_mask) {
+			g_kpc.actionids[fix_count + i] = actionids[i_actionids];
+			i_actionids += 1;
 		}
 	}
 
@@ -715,40 +707,28 @@ kpc_set_actionid(uint32_t classes, uint32_t *val)
 }
 
 int
-kpc_get_actionid(uint32_t classes, uint32_t *val)
+kpc_get_actionid(uint32_t classes, uint32_t *actionids_out)
 {
-	uint32_t count = 0;
+	unsigned int fix_count = kpc_fixed_count();
+	unsigned int cfg_count = kpc_configurable_count();
 	uint64_t pmc_mask = 0ULL;
-
-	assert(val);
+	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
+		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
+	} else if (classes & KPC_CLASS_POWER_MASK) {
+		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
+	}
 
 	lck_mtx_lock(&kpc_config_lock);
 
+	unsigned int i_actionids = 0;
 	if (classes & KPC_CLASS_FIXED_MASK) {
-		count = kpc_get_counter_count(KPC_CLASS_FIXED_MASK);
-		memcpy(val, &FIXED_ACTIONID(0), count * sizeof(uint32_t));
-		val += count;
+		memcpy(actionids_out, &g_kpc.actionids, fix_count * sizeof(actionids_out[0]));
+		i_actionids += fix_count;
 	}
-
-	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
-		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
-
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				*val++ = CONFIGURABLE_ACTIONID(i);
-			}
-		}
-	}
-
-	if (classes & KPC_CLASS_POWER_MASK) {
-		pmc_mask = kpc_get_configurable_pmc_mask(KPC_CLASS_POWER_MASK);
-
-		count = kpc_configurable_count();
-		for (uint32_t i = 0; i < count; ++i) {
-			if ((1ULL << i) & pmc_mask) {
-				*val++ = CONFIGURABLE_ACTIONID(i);
-			}
+	for (uint32_t i = 0; i < cfg_count; ++i) {
+		if ((1ULL << i) & pmc_mask) {
+			actionids_out[i_actionids] = g_kpc.actionids[fix_count + i];
+			i_actionids += 1;
 		}
 	}
 
@@ -758,82 +738,132 @@ kpc_get_actionid(uint32_t classes, uint32_t *val)
 }
 
 int
-kpc_set_running(uint32_t classes)
+kpc_get_fixed_counters(uint64_t *counterv)
 {
-	uint32_t all_cfg_classes = KPC_CLASS_CONFIGURABLE_MASK | KPC_CLASS_POWER_MASK;
-	struct kpc_running_remote mp_config = {
-		.classes = classes, .cfg_target_mask = 0ULL, .cfg_state_mask = 0ULL
-	};
+#if __arm64__
+	struct cpc_cycles_instrs counts = cpc_cycles_instrs();
+	counterv[0] = counts.cycles;
+	counterv[1] = counts.instrs;
+#elif __X86_64__
+	uint32_t count = kpc_fixed_count();
+	cpc_hw_counts(CPC_HW_CPMU, (1ULL << count) - 1, counterv, count);
+#endif // !__X86_64__ && !__arm64__
+	return 0;
+}
 
-	/* target all available PMCs */
-	mp_config.cfg_target_mask = kpc_get_configurable_pmc_mask(all_cfg_classes);
+int
+kpc_get_configurable_counters(uint64_t *counterv, uint64_t pmc_mask)
+{
+	assert(counterv != NULL);
+	uint32_t offset = kpc_fixed_count();
+	uint32_t config_count = kpc_configurable_count();
+	cpc_hw_counts(CPC_HW_CPMU, pmc_mask << offset, counterv, config_count);
+	return 0;
+}
 
-	/* translate the power class for the machine layer */
+static int
+_kpc_set_running_internal(uint32_t classes)
+{
+	int error = 0;
+	uint32_t cfg_classes = classes;
+
+	/*
+	 * The power mask implies configurable counters for CPC.
+	 */
 	if (classes & KPC_CLASS_POWER_MASK) {
-		mp_config.classes |= KPC_CLASS_CONFIGURABLE_MASK;
+		cfg_classes |= KPC_CLASS_CONFIGURABLE_MASK;
 	}
 
-	/* generate the state of each configurable PMCs */
-	mp_config.cfg_state_mask = kpc_get_configurable_pmc_mask(classes);
+	lck_mtx_lock(&kpc_config_lock);
+	bool const enabling_configurable = cfg_classes & KPC_CLASS_CONFIGURABLE_MASK;
+	if (enabling_configurable) {
+		/*
+		 * Configurable counters are starting up; synchronize the KPC state
+		 * with CPC.
+		 */
+		if (g_kpc.set == NULL || g_kpc.set_out_of_date) {
+			if (g_kpc.set) {
+				if (g_kpc.set_applied) {
+					cpc_set_remove(g_kpc.set);
+					g_kpc.set_applied = false;
+				} else {
+					/*
+					 * Set was allocated but not applied, indicating counting
+					 * had been previously disabled.
+					 *
+					 * This set is still out of date, so destroy it.
+					 */
+				}
+				cpc_set_destroy(g_kpc.set);
+				g_kpc.set = NULL;
+			} else {
+				/*
+				 * Need to allocate a new set, as this is the first time KPC
+				 * has been configured.
+				 */
+			}
+			g_kpc.set = cpc_set_alloc(CPC_HW_CPMU, CPC_SET_BASE, g_kpc.event_selects,
+			    g_kpc.event_count, g_kpc.cyclics, g_kpc.cyclic_count);
+			if (g_kpc.set) {
+				g_kpc.set_out_of_date = false;
+			} else {
+				/*
+				 * Set failed to allocate, will return an error below.
+				 */
+			}
+		} else {
+			/*
+			 * Set already exists and is not out of date.
+			 */
+		}
+		if (!g_kpc.set) {
+			error = EINVAL;
+			goto out;
+		}
 
-	return kpc_set_running_arch(&mp_config);
-}
-
-boolean_t
-kpc_register_pm_handler(kpc_pm_handler_t handler)
-{
-	return kpc_reserve_pm_counters(0x38, handler, TRUE);
-}
-
-boolean_t
-kpc_reserve_pm_counters(uint64_t pmc_mask, kpc_pm_handler_t handler,
-    boolean_t custom_config)
-{
-	uint64_t all_mask = (1ULL << kpc_configurable_count()) - 1;
-	uint64_t req_mask = 0ULL;
-
-	/* pre-condition */
-	assert(handler != NULL);
-	assert(kpc_pm_handler == NULL);
-
-	/* check number of counters requested */
-	req_mask = (pmc_mask & all_mask);
-	assert(kpc_popcount(req_mask) <= kpc_configurable_count());
-
-	/* save the power manager states */
-	kpc_pm_has_custom_config = custom_config;
-	kpc_pm_pmc_mask = req_mask;
-	kpc_pm_handler = handler;
-
-	printf("kpc: pm registered pmc_mask=%llx custom_config=%d\n",
-	    req_mask, custom_config);
-
-	/* post-condition */
-	{
-		uint32_t cfg_count = kpc_get_counter_count(KPC_CLASS_CONFIGURABLE_MASK);
-		uint32_t pwr_count = kpc_popcount(kpc_pm_pmc_mask);
-#pragma unused(cfg_count, pwr_count)
-		assert((cfg_count + pwr_count) == kpc_configurable_count());
+		if (!g_kpc.set_applied) {
+			cpc_set_apply(g_kpc.set);
+			g_kpc.set_applied = true;
+		} else {
+			/*
+			 * Transitioning from running to running, with no intervening
+			 * changes to the configuration.
+			 */
+		}
+	} else {
+		bool const configurable_running = g_kpc.running_class_mask & KPC_CLASS_CONFIGURABLE_MASK;
+		if (configurable_running && g_kpc.set && g_kpc.set_applied) {
+			cpc_set_remove(g_kpc.set);
+			g_kpc.set_applied = false;
+		} else {
+			/*
+			 * Nothing was running or applied, so don't try to remove it.
+			 */
+		}
 	}
 
-	return force_all_ctrs ? FALSE : TRUE;
+	g_kpc.running_pmc_mask = kpc_get_configurable_pmc_mask(classes);
+	g_kpc.running_class_mask = cfg_classes;
+
+out:
+	lck_mtx_unlock(&kpc_config_lock);
+	if (error != 0) {
+		printf("kpc: failed to set running: %d\n", error);
+	}
+	return error;
 }
 
-void
-kpc_release_pm_counters(void)
+int
+kpc_set_running_kernel(uint32_t classes)
 {
-	/* pre-condition */
-	assert(kpc_pm_handler != NULL);
+	return _kpc_set_running_internal(classes);
+}
 
-	/* release the counters */
-	kpc_pm_has_custom_config = FALSE;
-	kpc_pm_pmc_mask = 0ULL;
-	kpc_pm_handler = NULL;
-
-	printf("kpc: pm released counters\n");
-
-	/* post-condition */
-	assert(kpc_get_counter_count(KPC_CLASS_CONFIGURABLE_MASK) == kpc_configurable_count());
+int kpc_set_running_external(uint32_t classes);
+int
+kpc_set_running_external(uint32_t classes)
+{
+	return _kpc_set_running_internal(classes);
 }
 
 uint8_t
@@ -854,14 +884,14 @@ kpc_get_configurable_pmc_mask(uint32_t classes)
 		goto exit;
 	}
 
-	assert(configurable_count < 64);
+	assert3u(configurable_count, <, 64);
 	all_cfg_pmcs_mask = (1ULL << configurable_count) - 1;
 
 	if (classes & KPC_CLASS_CONFIGURABLE_MASK) {
-		if (force_all_ctrs == TRUE) {
+		if (kpc_get_force_all_ctrs()) {
 			cfg_mask |= all_cfg_pmcs_mask;
 		} else {
-			cfg_mask |= (~kpc_pm_pmc_mask) & all_cfg_pmcs_mask;
+			cfg_mask |= (~g_kpc.pwr_mgmt_pmc_mask) & all_cfg_pmcs_mask;
 		}
 	}
 
@@ -870,20 +900,33 @@ kpc_get_configurable_pmc_mask(uint32_t classes)
 	 *      - No tasks acquired all PMCs
 	 *      - PM registered and uses kpc to interact with PMCs
 	 */
-	if ((force_all_ctrs == FALSE) &&
-	    (kpc_pm_handler != NULL) &&
-	    (kpc_pm_has_custom_config == FALSE) &&
+	if (!kpc_get_force_all_ctrs() &&
+	    kpc_multiple_clients() &&
+	    !g_kpc.pwr_mgmt_custom_config &&
 	    (classes & KPC_CLASS_POWER_MASK)) {
-		pwr_mask |= kpc_pm_pmc_mask & all_cfg_pmcs_mask;
+		pwr_mask |= g_kpc.pwr_mgmt_pmc_mask & all_cfg_pmcs_mask;
 	}
 
 exit:
-	/* post-conditions */
-	assert(((cfg_mask | pwr_mask) & (~all_cfg_pmcs_mask)) == 0 );
-	assert( kpc_popcount(cfg_mask | pwr_mask) <= kpc_configurable_count());
-	assert((cfg_mask & pwr_mask) == 0ULL );
+	assert3u(((cfg_mask | pwr_mask) & (~all_cfg_pmcs_mask)), ==, 0);
+	assert3u(kpc_popcount(cfg_mask | pwr_mask), <=, kpc_configurable_count());
+	assert3u(cfg_mask & pwr_mask, ==, 0ULL);
 
 	return cfg_mask | pwr_mask;
+}
+
+boolean_t
+kpc_is_running_fixed(void)
+{
+	return (g_kpc.running_class_mask & KPC_CLASS_FIXED_MASK) == KPC_CLASS_FIXED_MASK;
+}
+
+boolean_t
+kpc_is_running_configurable(uint64_t pmc_mask)
+{
+	assert3u(kpc_popcount(pmc_mask), <=, kpc_configurable_count());
+	return ((g_kpc.running_class_mask & KPC_CLASS_CONFIGURABLE_MASK) == KPC_CLASS_CONFIGURABLE_MASK) &&
+	       ((g_kpc.running_pmc_mask & pmc_mask) == pmc_mask);
 }
 
 #else // CONFIG_CPU_COUNTERS
@@ -934,16 +977,6 @@ kpc_get_cpu_counters(
 	return ENOTSUP;
 }
 
-int
-kpc_get_shadow_counters(
-	boolean_t __unused all_cpus,
-	uint32_t __unused classes,
-	int * __unused curcpu,
-	uint64_t * __unused buf)
-{
-	return ENOTSUP;
-}
-
 uint32_t
 kpc_get_running(void)
 {
@@ -951,7 +984,7 @@ kpc_get_running(void)
 }
 
 int
-kpc_set_running(uint32_t __unused classes)
+kpc_set_running_kernel(uint32_t __unused classes)
 {
 	return ENOTSUP;
 }
@@ -964,11 +997,26 @@ kpc_get_config(
 	return ENOTSUP;
 }
 
+int
+kpc_set_config_kernel(
+	uint32_t __unused classes,
+	kpc_config_t * __unused configv)
+{
+	return ENOTSUP;
+}
+
 int kpc_set_config_external(uint32_t classes, kpc_config_t *configv);
 int
 kpc_set_config_external(
 	uint32_t __unused classes,
 	kpc_config_t * __unused configv)
+{
+	return ENOTSUP;
+}
+
+int kpc_set_running_external(uint32_t classes);
+int
+kpc_set_running_external(uint32_t __unused classes)
 {
 	return ENOTSUP;
 }

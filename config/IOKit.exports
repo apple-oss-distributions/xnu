@@ -39,7 +39,7 @@ _IOFree
 _IOFreeAligned
 _IOFreeContiguous
 _IOFreeData
-_IOFreeDataSharable
+_IOFreeDataShareable
 _IOFreeTypeImpl
 _IOFreeTypeVarImpl
 _IOFreePageable
@@ -69,8 +69,8 @@ _IOMallocPageable
 _IOMallocPageableZero
 _IOMallocZero:_IOMallocZero_external
 _IOMallocZeroData: _IOMallocZeroData_external
-_IOMallocDataSharable: _IOMallocDataSharable_external
-_IOMallocZeroDataSharable: _IOMallocZeroDataSharable_external
+_IOMallocDataShareable: _IOMallocDataShareable_external
+_IOMallocZeroDataShareable: _IOMallocZeroDataShareable_external
 _IOMappedRead16
 _IOMappedRead32
 _IOMappedRead64

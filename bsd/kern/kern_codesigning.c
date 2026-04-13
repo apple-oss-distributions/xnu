@@ -504,7 +504,7 @@ disable_developer_mode(void)
 	CSM_PREFIX(toggle_developer_mode)(false);
 }
 
-bool
+__mockable bool
 developer_mode_state(void)
 {
 	/* Assume false if the pointer isn't setup */
@@ -669,7 +669,7 @@ csm_register_provisioning_profile(
 	}
 
 	/* Allocate storage for the profile wrapper object */
-	profile = kalloc_type(cs_profile_t, Z_WAITOK_ZERO);
+	profile = kalloc_type(cs_profile_t, Z_WAITOK_ZERO_NOFAIL);
 	assert(profile != NULL);
 
 	/* Lock the profile set exclusively */
@@ -1084,6 +1084,7 @@ address_space_debugged_state(
 	return KERN_DENIED;
 }
 
+/* Requires: Nothing locked */
 bool
 is_address_space_debugged(const proc_t process)
 {
@@ -1092,7 +1093,7 @@ is_address_space_debugged(const proc_t process)
 
 #if CODE_SIGNING_MONITOR
 
-bool
+__mockable bool
 csm_enabled(void)
 {
 	return CSM_PREFIX(code_signing_enabled)();
@@ -1171,6 +1172,19 @@ csm_code_signing_violation(
 	assert(proc == current_proc());
 
 	/*
+	 * If the address space is being debugged, we expect this task to
+	 * undergo some code signing violations. In this case, we are NOT
+	 * killing the task and simply let the caller deliver the exception
+	 * to userspace.
+	 *
+	 * This is mandatory to maintain debuggability.
+	 */
+	if (is_address_space_debugged(proc)) {
+		/* do NOT kill the task */
+		return;
+	}
+
+	/*
 	 * Force exit the process and set it to allow generating crash reports, which is critical
 	 * for better triaging these issues.
 	 */
@@ -1184,6 +1198,7 @@ csm_code_signing_violation(
 		.kt_info.kt_error = KDBG_TRIAGE_VM_CODE_SIGNING
 	};
 
+	/* kill the task, unconditionally and fatally */
 	exit_with_mach_exception(proc, info, PX_KTRIAGE);
 }
 
@@ -1248,7 +1263,7 @@ csm_reconstitute_code_signature(
 		unneeded_size);
 }
 
-kern_return_t
+__mockable kern_return_t
 csm_setup_nested_address_space(
 	pmap_t pmap,
 	const vm_address_t region_addr,
@@ -1431,7 +1446,7 @@ csm_associate_os_entitlements(
 kern_return_t
 csm_accelerate_entitlements(
 	void *monitor_sig_obj,
-	CEQueryContext_t *ce_ctx)
+	const CEContext_t **ce_ctx)
 {
 	if (csm_enabled() == false) {
 		return KERN_NOT_SUPPORTED;

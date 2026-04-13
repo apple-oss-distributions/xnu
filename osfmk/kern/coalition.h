@@ -103,14 +103,10 @@ void coalition_for_each_task(coalition_t coal,
     coalition_for_each_task_block_t block);
 
 /*  Coalition ledger  */
-struct coalition_ledger_indices {
-	int logical_writes;
-};
 void init_coalition_ledgers(void);
 int coalition_ledger_set_logical_writes_limit(coalition_t coal, int64_t limit);
 void coalition_io_monitor_ctl(struct coalition *coalition, uint32_t flags, int64_t limit);
 ledger_t coalition_ledger_get_from_task(task_t task);
-void coalition_io_rate_exceeded(int warning, const void *param0, __unused const void *param1);
 void coalition_io_ledger_update(task_t task, int32_t flavor, boolean_t is_credit, uint32_t io_size);
 /*
  * Mark this coalition as eligible for swap.

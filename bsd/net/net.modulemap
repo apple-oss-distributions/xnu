@@ -1,4 +1,4 @@
-module Darwin.POSIX.net [system] {
+module Darwin.POSIX.net {
   module dl {
     header "net/if_dl.h"
     export *
@@ -15,7 +15,7 @@ module Darwin.POSIX.net [system] {
   }
 }
 
-module Darwin.net [system] {
+module Darwin.net {
   #ifdef XNU_KERNEL_PRIVATE
   // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.

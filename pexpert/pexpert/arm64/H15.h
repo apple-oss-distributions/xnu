@@ -64,23 +64,16 @@
 #define HAS_ERRATA_123855614     1
 
 #define CPU_HAS_APPLE_PAC                    1
-#define HAS_UNCORE_CTRS                      1
-#define UNCORE_VERSION                       2
-#define UNCORE_PER_CLUSTER                   1
-#define UNCORE_NCTRS                         16
-#define CORE_NCTRS                           10
-#define HAS_CPMU_PC_CAPTURE                  1
 
 /* Performance Monitor */
 #define CPMU_PMC_COUNT                       10
+#define HAS_CPMU_PC_CAPTURE                  1
 #define CPMU_INSTRUCTION_MATCHING            1
 #define CPMU_MEMORY_FILTERING                1
 #define CPMU_64BIT_PMCS                      1
 #define CPMU_16BIT_EVENTS                    1
 #define HAS_UPMU                             1
-#define UPMU_VERSION                         2
 #define UPMU_PMC_COUNT                       16
-#define UPMU_PER_CLUSTER                     1
 #define UPMU_AF_LATENCY                      1
 #define UPMU_META_EVENTS                     1
 #define UPMU_64BIT_PMCS                      1
@@ -107,10 +100,11 @@
 
 #define __ARM_RANGE_TLBI__                   1
 
+#if XNU_KERNEL_PRIVATE
 #if !CONFIG_SPTM
-/* VHE is disabled at runtime on SPTM-based systems. */
-#include <pexpert/arm64/vhe_disable.h>
+#error "This platform requires SPTM; PPL has been deprecated."
 #endif /* !CONFIG_SPTM */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #include <pexpert/arm64/apple_arm64_common.h>
 

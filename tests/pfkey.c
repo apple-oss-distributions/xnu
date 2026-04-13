@@ -7,11 +7,13 @@
 #include <arpa/inet.h>
 
 T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.pfkey"),
+	T_META_NAMESPACE("xnu.net.pfkey"),
 	T_META_ASROOT(true),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("NetworkExtension"),
-	T_META_CHECK_LEAKS(false));
+	T_META_CHECK_LEAKS(false),
+	T_META_OWNER("fernandes")
+	);
 
 #define MAX_SPD_CHECK       100
 #define TEST_SRC_ADDRESS_IPv4           "192.168.2.2"

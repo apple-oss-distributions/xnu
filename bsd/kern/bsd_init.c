@@ -302,6 +302,10 @@ __private_extern__ TUNABLE(bool, bootarg_disable_aslr, "-disable_aslr", 0);
 char dyld_alt_path[MAXPATHLEN];
 int use_alt_dyld = 0;
 
+char dyld_suffix[NAME_MAX];
+int use_dyld_suffix = 0;
+#endif
+
 char panic_on_proc_crash[NAME_MAX];
 int use_panic_on_proc_crash = 0;
 
@@ -310,10 +314,6 @@ int use_panic_on_proc_exit = 0;
 
 char panic_on_proc_spawn_fail[NAME_MAX];
 int use_panic_on_proc_spawn_fail = 0;
-
-char dyld_suffix[NAME_MAX];
-int use_dyld_suffix = 0;
-#endif
 
 #if DEVELOPMENT || DEBUG
 __private_extern__ bool bootarg_hide_process_traced = 0;
@@ -676,9 +676,9 @@ bsd_init(void)
 	bsd_pageable_map = kmem_suballoc(kernel_map,
 	    &bsd_pageable_range.min_address,
 	    (vm_size_t)bsd_pageable_map_size,
-	    VM_MAP_CREATE_PAGEABLE,
+	    VM_MAP_CREATE_DEFAULT,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    KMS_PERMANENT | KMS_NOFAIL,
+	    KMS_NOFAIL,
 	    VM_KERN_MEMORY_BSD).kmr_submap;
 
 	/*
@@ -1241,18 +1241,6 @@ parse_bsd_args(void)
 	}
 #endif
 
-#if DEVELOPMENT || DEBUG
-	if (PE_parse_boot_argn("dyldsuffix", dyld_suffix, sizeof(dyld_suffix))) {
-		if (strlen(dyld_suffix) > 0) {
-			use_dyld_suffix = 1;
-		}
-	}
-
-	if (PE_parse_boot_argn("alt-dyld", dyld_alt_path, sizeof(dyld_alt_path))) {
-		if (strlen(dyld_alt_path) > 0) {
-			use_alt_dyld = 1;
-		}
-	}
 
 	if (PE_parse_boot_arg_str("panic-on-proc-crash", panic_on_proc_crash, sizeof(panic_on_proc_crash))) {
 		if (strlen(panic_on_proc_crash) > 0) {
@@ -1269,6 +1257,19 @@ parse_bsd_args(void)
 	if (PE_parse_boot_arg_str("panic-on-proc-spawn-fail", panic_on_proc_spawn_fail, sizeof(panic_on_proc_spawn_fail))) {
 		if (strlen(panic_on_proc_spawn_fail) > 0) {
 			use_panic_on_proc_spawn_fail = 1;
+		}
+	}
+
+#if DEVELOPMENT || DEBUG
+	if (PE_parse_boot_argn("dyldsuffix", dyld_suffix, sizeof(dyld_suffix))) {
+		if (strlen(dyld_suffix) > 0) {
+			use_dyld_suffix = 1;
+		}
+	}
+
+	if (PE_parse_boot_argn("alt-dyld", dyld_alt_path, sizeof(dyld_alt_path))) {
+		if (strlen(dyld_alt_path) > 0) {
+			use_alt_dyld = 1;
 		}
 	}
 

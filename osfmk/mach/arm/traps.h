@@ -33,8 +33,8 @@
 
 #pragma once
 
-#define MACH_ARM_TRAP_ABSTIME -3
-#define MACH_ARM_TRAP_CONTTIME -4
+#define MACH_ARM_TRAP_ABSTIME (-3)
+#define MACH_ARM_TRAP_CONTTIME (-4)
 
 
 #endif /* defined (__arm__) || defined (__arm64__) */

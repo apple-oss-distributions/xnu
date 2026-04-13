@@ -153,6 +153,15 @@ ifeq ($(origin PLATFORM),undefined)
 	endif
 endif
 
+ifeq ($(origin PLATFORM_FOR_CONFIG),undefined)
+    # PLATFORM_FOR_CONFIG determines the CONFIG_* and XNU_PLATFORM_* #defines that the code is compiled with.
+    # It is usually the same as PLATFORM, except for when XNU is built for user-space unit-tests,
+    # where we may want the CONFIG_* defines to be of a target different than the target that the
+    # code runs on. For instance, a unit-test for iPhone-only logic in a unit-test that runs on macOS.
+    # see tests/unit/Makefile where this is used.
+    export PLATFORM_FOR_CONFIG := $(PLATFORM)
+endif
+
 ifeq ($(PLATFORM),DriverKit)
 	ifeq ($(origin COHORT_SDKROOT_RESOLVED),undefined)
 		SDK_NAME = $(notdir $(SDKROOT))
@@ -291,9 +300,8 @@ endif
 #
 # Platform options
 #
-SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS BridgeOS
-SUPPORTED_SIMULATOR_PLATFORMS := iPhoneSimulator iPhoneNanoSimulator tvSimulator AppleTVSimulator WatchSimulator
-
+SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS XROS BridgeOS
+SUPPORTED_SIMULATOR_PLATFORMS := iPhoneSimulator iPhoneNanoSimulator tvSimulator AppleTVSimulator WatchSimulator XRSimulator
 
 SUPPORTED_PLATFORMS := MacOSX DriverKit ExclaveKit ExclaveCore $(SUPPORTED_SIMULATOR_PLATFORMS) $(SUPPORTED_EMBEDDED_PLATFORMS)
 

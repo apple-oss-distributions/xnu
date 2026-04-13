@@ -21,10 +21,19 @@ def main():
         raise Exception(f"unsupported arch {arch}")
 
     if sdk_platform == "macosx":
-        file_name_prefix = "kernel"
+        plaform_for_config = "MacOSX"
+    elif sdk_platform == "iphoneos":
+        plaform_for_config = "iPhoneOS"
+    elif sdk_platform == "appletvos":
+        plaform_for_config = "tvOS"
+    elif sdk_platform == "watchos":
+        plaform_for_config = "WatchOS"
+    elif sdk_platform == "xros":
+        plaform_for_config = "XROS"
     else:
-        file_name_prefix = "mach"
-    print(arch + " " + kernel_platform + " " + file_name_prefix)
+        plaform_for_config = "unexpected"
+
+    print(arch + " " + kernel_platform + " " + plaform_for_config)
 
 if __name__ == "__main__":
     sys.exit(main())

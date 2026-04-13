@@ -482,7 +482,8 @@ pvh_test_type(uintptr_t pvh, pvh_type_t type)
 }
 
 /**
- * Unlock a pv_head_table entry, updating the contents of the entry with the passed-in value.
+ * Unlock a pv_head_table entry (without reenabling preemption),
+ * updating the contents of the entry with the passed-in value.
  *
  * @note Only the non-lock flags, pointer, and type fields of the entry will be updated
  *       according to the passed-in value.  PVH_LOCK_FLAGS will be ignored as they are
@@ -494,7 +495,7 @@ pvh_test_type(uintptr_t pvh, pvh_type_t type)
  *        while the lock was held.
  */
 static inline void
-pvh_unlock(locked_pvh_t *locked_pvh)
+pvh_unlock_nopreempt(locked_pvh_t *locked_pvh)
 {
 	assert(locked_pvh != NULL);
 	assert(locked_pvh->pvh != 0);
@@ -523,13 +524,32 @@ pvh_unlock(locked_pvh_t *locked_pvh)
 		os_atomic_store(&pv_head_table[index],
 		    (locked_pvh->pvh & ~PVH_FLAG_SLEEP) | PVH_FLAG_LOCK, relaxed);
 	}
-	hw_unlock_bit(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET);
+	hw_unlock_bit_nopreempt(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET);
 
 	if (__improbable(pri_floor_end)) {
 		thread_priority_floor_end(&locked_pvh->pri_token);
 	}
 
 	locked_pvh->pvh = 0;
+}
+
+/**
+ * Unlock a pv_head_table entry, updating the contents of the entry with the passed-in value.
+ *
+ * @note Only the non-lock flags, pointer, and type fields of the entry will be updated
+ *       according to the passed-in value.  PVH_LOCK_FLAGS will be ignored as they are
+ *       directly manipulated by this function.
+ *
+ * @param locked_pvh Pointer to a wrapper object representing the locked PV head table entry.
+ *        The pvh field from this entry, except for the PVH_LOCK_FLAGS bits, will be stored
+ *        in pv_head_table to reflect any updates that may have been performed on the PV list
+ *        while the lock was held.
+ */
+static inline void
+pvh_unlock(locked_pvh_t *locked_pvh)
+{
+	pvh_unlock_nopreempt(locked_pvh);
+	enable_preemption();
 }
 
 /**
@@ -868,7 +888,7 @@ pve_init(pv_entry_t *pvep)
  * @return Index of the found entry, or -1 if no entry exists.
  */
 static inline int
-pve_find_ptep_index(pv_entry_t *pvep, pt_entry_t *ptep)
+pve_find_ptep_index(pv_entry_t *pvep, const pt_entry_t *ptep)
 {
 	for (unsigned int i = 0; i < PTE_PER_PVE; i++) {
 		if (pve_get_ptep(pvep, i) == ptep) {
@@ -997,7 +1017,7 @@ typedef struct {
 	 * For IOMMU pages, may optionally reflect a driver-defined refcount (IOMMU
 	 * operations are implicitly wired).
 	 */
-	unsigned short wiredcnt;
+	uint16_t wiredcnt;
 } ptd_info_t;
 
 /**
@@ -1246,6 +1266,26 @@ pvh_ptd(uintptr_t pvh)
 }
 
 /**
+ * Given a physical address, return the page table descriptor (PTD) object for
+ * the page table allocated at that physical address.
+ *
+ * @param pa The physical address whose PTD should be returned.
+ *
+ * @return The PTD object for [pa]
+ */
+static inline pt_desc_t *
+pa_get_ptd(pmap_paddr_t pa)
+{
+	uintptr_t pvh = pai_to_pvh(pa_index(pa));
+
+	if (__improbable(!pvh_test_type(pvh, PVH_TYPE_PTDP))) {
+		panic("%s: invalid PV head 0x%llx for PA 0x%llx", __func__, (uint64_t)pvh, (unsigned long long)pa);
+	}
+
+	return pvh_ptd(pvh);
+}
+
+/**
  * Given an arbitrary page table entry, return back the page table descriptor
  * (PTD) object for the page table that contains that entry.
  *
@@ -1258,14 +1298,7 @@ ptep_get_ptd(const pt_entry_t *ptep)
 {
 	assert(ptep != NULL);
 
-	const vm_offset_t pt_base_va = (vm_offset_t)ptep;
-	uintptr_t pvh = pai_to_pvh(pa_index(kvtophys(pt_base_va)));
-
-	if (__improbable(!pvh_test_type(pvh, PVH_TYPE_PTDP))) {
-		panic("%s: invalid PV head 0x%llx for PTE %p", __func__, (uint64_t)pvh, ptep);
-	}
-
-	return pvh_ptd(pvh);
+	return pa_get_ptd(kvtophys((vm_offset_t)ptep));
 }
 
 /**
@@ -1298,16 +1331,10 @@ ptep_get_pmap(const pt_entry_t *ptep)
  *         TTE.
  */
 static inline pt_desc_t *
-tte_get_ptd(const tt_entry_t tte)
+tte_get_ptd(tt_entry_t tte)
 {
-	const vm_offset_t pt_base_va = (vm_offset_t)(tte & ~((tt_entry_t)PAGE_MASK));
-	uintptr_t pvh = pai_to_pvh(pa_index(pt_base_va));
-
-	if (__improbable(!pvh_test_type(pvh, PVH_TYPE_PTDP))) {
-		panic("%s: invalid PV head 0x%llx for TTE 0x%llx", __func__, (uint64_t)pvh, (uint64_t)tte);
-	}
-
-	return pvh_ptd(pvh);
+	assert(tte_is_valid_table(tte));
+	return pa_get_ptd(tte_to_pa(tte));
 }
 
 /**
@@ -1338,6 +1365,22 @@ static inline ptd_info_t *
 ptep_get_info(const pt_entry_t *ptep)
 {
 	return ptd_get_info(ptep_get_ptd(ptep));
+}
+
+/**
+ * Given an arbitrary translation table entry, get the ptd_info_t structure
+ * for the page table pointed to by that TTE.
+ *
+ * @param tte The translation table entry to parse. For instance, if this is an
+ *            L2 TTE, then the ptd_info_t for the L3 table this entry points to
+ *            will be returned.
+ *
+ * @return The ptd_info object for the page table pointed to by [tte].
+ */
+static inline ptd_info_t *
+tte_get_info(tt_entry_t tte)
+{
+	return ptd_get_info(tte_get_ptd(tte));
 }
 
 /**
@@ -2026,16 +2069,24 @@ ppattr_test_modfault(unsigned int pai)
  *
  * @note This function issues all required barriers to ensure correct ordering of
  *       the epoch update relative to ensuing SPTM accesses.
+ *
+ * @return A pointer to the current CPU's epoch instance, to be later passed to
+ *         pmap_epoch_exit().
  */
-static inline void
+static inline pmap_epoch_t *
 pmap_epoch_enter(void)
 {
-	mp_disable_preemption();
+	disable_preemption();
 	pmap_epoch_t *pmap_epoch = &PERCPU_GET(pmap_sptm_percpu)->pmap_epoch;
-	assert(!preemption_enabled());
 
-	/* Must not already been in a pmap epoch on this CPU. */
-	assert(pmap_epoch->local_seq == 0);
+	/**
+	 * Per-CPU epoch updates aren't atomic with respect to interrupts, we should never
+	 * invoke pmap functions that use these from primary interrupt context.
+	 */
+	assert(!ml_at_interrupt_context());
+
+	/* Must not already be in a pmap epoch on this CPU. */
+	assert3u(pmap_epoch->local_seq, ==, 0);
 	pmap_epoch->local_seq = ++pmap_epoch->next_seq;
 	/* Unsigned 64-bit per-CPU integer should never overflow on any human timescale. */
 	assert(pmap_epoch->local_seq != 0);
@@ -2045,6 +2096,8 @@ pmap_epoch_enter(void)
 	 * SPTM accesses will also observe the epoch update.
 	 */
 	os_atomic_thread_fence(seq_cst);
+
+	return pmap_epoch;
 }
 
 /**
@@ -2053,13 +2106,16 @@ pmap_epoch_enter(void)
  *
  * @note This function must be called with preemption disabled and will decrement
  *       the current thread's preemption disable count.
+ *
+ * @param pmap_epoch A pointer to the current CPU's epoch instance, returned by a
+ *                   previous call to pmap_epoch_enter().
  */
 static inline void
-pmap_epoch_exit(void)
+pmap_epoch_exit(pmap_epoch_t *pmap_epoch)
 {
-	pmap_epoch_t *pmap_epoch = &PERCPU_GET(pmap_sptm_percpu)->pmap_epoch;
 	assert(!preemption_enabled());
-	assert(pmap_epoch->local_seq == pmap_epoch->next_seq);
+	assert(pmap_epoch->local_seq != 0);
+	assert3u(pmap_epoch->local_seq, ==, pmap_epoch->next_seq);
 
 	/**
 	 * Clear the sequence using a store-release operation to ensure that prior
@@ -2067,18 +2123,7 @@ pmap_epoch_exit(void)
 	 * of an epoch is visible.
 	 */
 	os_atomic_store(&pmap_epoch->local_seq, 0, release);
-	mp_enable_preemption();
-}
-
-/**
- * Helper for determining whether the current CPU is within an epoch.
- *
- * @return true if the current CPU holds the epoch, false otherwise.
- */
-static inline bool
-pmap_in_epoch(void)
-{
-	return !preemption_enabled() && (PERCPU_GET(pmap_sptm_percpu)->pmap_epoch.local_seq != 0);
+	enable_preemption();
 }
 
 /**
@@ -2103,7 +2148,7 @@ pmap_in_epoch(void)
 static inline void
 pmap_epoch_prepare_drain(void)
 {
-	mp_disable_preemption();
+	disable_preemption();
 	pmap_epoch_t *pmap_epoch = &PERCPU_GET(pmap_sptm_percpu)->pmap_epoch;
 	assert(pmap_epoch->flags == 0);
 	unsigned int i = 0;
@@ -2156,7 +2201,7 @@ pmap_epoch_drain(void)
 	assert(flags & PMAP_EPOCH_PREPARED);
 	pmap_epoch->flags = 0;
 	if (!(flags & PMAP_EPOCH_DRAIN_REQUIRED)) {
-		mp_enable_preemption();
+		enable_preemption();
 		return;
 	}
 	unsigned int i = 0;
@@ -2177,7 +2222,7 @@ pmap_epoch_drain(void)
 		}
 		++i;
 	}
-	mp_enable_preemption();
+	enable_preemption();
 	/**
 	 * Issue a load-load barrier to ensure subsequent accesses to sensitive state will
 	 * not be speculated ahead of the sampling we just did.
@@ -2196,7 +2241,8 @@ static inline bool
 pmap_type_requires_retype_on_recycle(sptm_frame_type_t frame_type)
 {
 	return sptm_type_is_user_executable(frame_type) ||
-	       (frame_type == XNU_ROZONE) || (frame_type == XNU_KERNEL_RESTRICTED);
+	       (frame_type == XNU_ROZONE) || (frame_type == XNU_KERNEL_RESTRICTED) ||
+	       (frame_type == XNU_USER_TPRO);
 }
 
 static inline boolean_t
@@ -2279,23 +2325,6 @@ extern kern_return_t pmap_page_alloc(pmap_paddr_t *, unsigned);
 extern void pmap_page_free(pmap_paddr_t);
 
 /**
- * The modes in which a pmap lock can be acquired. Note that shared access
- * doesn't necessarily mean "read-only". As long as data is atomically updated
- * correctly (to account for multi-cpu accesses) data can still get written with
- * a shared lock held. Care just needs to be taken so as to not introduce any
- * race conditions when there are multiple writers.
- *
- * This is here in pmap_data.h because it's a needed parameter for pv_alloc()
- * and pmap_enter_pv(). This header is always included in pmap_internal.h before
- * the rest of the pmap locking code is defined so there shouldn't be any issues
- * with missing types.
- */
-OS_ENUM(pmap_lock_mode, uint8_t,
-    PMAP_LOCK_SHARED,
-    PMAP_LOCK_EXCLUSIVE,
-    PMAP_LOCK_HELD);
-
-/**
  * Possible return values for pv_alloc(). See the pv_alloc() function header for
  * a description of each of these values.
  */
@@ -2306,12 +2335,12 @@ typedef enum {
 } pv_alloc_return_t;
 
 extern pv_alloc_return_t pv_alloc(
-	pmap_t, pmap_lock_mode_t, unsigned int, pv_entry_t **, locked_pvh_t *, volatile uint16_t *);
+	pmap_t, unsigned int, pv_entry_t **, locked_pvh_t *);
 extern void pv_free(pv_entry_t *);
 extern void pv_list_free(pv_entry_t *, pv_entry_t *, unsigned int);
 extern void pmap_compute_pv_targets(void);
 extern pv_alloc_return_t pmap_enter_pv(
-	pmap_t, pt_entry_t *, unsigned int, pmap_lock_mode_t, locked_pvh_t *, pv_entry_t **, int *);
+	pmap_t, pt_entry_t *, unsigned int, locked_pvh_t *, pv_entry_t **, int *);
 
 typedef enum {
 	PV_REMOVE_SUCCESS, /* found a mapping */
@@ -2321,15 +2350,47 @@ typedef enum {
 extern pv_remove_return_t pmap_remove_pv(pmap_t, pt_entry_t *, locked_pvh_t *, bool *, bool *);
 
 extern void ptd_bootstrap(pt_desc_t *, unsigned int);
-extern pt_desc_t *ptd_alloc_unlinked(unsigned int);
+extern pt_desc_t *ptd_alloc_unlinked(pmap_t, unsigned int);
 extern pt_desc_t *ptd_alloc(pmap_t, unsigned int);
 extern void ptd_deallocate(pt_desc_t *);
 extern void ptd_info_init(
-	pt_desc_t *, pmap_t, vm_map_address_t, unsigned int, pt_entry_t *);
+	pt_desc_t *, pmap_t, vm_map_address_t, unsigned int);
 extern void ptd_info_finalize(pt_desc_t *);
 
-extern kern_return_t pmap_ledger_credit(pmap_t, int, ledger_amount_t);
-extern kern_return_t pmap_ledger_debit(pmap_t, int, ledger_amount_t);
+/**
+ * Returns the pmap's ledger
+ *
+ * @note This helper is here so that the compiler can hoist access to it.
+ */
+__pure2
+static inline ledger_t
+pmap_ledger(pmap_t pmap)
+{
+	return pmap->ledger;
+}
+
+/**
+ * Credit a specific ledger entry within the passed in pmap's ledger object.
+ *
+ * @param pmap The pmap whose ledger should be updated.
+ * @param entry The specifc ledger entry to update. This needs to be one of the
+ *              task_ledger entries.
+ * @param amount The amount to credit from the ledger.
+ */
+#define pmap_ledger_credit(pmap, entry, amount) \
+	ledger_credit_scalable(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+
+/**
+ * Debit a specific ledger entry within the passed in pmap's ledger object.
+ *
+ * @param pmap The pmap whose ledger should be updated.
+ * @param entry The specifc ledger entry to update. This needs to be one of the
+ *              task_ledger entries.
+ * @param amount The amount to debit from the ledger.
+ */
+#define pmap_ledger_debit(pmap, entry, amount) \
+	ledger_debit_scalable(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+
 
 extern void validate_pmap_internal(const volatile struct pmap *, const char *);
 extern void validate_pmap_mutable_internal(const volatile struct pmap *, const char *);
@@ -2489,3 +2550,5 @@ extern unsigned int surt_list_len(void);
 extern unsigned int pmap_wcrt_on_non_dram_count_get(void);
 extern void pmap_wcrt_on_non_dram_count_increment_atomic(void);
 #endif /* DEBUG || DEVELOPMENT */
+
+extern void pmap_free_pt_delayed_enqueue(pmap_t pmap, pmap_paddr_t pa);

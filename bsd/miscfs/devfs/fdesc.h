@@ -117,6 +117,7 @@ extern int fdesc_root(struct mount *, struct vnode **, vfs_context_t);
 extern int fdesc_select(struct vnop_select_args *ap);
 extern int fdesc_setattr(struct vnop_setattr_args *ap);
 extern int fdesc_write(struct vnop_write_args *ap);
+extern int fdesc_getbackingvnode(struct vnode *, struct vnode **);
 
 extern int(**fdesc_vnodeop_p)(void *);
 extern int(**devfs_devfd_vnodeop_p)(void*);

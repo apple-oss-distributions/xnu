@@ -51,7 +51,6 @@ INSTALL_KF_MD_LIST = $(ARM_HEADER_FILES)
 INSTALL_KF_MD_LCL_LIST = \
 		cpu_topology.h \
 		dbgwrap.h \
-		machine_kpc.h \
 		pmap_public.h \
 		proc_reg.h \
 		smp.h \
@@ -64,7 +63,6 @@ EXPORT_MD_LIST = \
 		cpu_topology.h \
 		dbgwrap.h \
 		machine_cpu.h \
-		machine_kpc.h \
 		pmap_public.h \
 		proc_reg.h \
 		smp.h \

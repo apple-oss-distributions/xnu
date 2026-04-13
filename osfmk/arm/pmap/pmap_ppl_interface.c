@@ -77,11 +77,6 @@ PMAP_SUPPORT_PROTOTYPES(
 	pmap_release_ppl_pages_to_kernel, (void), PMAP_RELEASE_PAGES_TO_KERNEL_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
-	void,
-	pmap_ledger_verify_size, (size_t),
-	PMAP_LEDGER_VERIFY_SIZE_INDEX);
-
-PMAP_SUPPORT_PROTOTYPES(
 	ledger_t,
 	pmap_ledger_alloc, (void),
 	PMAP_LEDGER_ALLOC_INDEX);
@@ -234,27 +229,6 @@ mapping_free_prime(void)
 	if (kr != KERN_SUCCESS) {
 		panic("%s: failed, no pages available? kr=%d", __func__, kr);
 	}
-}
-
-/**
- * See pmap_ledger_verify_size_internal()'s function header for more information.
- */
-#if !XNU_MONITOR
-__attribute__((noreturn))
-#endif /* !XNU_MONITOR */
-void
-pmap_ledger_verify_size(size_t size)
-{
-#if XNU_MONITOR
-	pmap_ledger_verify_size_ppl(size);
-#else /* XNU_MONITOR */
-	/**
-	 * Ledger objects are only managed by the pmap on PPL-enabled systems. Other
-	 * systems will allocate them using a zone allocator.
-	 */
-	panic("%s: unsupported on non-PPL systems, size=%lu", __func__, size);
-	__builtin_unreachable();
-#endif /* XNU_MONITOR */
 }
 
 /**

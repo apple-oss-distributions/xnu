@@ -1,0 +1,12 @@
+#!/bin/sh
+
+dir="$(dirname "$0")"
+jar=tla2tools.jar
+
+exec java \
+    -XX:+UseParallelGC \
+    -XX:InitialRAMPercentage=25 \
+    -XX:MaxRAMPercentage=50 \
+    -cp "$dir/$jar" tlc2.TLC \
+    -workers auto \
+    "$@"

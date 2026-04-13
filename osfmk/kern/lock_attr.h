@@ -43,6 +43,7 @@ extern lck_attr_t       lck_attr_default;
 #define LCK_ATTR_NONE                   0
 #define LCK_ATTR_DEBUG                  0x00000001
 #define LCK_ATTR_RW_SHARED_PRIORITY     0x00010000
+#define LCK_ATTR_RW_NO_SLEEP            0x00020000
 #else /* !XNU_KERNEL_PRIVATE */
 typedef struct __lck_attr__ lck_attr_t;
 #endif /* !XNU_KERNEL_PRIVATE */

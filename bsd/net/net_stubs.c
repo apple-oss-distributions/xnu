@@ -375,6 +375,7 @@ STUB(ifnet_set_rx_flow_steering);
 STUB(ifnet_get_rx_flow_steering);
 STUB(ifnet_notify_tcp_keepalive_offload_timeout);
 STUB(ifnet_enable_cellular_thread_group);
+STUB(ifnet_get_rx_steering_rules);
 STUB(in6_localaddr);
 STUB(in_localaddr);
 STUB(in6addr_local);

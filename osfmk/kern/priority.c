@@ -961,9 +961,13 @@ sched_set_thread_mode(thread_t thread, sched_mode_t new_mode)
 	}
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
+	sched_mode_t old_mode = thread->sched_mode;
 	thread->sched_mode = new_mode;
 
 	SCHED(update_thread_bucket)(thread);
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_MODE_CHANGE) | DBG_FUNC_NONE,
+	    thread_tid(thread), old_mode, new_mode, thread->th_sched_bucket);
 }
 
 /*

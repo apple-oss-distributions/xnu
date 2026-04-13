@@ -181,6 +181,7 @@ enum {
 #endif
 
 
+
 extern unsigned int net_rxpoll;
 extern unsigned int net_affinity;
 extern unsigned int net_async;     /* 0: synchronous, 1: asynchronous */
@@ -283,6 +284,7 @@ struct proto_input_entry;
  */
 extern kern_return_t dlil_affinity_set(struct thread *, u_int32_t);
 extern boolean_t packet_has_vlan_tag(struct mbuf * m);
+extern bool packet_has_magic_pattern(struct mbuf * m);
 
 /*
  * Monitor routines.

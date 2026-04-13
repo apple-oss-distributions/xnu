@@ -2990,7 +2990,7 @@ task_set_cpuusage(task_t task, uint8_t percentage, uint64_t interval, uint64_t d
 
 			ledger_set_limit(task->ledger, task_ledgers.cpu_time, abstime, 0);
 			ledger_set_period(task->ledger, task_ledgers.cpu_time, interval);
-			ledger_set_action(task->ledger, task_ledgers.cpu_time, LEDGER_ACTION_BLOCK);
+			ledger_set_blocking(task->ledger, task_ledgers.cpu_time);
 		}
 	}
 

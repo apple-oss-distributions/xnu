@@ -27,8 +27,6 @@
  */
 
 #define LOCK_PRIVATE 1
-
-#include <mach_ldebug.h>
 #include <kern/locks_internal.h>
 #include <kern/lock_stat.h>
 #include <kern/lock_ptr.h>
@@ -163,13 +161,15 @@ static const struct hw_spin_policy hw_lck_ptr_spin_policy = {
 static void * __attribute__((noinline))
 hw_lck_ptr_contended(hw_lck_ptr_t *lck LCK_GRP_ARG(lck_grp_t *grp))
 {
-	hw_spin_policy_t  pol = &hw_lck_ptr_spin_policy;
-	hw_spin_timeout_t to  = hw_spin_compute_timeout(pol);
-	hw_spin_state_t   ss  = { };
+	hw_spin_policy_t  pol  = &hw_lck_ptr_spin_policy;
+	hw_spin_timeout_t to   = hw_spin_compute_timeout(pol);
+	hw_spin_state_t   ss   = { };
+	lck_mcs_id_t     *link = &lck->lck_ptr_mcs_tail;
+	lck_mcs_mode_t    mode = LCK_MCS_SPINNING;
 
 	hw_lck_ptr_t      value, nvalue;
-	lck_mcs_id_t      pidx;
-	lck_spin_txn_t    txn;
+	lck_mcs_node_t    node;
+	lck_mcs_id_t      idx;
 
 #if CONFIG_DTRACE || LOCK_STATS
 	uint64_t          spin_start;
@@ -185,57 +185,32 @@ hw_lck_ptr_contended(hw_lck_ptr_t *lck LCK_GRP_ARG(lck_grp_t *grp))
 	 *	and then spin until we're at the head of it.
 	 */
 
-	txn = lck_spin_txn_begin(lck);
-
-	pidx = os_atomic_xchg(&lck->lck_ptr_mcs_tail, txn.txn_mcs_id, release);
-	if (pidx) {
-		lck_spin_mcs_t pnode;
-		unsigned long ready;
-
-		pnode = lck_spin_mcs_decode(pidx);
-		os_atomic_store(&pnode->lsm_next, txn.txn_slot, relaxed);
-
-		while (!hw_spin_wait_until(&txn.txn_slot->lsm_ready, ready, ready)) {
-			hw_spin_should_keep_spinning(lck, pol, to, &ss);
-		}
-	}
+	node = lck_mcs_enqueue(link, mode, lck, pol);
+	idx  = lck_mcs_node_id(node);
 
 	/*
 	 *	We're now the first in line, wait for the lock bit
 	 *	to look ready and take it.
 	 */
 	do {
-		while (!hw_spin_wait_until(&lck->lck_ptr_value,
-		    value.lck_ptr_value, value.lck_ptr_locked == 0)) {
+		while (!hw_spin_wait_until_n(LOCK_SNOOP_SPINS_MCS,
+		    &lck->lck_ptr_value, value.lck_ptr_value,
+		    value.lck_ptr_locked == 0)) {
+			lck_mcs_spin_step(node, link, mode, NULL);
 			hw_spin_should_keep_spinning(lck, pol, to, &ss);
 		}
 
 		nvalue = value;
 		nvalue.lck_ptr_locked = true;
-		if (nvalue.lck_ptr_mcs_tail == txn.txn_mcs_id) {
-			nvalue.lck_ptr_mcs_tail = 0;
+		if (nvalue.lck_ptr_mcs_tail == idx) {
+			nvalue.lck_ptr_mcs_tail = LCK_MCS_ID_NULL;
 		}
 	} while (!os_atomic_cmpxchg(lck, value, nvalue, acquire));
 
 	/*
 	 *	We now have the lock, let's cleanup the MCS state.
-	 *
-	 *	If there is a node after us, notify that it
-	 *	is at the head of the interlock queue.
-	 *
-	 *	Then, clear the MCS node.
 	 */
-	if (value.lck_ptr_mcs_tail != txn.txn_mcs_id) {
-		lck_spin_mcs_t nnode;
-
-		while (!hw_spin_wait_until(&txn.txn_slot->lsm_next, nnode, nnode)) {
-			hw_spin_should_keep_spinning(lck, pol, to, &ss);
-		}
-
-		os_atomic_store(&nnode->lsm_ready, 1, relaxed);
-	}
-
-	lck_spin_txn_end(&txn);
+	lck_mcs_cleanup(node, mode, value.lck_ptr_mcs_tail != idx);
 
 #if CONFIG_DTRACE || LOCK_STATS
 	if (__improbable(spin_start)) {

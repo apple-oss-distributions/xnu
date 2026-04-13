@@ -132,14 +132,14 @@ static_assert((PV_BATCH_SIZE * sizeof(pv_entry_t)) <= PAGE_SIZE);
  * The number of PVEs to attempt to keep in the kernel-dedicated free list. If
  * the number of entries is below this value, then allocate more.
  */
-static uint32_t pv_kern_low_water_mark MARK_AS_PMAP_DATA = PV_KERN_LOW_WATER_MARK_DEFAULT;
+static uint32_t pv_kern_low_water_mark = PV_KERN_LOW_WATER_MARK_DEFAULT;
 
 /**
  * The initial number of PVEs to allocate during bootstrap (can be overriden in
  * the device tree, see pmap_compute_pv_targets() for more info).
  */
-uint32_t pv_alloc_initial_target MARK_AS_PMAP_DATA = PV_ALLOC_CHUNK_INITIAL * MAX_CPUS;
-uint32_t pv_kern_alloc_initial_target MARK_AS_PMAP_DATA = PV_KERN_ALLOC_CHUNK_INITIAL;
+uint32_t pv_alloc_initial_target = PV_ALLOC_CHUNK_INITIAL * MAX_CPUS;
+uint32_t pv_kern_alloc_initial_target = PV_KERN_ALLOC_CHUNK_INITIAL;
 
 /**
  * Global variables strictly used for debugging purposes. These variables keep
@@ -147,10 +147,10 @@ uint32_t pv_kern_alloc_initial_target MARK_AS_PMAP_DATA = PV_KERN_ALLOC_CHUNK_IN
  * total number of PVEs that have been added to the global or kernel-dedicated
  * free lists respectively.
  */
-static _Atomic unsigned int pv_page_count MARK_AS_PMAP_DATA = 0;
-static unsigned int ptd_page_count MARK_AS_PMAP_DATA = 0;
-static unsigned pmap_reserve_replenish_stat MARK_AS_PMAP_DATA = 0;
-static unsigned pmap_kern_reserve_alloc_stat MARK_AS_PMAP_DATA = 0;
+static _Atomic unsigned int pv_page_count = 0;
+static unsigned int ptd_page_count = 0;
+static unsigned pmap_reserve_replenish_stat = 0;
+static unsigned pmap_kern_reserve_alloc_stat = 0;
 
 /**
  * Number of linked lists of PVEs ("batches") in the global PV free ring buffer.
@@ -163,11 +163,11 @@ static unsigned pmap_kern_reserve_alloc_stat MARK_AS_PMAP_DATA = 0;
  * (called "batches"). Allocations out of this array will always operate on
  * a PV_BATCH_SIZE amount of entries at a time.
  */
-static pv_free_list_t pv_free_ring[PV_FREE_ARRAY_SIZE] MARK_AS_PMAP_DATA = {0};
+static pv_free_list_t pv_free_ring[PV_FREE_ARRAY_SIZE] = {0};
 
 /* Read and write indices for the pv_free ring buffer. */
-static uint16_t pv_free_read_idx MARK_AS_PMAP_DATA = 0;
-static uint16_t pv_free_write_idx MARK_AS_PMAP_DATA = 0;
+static uint16_t pv_free_read_idx = 0;
+static uint16_t pv_free_write_idx = 0;
 
 /**
  * Make sure the PV free array is small enough so that all elements can be
@@ -188,20 +188,20 @@ pv_free_array_n_elems(void)
 }
 
 /* Free list of PV entries dedicated for usage by the kernel. */
-static pv_free_list_t pv_kern_free MARK_AS_PMAP_DATA = {0};
+static pv_free_list_t pv_kern_free = {0};
 
 /* Locks for the global and kernel-dedicated PV free lists. */
-static MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pv_free_array_lock, 0);
-static MARK_AS_PMAP_DATA SIMPLE_LOCK_DECLARE(pv_kern_free_list_lock, 0);
+static SIMPLE_LOCK_DECLARE(pv_free_array_lock, 0);
+static SIMPLE_LOCK_DECLARE(pv_kern_free_list_lock, 0);
 
 /* Represents a null page table descriptor (PTD). */
 #define PTD_ENTRY_NULL ((pt_desc_t *) 0)
 
 /* Running free list of PTD nodes. */
-static pt_desc_t *ptd_free_list MARK_AS_PMAP_DATA = PTD_ENTRY_NULL;
+static pt_desc_t *ptd_free_list = PTD_ENTRY_NULL;
 
 /* The number of free PTD nodes available in the free list. */
-static unsigned int ptd_free_count MARK_AS_PMAP_DATA = 0;
+static unsigned int ptd_free_count = 0;
 
 /**
  * The number of PTD objects located in each page being used by the PTD
@@ -220,7 +220,7 @@ static SECURITY_READ_ONLY_LATE(unsigned) ptd_per_page = 0;
 static SECURITY_READ_ONLY_LATE(unsigned) ptd_info_offset = 0;
 
 /* Lock to protect accesses to the PTD free list. */
-static decl_simple_lock_data(, ptd_free_list_lock MARK_AS_PMAP_DATA);
+static decl_simple_lock_data(, ptd_free_list_lock);
 
 /**
  * Dummy _internal() prototypes so Clang doesn't complain about missing
@@ -285,6 +285,11 @@ bool surt_ready = false;
 /* Track number of instances a WC/RT mapping request is converted to Device-GRE. */
 static _Atomic unsigned int pmap_wcrt_on_non_dram_count = 0;
 #endif /* DEBUG || DEVELOPMENT */
+
+/**
+ * A lock protecting the delayed free page table list.
+ */
+LCK_MTX_DECLARE(delayed_free_pt_lock, &pmap_lck_grp);
 
 /**
  * This function is called once during pmap_bootstrap() to allocate and
@@ -437,22 +442,25 @@ pmap_data_bootstrap(void)
  * of pages is exposed to the debugger through the Low Globals, where it's used
  * to ensure that all pmap data is saved in an active core dump.
  *
- * @param mem The head of the queue of VM pages to add to the pmap's VM object.
+ * @param list The head of the queue of VM pages to add to the pmap's VM object.
  */
 void
-pmap_enqueue_pages(vm_page_t mem)
+pmap_enqueue_pages(vm_page_t list)
 {
-	vm_page_t m_prev;
+	struct vmpi_acct delayed_acct = { };
+	vm_page_t mem;
+
 	vm_object_lock(pmap_object);
-	while (mem != VM_PAGE_NULL) {
+
+	_vm_page_list_foreach_consume(mem, &list) {
 		const vm_object_offset_t offset =
 		    (vm_object_offset_t) ((ptoa(VM_PAGE_GET_PHYS_PAGE(mem))) - gPhysBase);
 
-		vm_page_insert_wired(mem, pmap_object, offset, VM_KERN_MEMORY_PTE);
-		m_prev = mem;
-		mem = NEXT_PAGE(m_prev);
-		*(NEXT_PAGE_PTR(m_prev)) = VM_PAGE_NULL;
+		vm_page_insert_internal(mem, pmap_object, offset,
+		    VM_KERN_MEMORY_PTE, VMPI_NONE, &delayed_acct);
 	}
+
+	vm_page_insert_flush_accounting(pmap_object, &delayed_acct);
 	vm_object_unlock(pmap_object);
 }
 
@@ -488,14 +496,13 @@ pmap_enqueue_pages(vm_page_t mem)
  *         value should always be KERN_SUCCESS (as the thread will block until
  *         there are free pages available).
  */
-MARK_AS_PMAP_TEXT kern_return_t
+kern_return_t
 pmap_page_alloc(pmap_paddr_t *ppa, unsigned options)
 {
 	assert(ppa != NULL);
 	pmap_paddr_t pa = 0;
 	PMAP_ASSERT_NOT_WRITING_HIB();
 	vm_page_t mem = VM_PAGE_NULL;
-	thread_t self = current_thread();
 
 	/**
 	 * It's not possible to allocate memory from the VM in a preemption disabled
@@ -520,21 +527,11 @@ pmap_page_alloc(pmap_paddr_t *ppa, unsigned options)
 	 * This field should only be modified by the local thread itself, so no lock
 	 * needs to be taken.
 	 */
-	uint16_t thread_options = self->options;
-	self->options |= TH_OPT_VMPRIV;
+	const boolean_t thread_vm_privileged = set_vm_privilege(true);
 
-	/**
-	 * If we're only allocating a single page, just grab one off the VM's
-	 * global page free list.
-	 */
-	vm_grab_options_t grab_options = VM_PAGE_GRAB_OPTIONS_NONE;
-	while ((mem = vm_page_grab_options(grab_options)) == VM_PAGE_NULL) {
-		if (options & PMAP_PAGE_ALLOCATE_NOWAIT) {
-			break;
-		}
-
-		VM_PAGE_WAIT();
-	}
+	vm_grab_options_t grab_options = ((options & PMAP_PAGE_ALLOCATE_NOWAIT) ?
+	    VM_PAGE_GRAB_NOPAGEWAIT : VM_PAGE_GRAB_OPTIONS_NONE);
+	mem = vm_page_grab_options(grab_options);
 
 	if (mem != VM_PAGE_NULL) {
 		vm_page_lock_queues();
@@ -542,9 +539,10 @@ pmap_page_alloc(pmap_paddr_t *ppa, unsigned options)
 		vm_page_unlock_queues();
 	}
 
-	self->options = thread_options;
+	set_vm_privilege(thread_vm_privileged);
 
 	if (mem == VM_PAGE_NULL) {
+		assert(options & PMAP_PAGE_ALLOCATE_NOWAIT);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
@@ -612,7 +610,7 @@ pmap_release_pages_fast(void)
  * @return A pointer to the head of the newly-allocated batch, or PV_ENTRY_NULL
  *         if empty.
  */
-MARK_AS_PMAP_TEXT static pv_entry_t *
+static pv_entry_t *
 pv_free_array_get_batch(void)
 {
 	pv_entry_t *new_batch = PV_ENTRY_NULL;
@@ -644,7 +642,7 @@ pv_free_array_get_batch(void)
  *
  * @return KERN_SUCCESS, or KERN_FAILURE if the global array is full.
  */
-MARK_AS_PMAP_TEXT static kern_return_t
+static kern_return_t
 pv_free_array_give_batch(pv_entry_t *batch_head)
 {
 	assert(batch_head != NULL);
@@ -672,7 +670,7 @@ pv_free_array_give_batch(pv_entry_t *batch_head)
  *              allocated node if the free list isn't empty, or a pointer to
  *              NULL if the list is empty.
  */
-MARK_AS_PMAP_TEXT static void
+static void
 pv_free_list_alloc(pv_free_list_t *free_list, pv_entry_t **pvepp)
 {
 	assert(pvepp != NULL);
@@ -698,7 +696,7 @@ pv_free_list_alloc(pv_free_list_t *free_list, pv_entry_t **pvepp)
  *              NULL if the list is empty. This pointer can't already be
  *              pointing to a valid entry before allocation.
  */
-MARK_AS_PMAP_TEXT static void
+static void
 pv_list_kern_alloc(pv_entry_t **pvepp)
 {
 	assert((pvepp != NULL) && (*pvepp == PV_ENTRY_NULL));
@@ -717,7 +715,7 @@ pv_list_kern_alloc(pv_entry_t **pvepp)
  * @param pve_tail Tail of the list to be returned.
  * @param pv_cnt Number of elements in the list to be returned.
  */
-MARK_AS_PMAP_TEXT static void
+static void
 pv_list_kern_free(pv_entry_t *pve_head, pv_entry_t *pve_tail, int pv_cnt)
 {
 	assert((pve_head != PV_ENTRY_NULL) && (pve_tail != PV_ENTRY_NULL));
@@ -740,13 +738,13 @@ pv_list_kern_free(pv_entry_t *pve_head, pv_entry_t *pve_tail, int pv_cnt)
  *              pointer can't already be pointing to a valid entry before
  *              allocation.
  */
-MARK_AS_PMAP_TEXT static void
+static void
 pv_list_alloc(pv_entry_t **pvepp)
 {
 	assert((pvepp != NULL) && (*pvepp == PV_ENTRY_NULL));
 
 	/* Disable preemption while working with per-CPU data. */
-	mp_disable_preemption();
+	disable_preemption();
 
 	pmap_cpu_data_t *pmap_cpu_data = pmap_get_cpu_data();
 	pv_free_list_alloc(&pmap_cpu_data->pv_free, pvepp);
@@ -779,7 +777,7 @@ pv_list_alloc(pv_entry_t **pvepp)
 	}
 
 pv_list_alloc_done:
-	mp_enable_preemption();
+	enable_preemption();
 
 	return;
 }
@@ -793,7 +791,7 @@ pv_list_alloc_done:
  * @param pve_tail Tail of the list to be returned.
  * @param pv_cnt Number of elements in the list to be returned.
  */
-MARK_AS_PMAP_TEXT void
+void
 pv_list_free(pv_entry_t *pve_head, pv_entry_t *pve_tail, unsigned int pv_cnt)
 {
 	assert((pve_head != PV_ENTRY_NULL) && (pve_tail != PV_ENTRY_NULL));
@@ -909,7 +907,7 @@ pv_list_free_done:
  * @return KERN_SUCCESS, or the value returned by pmap_page_alloc() upon
  *         failure.
  */
-MARK_AS_PMAP_TEXT static kern_return_t
+static kern_return_t
 pve_feed_page(unsigned alloc_flags)
 {
 	kern_return_t kr = KERN_FAILURE;
@@ -963,8 +961,6 @@ pve_feed_page(unsigned alloc_flags)
  *
  * @param pmap The pmap that owns the new mapping, or NULL if this is tracking
  *             an IOMMU translation.
- * @param lock_mode Which state the pmap lock is being held in if the mapping is
- *                  owned by a pmap, otherwise this is a don't care.
  * @param options PMAP_OPTIONS_* family of options passed from the caller.
  * @param pvepp Output parameter that will get updated with a pointer to the
  *              allocated node if none of the free lists are empty, or a pointer
@@ -974,11 +970,6 @@ pve_feed_page(unsigned alloc_flags)
  *                   pv_head_table entry previously obtained from pvh_lock().
  *                   This value will be updated if [locked_pvh->pai] needs to be
  *                   re-locked.
- * @param refcountp Pointer to a reference count that will be temporarily
- *                  atomically incremented in the event that [pmap]'s lock needs
- *                  to be temporarily dropped in order to satisfy the allocation.
- *                  This is typically used to prevent a page table from being
- *                  reclaimed while the lock is dropped.  May be NULL.
  *
  * @return These are the possible return values:
  *     PV_ALLOC_SUCCESS: A PVE object was successfully allocated.
@@ -986,27 +977,21 @@ pve_feed_page(unsigned alloc_flags)
  *                    allocating a new page failed.
  *     PV_ALLOC_RETRY: No objects were available on the free lists, so a new
  *                     page of PVE objects needed to be allocated. To do that,
- *                     the pmap and PVH locks were dropped. The caller may have
- *                     depended on these locks for consistency, so return and
- *                     let the caller retry the PVE allocation with the locks
- *                     held. Note that the locks have already been re-acquired
+ *                     PVH lock is temporarily dropped. The caller may have
+ *                     depended on this lock for consistency, so return and
+ *                     let the caller retry the PVE allocation with the lock
+ *                     held. Note that the lock has already been re-acquired
  *                     before this function exits.
  */
-MARK_AS_PMAP_TEXT pv_alloc_return_t
+pv_alloc_return_t
 pv_alloc(
 	pmap_t pmap,
-	pmap_lock_mode_t lock_mode,
 	unsigned int options,
 	pv_entry_t **pvepp,
-	locked_pvh_t *locked_pvh,
-	volatile uint16_t *refcountp)
+	locked_pvh_t *locked_pvh)
 {
 	assert((pvepp != NULL) && (*pvepp == PV_ENTRY_NULL));
 	assert(locked_pvh != NULL);
-
-	if (pmap != NULL) {
-		pmap_assert_locked(pmap, lock_mode);
-	}
 
 	pv_list_alloc(pvepp);
 	if (PV_ENTRY_NULL != *pvepp) {
@@ -1077,16 +1062,6 @@ pv_alloc(
 	 * from the VM (which requires grabbing a mutex).
 	 */
 	pvh_unlock(locked_pvh);
-	if (pmap != NULL) {
-		/**
-		 * Bump the provided refcount before we drop the pmap lock in order to prevent
-		 * page table reclamation while the lock is dropped.
-		 */
-		if (__improbable((refcountp != NULL) && (os_atomic_inc_orig(refcountp, relaxed) == UINT16_MAX))) {
-			panic("%s: pmap %p refcount %p overflow", __func__, pmap, refcountp);
-		}
-		pmap_unlock(pmap, lock_mode);
-	}
 
 	if ((kr = pve_feed_page(alloc_flags)) == KERN_SUCCESS) {
 		/**
@@ -1099,13 +1074,6 @@ pv_alloc(
 		pv_status = PV_ALLOC_RETRY;
 	} else {
 		pv_status = PV_ALLOC_FAIL;
-	}
-
-	if (pmap != NULL) {
-		pmap_lock(pmap, lock_mode);
-		if (__improbable((refcountp != NULL) && (os_atomic_dec_orig(refcountp, relaxed) == 0))) {
-			panic("%s: pmap %p refcount %p underflow", __func__, pmap, refcountp);
-		}
 	}
 
 	if (__improbable(options & PMAP_OPTIONS_NOPREEMPT)) {
@@ -1125,7 +1093,7 @@ pv_alloc(
  *
  * @param pvep Pointer to the PVE object to free.
  */
-MARK_AS_PMAP_TEXT void
+void
 pv_free(pv_entry_t *pvep)
 {
 	assert(pvep != PV_ENTRY_NULL);
@@ -1138,7 +1106,7 @@ pv_free(pv_entry_t *pvep)
  * default PV allocation amounts and the watermark level which determines how
  * many PVE objects are kept in the kernel-dedicated free list.
  */
-MARK_AS_PMAP_TEXT void
+void
 pmap_compute_pv_targets(void)
 {
 	DTEntry entry = NULL;
@@ -1191,7 +1159,7 @@ mapping_adjust(void)
  *         return value from pve_feed_page() on failure (could be caused by not
  *         being able to allocate a page).
  */
-MARK_AS_PMAP_TEXT kern_return_t
+kern_return_t
 mapping_free_prime_internal(void)
 {
 	kern_return_t kr = KERN_FAILURE;
@@ -1222,8 +1190,6 @@ mapping_free_prime_internal(void)
  *
  * @param pmap Either the pmap that owns the mapping being registered in
  *             pmap_enter_pv(), or NULL if this is an IOMMU mapping.
- * @param lock_mode Which state the pmap lock is being held in if the mapping is
- *                  owned by a pmap, otherwise this is a don't care.
  * @param options PMAP_OPTIONS_* family of options.
  * @param locked_pvh Input/output parameter pointing to the wrapped value of the
  *                   pv_head_table entry previously obtained from pvh_lock().
@@ -1236,10 +1202,9 @@ mapping_free_prime_internal(void)
  *         pv_alloc()'s function header for a detailed explanation of the
  *         possible return values.
  */
-MARK_AS_PMAP_TEXT static pv_alloc_return_t
+static pv_alloc_return_t
 pepv_convert_ptep_to_pvep(
 	pmap_t pmap,
-	pmap_lock_mode_t lock_mode,
 	unsigned int options,
 	locked_pvh_t *locked_pvh)
 {
@@ -1247,7 +1212,7 @@ pepv_convert_ptep_to_pvep(
 	assert(pvh_test_type(locked_pvh->pvh, PVH_TYPE_PTEP));
 
 	pv_entry_t *pvep = PV_ENTRY_NULL;
-	pv_alloc_return_t ret = pv_alloc(pmap, lock_mode, options, &pvep, locked_pvh, NULL);
+	pv_alloc_return_t ret = pv_alloc(pmap, options, &pvep, locked_pvh);
 	if (ret != PV_ALLOC_SUCCESS) {
 		return ret;
 	}
@@ -1312,8 +1277,6 @@ pepv_convert_ptep_to_pvep(
  *                    this page is also marked internal, then mark the page as
  *                    being "reusable". See the definition of PP_ATTR_REUSABLE
  *                    for more info.
- * @param lock_mode Which state the pmap lock is being held in if the mapping is
- *                  owned by a pmap, otherwise this is a don't care.
  * @param locked_pvh Input/output parameter pointing to the wrapped value of the
  *                   pv_head_table entry previously obtained from pvh_lock().
  *                   If the registration is successful, locked_pvh->pvh will be
@@ -1332,12 +1295,11 @@ pepv_convert_ptep_to_pvep(
  *         otherwise. See pv_alloc()'s function header for a detailed explanation
  *         of the possible return values.
  */
-MARK_AS_PMAP_TEXT pv_alloc_return_t
+pv_alloc_return_t
 pmap_enter_pv(
 	pmap_t pmap,
 	pt_entry_t *ptep,
 	unsigned int options,
-	pmap_lock_mode_t lock_mode,
 	locked_pvh_t *locked_pvh,
 	pv_entry_t **new_pvepp,
 	int *new_pve_ptep_idx)
@@ -1348,10 +1310,6 @@ pmap_enter_pv(
 	bool first_cpu_mapping = false;
 
 	PMAP_ASSERT_NOT_WRITING_HIB();
-
-	if (pmap != NULL) {
-		pmap_assert_locked(pmap, lock_mode);
-	}
 
 	uintptr_t pvh_flags = pvh_get_flags(locked_pvh->pvh);
 	const unsigned int pai = locked_pvh->pai;
@@ -1401,7 +1359,7 @@ pmap_enter_pv(
 			 * mappings can be tracked. If PVEs cannot hold more than a single
 			 * mapping, a second PVE will be added farther down.
 			 */
-			if ((ret = pepv_convert_ptep_to_pvep(pmap, lock_mode, options, locked_pvh)) != PV_ALLOC_SUCCESS) {
+			if ((ret = pepv_convert_ptep_to_pvep(pmap, options, locked_pvh)) != PV_ALLOC_SUCCESS) {
 				return ret;
 			}
 
@@ -1431,7 +1389,7 @@ pmap_enter_pv(
 			 */
 			pve_ptep_idx = 0;
 			pvep = PV_ENTRY_NULL;
-			if ((ret = pv_alloc(pmap, lock_mode, options, &pvep, locked_pvh, NULL)) != PV_ALLOC_SUCCESS) {
+			if ((ret = pv_alloc(pmap, options, &pvep, locked_pvh)) != PV_ALLOC_SUCCESS) {
 				return ret;
 			}
 
@@ -1664,7 +1622,7 @@ pmap_remove_pv(
  * @param num_pages The number of virtually-contiguous pages pointed to by
  *                  `ptdp` that will be used to prime the PTD allocator.
  */
-MARK_AS_PMAP_TEXT void
+void
 ptd_bootstrap(pt_desc_t *ptdp, unsigned int num_pages)
 {
 	assert(ptd_per_page > 0);
@@ -1693,6 +1651,7 @@ ptd_bootstrap(pt_desc_t *ptdp, unsigned int num_pages)
  * and don't associate the PTD with a specific pmap (that's what "unlinked"
  * means here).
  *
+ * @param pmap the pmap whose ledger needs to be updated or NULL.
  * @param alloc_flags Allocation flags passed to pmap_page_alloc(). See the
  *                    definition of that function for a detailed description of
  *                    the available flags.
@@ -1701,8 +1660,8 @@ ptd_bootstrap(pt_desc_t *ptdp, unsigned int num_pages)
  *         NULL otherwise (which indicates that a page failed to be allocated
  *         for new nodes).
  */
-MARK_AS_PMAP_TEXT pt_desc_t*
-ptd_alloc_unlinked(unsigned int alloc_flags)
+pt_desc_t*
+ptd_alloc_unlinked(pmap_t pmap, unsigned int alloc_flags)
 {
 	pt_desc_t *ptdp = PTD_ENTRY_NULL;
 
@@ -1788,7 +1747,12 @@ ptd_alloc_unlinked(unsigned int alloc_flags)
 
 	ptd_free_count--;
 
-	pmap_simple_unlock(&ptd_free_list_lock);
+	pmap_simple_unlock_nopreempt(&ptd_free_list_lock);
+
+	if (pmap) {
+		pmap_tt_ledger_credit(pmap, sizeof(*ptdp), false);
+	}
+	enable_preemption();
 
 	ptdp->pmap = NULL;
 
@@ -1826,26 +1790,17 @@ ptd_alloc_unlinked(unsigned int alloc_flags)
  * @return The allocated PTD object, or NULL if one failed to get allocated
  *         (which indicates that memory wasn't able to get allocated).
  */
-MARK_AS_PMAP_TEXT pt_desc_t*
+pt_desc_t*
 ptd_alloc(pmap_t pmap, unsigned int alloc_flags)
 {
-	pt_desc_t *ptdp = ptd_alloc_unlinked(alloc_flags);
+	pt_desc_t *ptdp = ptd_alloc_unlinked(pmap, alloc_flags);
 
 	if (ptdp == NULL) {
 		return NULL;
 	}
 
-	/**
-	 * For PTDs that are linked to pmaps, initialize the wired count to 1
-	 * to prevent pmap_remove() from concurrently attempting to free a
-	 * newly-installed page table page while it is still being initialized.
-	 * This wired reference will be atomically dropped in ptd_info_init()
-	 * once page table initialization is complete.
-	 */
-	ptdp->ptd_info->wiredcnt = 1;
 	ptdp->pmap = pmap;
 
-	pmap_tt_ledger_credit(pmap, sizeof(*ptdp));
 	return ptdp;
 }
 
@@ -1859,7 +1814,7 @@ ptd_alloc(pmap_t pmap, unsigned int alloc_flags)
  *
  * @param ptdp Pointer to the PTD object to deallocate.
  */
-MARK_AS_PMAP_TEXT void
+void
 ptd_deallocate(pt_desc_t *ptdp)
 {
 	pmap_t pmap = ptdp->pmap;
@@ -1869,15 +1824,16 @@ ptd_deallocate(pt_desc_t *ptdp)
 	(*(void **)ptdp) = (void *)ptd_free_list;
 	ptd_free_list = (pt_desc_t *)ptdp;
 	ptd_free_count++;
-	pmap_simple_unlock(&ptd_free_list_lock);
+	pmap_simple_unlock_nopreempt(&ptd_free_list_lock);
 
 	/**
 	 * If this PTD was being used to represent an IOMMU page then there won't be
 	 * an associated pmap, and therefore no ledger statistics to update.
 	 */
 	if ((uintptr_t)pmap != IOMMU_INSTANCE_NULL) {
-		pmap_tt_ledger_debit(pmap, sizeof(*ptdp));
+		pmap_tt_ledger_debit(pmap, sizeof(*ptdp), false);
 	}
+	enable_preemption();
 }
 
 /**
@@ -1889,27 +1845,24 @@ ptd_deallocate(pt_desc_t *ptdp)
  * which effectively guarantee the ordering of these updates.
  *
  * @param ptdp Pointer to the PTD object which contains the ptd_info_t field to
- *             update. Must match up with the `pmap` and `ptep` parameters.
+ *             update. Must match up with the `pmap` parameter.
  * @param pmap The pmap that owns the page table managed by the passed in PTD.
  * @param va Any virtual address that resides within the virtual address space
- *           being mapped by the page table pointed to by `ptep`.
+ *           being mapped by the page table.
  * @param level The level in the page table hierarchy that the table resides.
- * @param ptep A pointer into a page table that the passed in PTD manages. This
- *             page table must be owned by `pmap` and be the PTE that maps `va`.
  */
-MARK_AS_PMAP_TEXT void
+void
 ptd_info_init(
 	pt_desc_t *ptdp,
 	pmap_t pmap,
 	vm_map_address_t va,
-	unsigned int level,
-	pt_entry_t *ptep)
+	unsigned int level)
 {
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 
 	if (ptdp->pmap != pmap) {
-		panic("%s: pmap mismatch, ptdp=%p, pmap=%p, va=%p, level=%u, ptep=%p",
-		    __func__, ptdp, pmap, (void*)va, level, ptep);
+		panic("%s: pmap mismatch, ptdp=%p, pmap=%p, va=%p, level=%u",
+		    __func__, ptdp, pmap, (void*)va, level);
 	}
 
 	/**
@@ -1925,64 +1878,6 @@ ptd_info_init(
 	 * table's level is to the root.
 	 */
 	ptdp->va = (vm_offset_t) va & ~pt_attr_ln_pt_offmask(pt_attr, level - 1);
-}
-
-/**
- * Performs final initialization of a newly-allocated page table descriptor.
- * This function effectively marks the linked page table as eligible for deallocation
- * and should therefore be called once initialization and mapping of the page table is
- * complete.
- *
- * @param ptdp Pointer to the PTD object which contains the ptd_info_t field to
- *             finalize
- */
-void
-ptd_info_finalize(pt_desc_t *ptdp)
-{
-	/**
-	 * Atomically drop the wired count (previously initialized to 1) with
-	 * release ordering to ensure all prior page table initialization is visible
-	 * to any subsequent pmap operation that attempts to operate on the PTD.
-	 */
-	__assert_only unsigned short prev_refcnt =
-	    os_atomic_dec_orig(&ptdp->ptd_info->wiredcnt, release);
-	assert3u(prev_refcnt, >, 0);
-}
-
-/**
- * Credit a specific ledger entry within the passed in pmap's ledger object.
- *
- * @param pmap The pmap whose ledger should be updated.
- * @param entry The specifc ledger entry to update. This needs to be one of the
- *              task_ledger entries.
- * @param amount The amount to credit from the ledger.
- *
- * @return The return value from the credit operation.
- */
-kern_return_t
-pmap_ledger_credit(pmap_t pmap, int entry, ledger_amount_t amount)
-{
-	assert(pmap != NULL);
-
-	return ledger_credit(pmap->ledger, entry, amount);
-}
-
-/**
- * Debit a specific ledger entry within the passed in pmap's ledger object.
- *
- * @param pmap The pmap whose ledger should be updated.
- * @param entry The specifc ledger entry to update. This needs to be one of the
- *              task_ledger entries.
- * @param amount The amount to debit from the ledger.
- *
- * @return The return value from the debit operation.
- */
-kern_return_t
-pmap_ledger_debit(pmap_t pmap, int entry, ledger_amount_t amount)
-{
-	assert(pmap != NULL);
-
-	return ledger_debit(pmap->ledger, entry, amount);
 }
 
 /**
@@ -2154,7 +2049,7 @@ pmap_range_iterate(bool (^step)(pmap_io_range_t const *))
  *                   initialized. This number should correspond to the CPU
  *                   executing this code.
  */
-MARK_AS_PMAP_TEXT void
+void
 pmap_cpu_data_init_internal(unsigned int cpu_number)
 {
 	pmap_cpu_data_t *pmap_cpu_data = pmap_get_cpu_data();
@@ -2283,7 +2178,7 @@ pmap_paddr_inflight_barrier(pmap_paddr_t paddr)
  *
  * @return true if the page in question has no mappings, false otherwise.
  */
-inline bool
+__inline_testable bool
 pmap_is_page_free(pmap_paddr_t paddr)
 {
 	/**
@@ -2439,7 +2334,7 @@ typedef struct {
  *       pmap is created.
  */
 void
-surt_init()
+surt_init(void)
 {
 	if (__improbable(surt_ready)) {
 		panic("%s: initializing the SURT subsystem while it has already been initialized", __func__);
@@ -2456,7 +2351,7 @@ surt_init()
  * Lock the SURT lock.
  */
 static inline void
-surt_lock_lock()
+surt_lock_lock(void)
 {
 	assert(surt_ready);
 	lck_mtx_lock(&surt_lock);
@@ -2466,7 +2361,7 @@ surt_lock_lock()
  * Unlock the SURT lock.
  */
 static inline void
-surt_lock_unlock()
+surt_lock_unlock(void)
 {
 	lck_mtx_unlock(&surt_lock);
 }
@@ -2480,7 +2375,7 @@ surt_lock_unlock()
  * @return the PA of the SURT if one is found, 0 otherwise.
  */
 pmap_paddr_t
-surt_try_alloc()
+surt_try_alloc(void)
 {
 	surt_lock_lock();
 	pmap_paddr_t surt_pa = 0ULL;
@@ -2609,3 +2504,131 @@ pmap_wcrt_on_non_dram_count_increment_atomic()
 	os_atomic_inc(&pmap_wcrt_on_non_dram_count, relaxed);
 }
 #endif /* DEBUG || DEVELOPMENT */
+
+/**
+ * The below fields and functions implement a thread-call based mechanism for
+ * freeing leaf page table pages which can't be immediately freed by pmap_remove()
+ * due to other threads having them "pinned".  This is meant to be a cheap, scheduler-
+ * friendly delayed-free mechanism that avoids the need for spinning on the pinned
+ * count during page table deletion (may be quite costly if a pinning thread we're
+ * waiting for is scheduled out), or for calling thread_block() on the page table
+ * deletion path (which would require added complexity for pinning threads).
+ */
+
+/* Fire the thread call every 10s as long as the delayed-free queue is non-empty. */
+#define PMAP_DELAYED_FREE_PT_POLL_INTERVAL_SEC 10
+/* If the head of the FIFO queue hasn't changed in 10min, we have a problem. */
+#define PMAP_DELAYED_FREE_PT_LIMIT_SEC 600
+
+/* Thread callout to process delayed-free page tables */
+static thread_call_t pmap_delayed_free_pt_thread_call;
+/* FIFO queue of delayed-free page table pages */
+static vm_page_queue_head_t pmap_delayed_free_pt_q VM_PAGE_PACKED_ALIGNED;
+/* Deadline for panicking if we detect an entry stuck on the delayed-free queue. */
+static uint64_t pmap_delayed_free_pt_deadline = UINT64_MAX;
+
+/* Total number of tables freed using the delayed mechanism since boot, for diagnostic purposes. */
+unsigned long total_delayed_free_pt_count = 0;
+/* Current number of pending tables in the delayed-free queue, for diagnostic purposes. */
+unsigned long current_delayed_free_pt_count = 0;
+
+/**
+ * Thread callout for processing the delayed-free page table page queue.
+ *
+ * @param arg0 Thread callout arg, currently unused.
+ * @param arg1 Thread callout arg, currently unused.
+ */
+static void
+pmap_free_pt_delayed(void *arg0 __unused, void *arg1 __unused)
+{
+	bool requeue_thread_call = false;
+	bool beheaded = false;
+	lck_mtx_lock(&delayed_free_pt_lock);
+	vm_page_t m = (vm_page_t)vm_page_queue_first(&pmap_delayed_free_pt_q);
+	vm_page_t first_m = m;
+	vm_page_t next_m;
+	while (!vm_page_queue_end(&pmap_delayed_free_pt_q, (vm_page_queue_entry_t)m)) {
+		next_m = (vm_page_t)vm_page_queue_next(&(m->vmp_pageq));
+		pmap_paddr_t pa = (pmap_paddr_t)ptoa(VM_PAGE_GET_PHYS_PAGE(m));
+		pt_desc_t *ptdp = pa_get_ptd(pa);
+		ptd_info_t * const ptd_info = ptd_get_info(ptdp);
+		pmap_t pmap = ptdp->pmap;
+		/* ptdp should not be accessed beyond this point; it may be freed by pmap_tt_deallocate() below. */
+		const bool can_free = (os_atomic_load(&(ptd_info->wiredcnt), acquire) == 0);
+		if (can_free) {
+			vm_page_queue_remove(&pmap_delayed_free_pt_q, m, vmp_pageq);
+			--current_delayed_free_pt_count;
+			if (m == first_m) {
+				beheaded = true;
+			}
+		}
+		/**
+		 * Drop the lock to let others enqueue, potentially while we do the expensive
+		 * freeing and retyping.
+		 */
+		lck_mtx_unlock(&delayed_free_pt_lock);
+		if (can_free) {
+			pmap_tt_deallocate(pmap, pa, pt_attr_leaf_level(pmap_get_pt_attr(pmap)));
+			pmap_destroy(pmap);
+		}
+		lck_mtx_lock(&delayed_free_pt_lock);
+		m = next_m;
+	}
+
+	if (!vm_page_queue_empty(&pmap_delayed_free_pt_q)) {
+		requeue_thread_call = true;
+	}
+	lck_mtx_unlock(&delayed_free_pt_lock);
+	if (requeue_thread_call) {
+		uint64_t deadline;
+		clock_interval_to_deadline(PMAP_DELAYED_FREE_PT_LIMIT_SEC, NSEC_PER_SEC, &deadline);
+
+		/**
+		 * If the queue head is changing (indicating we've gotten rid of the oldest page)
+		 * or the deadline hasn't already been configured, set up our 10-minute panic timer.
+		 */
+		if (beheaded || (deadline < pmap_delayed_free_pt_deadline)) {
+			pmap_delayed_free_pt_deadline = deadline;
+		} else if (__improbable(mach_absolute_time() > pmap_delayed_free_pt_deadline)) {
+			panic("%s: vm_page_t %p on pmap delayed free pt queue for at least %d sec; wiredcnt leak?",
+			    __func__, first_m, PMAP_DELAYED_FREE_PT_LIMIT_SEC);
+		}
+		clock_interval_to_deadline(PMAP_DELAYED_FREE_PT_POLL_INTERVAL_SEC, NSEC_PER_SEC, &deadline);
+		thread_call_enter_delayed(pmap_delayed_free_pt_thread_call, deadline);
+	} else {
+		pmap_delayed_free_pt_deadline = UINT64_MAX;
+	}
+}
+
+/**
+ * Boot-time initializer for delayed-free objects.
+ */
+static void
+pmap_delayed_free_pt_init(void)
+{
+	vm_page_queue_init(&pmap_delayed_free_pt_q);
+	pmap_delayed_free_pt_thread_call = thread_call_allocate_with_options(pmap_free_pt_delayed, NULL,
+	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+}
+
+STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, pmap_delayed_free_pt_init);
+
+/**
+ * Enqueue a page table page in the delayed-free queue.
+ *
+ * @param pmap The pmap which owns the PT page to be queued for delayed freeing.
+ * @param pa The physical address of the page table page to be queued up for delayed freeing.
+ */
+void
+pmap_free_pt_delayed_enqueue(pmap_t pmap, pmap_paddr_t pa)
+{
+	pmap_reference(pmap);
+	vm_page_t page = vm_page_find_canonical((ppnum_t)atop(pa));
+	assert(page != VM_PAGE_NULL);
+	lck_mtx_lock(&delayed_free_pt_lock);
+	++total_delayed_free_pt_count;
+	++current_delayed_free_pt_count;
+	vm_page_queue_enter(&pmap_delayed_free_pt_q, page, vmp_pageq);
+	lck_mtx_unlock(&delayed_free_pt_lock);
+	thread_call_enter(pmap_delayed_free_pt_thread_call);
+}

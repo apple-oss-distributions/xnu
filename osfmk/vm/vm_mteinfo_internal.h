@@ -280,45 +280,7 @@ extern struct mte_cell_list mte_info_lists[MTE_LISTS_COUNT];
  */
 extern struct vm_page_free_queue mte_free_queues[MTE_FREE_NOT_QUEUED];
 
-/*!
- * The queue of claimable tag storage pages.
- * (pages with <= 8 associated free pages and inactive).
- */
-extern struct vm_page_free_queue mte_claimable_queue;
-
 #ifndef VM_MTE_FF_VERIFY
-
-/*!
- * @abstract
- * The type for MTE related per-cpu free queues.
- *
- * @field free_tagged_pages
- * The per-cpu free list of tagged pages.
- * Pages on this list have the @c VM_PAGE_ON_FREE_LOCAL_Q state.
- * Their associated cell will have state @c MTE_STATE_ACTIVE.
- * This list is only accessed by the current CPU with preemption disabled.
- *
- * @field free_claimed_pages
- * The per-cpu free queue of claimed pages.
- * Pages on this list have the @c VM_PAGE_ON_FREE_LOCAL_Q state.
- * Their associated cell will have state @c MTE_STATE_CLAIMED.
- * Access to this queue is protected by the @c free_claimed_lock.
- *
- * @field free_claimed_lock
- * The lock protecting the per-cpu free queue of claimed pages.
- * This allows for the refill thread to steal claimed pages from this queue.
- *
- * @field deactivate_suspend
- * Per-cpu marker that suspends page deactivations until the current CPU
- * has finished some untagging (see mteinfo_tag_storage_deactivate_barrier()).
- */
-typedef struct mte_pcpu {
-	vm_page_queue_head_t   free_claimed_pages VM_PAGE_PACKED_ALIGNED;
-	vm_page_t              free_tagged_pages;
-	lck_ticket_t           free_claimed_lock;
-	uint32_t               deactivate_suspend;
-} *mte_pcpu_t;
-PERCPU_DECL(struct mte_pcpu, mte_pcpu);
 
 /*!
  * @var vm_cpu_free_count
@@ -330,10 +292,24 @@ PERCPU_DECL(struct mte_pcpu, mte_pcpu);
  *
  * @var vm_cpu_free_tagged_count
  * Scalable counter of the number of free claimed pages on CPU free lists.
+ *
+ * @var vm_mte_tagged_pages_grabbed
+ * Scalable counter of the number of tagged pages grabbed, cumulative.
+ *
+ * @var vm_mte_tagged_pages_grabbed_for_untagged
+ * Scalable counter of the number of tagged pages grabbed to service untagged
+ * demand, cumulative.
+ *
+ * @var vm_mte_inline_ts_activated_count
+ * Scalable counter of the number of tag storage pages activated for tagged
+ * memory.
  */
 SCALABLE_COUNTER_DECLARE(vm_cpu_free_count);
 SCALABLE_COUNTER_DECLARE(vm_cpu_free_tagged_count);
 SCALABLE_COUNTER_DECLARE(vm_cpu_free_claimed_count);
+SCALABLE_COUNTER_DECLARE(vm_mte_tagged_pages_grabbed);
+SCALABLE_COUNTER_DECLARE(vm_mte_tagged_pages_grabbed_for_untagged);
+SCALABLE_COUNTER_DECLARE(vm_mte_inline_ts_activated_count);
 
 #endif /* VM_MTE_FF_VERIFY */
 
@@ -425,6 +401,25 @@ extern uint64_t vm_page_tag_storage_compressor_relocation_count;
 extern uint32_t vm_page_free_wanted_tagged;
 extern uint32_t vm_page_free_wanted_tagged_privileged;
 
+/*!
+ * @abstract
+ * Counters for MEMINFO tracepoints.
+ *
+ * @var vm_mte_refill_ts_considered_count
+ * Number of tag storage pages the refill thread has considered.
+ *
+ * @var vm_mte_refill_ts_activated_count
+ * Number of tag storage pages for normal tagged memory the refill thread has
+ * activated.
+ *
+ * @var vm_mte_refill_ts_deactivated_count
+ * Number of tag storage pages for normal tagged memory the refill thread has
+ * deactivated.
+ */
+extern uint32_t vm_mte_refill_ts_considered_count;
+extern uint64_t vm_mte_refill_ts_activated_count;
+extern uint64_t vm_mte_refill_ts_deactivated_count;
+
 #ifndef VM_MTE_FF_VERIFY
 /*!
  * @var vm_cpu_claimed_count
@@ -450,6 +445,12 @@ extern bool vm_mte_tag_storage_for_compressor;
  * Which VM tags can use tag storage.
  */
 extern bitmap_t vm_mte_tag_storage_for_vm_tags_mask[BITMAP_LEN(VM_MEMORY_COUNT)];
+
+/*!
+ * @abstract
+ * Compute the current number of claimable tag storage pages.
+ */
+extern uint32_t mteinfo_claimable_count(void);
 
 #if MACH_KERNEL_PRIVATE
 #pragma mark Tag storage space state machine
@@ -645,6 +646,7 @@ extern void mteinfo_wake_fill_thread(void);
  * Clients cannot get more pages than the free queue has; attempting to do so
  * will cause a panic.
  *
+ * @param vmp_pcpu      The per-cpu vm page structure for the current CPU.
  * @param options       The grab options.
  * @param mem_class     The memory class to allocate from.
  * @param num_pages     The number of pages to grab.
@@ -654,6 +656,7 @@ extern void mteinfo_wake_fill_thread(void);
  * A list of pages; the list will be at least num_pages long.
  */
 extern vm_page_list_t mteinfo_free_queue_grab(
+	vm_page_pcpu_t          vmp_pcpu,
 	vm_grab_options_t       options,
 	vm_memory_class_t       mem_class,
 	unsigned int            num_pages,

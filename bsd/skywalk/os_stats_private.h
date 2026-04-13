@@ -797,6 +797,7 @@
 	X(FSW_STATS_RX_FLOW_NOT_FOUND,		"RxFlowNotFound",	"\t\t%llu dropped, flow lookup failure\n")        \
 	X(FSW_STATS_RX_FLOW_TRACK_ERR,		"RxFlowTrackErr",	"\t\t%llu dropped, flow tracker error\n") \
 	X(FSW_STATS_RX_FLOW_NONVIABLE,		"RxFlowNonviable",	"\t\t%llu dropped, flow already nonviable\n") \
+	X(FSW_STATS_RX_FLOW_DISABLED,		"RxFlowDisabled",	"\t\t%llu dropped, flow disabled\n") \
 	X(FSW_STATS_RX_FLOW_TORNDOWN,		"RxFlowTornDown",	"\t\t%llu dropped, flow already torndown\n")      \
 	X(FSW_STATS_RX_DST_RING_FULL,		"RxDstRingFull",	"\t\t%llu dropped, destination ring full\n") \
 	X(FSW_STATS_RX_COPY_PKT2PKT,		"RxCopyPktToPkt",	"\t\t%llu copied pkt  -> pkt\n")        \
@@ -864,6 +865,7 @@
 	X(FSW_STATS_TX_FLOW_TRACK_ERR,		"TxFlowTrackErr",	"\t\t%llu dropped, flow tracker error\n") \
 	X(FSW_STATS_TX_FLOW_BAD_ID,		"TxFLowBadID",		"\t\t%llu dropped, flow id invalid\n") \
 	X(FSW_STATS_TX_FLOW_NONVIABLE,		"TxFlowNonviable",	"\t\t%llu dropped, flow already nonviable\n") \
+	X(FSW_STATS_TX_FLOW_DISABLED,		"TxFlowDisabled",	"\t\t%llu dropped, flow disabled\n") \
 	X(FSW_STATS_TX_FLOW_TORNDOWN,		"TxFlowTornDown",	"\t\t%llu dropped, flow already torndown\n") \
 	X(FSW_STATS_TX_BAD_LISTENER,		"TxBadListener",	"\t\t%llu dropped, flow as listener only\n")      \
 	X(FSW_STATS_TX_AQM_DROP,		"TxAQMDrop",		"\t\t%llu dropped, AQM enqueue failure\n")        \

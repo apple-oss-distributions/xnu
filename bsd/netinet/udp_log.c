@@ -67,9 +67,8 @@ SYSCTL_STRING(_net_inet_udp_log, OID_AUTO, enable_usage, CTLFLAG_RD | CTLFLAG_LO
 #undef X
 
 /*
- *
+ * For binding
  */
-static int sysctl_udp_log_port SYSCTL_HANDLER_ARGS;
 
 int udp_log_bind_anon_port = 0;
 SYSCTL_INT(_net_inet_udp_log, OID_AUTO, bind_anon_port,
@@ -78,22 +77,22 @@ SYSCTL_INT(_net_inet_udp_log, OID_AUTO, bind_anon_port,
 int udp_log_local_port_included = 0;
 SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, local_port_included,
     CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_local_port_included, 0, &sysctl_udp_log_port, "I", "");
+    &udp_log_local_port_included, 0, &sysctl_inp_log_port, "I", "");
 
 int udp_log_remote_port_included = 0;
 SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, remote_port_included,
     CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_remote_port_included, 0, &sysctl_udp_log_port, "I", "");
+    &udp_log_remote_port_included, 0, &sysctl_inp_log_port, "I", "");
 
 int udp_log_local_port_excluded = 0;
 SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, local_port_excluded,
     CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_local_port_excluded, 0, &sysctl_udp_log_port, "I", "");
+    &udp_log_local_port_excluded, 0, &sysctl_inp_log_port, "I", "");
 
 int udp_log_remote_port_excluded = 0;
 SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, remote_port_excluded,
     CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_remote_port_excluded, 0, &sysctl_udp_log_port, "I", "");
+    &udp_log_remote_port_excluded, 0, &sysctl_inp_log_port, "I", "");
 
 #define UDP_LOG_RATE_LIMIT 1000
 static unsigned int udp_log_rate_limit = UDP_LOG_RATE_LIMIT;
@@ -122,8 +121,7 @@ static bool udp_log_rate_exceeded_logged = false;
 
 static uint64_t udp_log_current_period = 0;
 
-#define ADDRESS_STR_LEN (MAX_IPv6_STR_LEN + 6)
-
+os_log_t udp_log_handle = OS_LOG_DEFAULT;
 
 #define UDP_LOG_COMMON_FMT \
 	    "[%s:%u<->%s:%u] " \
@@ -247,7 +245,7 @@ udp_log_common(struct inpcb *inp, const char *event, int error)
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
 	    inp->inp_flowhash
 
-	os_log(OS_LOG_DEFAULT, UDP_LOG_CONNECTION_FMT,
+	os_log(udp_log_handle, UDP_LOG_CONNECTION_FMT,
 	    UDP_LOG_CONNECTION_ARGS);
 
 #undef UDP_LOG_CONNECTION_FMT
@@ -388,7 +386,7 @@ udp_log_connection_summary(struct inpcb *inp)
 	    inp->inp_fadv_total_time, \
 	    inp->inp_fadv_cnt
 
-	os_log(OS_LOG_DEFAULT, UDP_LOG_CONNECTION_SUMMARY_FMT,
+	os_log(udp_log_handle, UDP_LOG_CONNECTION_SUMMARY_FMT,
 	    UDP_LOG_CONNECTION_SUMMARY_ARGS);
 #undef UDP_LOG_CONNECTION_SUMMARY_FMT
 #undef UDP_LOG_CONNECTION_SUMMARY_ARGS
@@ -444,7 +442,7 @@ udp_log_message(const char *func_name, int line_no, struct inpcb *inp, const cha
 	    UDP_LOG_COMMON_PCB_ARGS, \
 	    message
 
-	os_log(OS_LOG_DEFAULT, UDP_LOG_MESSAGE_FMT,
+	os_log(udp_log_handle, UDP_LOG_MESSAGE_FMT,
 	    UDP_LOG_MESSAGE_ARGS);
 
 #undef UDP_LOG_MESSAGE_FMT
@@ -580,24 +578,8 @@ udp_log_drop_pcb(void *hdr, struct udphdr *uh, struct inpcb *inp, bool outgoing,
 	    so->so_error, \
 	    reason
 
-	os_log(OS_LOG_DEFAULT, UDP_LOG_DROP_PCB_FMT,
+	os_log(udp_log_handle, UDP_LOG_DROP_PCB_FMT,
 	    UDP_LOG_DROP_PCB_ARGS);
 #undef UDP_LOG_DROP_PCB_FMT
 #undef UDP_LOG_DROP_PCB_ARGS
-}
-static int
-sysctl_udp_log_port SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int error;
-	int new_value = *(uint16_t *)oidp->oid_arg1;
-
-	error = sysctl_handle_int(oidp, &new_value, 0, req);
-	if (error == 0) {
-		if (new_value < 0 || new_value > UINT16_MAX) {
-			return EINVAL;
-		}
-		*(int *)oidp->oid_arg1 = new_value;
-	}
-	return error;
 }

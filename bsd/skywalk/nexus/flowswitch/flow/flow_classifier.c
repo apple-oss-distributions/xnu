@@ -106,9 +106,14 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	 * incrementally validated from l3 to l4
 	 */
 	uint8_t l3hlen = 0;    /* IP header length */
-	uint16_t l3tlen = 0;    /* total length of IP packet */
+	/*
+	 * Total length of IP packet. Must be at least 32 bits
+	 * since ip6->ip6_plen takes up a whole 16 bits and
+	 * when header lengths are added, 16 bits can overflow.
+	 */
+	uint32_t l3tlen = 0;
 	uint8_t l4hlen = 0;    /* TCP/UDP header length */
-	uint16_t ulen = 0;      /* user data length */
+	uint32_t ulen = 0;      /* user data length */
 
 	int error = 0;
 

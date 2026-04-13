@@ -115,7 +115,7 @@ run_munch_mte(void)
 T_DECL(vm_mte_ts_for_tagged_malloc,
     "Make sure we don't use tag storage page for tagged malloc heap",
     T_META_BOOTARGS_SET("mte_ts_vm_tag=1_4,7_9,11_12"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC)
 {
@@ -142,7 +142,7 @@ T_DECL(test_mte_tag_storage_reclamation,
     "vm.mte.compress_ts_pages_used should decrease ).",
     T_META_BOOTARGS_SET("mte_ts_vmtag=2,7,11"),
     T_META_BOOTARGS_SET("mte_ts_compressor=1"),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_ASROOT(true),
     T_META_ENABLED(!TARGET_OS_XR) /* rdar://165838166 */)

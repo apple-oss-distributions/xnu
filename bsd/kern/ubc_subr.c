@@ -4434,7 +4434,8 @@ accelerate_entitlement_queries(
 	kern_return_t ret = KERN_NOT_SUPPORTED;
 
 #if CODE_SIGNING_MONITOR
-	CEQueryContext_t ce_ctx = NULL;
+	const CEContext_t *ce_ctx = NULL;
+	const void *ce_legacy_ctx = NULL;
 	const char *signing_id = NULL;
 
 	ret = csm_accelerate_entitlements(cs_blob->csb_csm_obj, &ce_ctx);
@@ -4443,23 +4444,34 @@ accelerate_entitlement_queries(
 		return EPERM;
 	}
 
+	/* Adjust the OSEntitlements context with AMFI */
 	if (ret == KERN_SUCCESS) {
-		/* Call cannot not fail at this stage */
-		ret = csm_acquire_signing_identifier(cs_blob->csb_csm_obj, &signing_id);
-		assert(ret == KERN_SUCCESS);
+		if (amfi->OSEntitlements.adjustContext != NULL) {
+			ret = amfi->OSEntitlements.adjustContext(cs_blob->csb_entitlements, cs_blob, ce_ctx);
+		} else {
+			/* Query the legacy context from the V2 context */
+			libCoreEntitlements->contextGetLegacyContext(ce_ctx, &ce_legacy_ctx);
 
-		/* Adjust the OSEntitlements context with AMFI */
-		ret = amfi->OSEntitlements.adjustContextWithMonitor(
-			cs_blob->csb_entitlements,
-			ce_ctx,
-			cs_blob->csb_csm_obj,
-			signing_id,
-			cs_blob->csb_flags);
+			/* Call cannot not fail at this stage */
+			ret = csm_acquire_signing_identifier(cs_blob->csb_csm_obj, &signing_id);
+			assert(ret == KERN_SUCCESS);
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+			ret = amfi->OSEntitlements.adjustContextWithMonitor(
+				cs_blob->csb_entitlements,
+				(CEQueryContext_t)ce_legacy_ctx,
+				cs_blob->csb_csm_obj,
+				signing_id,
+				cs_blob->csb_flags);
+#pragma GCC diagnostic pop
+		}
+
+		/* Check for any error in adjustment */
 		if (ret != KERN_SUCCESS) {
 			printf("unable to adjust OSEntitlements context with monitor: %d\n", ret);
 			return EPERM;
 		}
-
 		return 0;
 	}
 #endif
@@ -4472,9 +4484,13 @@ accelerate_entitlement_queries(
 	 */
 	assert(ret == KERN_NOT_SUPPORTED);
 
-	ret = amfi->OSEntitlements.adjustContextWithoutMonitor(
-		cs_blob->csb_entitlements,
-		cs_blob);
+	if (amfi->OSEntitlements.adjustContext != NULL) {
+		ret = amfi->OSEntitlements.adjustContext(cs_blob->csb_entitlements, cs_blob, NULL);
+	} else {
+		ret = amfi->OSEntitlements.adjustContextWithoutMonitor(
+			cs_blob->csb_entitlements,
+			cs_blob);
+	}
 
 	if (ret != KERN_SUCCESS) {
 		printf("unable to adjust OSEntitlements context without monitor: %d\n", ret);

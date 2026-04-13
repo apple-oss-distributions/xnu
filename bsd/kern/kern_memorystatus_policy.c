@@ -340,7 +340,8 @@ memorystatus_pick_action(jetsam_state_t state,
 		 * and if there are high watermark kills left to do.
 		 */
 		if (memorystatus_swap_all_apps) {
-			if (status.msh_swappable_compressor_segments_over_limit && !vm_swapout_thread_running && !os_atomic_load(&vm_swapout_wake_pending, relaxed)) {
+			if (status.msh_swappable_compressor_segments_over_limit &&
+			    !vm_swapout_is_running()) {
 				/*
 				 * TODO: The swapper will keep running until it has drained the entire early swapout queue.
 				 * That might be overly aggressive & we should look into tuning it.
@@ -351,8 +352,7 @@ memorystatus_pick_action(jetsam_state_t state,
 				return MEMORYSTATUS_PROCESS_SWAPIN_QUEUE;
 			} else if (status.msh_swappable_compressor_segments_over_limit) {
 				memorystatus_log_info(
-					"memorystatus: Skipping swap wakeup because the swap thread is already running. vm_swapout_thread_running=%d, vm_swapout_wake_pending=%d\n",
-					vm_swapout_thread_running, os_atomic_load(&vm_swapout_wake_pending, relaxed));
+					"memorystatus: Skipping swap wakeup because the swap thread is already running.\n");
 			}
 		}
 
@@ -964,7 +964,10 @@ memorystatus_freeze_thread_should_run()
 		}
 	}
 
-	if (memorystatus_frozen_shared_mb_max && (memorystatus_frozen_shared_mb >= memorystatus_frozen_shared_mb_max)) {
+	if (!memorystatus_freeze_shared_memory &&
+	    (memorystatus_frozen_shared_mb_max != 0) &&
+	    (memorystatus_frozen_shared_mb >= memorystatus_frozen_shared_mb_max)
+	    ) {
 		memorystatus_freezer_stats.mfs_skipped_shared_mb_high_count++;
 		return false;
 	}

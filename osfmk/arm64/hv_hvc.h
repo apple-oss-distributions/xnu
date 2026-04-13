@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021, 2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -29,10 +29,12 @@
 #pragma once
 
 /* Function Identifiers. */
-#define HVC_FID_FAST_CALL    0x80000000
-#define HVC_FID_HVC64        0x40000000
-#define HVC_FID_CPU          0x01000000
-#define HVC_FID_OEM          0x03000000
+#define HVC_FID_FAST_CALL            0x80000000
+#define HVC_FID_HVC64                0x40000000
+#define HVC_FID_CPU                  0x01000000
+#define HVC_FID_OEM                  0x03000000
+/* Defined in ARM DEN 0028F */
+#define HVC_FID_HYPERVISOR_VENDOR    0x06000000
 
 #define HVC_FID_SC_MASK      0xff000000
 #define HVC_FID_NUM_MASK     0x0000ffff
@@ -73,3 +75,25 @@
 
 /* Common UUID identifying Apple as the implementor. */
 #define VMAPPLE_HVC_UID "3B878185-AA62-4E1F-9DC9-D6799CBB6EBB"
+
+/* Apple Para-nested Hypervisor Service */
+#define HVC_NESTED_SERVICE    (HVC_FID_FAST_CALL | HVC_FID_HVC64 | HVC_FID_HYPERVISOR_VENDOR)
+
+/* Maximum number of nested services. Power of 2 */
+#define USER_PARAVIRTUALIZED_NESTED_SERVICE_COUNT (1<<4)
+#define KERNEL_PARAVIRTUALIZED_NESTED_SERVICE_COUNT (1<<5)
+// User originated calls
+#define VMAPPLE_NESTED_CAPABILITIES    (HVC_NESTED_SERVICE | 0x0)
+
+// Kernel originated calls
+#define VMAPPLE_NESTED_VCPU_RUN        (HVC_NESTED_SERVICE | 0x10)
+#define VMAPPLE_NESTED_VCPU_INIT       (HVC_NESTED_SERVICE | 0x11)
+#define VMAPPLE_NESTED_VCPU_DESTROY    (HVC_NESTED_SERVICE | 0x12)
+#define VMAPPLE_NESTED_VCPU_RUN_CANCEL (HVC_NESTED_SERVICE | 0x13)
+#define VMAPPLE_NESTED_VM_INIT         (HVC_NESTED_SERVICE | 0x14)
+#define VMAPPLE_NESTED_SPACE_MAP       (HVC_NESTED_SERVICE | 0x15)
+#define VMAPPLE_NESTED_SPACE_UNMAP     (HVC_NESTED_SERVICE | 0x16)
+#define VMAPPLE_NESTED_SPACE_PROTECT   (HVC_NESTED_SERVICE | 0x17)
+#define VMAPPLE_NESTED_VM_DESTROY      (HVC_NESTED_SERVICE | 0x18)
+#define VMAPPLE_NESTED_INIT            (HVC_NESTED_SERVICE | 0x19)
+#define VMAPPLE_NESTED_CONTEXT_VERSION (HVC_NESTED_SERVICE | 0x1A)

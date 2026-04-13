@@ -15,6 +15,12 @@
 
 #include "net_test_lib.h"
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"));
+
+
 /* sizeof(struct ip6_pktopts) */
 #define SIZEOF_STRUCT_IP6_PKTOPTS 192
 

@@ -93,7 +93,7 @@
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 #if MACH_KERNEL_PRIVATE
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 struct task_watchport_elem;
 
@@ -112,6 +112,7 @@ struct ipc_port_request {
 		ipc_port_request_index_t        ipr_next;
 	};
 };
+xnu_static_assert_struct_size(struct ipc_port_request, 16);
 
 KALLOC_ARRAY_TYPE_DECL(ipc_port_request_table, struct ipc_port_request);
 
@@ -140,9 +141,10 @@ struct ipc_port {
 		    , ip_kernel_iotier_override:2 /* kernel iotier override */
 		    , ip_kernel_qos_override:3    /* kernel qos override */
 		    /* development bits only */
-		    , ip_srp_lost_link:1          /* special reply port turnstile link chain broken */
-		    , ip_srp_msg_sent:1           /* special reply port msg sent */
-		    , __ip_unused:7               /* reserve of bits */
+		    , ip_srp_lost_link:1           /* special reply port turnstile link chain broken */
+		    , ip_srp_msg_sent:1            /* special reply port msg sent */
+		    , ip_enforce_reply_semantics:1 /* enforce reply port semantics */
+		    , __ip_unused:6                /* reserve of bits */
 		    );
 		struct waitq            ip_waitq;
 	};
@@ -155,7 +157,7 @@ struct ipc_port {
 	 */
 	union {
 		struct ipc_space       *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_receiver") ip_receiver;
-		struct ipc_port        *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_destination") ip_destination;
+		struct ipc_port        *XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("ipc_port.ip_destination") ip_destination;
 		ipc_port_timestamp_t    ip_timestamp;
 	};
 
@@ -165,10 +167,11 @@ struct ipc_port {
 	};
 
 	union {
-		ipc_importance_task_t   ip_imp_task; /* use accessor ip_get_imp_task() */
-		struct ipc_port        *ip_sync_inheritor_port;
-		struct knote           *ip_sync_inheritor_knote;
-		struct turnstile       *ip_sync_inheritor_ts;
+		ipc_importance_task_t   XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_imp_task") ip_imp_task; /* use accessor ip_get_imp_task() */
+		/* following three are ip_is_special_reply_port disambiguated by ip_sync_link_state */
+		struct ipc_port        *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_sync_inheritor_port")ip_sync_inheritor_port;
+		struct knote           *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_sync_inheritor_knote")ip_sync_inheritor_knote;
+		struct turnstile       *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_sync_inheritor_ts")ip_sync_inheritor_ts;
 	};
 
 	/*
@@ -178,8 +181,8 @@ struct ipc_port {
 	 */
 	union {
 		int                     ip_pid;
-		struct task_watchport_elem *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_twe") ip_twe;
-		struct ipc_port *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_pdrequest") ip_pdrequest;
+		struct task_watchport_elem *XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("ipc_port.ip_twe") ip_twe;
+		struct ipc_port *XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("ipc_port.ip_pdrequest") ip_pdrequest;
 	};
 
 	ipc_port_request_table_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_request") ip_requests;
@@ -197,6 +200,12 @@ struct ipc_port {
 	uint32_t                        ip_made_pid;    /* for debugging */
 #endif  /* MACH_ASSERT */
 };
+#if DEVELOPMENT || DEBUG
+xnu_static_assert_struct_size(struct ipc_port, 160);
+#else /* DEVELOPMENT || DEBUG */
+xnu_static_assert_struct_size(struct ipc_port, 144);
+#endif /* DEVELOPMENT || DEBUG */
+
 
 static inline bool
 ip_in_pset(ipc_port_t port)
@@ -319,14 +328,19 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_is_moving(port)              io_state_is_moving(ip_to_object(port)->io_state)
 #define ip_is_immovable_receive(port)   (ip_to_object(port)->io_state == IO_STATE_IN_SPACE_IMMOVABLE)
 
-#define ip_is_exception_port(port)              (ip_type(port) == IOT_EXCEPTION_PORT)
-#define ip_is_provisional_reply_port(port)      (ip_type(port) == IOT_PROVISIONAL_REPLY_PORT)
+#define ip_is_exception_port(port)              (ip_is_exception_port_type(ip_type(port)))
+#define ip_is_exception_port_type(type)         ((type) == IOT_EXCEPTION_PORT)
+#define ip_is_notification_port(port)           (ip_is_notification_port_type(ip_type(port)))
+#define ip_is_notification_port_type(type)      ((type) == IOT_NOTIFICATION_PORT)
+#define ip_is_weak_reply_port(port)             (ip_type(port) == IOT_WEAK_REPLY_PORT)
 #define ip_is_special_reply_port_type(type)     ((type) == IOT_SPECIAL_REPLY_PORT)
 #define ip_is_special_reply_port(port)          (ip_is_special_reply_port_type(ip_type(port)))
 #define ip_is_any_service_port(port)            ip_is_any_service_port_type(ip_type(port))
 #define ip_is_strong_service_port(port)         ip_is_strong_service_port_type(ip_type(port))
+#define ip_is_weak_service_port_type(type)      ((type) == IOT_WEAK_SERVICE_PORT)
 #define ip_is_bootstrap_port(port)              ip_is_bootstrap_port_type(ip_type(port))
 #define ip_is_port_array_allowed(port)          (ip_type(port) == IOT_CONNECTION_PORT_WITH_PORT_ARRAY)
+#define ip_is_connection_port(port)             (ip_type(port) == IOT_CONNECTION_PORT)
 #define ip_is_timer(port)                       (ip_type(port) == IOT_TIMER_PORT)
 
 static inline bool
@@ -482,7 +496,7 @@ ip_get_death_time(ipc_port_t port)
 static inline ipc_importance_task_t
 ip_get_imp_task(ipc_port_t port)
 {
-	return (!ip_is_kobject(port) && !ip_is_special_reply_port(port) && port->ip_tempowner) ? port->ip_imp_task : IIT_NULL;
+	return (!ip_is_special_reply_port(port) && port->ip_tempowner) ? port->ip_imp_task : IIT_NULL;
 }
 
 extern kern_return_t ipc_port_translate_send(
@@ -927,6 +941,10 @@ extern mach_port_name_t ipc_port_copyout_send_pinned(
 	ipc_port_t      sright,
 	ipc_space_t     space);
 
+extern mach_port_name_t ipc_port_copyout_send_allow_immovable(
+	ipc_port_t      sright,
+	ipc_space_t     space);
+
 extern void ipc_port_thread_group_blocked(
 	ipc_port_t      port);
 
@@ -993,7 +1011,7 @@ extern void ipc_port_send_update_inheritor(
 extern int ipc_special_reply_get_pid_locked(
 	ipc_port_t              port);
 
-#pragma GCC visibility pop
+__exported_pop
 #endif /* MACH_KERNEL_PRIVATE */
 #if KERNEL_PRIVATE
 
@@ -1017,6 +1035,7 @@ struct thread_attr_for_ipc_propagation {
 	};
 	uint64_t tafip_reserved;
 };
+xnu_static_assert_struct_size(struct thread_attr_for_ipc_propagation, 16);
 
 extern kern_return_t ipc_port_propagate_thread_attr(
 	ipc_port_t             port,

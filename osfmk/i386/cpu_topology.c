@@ -29,6 +29,8 @@
 #include <mach/machine.h>
 #include <mach/processor.h>
 #include <kern/kalloc.h>
+#include <kern/sched_common.h>
+#include <kern/smr.h>
 #include <i386/cpu_affinity.h>
 #include <i386/cpu_topology.h>
 #include <i386/cpu_threads.h>
@@ -90,7 +92,7 @@ cpu_topology_sort(int ncpus)
 
 	assert(machine_info.physical_cpu == 1);
 	assert(machine_info.logical_cpu == 1);
-	assert(master_cpu == 0);
+	assert(boot_cpu_id == 0);
 	assert(cpu_number() == 0);
 	assert(cpu_datap(0)->cpu_number == 0);
 
@@ -172,7 +174,7 @@ cpu_topology_sort(int ncpus)
 	 */
 	TOPO_DBG("cpu_topology_start() creating affinity sets:ncpus=%d max_cpus=%d\n", ncpus, machine_info.max_cpus);
 
-	uint32_t pset_cluster_id = 0;
+	assert3u(sched_num_psets, ==, 1);
 	for (i = 0; i < machine_info.max_cpus; i++) {
 		cpu_data_t              *cpup = cpu_datap(i);
 		x86_lcpu_t              *lcpup = cpu_to_lcpu(i);
@@ -188,14 +190,13 @@ cpu_topology_sort(int ncpus)
 			x86_affinities = aset;
 			aset->num = x86_affinity_count++;
 			aset->cache = LLC_cachep;
-			if (i == master_cpu) {
+			if (i == boot_cpu_id) {
 				aset->pset = processor_pset(master_processor);
 			} else {
-				pset_cluster_id++;
-				aset->pset = pset_create(CLUSTER_TYPE_SMP, pset_cluster_id, pset_cluster_id);
-				if (aset->pset == PROCESSOR_SET_NULL) {
-					panic("cpu_topology_start: pset_create");
-				}
+				sched_num_psets++;
+				aset->pset = pset_create_smp((pset_id_t)sched_num_psets);
+				assert3p(aset->pset, !=, PROCESSOR_SET_NULL);
+				pset_node_add_pset(sched_boot_pset_node, aset->pset);
 			}
 			TOPO_DBG("\tnew set %p(%d) pset %p for cache %p\n",
 			    aset, aset->num, aset->pset, aset->cache);
@@ -204,8 +205,9 @@ cpu_topology_sort(int ncpus)
 		TOPO_DBG("\tprocessor_init set %p(%d) lcpup %p(%d) cpu %p processor %p\n",
 		    aset, aset->num, lcpup, lcpup->cpu_num, cpup, cpup->cpu_processor);
 
-		if (i != master_cpu) {
+		if (i != boot_cpu_id) {
 			processor_init(cpup->cpu_processor, i, aset->pset);
+			smr_cpu_init(processor_array[i]);
 		}
 
 		if (lcpup->core->num_lcpus > 1) {

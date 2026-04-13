@@ -88,8 +88,10 @@
 #include <machine/cpu_capabilities.h>
 #include <machine/machine_routines.h>
 #include <arm/cpu_data_internal.h>
+#include <arm/cpu_internal.h>
 #include <arm/pmap.h>
 #include <arm/pmap/pmap_pt_geometry.h>
+#include <pexpert/pexpert.h>
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)
 #include <arm64/amcc_rorgn.h>
@@ -97,11 +99,24 @@
 
 #include <arm64/machine_machdep.h>
 
+#if CONFIG_SPTM
+#include <sptm/sptm_xnu.h>
+#endif /* CONFIG_SPTM */
+
 kern_return_t arm64_backtrace_test(void);
 kern_return_t arm64_lock_test(void);
 kern_return_t arm64_munger_test(void);
 kern_return_t arm64_pan_test(void);
 kern_return_t arm64_late_pan_test(void);
+#if DEVELOPMENT || DEBUG
+#if CONFIG_SPTM
+void __attribute__((noreturn)) sptm_vs_xnu_panic_test(void);
+void __attribute__((noreturn)) xnu_vs_sptm_panic_test(void);
+void __attribute__((noreturn)) sptm_vs_sptm_panic_test(void);
+#endif /* CONFIG_SPTM */
+void __attribute__((noreturn)) xnu_vs_xnu_panic_test(void);
+void __attribute__((noreturn)) stack_overflow_panic_test(void);
+#endif /* DEVELOPMENT || DEBUG */
 #if defined(HAS_APPLE_PAC)
 #include <ptrauth.h>
 kern_return_t arm64_ropjop_test(void);
@@ -139,6 +154,9 @@ kern_return_t arm64_panic_lockdown_test(void);
 #include <arm64/speculation.h>
 kern_return_t arm64_speculation_guard_test(void);
 
+
+#include <machine/static_if.h>
+kern_return_t arm64_static_if_asm_test(void);
 
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
@@ -703,15 +721,15 @@ lt_bound_thread(void *arg, wait_result_t wres __unused)
 }
 
 static void
-lt_cluster_bound_thread(void *arg, char cluster_type)
+lt_pset_bound_thread(void *arg, char pset_type)
 {
 	void (*func)(void) = (void (*)(void))arg;
 
 	thread_t thread = current_thread();
 
-	kern_return_t kr = thread_soft_bind_cluster_type(thread, cluster_type);
+	kern_return_t kr = thread_soft_bind_pset_type(thread, pset_type);
 	if (kr != KERN_SUCCESS) {
-		printf("%s>failed to bind to cluster type %c\n", __FUNCTION__, cluster_type);
+		printf("%s>failed to bind to pset type %c\n", __FUNCTION__, pset_type);
 	}
 
 	func();
@@ -722,14 +740,14 @@ lt_cluster_bound_thread(void *arg, char cluster_type)
 static void
 lt_e_thread(void *arg, wait_result_t wres __unused)
 {
-	lt_cluster_bound_thread(arg, 'e');
+	lt_pset_bound_thread(arg, 'e');
 }
 
 
 static void
 lt_p_thread(void *arg, wait_result_t wres __unused)
 {
-	lt_cluster_bound_thread(arg, 'p');
+	lt_pset_bound_thread(arg, 'p');
 }
 
 static void
@@ -985,7 +1003,7 @@ lt_test_locks()
 	thread_count = 0;
 	for (processor_t processor = processor_list; processor != NULL; processor = processor->processor_list) {
 		processor_set_t pset = processor->processor_set;
-		switch (pset->pset_cluster_type) {
+		switch (pset->pset_type) {
 		case PSET_AMP_P:
 			lt_start_lock_thread_with_bind(lt_p_thread, lt_stress_ticket_lock);
 			break;
@@ -1930,10 +1948,11 @@ panic_lockdown_pacda_get_invalid_ptr(void)
 static bool
 arm64_panic_lockdown_is_mte_enabled(void)
 {
-	if (!is_mte_enabled) {
+	if (!mte_kern_enabled()) {
 		T_LOG("MTE disabled");
+		return false;
 	}
-	return is_mte_enabled;
+	return true;
 }
 #endif /* HAS_MTE */
 
@@ -2194,7 +2213,7 @@ extract_mte_tag(void *ptr)
 kern_return_t
 mte_test(void)
 {
-	if (!is_mte_enabled) {
+	if (!mte_kern_enabled()) {
 		T_SKIP("MTE disabled");
 		return KERN_SUCCESS;
 	}
@@ -2325,7 +2344,7 @@ mte_test(void)
 kern_return_t
 mte_copyio_recovery_handler_test(void)
 {
-	if (!is_mte_enabled) {
+	if (!mte_kern_enabled()) {
 		T_SKIP("MTE disabled");
 		return KERN_SUCCESS;
 	}
@@ -2857,5 +2876,163 @@ arm64_backtrace_test(void)
 	/* Reset the debug data so it can be filled later if needed */
 	debug_panic_lockdown_initiator_state.initiator_pc = 0;
 #endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
+	return KERN_SUCCESS;
+}
+
+#if DEVELOPMENT || DEBUG
+/*
+ * Helper function to choose a remote CPU to send a test IPI to.
+ */
+static cpu_data_t *
+find_different_cpu(void)
+{
+	cpu_data_t *current_cpu = getCpuDatap();
+	cpu_data_t *target_cpu;
+
+	for (int cpu_id = 0; cpu_id < MAX_CPUS; cpu_id++) {
+		target_cpu = cpu_datap(cpu_id);
+		if (target_cpu != NULL && target_cpu != current_cpu) {
+			return target_cpu;
+		}
+	}
+	return NULL;
+}
+
+#if CONFIG_SPTM
+static void __attribute__((noreturn))
+sptm_vs_xnu_panic_vector(void)
+{
+	panic("sptm_vs_xnu panic test");
+}
+
+static void __attribute__((noreturn))
+xnu_vs_sptm_panic_vector(void)
+{
+	sptm_iofilter_protected_write(0, 0, 8);
+	panic("xnu_vs_sptm panic test - should not reach here");
+}
+
+static void __attribute__((noreturn))
+sptm_vs_sptm_panic_vector(void)
+{
+	sptm_iofilter_protected_write(0, 0, 8);
+	panic("sptm_vs_sptm panic test - should not reach here");
+}
+
+/*
+ * Test SPTM winning a race to panic vs XNU panicking on a different
+ * processor.
+ */
+void __attribute__((noreturn))
+sptm_vs_xnu_panic_test(void)
+{
+	cpu_data_t *target_cpu = find_different_cpu();
+
+	cpu_signal_set_test_vector(sptm_vs_xnu_panic_vector);
+	if (target_cpu != NULL) {
+		cpu_signal_deferred(target_cpu, SIGPtest);
+	}
+	sptm_iofilter_protected_write(0, 0, 8);
+	panic("sptm_vs_xnu panic test - should not reach here");
+}
+
+/*
+ * Test XNU winning a race to panic vs SPTM panicking on a different
+ * processor.
+ */
+void __attribute__((noreturn))
+xnu_vs_sptm_panic_test(void)
+{
+	cpu_data_t *target_cpu = find_different_cpu();
+
+	cpu_signal_set_test_vector(xnu_vs_sptm_panic_vector);
+	if (target_cpu != NULL) {
+		cpu_signal_deferred(target_cpu, SIGPtest);
+	}
+	panic("xnu_vs_sptm panic test");
+}
+
+/*
+ * Test SPTM racing to panic on two CPUs.
+ */
+void __attribute__((noreturn))
+sptm_vs_sptm_panic_test(void)
+{
+	cpu_data_t *target_cpu = find_different_cpu();
+
+	cpu_signal_set_test_vector(sptm_vs_sptm_panic_vector);
+	if (target_cpu != NULL) {
+		cpu_signal_deferred(target_cpu, SIGPtest);
+	}
+	sptm_iofilter_protected_write(0, 0, 8);
+	panic("sptm_vs_sptm panic test - should not reach here");
+}
+#endif /* CONFIG_SPTM */
+
+static void __attribute__((noreturn))
+xnu_vs_xnu_panic_vector(void)
+{
+	panic("xnu_vs_xnu panic test");
+}
+
+/*
+ * Test XNU panicking on two CPUs very close together.
+ */
+void __attribute__((noreturn))
+xnu_vs_xnu_panic_test(void)
+{
+	cpu_data_t *target_cpu = find_different_cpu();
+
+	cpu_signal_set_test_vector(xnu_vs_xnu_panic_vector);
+	if (target_cpu != NULL) {
+		cpu_signal_deferred(target_cpu, SIGPtest);
+	}
+	xnu_vs_xnu_panic_vector();
+}
+
+/*
+ * Test creating a stack overflow to ensure we panic
+ * properly in that case.
+ */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winfinite-recursion"
+void __attribute__((noreturn))
+__attribute((disable_tail_calls))
+stack_overflow_panic_test(void)
+{
+	stack_overflow_panic_test();
+	panic("stack_overflow_panic_test");
+}
+#pragma clang diagnostic pop
+#endif /* DEVELOPMENT || DEBUG */
+
+kern_return_t
+arm64_static_if_asm_test(void)
+{
+	extern unsigned int arm64_static_if_asm_test_key_true(void);
+	extern unsigned int arm64_static_if_asm_test_key_true_to_false(void);
+	extern unsigned int arm64_static_if_asm_test_key_false(void);
+	extern unsigned int arm64_static_if_asm_test_key_false_to_true(void);
+
+	/*
+	 * Each testcase exercises STATIC_BRANCH_IF_ENABLED and
+	 * STATIC_BRANCH_IF_DISABLED.  They return the number of times the key
+	 * evaluated to true.
+	 */
+	const unsigned int KEY_DISABLED = 0;
+	const unsigned int KEY_ENABLED = 2;
+
+	unsigned int n = arm64_static_if_asm_test_key_true();
+	T_EXPECT_EQ_UINT(n, KEY_ENABLED, "static_if_test_key_true should be enabled");
+
+	n = arm64_static_if_asm_test_key_true_to_false();
+	T_EXPECT_EQ_UINT(n, KEY_DISABLED, "static_if_test_key_true_to_false should be disabled");
+
+	n = arm64_static_if_asm_test_key_false();
+	T_EXPECT_EQ_UINT(n, KEY_DISABLED, "static_if_test_key_false should be disabled");
+
+	n = arm64_static_if_asm_test_key_false_to_true();
+	T_EXPECT_EQ_UINT(n, KEY_ENABLED, "static_if_test_key_false_to_true should be enabled");
+
 	return KERN_SUCCESS;
 }

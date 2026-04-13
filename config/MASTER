@@ -414,9 +414,9 @@ options		VM_PRESSURE_EVENTS		# <vm_pressure_events>
 options		CONFIG_SECLUDED_MEMORY		# <config_secluded_memory>
 
 #
-# Ledger features
+# Enable microstackshot-based memory usage sampling.
 #
-options		CONFIG_LEDGER_INTERVAL_MAX	# <config_ledger_interval_max>
+options     CONFIG_MEMORY_MICROSTACKSHOT    # <config_memory_microstackshot>
 
 #
 # I/O Scheduling
@@ -596,7 +596,6 @@ options		CONFIG_PROC_RESOURCE_LIMITS	# Per process limits for resources like fil
 #	of this option is significant.
 #
 options		MACH_ASSERT	#		# <mach_assert>
-options		MACH_VM_DEBUG	#				# <debug>
 options		CONFIG_ZLEAKS	# Live zone leak debugging	# <zleaks>
 options		CONFIG_VOUCHER_DEPRECATED # Enable deprecated voucher managers # <config_voucher_deprecated>
 

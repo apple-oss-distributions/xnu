@@ -1134,7 +1134,8 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			ln_setexpire(ln, timenow + nd6_gctimer);
 		}
 
-		rt_lookup_qset_id(rt, false);
+		uint64_t qset_id = rt_lookup_qset_id(rt, false);
+		nd6log3(info, "nd6_na_input: qset_id=%lld", qset_id);
 
 		/*
 		 * Enqueue work item to invoke callback for this
@@ -1271,7 +1272,8 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			 */
 			/* Enqueue work item to invoke callback for this route entry */
 			if (llchange) {
-				rt_lookup_qset_id(rt, false);
+				uint64_t qset_id = rt_lookup_qset_id(rt, false);
+				nd6log3(info, "nd6_na_input: llchanged qset_id=%lld", qset_id);
 				route_event_enqueue_nwk_wq_entry(rt, NULL,
 				    ROUTE_LLENTRY_CHANGED, NULL, TRUE);
 			}
@@ -1950,17 +1952,17 @@ nd6_dad_timer(struct ifaddr *ifa)
 		goto done;
 	}
 
-	nd6log2(debug, "%s - %s ifp %s ia6_flags 0x%x\n",
-	    __func__,
-	    ip6_sprintf(&ia->ia_addr.sin6_addr),
-	    if_name(ia->ia_ifp),
-	    ia->ia6_flags);
-
 	dp = nd6_dad_find(ifa, NULL);
 	if (dp == NULL) {
 		nd6log0(error, "nd6_dad_timer: DAD structure not found\n");
 		goto done;
 	}
+
+	nd6log2(debug, "%s - %s ifp %s ia6_flags 0x%x\n",
+	    __func__,
+	    ip6_sprintf(&ia->ia_addr.sin6_addr),
+	    if_name(ia->ia_ifp),
+	    ia->ia6_flags);
 	IFA_LOCK(&ia->ia_ifa);
 	if (ia->ia6_flags & IN6_IFF_DUPLICATED) {
 		nd6log0(error, "nd6_dad_timer: called with duplicated address "

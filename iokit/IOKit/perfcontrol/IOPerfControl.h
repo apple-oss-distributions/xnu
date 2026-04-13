@@ -18,6 +18,10 @@ enum{
 	kIOPerfControlClientWorkUntracked = 0,
 };
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wunnecessary-virtual-specifier"
+
 /*!
  * @class IOPerfControlClient : public OSObject
  * @abstract Class which implements an interface allowing device drivers to participate in performance control.
@@ -297,6 +301,7 @@ public:
 			kGPU,
 			kMSR,
 			kStorage,
+			kKeyStore,
 		};
 
 		struct DriverState {
@@ -395,7 +400,7 @@ private:
 	static constexpr size_t kWorkTableIndexBits = 24;
 	static constexpr size_t kWorkTableMaxSize = (1 << kWorkTableIndexBits) - 1; // - 1 since
 	// kIOPerfControlClientWorkUntracked takes number 0
-	static constexpr size_t kWorkTableIndexMask = (const size_t)mask(kWorkTableIndexBits);
+	static constexpr size_t kWorkTableIndexMask = (const size_t)bits_mask(kWorkTableIndexBits);
 
 	uint64_t allocateToken(thread_group *thread_group);
 	void deallocateToken(uint64_t token);
@@ -414,6 +419,8 @@ private:
 
 	IOPerfControlClientData clientData;
 };
+
+#pragma clang diagnostic pop
 
 #endif /* __cplusplus */
 #endif /* KERNEL_PRIVATE */

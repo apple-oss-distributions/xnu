@@ -982,7 +982,6 @@ decmpfs_update_attributes(vnode_t vp, struct vnode_attr *vap)
 				if (error == 0) {
 					/*
 					 * Allow the flag to be set since the decmpfs attribute
-					 * is present.
 					 *
 					 * If we're creating a dataless file we do not want to
 					 * truncate it to zero which allows the file resolver to

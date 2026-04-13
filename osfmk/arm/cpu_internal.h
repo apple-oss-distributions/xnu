@@ -57,6 +57,11 @@ extern void                     cpu_signal_cancel(
 	cpu_data_t              *target,
 	cpu_signal_t            signal);
 
+#if DEVELOPMENT || DEBUG
+extern void                     cpu_signal_set_test_vector(
+	void                    (*func)(void));
+#endif /* DEVELOPMENT || DEBUG */
+
 extern bool cpu_has_SIGPdebug_pending(void);
 
 extern unsigned int real_ncpus;

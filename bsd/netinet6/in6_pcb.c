@@ -116,6 +116,7 @@
 #include <netinet/in_systm.h>
 #include <netinet/ip6.h>
 #include <netinet/ip_var.h>
+#include <netinet/inp_log.h>
 
 #include <netinet6/ip6_var.h>
 #include <netinet6/nd6.h>
@@ -392,6 +393,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				error = EADDRINUSE;
+				INP_LOG(inp, nam, NULL, "error EADDRINUSE port %u is restricted", ntohs(lport));
 				goto done;
 			}
 
@@ -409,6 +411,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 				    (!(t->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
+					INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					error = EADDRINUSE;
@@ -431,6 +434,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 					    (!(t->inp_flags2 & INP2_EXTERNAL_PORT) ||
 					    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) ||
 					    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
+						INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 						lck_rw_done(&pcbinfo->ipi_lock);
 						socket_lock(so, 0);
 						error = EADDRINUSE;
@@ -451,6 +455,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 							lck_rw_done(&pcbinfo->ipi_lock);
 							socket_lock(so, 0);
 							error = EADDRINUSE;
+							INP_LOG(inp, nam, NULL, "error EADDRINUSE netns_reserve_in failed for port %u", ntohs(lport));
 							goto done;
 						}
 					}
@@ -467,6 +472,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 #if SKYWALK
 				netns_release(&inp->inp_wildcard_netns_token);
 #endif /* SKYWALK */
+				INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				error = EADDRINUSE;
@@ -486,6 +492,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 				    (!(t->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
+					INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 #if SKYWALK
 					netns_release(&inp->inp_wildcard_netns_token);
 #endif /* SKYWALK */
@@ -508,6 +515,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 						lck_rw_done(&pcbinfo->ipi_lock);
 						socket_lock(so, 0);
 						error = EADDRINUSE;
+						INP_LOG(inp, nam, NULL, "error EADDRINUSE netns_reserve_in failed for port %u", ntohs(lport));
 						goto done;
 					}
 				}
@@ -520,6 +528,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 				if (netns_reserve_in6(&inp->inp_netns_token,
 				    sin6.sin6_addr, (uint8_t)SOCK_PROTO(so), lport,
 				    NETNS_BSD, NULL) != 0) {
+					INP_LOG(inp, nam, NULL, "error EADDRINUSE netns_reserve_in6 failed for port %u", ntohs(lport));
 					netns_release(&inp->inp_wildcard_netns_token);
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
@@ -772,6 +781,7 @@ in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	    &addr6 : &inp->in6p_laddr, inp->inp_lport, lifscope, 0, NULL);
 	socket_lock(so, 0);
 	if (pcb != NULL) {
+		INP_LOG(pcb, NULL, nam, "already connected, causing error EADDRINUSE");
 		in_pcb_checkstate(pcb, WNT_RELEASE, pcb == inp ? 1 : 0);
 		error = EADDRINUSE;
 		goto done;

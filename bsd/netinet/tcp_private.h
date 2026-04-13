@@ -386,6 +386,11 @@ typedef struct conninfo_tcp {
 	struct tcp_info         tcpci_tcp_info;/* TCP info */
 } conninfo_tcp_t;
 
+/*
+ * Entitlement for the syctl "net.inet.tcp.info"
+ */
+#define NET_INET_TCP_INFO_ENTITLEMENT "com.apple.private.network.tcp.info"
+
 #pragma pack()
 
 struct mptcp_itf_stats {

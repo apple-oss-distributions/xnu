@@ -48,7 +48,8 @@
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.net"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("networking")
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("vlubet")
 	);
 
 #define MAX_IPv6_STR_LEN        64

@@ -53,7 +53,7 @@ void                    memory_object_control_collapse(
 __private_extern__
 vm_object_t             memory_object_control_to_vm_object(
 	memory_object_control_t control);
-__private_extern__
+__exported_hidden
 vm_object_t             memory_object_to_vm_object(
 	memory_object_t mem_obj);
 

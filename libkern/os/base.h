@@ -391,12 +391,22 @@ typedef void (^os_block_t)(void);
 #define __static_testable
 // inline makes the functions not visible
 #define __inline_testable
-// This marks a function which could be overriden by a mock in a unit-tester
-#define __mockable __attribute__((noinline))
+#define __always_inline_testable
+#define __header_always_inline_testable
+// This marks a function which could be overridden by a mock in a unit-tester
+// noinline - inlined instance of the function can't be interposed by the mock
+// weak - trick the compiler to not do any constant-propagation in to arguments and out of the return value
+#define __mockable __attribute__((noinline,used,weak))
+// The 'weak' attribute breaks the mocking of functions that have a definition with the same name in a different
+// .dylib. To avoid a problem in these rare cases __mockable_strong should be used. see also check_mocks_original
+#define __mockable_strong __attribute__((noinline,used))
 #else // __BUILDING_XNU_LIBRARY__
 #define __static_testable static
 #define __inline_testable inline
+#define __always_inline_testable __attribute((always_inline))
+#define __header_always_inline_testable __header_always_inline
 #define __mockable
+#define __mockable_strong
 #endif // __BUILDING_XNU_LIBRARY__
 
 #endif // XNU_KERNEL_PRIVATE

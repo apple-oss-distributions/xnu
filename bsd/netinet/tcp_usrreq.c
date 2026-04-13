@@ -116,9 +116,9 @@
 
 #include <net/sockaddr_utils.h>
 
-extern char *proc_name_address(void *p);
+#include <IOKit/IOBSD.h>
 
-errno_t tcp_fill_info_for_info_tuple(struct info_tuple *, struct tcp_info *);
+extern char *proc_name_address(void *p);
 
 static int tcp_sysctl_info(struct sysctl_oid *, void *, int, struct sysctl_req *);
 static void tcp_connection_fill_info(struct tcpcb *tp,
@@ -1531,6 +1531,7 @@ tcp_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 		    (otp->t_flags & TF_RCVD_CC)) {
 			otp = tcp_close(otp);
 		} else {
+			INP_LOG_PAIR(inp, NULL, nam, oinp, "EADDRINUSE caused by");
 			if (oinp != inp) {
 				socket_unlock(oinp->inp_socket, 1);
 			}
@@ -1667,6 +1668,7 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 		    (otp->t_flags & TF_RCVD_CC)) {
 			otp = tcp_close(otp);
 		} else {
+			INP_LOG_PAIR(inp, NULL, nam, oinp, "EADDRINUSE caused by");
 			error = EADDRINUSE;
 			goto done;
 		}
@@ -1936,13 +1938,15 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 	ti->tcpi_max_pacing_rate = inp->inp_max_pacing_rate;
 }
 
-__private_extern__ errno_t
+static errno_t
 tcp_fill_info_for_info_tuple(struct info_tuple *itpl, struct tcp_info *ti)
 {
 	struct inpcbinfo *pcbinfo = NULL;
 	struct inpcb *inp = NULL;
 	struct socket *so;
 	struct tcpcb *tp;
+	int pid = proc_selfpid();
+	task_t __single task = current_task();
 
 	if (itpl->itpl_proto == IPPROTO_TCP) {
 		pcbinfo = &tcbinfo;
@@ -1996,6 +2000,12 @@ tcp_fill_info_for_info_tuple(struct info_tuple *itpl, struct tcp_info *ti)
 			socket_unlock(so, 0);
 			return ENOENT;
 		}
+		if (task != kernel_task && proc_suser(current_proc()) != 0 &&
+		    pid != so->last_pid && !IOCurrentTaskHasEntitlement(NET_INET_TCP_INFO_ENTITLEMENT)) {
+			socket_unlock(so, 0);
+			return ENOENT;
+		}
+
 		tp = intotcpcb(inp);
 
 		tcp_fill_info(tp, ti);
@@ -2021,6 +2031,10 @@ tcp_fill_info_for_info_tuple(struct info_tuple *itpl, struct tcp_info *ti)
 		}
 		if (len != sizeof(sf)) {
 			printf("kernel_sysctlbyname invalid len %zu\n", len);
+			return ENOENT;
+		}
+		if (task != kernel_task && proc_suser(current_proc()) != 0 &&
+		    pid != sf.sf_pid && !IOCurrentTaskHasEntitlement(NET_INET_TCP_INFO_ENTITLEMENT)) {
 			return ENOENT;
 		}
 

@@ -6,6 +6,9 @@
 import sys, re, time, os, time
 import lldb
 import struct
+from typing import (
+    Optional,
+)
 
 from core.cvalue import *
 from core.configuration import *
@@ -97,6 +100,22 @@ def ArgumentStringToAddress(arg_string) -> int:
     except ValueError:
         val = LazyTarget.GetTarget().chkEvaluateExpression(arg_string)
         return val.unsigned
+
+def ArgumentStringToSBValue(arg_string: str, type: str) -> int:
+    """ converts an argument to an SBValue of type
+        params:
+            arg_string: str - typically a string passed from the commandline.
+                        Accepted inputs:
+                        1. A base 2/8/10/16 literal representation, e.g. "0b101"/"0o5"/"5"/"0x5"
+                        2. An LLDB expression, e.g. "((char*)foo_ptr + sizeof(bar_type))"
+            type:       str - a C/C++ type name
+        returns:
+            SBValue - an lldb value of the proper type
+    """
+
+    target = LazyTarget.GetTarget()
+    addr   = target.chkEvaluateExpression(arg_string).xGetValueAsInteger()
+    return target.xCreateValueFromAddress(None, addr, gettype(type))
 
 def ArgumentStringToInt(arg_string) -> int:
     """ converts an argument to an int

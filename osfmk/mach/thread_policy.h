@@ -264,7 +264,7 @@ typedef struct thread_throughput_qos_policy     *thread_throughput_qos_policy_t;
 #define THREAD_THROUGHPUT_QOS_POLICY_COUNT      ((mach_msg_type_number_t) \
 	    (sizeof (thread_throughput_qos_policy_data_t) / sizeof (integer_t)))
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <mach/thread_policy_private.h>
 #endif
 

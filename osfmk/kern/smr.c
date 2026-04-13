@@ -504,7 +504,7 @@ __smrw_wakeup_and_unlock(struct smr_worker *smrw)
 	assert(!ml_get_interrupts_enabled());
 
 	thread = waitq_wakeup64_identify_locked(&smrw->waitq,
-	    __smrw_drain_event(smrw), WAITQ_UNLOCK);
+	    __smrw_drain_event(smrw), WAITQ_UNLOCK, NULL);
 
 	if (thread != THREAD_NULL) {
 		assert(thread == smrw->thread);
@@ -1018,7 +1018,7 @@ __smr_wait_for_oncore(smr_pcpu_t pcpu, smr_seq_t goal, uint32_t cpu)
 		 * to avoid IPI storms in case of a pile-up
 		 * of smr_synchronize() calls stalled on the same guy.
 		 */
-		cause_ast_check(PERCPU_GET_WITH_BASE(base, processor));
+		cause_maintenance_ipi(cpu);
 	}
 
 	if (hw_spin_wait_until(&pcpu->c_rd_seq, rd_seq,
@@ -2252,8 +2252,7 @@ smr_maintenance(uint64_t ctime)
 static struct smrq_slist_head *
 smr_hash_alloc_array(size_t size)
 {
-	return kalloc_type(struct smrq_slist_head, size,
-	           Z_WAITOK | Z_ZERO | Z_SPRAYQTN);
+	return kalloc_type(struct smrq_slist_head, size, Z_WAITOK | Z_ZERO);
 }
 
 static void
@@ -2442,8 +2441,7 @@ __smr_hash_grow_and_unlock(
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
-	prevarray = kalloc_type(__smrq_slink_t *, newsize,
-	    Z_WAITOK | Z_ZERO | Z_SPRAYQTN);
+	prevarray = kalloc_type(__smrq_slink_t *, newsize, Z_WAITOK | Z_ZERO);
 	if (prevarray == NULL) {
 		smr_hash_free_array(newarray, newsize);
 		os_atomic_store(&smrh->smrh_resizing, false, relaxed);

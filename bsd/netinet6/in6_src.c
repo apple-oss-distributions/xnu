@@ -1981,7 +1981,7 @@ addrsel_policy_init(void)
 			},
 			.addrmask = {
 				.sin6_family = AF_INET6,
-				.sin6_addr = IN6MASK16,
+				.sin6_addr = IN6MASK10,
 				.sin6_len    = sizeof(struct sockaddr_in6)
 			},
 			.preced   = 1,

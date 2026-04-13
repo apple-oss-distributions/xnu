@@ -108,7 +108,7 @@
 
 
 #if CONFIG_VOLFS
-static int vfs_getrealpath(const char * path, char * realpath, size_t bufsize, vfs_context_t ctx, vnode_t rdvp);
+__static_testable int vfs_getrealpath_with_vp(const char * path, char * realpath, size_t bufsize, vfs_context_t ctx, vnode_t *volfs_vpp);
 #define MAX_VOLFS_RESTARTS 5
 #endif
 
@@ -129,7 +129,82 @@ extern lck_rw_t rootvnode_rw_lock;
 
 #define RESOLVE_CHECKED       0x80000000
 
-static KALLOC_HEAP_DEFINE(KHEAP_VFS_NAMEI, "vfs_namei", KHEAP_ID_DATA_BUFFERS);
+/*
+ * This function handles setting up the starting directory in case the user has
+ * specified one via the at syscalls. This function also implements the namedfork
+ * handling specific to a fd and in that case, no further processing by namei
+ * is required.
+ * return values :
+ * 0 -> at directory set up successfully
+ * EJUSTRETURN -> resource fork handled in this function, namei should "just return"
+ *                success to the caller.
+ * all other values -> return error to caller.
+ */
+static errno_t
+namei_setup_at_dir(struct nameidata *ndp, struct componentname *cnp, bool *put_usedvp)
+{
+	vnode_t dvp_at;
+	errno_t error = 0;
+
+	*put_usedvp = false;
+
+	if (*cnp->cn_pnbuf != '/') {
+		error = vnode_getfromfd(cnp->cn_context, ndp->ni_atfd,
+		    &dvp_at);
+		if (error) {
+			goto error_out;
+		}
+
+#if NAMEDRSRCFORK
+		if ((ndp->ni_pathlen == (sizeof(_PATH_RSRCFORKSPEC) - 1)) &&
+		    (vnode_vtype(dvp_at) == VREG) && !mount_skip_rsrc_lookup(vnode_mount(dvp_at)) &&
+		    (cnp->cn_pnbuf[0] == '.' && cnp->cn_pnbuf[1] == '.') &&
+		    (bcmp(cnp->cn_pnbuf, &_PATH_RSRCFORKSPEC[1], sizeof(_PATH_RSRCFORKSPEC) - 1) == 0)) {
+			ndp->ni_next = cnp->cn_pnbuf;
+			cnp->cn_nameptr = cnp->cn_pnbuf;
+			cnp->cn_namelen = ndp->ni_pathlen;
+			cnp->cn_flags &= ~(MAKEENTRY | ISDOTDOT);
+			cnp->cn_flags |= CN_WANTSRSRCFORK | ISLASTCN;
+			ndp->ni_next[0] = '\0';
+			ndp->ni_pathlen = 1;
+
+			/*
+			 * This function will release the iocount on dvp_at unless
+			 * the caller requested the parent.
+			 */
+			error = lookup_handle_rsrc_fork(dvp_at, ndp, cnp,
+			    cnp->cn_flags & (LOCKPARENT | WANTPARENT),
+			    cnp->cn_context);
+
+			if (kdebug_enable) {
+				kdebug_lookup(ndp->ni_vp, cnp);
+			}
+
+			if (error) {
+				vnode_put(dvp_at);
+				goto error_out;
+			}
+
+			return EJUSTRETURN;
+		}
+#endif /* NAMEDRSRCFORK */
+
+		if (vnode_vtype(dvp_at) != VDIR) {
+			vnode_put(dvp_at);
+			error = ENOTDIR;
+			goto error_out;
+		}
+
+		ndp->ni_dvp = dvp_at;
+		cnp->cn_flags |= USEDVP;
+		*put_usedvp = true;
+	}
+
+error_out:
+	return error;
+}
+
+static KALLOC_HEAP_DEFINE(KHEAP_VFS_NAMEI, "vfs_namei", KHEAP_ID_DATA_PRIVATE);
 
 /* namei allocation/free methods */
 
@@ -206,15 +281,17 @@ namei(struct nameidata *ndp)
 	int volfs_restarts = 0;
 #endif
 	size_t bytes_copied = 0;
-	size_t resolve_prefix_len;
+	size_t resolve_prefix_len = 0;
 	vnode_t rootdir_with_usecount = NULLVP;
 	vnode_t startdir_with_usecount = NULLVP;
 	vnode_t usedvp_dp = NULLVP;
+	vnode_t volfs_vp = NULLVP;
 	int32_t old_count = 0;
-	uint32_t resolve_flags;
+	uint32_t resolve_flags = 0;
 	int resolve_error = 0;
 	bool dp_has_iocount = false;
 	bool clear_usedvp = false;
+	bool put_usedvp = false;
 
 #if DIAGNOSTIC
 	if (!vfs_context_ucred(ctx) || !p) {
@@ -359,6 +436,9 @@ retry_copy:
 			if (resolve_flags & RESOLVE_NOXATTRS) {
 				ndp->ni_flag |= NAMEI_NOXATTRS;
 			}
+			if (resolve_flags & RESOLVE_NOUNION) {
+				ndp->ni_flag |= NAMEI_NOUNION;
+			}
 		}
 	}
 
@@ -393,7 +473,6 @@ retry_copy:
 		char * realpath;
 		size_t realpathlen;
 		int realpath_err;
-		vnode_t rdvp = NULLVP;
 		/* Attempt to resolve a legacy volfs style pathname. */
 
 		realpathlen = MAXPATHLEN;
@@ -404,29 +483,13 @@ retry_copy:
 			 */
 			realpath = namei_alloc(realpathlen);
 
-			if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
-				proc_dirs_lock_shared(p);
-				if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
-					rdvp = p->p_fd.fd_rdir;
-					if (vnode_get(rdvp)) {
-						rdvp = NULLVP;
-					}
-				}
-				proc_dirs_unlock_shared(p);
-			}
 			/*
 			 * We only error out on the ENAMETOOLONG cases where we know that
 			 * vfs_getrealpath translation succeeded but the path could not fit into
 			 * realpathlen characters.  In other failure cases, we may be dealing with a path
 			 * that legitimately looks like /.vol/1234/567 and is not meant to be translated
 			 */
-			realpath_err = vfs_getrealpath(&cnp->cn_pnbuf[6], realpath, realpathlen, ctx, rdvp);
-
-			if (rdvp) {
-				vnode_put(rdvp);
-				rdvp = NULLVP;
-			}
-			if (realpath_err) {
+			if ((realpath_err = vfs_getrealpath_with_vp(&cnp->cn_pnbuf[6], realpath, realpathlen, ctx, &volfs_vp))) {
 				namei_free(realpath, realpathlen);
 				if (realpath_err == ENOSPC || realpath_err == ENAMETOOLONG) {
 					error = ENAMETOOLONG;
@@ -447,7 +510,12 @@ retry_copy:
 		} while (error == ENAMETOOLONG && (realpathlen *= 2) && realpathlen <= MAXLONGPATHLEN);
 
 		if (error) {
+			assert(!volfs_vp);
 			goto error_out;
+		}
+		if (volfs_vp) {
+			error = vnode_ref_ext(volfs_vp, O_EVTONLY, VNODE_REF_FORCE);
+			vnode_put(volfs_vp);
 		}
 	}
 #endif /* CONFIG_VOLFS */
@@ -469,6 +537,18 @@ retry_copy:
 		error = ENOENT;
 		goto error_out;
 	}
+
+	if (ndp->ni_flag & NAMEI_ATFD && !(cnp->cn_flags & USEDVP)) {
+		error = namei_setup_at_dir(ndp, cnp, &put_usedvp);
+		if (error) {
+			if (error == EJUSTRETURN) {
+				return 0;
+			} else {
+				goto error_out;
+			}
+		}
+	}
+
 	if (ndp->ni_flag & NAMEI_NOFOLLOW_ANY || (resolve_flags & RESOLVE_NOFOLLOW_ANY)) {
 		ndp->ni_loopcnt = MAXSYMLINKS;
 	} else {
@@ -615,6 +695,21 @@ retry_copy:
 				error = ENOTCAPABLE;
 				goto out_drop;
 			}
+
+#if CONFIG_MACF
+			/*
+			 * This MACF hook, invoked during lookup after vnode acquisition,
+			 * provides resolve flags. This enables kernel extensions (like
+			 * Sandbox) to handle relevant policies.
+			 */
+			if (ndp->ni_vp && (resolve_flags & RESOLVE_RESERVED_NONVFS_MASK)) {
+				error = mac_vnode_check_lookup_postflight(ctx, ndp->ni_vp, resolve_flags);
+				if (error) {
+					goto out_drop;
+				}
+			}
+#endif /* CONFIG_MACF */
+
 			if (startdir_with_usecount) {
 				vnode_rele(startdir_with_usecount);
 				startdir_with_usecount = NULLVP;
@@ -637,6 +732,22 @@ retry_copy:
 					vnode_rele(rootdir_with_usecount);
 					rootdir_with_usecount = NULLVP;
 				}
+			}
+
+			if (put_usedvp) {
+				vnode_put(ndp->ni_usedvp);
+				ndp->ni_usedvp = NULLVP;
+			} else if (clear_usedvp) {
+				ndp->ni_usedvp = NULLVP;
+			}
+
+			if (volfs_vp) {
+				if (ndp->ni_vp != volfs_vp) {
+					error = ENOENT;
+					goto out_drop;
+				}
+				vnode_rele_ext(volfs_vp, O_EVTONLY, 0);
+				volfs_vp = NULLVP;
 			}
 
 			return 0;
@@ -675,9 +786,6 @@ out_drop:
 		vnode_put(ndp->ni_vp);
 	}
 error_out:
-	if (clear_usedvp) {
-		ndp->ni_usedvp = NULLVP;
-	}
 	if (startdir_with_usecount) {
 		vnode_rele(startdir_with_usecount);
 		startdir_with_usecount = NULLVP;
@@ -701,6 +809,20 @@ error_out:
 		rootdir_with_usecount = NULLVP;
 	}
 
+	if (put_usedvp) {
+		vnode_put(ndp->ni_usedvp);
+		ndp->ni_usedvp = NULLVP;
+		put_usedvp = false;
+	} else if (clear_usedvp) {
+		ndp->ni_usedvp = NULLVP;
+		clear_usedvp = false;
+	}
+
+	if (volfs_vp) {
+		vnode_rele_ext(volfs_vp, O_EVTONLY, 0);
+		volfs_vp = NULLVP;
+	}
+
 	if ((cnp->cn_flags & HASBUF)) {
 		cnp->cn_flags &= ~HASBUF;
 		namei_free(cnp->cn_pnbuf, cnp->cn_pnlen);
@@ -708,7 +830,8 @@ error_out:
 	cnp->cn_pnbuf = NULL;
 	ndp->ni_vp = NULLVP;
 	ndp->ni_dvp = NULLVP;
-
+	resolve_prefix_len = 0;
+	resolve_flags = 0;
 #if CONFIG_VOLFS
 	/*
 	 * Deal with volfs fallout.
@@ -815,9 +938,14 @@ lookup_authorize_search(vnode_t dp, struct componentname *cnp, int dp_authorized
 	int error;
 
 	if (!dp_authorized_in_cache) {
-		error = vnode_authorize(dp, NULL, KAUTH_VNODE_SEARCH, ctx);
-		if (error) {
-			return error;
+		/* Skip search authorization for resource fork access on regular files */
+		if (vnode_isreg(dp) && (cnp->cn_flags & CN_ALLOWRSRCFORK)) {
+			/* Resource fork access on regular files doesn't require search permissions */
+		} else {
+			error = vnode_authorize(dp, NULL, KAUTH_VNODE_SEARCH, ctx);
+			if (error) {
+				return error;
+			}
 		}
 	}
 #if CONFIG_MACF
@@ -887,7 +1015,7 @@ lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *ndp, struct componentname 
 	int error;
 
 	if (dp->v_type != VREG) {
-		error = ENOENT;
+		error = (cnp->cn_nameiop == CREATE) ? EPERM : ENOENT;
 		goto out;
 	}
 	switch (cnp->cn_nameiop) {
@@ -1498,7 +1626,7 @@ unionlookup:
 #endif /* CONFIG_UNION_MOUNTS */
 	ndp->ni_vp = NULLVP;
 
-	if (dp->v_type != VDIR) {
+	if (dp->v_type != VDIR && !(cnp->cn_flags & CN_WANTSRSRCFORK)) {
 #if CONFIG_MACF
 		/*
 		 * Prevent the information disclosure on the vnode
@@ -1564,7 +1692,8 @@ lookup_error:
 #if CONFIG_UNION_MOUNTS
 		if ((error == ENOENT) &&
 		    (dp->v_mount != NULL) &&
-		    (dp->v_mount->mnt_flag & MNT_UNION)) {
+		    (dp->v_mount->mnt_flag & MNT_UNION) &&
+		    !(ndp->ni_flag & NAMEI_NOUNION)) {
 			tdp = dp;
 			error = lookup_traverse_union(tdp, &dp, ctx);
 			vnode_put(tdp);
@@ -2053,6 +2182,7 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 			vnode_put(dp); /* ALWAYS have a dvp for a symlink */
 			return ENOTCAPABLE;
 		}
+		ndp->ni_flag &= ~NAMEI_FIRMLINK_FOLLOWED; /* previously followed firmlinks no longer matter */
 		while (*(cnp->cn_nameptr) == '/') {
 			cnp->cn_nameptr++;
 			ndp->ni_pathlen--;
@@ -2344,8 +2474,8 @@ vfs_getbyid(fsid_t *fsid, ino64_t ino, vnode_t *vpp, vfs_context_t ctx)
  *	"foobar" represents a file name
  */
 #if CONFIG_VOLFS
-static int
-vfs_getrealpath(const char * path, char * realpath, size_t bufsize, vfs_context_t ctx, vnode_t rdvp)
+__static_testable int
+vfs_getrealpath_with_vp(const char * path, char * realpath, size_t bufsize, vfs_context_t ctx, vnode_t *volfs_vpp)
 {
 	vnode_t vp;
 	struct mount *mp = NULL;
@@ -2355,6 +2485,10 @@ vfs_getrealpath(const char * path, char * realpath, size_t bufsize, vfs_context_
 	ino64_t ino;
 	int error;
 	int length;
+
+	if (volfs_vpp) {
+		*volfs_vpp = NULLVP;
+	}
 
 	/* Get file system id and move str to next component. */
 	id = strtoul(path, &str, 10);
@@ -2374,7 +2508,7 @@ vfs_getrealpath(const char * path, char * realpath, size_t bufsize, vfs_context_
 		return EINVAL;  /* unexpected failure */
 	}
 	/* Check for an alias to a file system root. */
-	if (ch == '@' && str[1] == '\0') {
+	if (ch == '@' && (str[1] == '\0' || str[1] == '/')) {
 		ino = 2;
 		str++;
 	} else {
@@ -2411,42 +2545,22 @@ vfs_getrealpath(const char * path, char * realpath, size_t bufsize, vfs_context_
 	}
 	realpath[0] = '\0';
 
-	/* Check for and fail if the path is not under the chroot */
-	if (rdvp != NULLVP) {
-		int is_subdir = 0;
-		vnode_t pvp = NULLVP;
-
-		/* Get the parent if vp is not a directory */
-		if (!vnode_isdir(vp) && !(pvp = vnode_getparent(vp))) {
-			error = EINVAL;
-			vnode_put(vp);
-			goto out;
-		}
-
-		/* Check if a given directory vp/pvp is a subdirectory of rdvp */
-		error = vnode_issubdir(pvp ? pvp : vp, rdvp, &is_subdir, ctx);
-		if (pvp) {
-			vnode_put(pvp);
-		}
-		if (error || !is_subdir) {
-			if (!error) {
-				/* Path is not under the chroot */
-				error = EINVAL;
-			}
-			vnode_put(vp);
-			goto out;
-		}
-	}
-
 	/* Get the absolute path to this vnode. */
 	error = build_path(vp, realpath, (int)bufsize, &length, 0, ctx);
-	vnode_put(vp);
 
 	if (error == 0 && *str != '\0') {
+		vnode_put(vp);
+		vp = NULLVP;
 		size_t attempt = strlcat(realpath, str, MAXPATHLEN);
 		if (attempt > MAXPATHLEN) {
 			error = ENAMETOOLONG;
 		}
+	}
+
+	if (!error && volfs_vpp) {
+		*volfs_vpp = vp;
+	} else if (vp) {
+		vnode_put(vp);
 	}
 out:
 	return error;

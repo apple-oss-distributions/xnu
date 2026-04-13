@@ -308,11 +308,17 @@ exclaves_xnuproxy_ctx_alloc(exclaves_ctx_t *ctx)
 	thread_exclaves_state_flags_t state = current_thread()->th_exclaves_state;
 	current_thread()->th_exclaves_state |= TH_EXCLAVES_SPAWN_EXPECTED;
 
-	tb_error_t ret = xnuproxy_cmd_ipccontextallocate(&xnuproxy_cmd_client,
-	    ^(xnuproxy_ipccontext_s c) {
-		local_ctx.ipcb = (Exclaves_L4_IpcBuffer_t *)phystokv(c.buffer);
-		local_ctx.scid = c.scid;
+	/* BEGIN IGNORE CODESTYLE */
+	tb_error_t ret = xnuproxy_cmd_ipccontextalloc(&xnuproxy_cmd_client,
+	    ^(xnuproxy_ipccontext__opt_s opt_c) {
+		xnuproxy_ipccontext_s *c = xnuproxy_ipccontext__opt_get(&opt_c);
+		if (c == NULL) {
+			return;
+		}
+		local_ctx.ipcb = (Exclaves_L4_IpcBuffer_t *)phystokv(c->buffer);
+		local_ctx.scid = c->scid;
 	});
+	/* END IGNORE CODESTYLE */
 
 	/* Restore the old state (which itself may have set the SPAWN flag).  */
 	current_thread()->th_exclaves_state = state;
@@ -322,6 +328,10 @@ exclaves_xnuproxy_ctx_alloc(exclaves_ctx_t *ctx)
 	if (ret != TB_ERROR_SUCCESS) {
 		exclaves_debug_printf(show_errors,
 		    "allocate context: failure %u\n", ret);
+		return KERN_FAILURE;
+	} else if (local_ctx.ipcb == NULL) {
+		exclaves_debug_printf(show_errors,
+		    "allocate context: xnuproxy allocation failure\n");
 		return KERN_FAILURE;
 	}
 

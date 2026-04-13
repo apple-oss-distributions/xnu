@@ -759,13 +759,28 @@ enum {
                                 | kIOPMWakeEventAOTConfirmedPossibleExit)
 
 enum {
-	kIOPMAOTModeMask          = 0x000000ff,
+	kIOPMAOTModeMask          = 0x0000FFFF,
     kIOPMAOTModeEnable        = 0x00000001,
     kIOPMAOTModeCycle         = 0x00000002,
     kIOPMAOTModeAddEventFlags = 0x00000004,
     kIOPMAOTModeRespectTimers = 0x00000008,
-    kIOPMAOTModeDefault       = (kIOPMAOTModeEnable | kIOPMAOTModeAddEventFlags | kIOPMAOTModeRespectTimers)
+    kIOPMAOTModeDefault       = (kIOPMAOTModeEnable | kIOPMAOTModeAddEventFlags | kIOPMAOTModeRespectTimers),
+
+	kIOPMAOTModeRunModeMask            = 0xFFFF0000,
+	kIOPMAOTModeRunModeShift           = 16,
 };
+
+enum {
+	kIOPMDriverClassStorage          = 0x00000010,
+	kIOPMDriverClassNetworkCellular  = 0x00000020,
+	kIOPMDriverClassTest             = 0x00000040,
+	kIOPMDriverClassNetworkWifi      = 0x00000080,
+	kIOPMDriverClassNetworkBluetooth = 0x00000100,
+#ifdef XNU_KERNEL_PRIVATE
+	kIOPMDriverClassDone             = (1ULL << 63),
+#endif /* XNU_KERNEL_PRIVATE */
+};
+
 
 enum {
     kIOPMAOTMetricsKernelWakeCountMax = 24
@@ -790,6 +805,35 @@ struct IOPMAOTMetrics
 };
 
 #define kIOPMAOTPowerKey    "aot-power"
+
+/**
+ * Shared data structure between user/kernel describing intervals for which assertions
+ * are active.
+ */
+struct IOPMAssertionLogData {
+	/**
+	 * Duration of an assertion's activation.
+	 */
+	struct Interval {
+		uint64_t    id;
+		uint64_t    create_timestamp;
+		uint64_t    delete_timestamp;
+	};
+
+	/**
+	 * Static properties associated with a given assertion.
+	 */
+	struct Properties {
+		uint64_t    id;
+		char        name[64];
+	};
+
+	uint64_t        intervals_pos;
+	struct Interval intervals[256];
+
+	uint64_t            props_pos;
+	struct Properties   props[128];
+};
 
 /*****************************************************************************
  *

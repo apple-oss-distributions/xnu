@@ -16,10 +16,10 @@ KERNELFILES = \
 	cpu_number.h	\
 	lock.h	\
 	locks.h	\
+	machine_cpc.h \
 	machine_cpuid.h		\
 	machine_remote_time.h \
 	machine_routines.h	\
-	machine_kpc.h		\
 	memory_types.h		\
 	monotonic.h \
 	pal_routines.h		\

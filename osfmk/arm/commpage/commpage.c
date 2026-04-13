@@ -750,6 +750,19 @@ commpage_init_arm_optional_features_smfr0(void)
 	}
 }
 
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ZFR0_EL1
+ */
+static void
+commpage_init_arm_optional_features_zfr0(void)
+{
+	uint64_t zfr0 = __builtin_arm_rsr64("S3_0_C0_C4_4" /* ID_AA64ZFR0_EL1 */);
+
+	if ((zfr0 & ID_AA64ZFR0_EL1_B16B16_MASK) >= ID_AA64ZFR0_EL1_B16B16_EN) {
+		gARM_FEAT_SVE_B16B16 = 1;
+	}
+}
+
 static void
 commpage_init_arm_optional_features_mmfr1(uint64_t *commpage_bits)
 {
@@ -838,6 +851,7 @@ commpage_init_arm_optional_features(uint64_t *commpage_bits)
 	commpage_init_arm_optional_features_pfr1(commpage_bits);
 	commpage_init_arm_optional_features_pfr2(commpage_bits);
 	commpage_init_arm_optional_features_smfr0();
+	commpage_init_arm_optional_features_zfr0();
 	commpage_init_arm_optional_features_fpcr(commpage_bits);
 	/*
 	 * commpage_init_arm_optional_features_misc handles features flags
@@ -892,6 +906,7 @@ commpage_init_cpu_capabilities( void )
 #ifdef __arm64__
 	commpage_init_arm_optional_features(&bits);
 #endif
+
 
 
 

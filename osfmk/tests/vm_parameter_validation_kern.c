@@ -412,11 +412,11 @@ prevent_wire_tag_panic(bool prevent)
 
 
 /*
- * wire_nested requires a range of exactly one page when passed a physpage pointer.
+ * wire_impl requires a range of exactly one page when passed a physpage pointer.
  * wire_and_extract is meant to provide that, but as a result of round introduced, unaligned values don't follow that.
  */
 static bool
-will_vm_map_wire_nested_panic_due_to_invalid_range_size(MAP_T map, mach_vm_address_t start)
+will_vm_map_wire_impl_panic_due_to_invalid_range_size(MAP_T map, mach_vm_address_t start)
 {
 	mach_vm_address_t end = start + VM_MAP_PAGE_SIZE(map);
 	if (round_up_map(map, end) - trunc_down_map(map, start) != VM_MAP_PAGE_SIZE(map)) {
@@ -444,7 +444,7 @@ vm_map_wire_and_extract_retyped(
 	vm_tag_t                tag __unused,
 	boolean_t               user_wire)
 {
-	if (will_vm_map_wire_nested_panic_due_to_invalid_range_size(map, start)) {
+	if (will_vm_map_wire_impl_panic_due_to_invalid_range_size(map, start)) {
 		return PANIC;
 	}
 
@@ -556,6 +556,10 @@ static kern_return_t
 call_vm_map_unwire_user_wired(MAP_T map, mach_vm_address_t start, mach_vm_address_t end)
 {
 	kern_return_t kr = vm_map_unwire(map, start, end, TRUE);
+	if (kr == KERN_INVALID_ADDRESS) {
+		/* rdar://144322132 (Entry Locking: Update golden files for vm_parameter validation and remove ACCEPTABLE hacks) */
+		kr = ACCEPTABLE;
+	}
 	return kr;
 }
 
@@ -568,6 +572,9 @@ call_vm_map_unwire_non_user_wired(MAP_T map, mach_vm_address_t start, mach_vm_ad
 		return PANIC;
 	}
 	kr = vm_map_unwire(map, start, end, FALSE);
+	if (kr == KERN_INVALID_ADDRESS) {
+		kr = ACCEPTABLE;
+	}
 	return kr;
 }
 

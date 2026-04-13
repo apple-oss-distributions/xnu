@@ -1,16 +1,17 @@
-module Darwin.POSIX.netinet [system] {
+module Darwin.POSIX.netinet {
   module in {
     header "netinet/in.h"
-    export *
-
     #ifdef XNU_KERNEL_PRIVATE
-    // netinet6/in6.h is conceptually a part of netinet/in.h, and so
-    // belongs to this module, but needs to be excluded or else clang
-    // will attempt to compile in6.h independently. And that fails
-    // because in6.h can only be included from in.h, it cannot be used
-    // in any other context.
+    // netinet6/in6.h is conceptually a part of netinet/in.h, and cannot
+    // be compiled independently. It needs to be a textual header so
+    // that clang doesn't attempt to compile it on its own, but it can
+    // still be included from netinet/in.h which is a modular header.
+    // It is very important that no other modular headers include in6.h
+    // or its declarations will be duplicated (which usually results in
+    // duplicate or incompatible declaration errors).
     #endif
-    exclude header "netinet6/in6.h"
+    private textual header "netinet6/in6.h"
+    export *
   }
 
   module tcp {
@@ -19,7 +20,7 @@ module Darwin.POSIX.netinet [system] {
   }
 }
 
-module Darwin.netinet [system] {
+module Darwin.netinet {
   #ifdef XNU_KERNEL_PRIVATE
   // The XNU_PLATFORM_MacOSX headers are in the public SDK for macOS,
   // but mastered out of the public SDK for the other OSes.

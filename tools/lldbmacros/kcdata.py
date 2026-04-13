@@ -141,6 +141,9 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_TASK_MEMORYSTATUS': 0x958,
     'STACKSHOT_KCTYPE_MTEINFO_CELL': 0x959,
     'STACKSHOT_KCTYPE_LATENCY_INFO_BUFFER': 0x95a,
+    'STACKSHOT_KCTYPE_VMRL_BLOCKING_RELS': 0x95b,
+    'STACKSHOT_KCTYPE_LOCK_STATE': 0x95c,
+
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
     'TASK_CRASHINFO_EXTMODINFO':           0x801,
@@ -176,6 +179,8 @@ kcdata_type_def = {
     'TASK_CRASHINFO_JIT_ADDRESS_RANGE':    0x840,
     'TASK_CRASHINFO_MB':                   0x841,
     'TASK_CRASHINFO_CS_AUXILIARY_INFO':    0x842,
+    'TASK_CRASHINFO_VOUCHER_INFO':         0x846,
+    'TASK_CRASHINFO_SANDBOX_PROFILE':      0x847,
     'EXIT_REASON_SNAPSHOT':                0x1001,
     'EXIT_REASON_USER_DESC':               0x1002,
     'EXIT_REASON_USER_PAYLOAD':            0x1003,
@@ -849,22 +854,25 @@ KNOWN_TYPES_COLLECTION[0x901] = KCTypeDescription(0x901, (
 )
 
 KNOWN_TYPES_COLLECTION[0x902] = KCTypeDescription(0x902, (
-    KCSubTypeElement('snapshot_magic', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 0, 0),
-    KCSubTypeElement('free_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 1, 0),
-    KCSubTypeElement('active_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 2, 0),
-    KCSubTypeElement('inactive_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 3, 0),
-    KCSubTypeElement('purgeable_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 4, 0),
-    KCSubTypeElement('wired_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 5, 0),
-    KCSubTypeElement('speculative_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 6, 0),
-    KCSubTypeElement('throttled_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 7, 0),
-    KCSubTypeElement('filebacked_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 8, 0),
-    KCSubTypeElement('compressions', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 9, 0),
-    KCSubTypeElement('decompressions', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 10, 0),
-    KCSubTypeElement('compressor_size', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 11, 0),
-    KCSubTypeElement('busy_buffer_count', KCSUBTYPE_TYPE.KC_ST_INT32, 4, 4 * 12, 0),
-    KCSubTypeElement('pages_wanted', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 13, 0),
-    KCSubTypeElement('pages_reclaimed', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4 * 14, 0),
-    KCSubTypeElement('pages_wanted_reclaimed_valid', KCSUBTYPE_TYPE.KC_ST_UINT8, 1, 4 * 15, 0)
+    KCSubTypeElement('snapshot_magic', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 0, 0),
+    KCSubTypeElement('free_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 4, 0),
+    KCSubTypeElement('active_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 8, 0),
+    KCSubTypeElement('inactive_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 12, 0),
+    KCSubTypeElement('purgeable_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 16, 0),
+    KCSubTypeElement('wired_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 20, 0),
+    KCSubTypeElement('speculative_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 24, 0),
+    KCSubTypeElement('throttled_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 28, 0),
+    KCSubTypeElement('filebacked_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 32, 0),
+    KCSubTypeElement('compressions', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 36, 0),
+    KCSubTypeElement('decompressions', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 40, 0),
+    KCSubTypeElement('compressor_size', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 44, 0),
+    KCSubTypeElement('busy_buffer_count', KCSUBTYPE_TYPE.KC_ST_INT32, 4, 48, 0),
+    KCSubTypeElement('pages_wanted', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 52, 0),
+    KCSubTypeElement('pages_reclaimed', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 56, 0),
+    KCSubTypeElement('pages_wanted_reclaimed_valid', KCSUBTYPE_TYPE.KC_ST_UINT8, 1, 60, 0),
+    KCSubTypeElement('shared_region_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 61, 0),
+    KCSubTypeElement('compressed_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 65, 0),
+    KCSubTypeElement('swapped_pages', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 69, 0),
 ),
     'mem_and_io_snapshot'
 )
@@ -1162,6 +1170,15 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_WAITINFO')] = KCT
             ),
             'thread_waitinfo')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_VMRL_BLOCKING_RELS')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_VMRL_BLOCKING_RELS'),
+            (
+                        KCSubTypeElement.FromBasicCtype('waiter_tid', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+                        KCSubTypeElement.FromBasicCtype('blocker_tid', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+                        KCSubTypeElement.FromBasicCtype('entry_hash', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+                        KCSubTypeElement.FromBasicCtype('flags', KCSUBTYPE_TYPE.KC_ST_UINT32, 24),
+            ),
+            'vmrl_blocking_rels')
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_TURNSTILEINFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_THREAD_TURNSTILEINFO'),
             (
                         KCSubTypeElement.FromBasicCtype('waiter', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
@@ -1409,6 +1426,16 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_MB')] = KCTypeDescription(
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_AUXILIARY_INFO')] = KCSubTypeElement('cs_auxiliary_info', KCSUBTYPE_TYPE.KC_ST_UINT64, 8, 0, 0)
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_VOUCHER_INFO')] = KCTypeDescription(GetTypeForName('TASK_CRASHINFO_VOUCHER_INFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('thread_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('originator_pid', KCSUBTYPE_TYPE.KC_ST_UINT32, 8),
+        KCSubTypeElement.FromBasicCtype('proximate_pid', KCSUBTYPE_TYPE.KC_ST_UINT32, 12),
+    ), 'voucher_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_SANDBOX_PROFILE')] = KCSubTypeElement('sandbox_profile', KCSUBTYPE_TYPE.KC_ST_CHAR,
+                           KCSubTypeElement.GetSizeForArray(32, 1), 0, 1)
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES'),
     (
         KCSubTypeElement.FromBasicCtype('user_usec', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
@@ -1574,6 +1601,13 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_MTEINFO_CELL')] = KCType
         KCSubTypeElement.FromBasicCtype('mic_kernel_wired_tagged_count', KCSUBTYPE_TYPE.KC_ST_UINT8, 5),
     ), 'mte_info_cell')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LOCK_STATE')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_LOCK_STATE'),
+    (
+        KCSubTypeElement.FromBasicCtype('flags', KCSUBTYPE_TYPE.KC_ST_UINT8, 0),
+        KCSubTypeElement.FromBasicCtype('passcode_status', KCSUBTYPE_TYPE.KC_ST_UINT8, 1),
+        KCSubTypeElement.FromBasicCtype('lock_state', KCSUBTYPE_TYPE.KC_ST_UINT8, 2),
+    ), 'device_lock_state')
+
 def GetSecondsFromMATime(mat, tb):
     return (float(long(mat) * tb['numer']) / tb['denom']) / 1e9
 
@@ -1681,7 +1715,7 @@ kThreadWaitEventlink            = 0x13
 kThreadWaitCompressor           = 0x14
 kThreadWaitParkedBoundWorkQueue = 0x15
 kThreadWaitPageBusy             = 0x16
-kThreadWaitPagerInit            = 0x17
+kThreadWaitPLReqInProgress      = 0x17
 kThreadWaitPagerReady           = 0x18
 kThreadWaitPagingActivity       = 0x19
 kThreadWaitMappingInProgress    = 0x1a
@@ -1690,6 +1724,9 @@ kThreadWaitPagingInProgress     = 0x1c
 kThreadWaitPageInThrottle       = 0x1d
 kThreadWaitExclaveCore          = 0x1e
 kThreadWaitExclaveKit           = 0x1f
+kThreadWaitVMEntryExclEvent     = 0x20
+kThreadWaitVMEntrySharedEvent   = 0x21
+kThreadWaitVMEntryDeleteEvent   = 0x22
 
 
 UINT64_MAX = 0xffffffffffffffff
@@ -1724,6 +1761,7 @@ def portlabel_domain(x):
     return PORTLABEL_DOMAINS.get(x, "unknown.{}".format(x))
 
 STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY = 0x1
+STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP = 0x2
 STACKSHOT_PORTLABEL_THROTTLED = 0x2
 
 def portThrottledSuffix(portlabel_flags):
@@ -1767,6 +1805,9 @@ def formatWaitInfo(info, wantHex, portlabels):
         if flags & STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY:
             s += "REPLY "
             flags = flags - STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY
+        if flags & STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP:
+            s += "BOOTSTRAP "
+            flags = flags - STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP
         if owner == STACKSHOT_WAITOWNER_PORT_LOCKED:
             s += "locked port %x" % context
         elif owner == STACKSHOT_WAITOWNER_INTRANSIT:
@@ -1875,8 +1916,8 @@ def formatWaitInfo(info, wantHex, portlabels):
             s += "exclavekit wait, id 0x%x, owner thread %s" % (context, ownerThread)
     elif type == kThreadWaitPageBusy:
         s += f"busy page 0x{context:x}"
-    elif type == kThreadWaitPagerInit:
-        s += f"pager initialization for vm object 0x{context:x}"
+    elif type == kThreadWaitPLReqInProgress:
+        s += f"page list request in progress for vm object 0x{context:x}"
     elif type == kThreadWaitPagerReady:
         s += f"pager ready for vm object 0x{context:x}"
     elif type == kThreadWaitPagingActivity:
@@ -1889,6 +1930,8 @@ def formatWaitInfo(info, wantHex, portlabels):
         s += f"paging in progress for vm object 0x{context:x}"
     elif type == kThreadWaitPageInThrottle:
         s += f"throttled vm object 0x{context:x}"
+    elif type == kThreadWaitVMEntryExclEvent or type == kThreadWaitVMEntrySharedEvent:
+        s += "waiting for vm_map_entry. For more info search this file for \'vmrlRels\' ."
     else:
         s += "unknown type %d (owner %s, context %x)" % (type, ownerThread, context)
 
@@ -2095,6 +2138,79 @@ class NotesBuilder:
     def addToOffset(self, frame_count):
         self.offset += frame_count
 
+STACKSHOT_WAITER_VMRL_SHARED      =   0x01
+STACKSHOT_BLOCKER_VMRL_SHARED     =   0x02
+STACKSHOT_WAITER_VMRL_EXCLUSIVE   =   0x04
+STACKSHOT_BLOCKER_VMRL_EXCLUSIVE  =   0x08
+
+STACKSHOT_WAITER_VMRL_STREAMING   =   0x10
+STACKSHOT_BLOCKER_VMRL_STREAMING  =   0x20
+STACKSHOT_WAITER_VMRL_ATOMIC      =   0x40
+STACKSHOT_BLOCKER_VMRL_ATOMIC     =   0x80
+
+VMRL_RW_MAP = {
+    STACKSHOT_WAITER_VMRL_SHARED:     "read",
+    STACKSHOT_BLOCKER_VMRL_SHARED:    "read",
+    STACKSHOT_WAITER_VMRL_EXCLUSIVE:  "write",
+    STACKSHOT_BLOCKER_VMRL_EXCLUSIVE: "write",
+}
+
+VMRL_MODE_MAP = {
+    STACKSHOT_WAITER_VMRL_STREAMING:  "streaming",
+    STACKSHOT_BLOCKER_VMRL_STREAMING: "streaming",
+    STACKSHOT_WAITER_VMRL_ATOMIC:     "atomic",
+    STACKSHOT_BLOCKER_VMRL_ATOMIC:    "atomic",
+}
+
+def decodeVmrlFlags(waitinfo_flags):
+    return {
+        "waiter_rw": VMRL_RW_MAP.get(
+            waitinfo_flags & (STACKSHOT_WAITER_VMRL_SHARED | STACKSHOT_WAITER_VMRL_EXCLUSIVE),
+            "unknown"
+        ),
+        "blocker_rw": VMRL_RW_MAP.get(
+            waitinfo_flags & (STACKSHOT_BLOCKER_VMRL_SHARED | STACKSHOT_BLOCKER_VMRL_EXCLUSIVE),
+            "unknown"
+        ),
+        "waiter_mode": VMRL_MODE_MAP.get(
+            waitinfo_flags & (
+                STACKSHOT_WAITER_VMRL_STREAMING |
+                STACKSHOT_WAITER_VMRL_ATOMIC
+            ),
+            "unknown"
+        ),
+        "blocker_mode": VMRL_MODE_MAP.get(
+            waitinfo_flags & (
+                STACKSHOT_BLOCKER_VMRL_STREAMING |
+                STACKSHOT_BLOCKER_VMRL_ATOMIC
+            ),
+            "unknown"
+        )
+    }
+
+def parseVmrlFlags(flags):
+    decoded = decodeVmrlFlags(flags)
+    return decoded['waiter_rw'], decoded['waiter_mode'], decoded['blocker_rw'], decoded['blocker_mode']
+
+def parseVmrlRels(raw_data):
+    if not isinstance(raw_data, list):
+        return []
+
+    output_strings = []
+    for rel_dict in raw_data:
+        waiter_tid = rel_dict.get('waiter_tid', 'Unknown')
+        blocker_tid = rel_dict.get('blocker_tid', 'Unknown')
+        raw_flags = rel_dict.get('flags', 0)
+        asset_id = rel_dict.get('entry_hash', 0)
+
+        waiter_rw, waiter_mode, blocker_rw, blocker_mode = parseVmrlFlags(raw_flags)
+
+        output_strings.append(
+            f"Thread {waiter_tid}: waiting for vm_map_entry {asset_id:x} (waiter flags: rw: {waiter_rw}, mode: {waiter_mode}). Blocking thread: {blocker_tid} (owner flags: rw: {blocker_rw}, mode: {blocker_mode})."
+        )
+
+    return output_strings
+
 def SaveStackshotReport(j, outfile_name, incomplete):
     import time
     ss = j.get('kcdata_stackshot')
@@ -2169,6 +2285,9 @@ def SaveStackshotReport(j, outfile_name, incomplete):
     obj["frontmostPids"] = [0]
     obj["exception"] = "0xDEADF157"
     obj["processByPid"] = {}
+    parsed_vmrl = parseVmrlRels(ss.get("vmrl_blocking_rels", {}))
+    if parsed_vmrl:
+        obj["vmrlRels"] = parsed_vmrl
     if sc_note is not None:
         obj["sharedCacheNote"] = sc_note
 
@@ -2257,6 +2376,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
 
         # Some fields are missing from transitioning_task snapshots.
         if ttsnap is None:
+            tsnap["start_time"] = tasksnap["ts_p_start_sec"]
             tsnap["residentMemoryBytes"] = tasksnap["ts_task_size"]
             tsnap["timesDidThrottle"] = tasksnap["ts_did_throttle"]
             tsnap["systemTimeTask"] = GetSecondsFromMATime(tasksnap["ts_system_time_in_terminated_th"], timebase)

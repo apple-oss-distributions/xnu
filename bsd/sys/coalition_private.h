@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2024-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -33,6 +33,8 @@
 #include <sys/cdefs.h>
 #include <sys/types.h>
 
+#include <mach/coalition.h>
+
 __BEGIN_DECLS
 
 #define COALITION_POLICY_ENTITLEMENT "com.apple.private.coalition-policy"
@@ -50,7 +52,12 @@ __enum_decl(coalition_policy_suppress_t, uint32_t, {
 /* Userspace syscall prototypes */
 int coalition_policy_set(uint64_t cid, coalition_policy_flavor_t flavor, uint32_t value);
 int coalition_policy_get(uint64_t cid, coalition_policy_flavor_t flavor);
+
+int coalition_info_pid_list(uint64_t cid, pid_t *pid_list, size_t *size_inout);
+int coalition_info_debug_info(uint64_t cid, struct coalinfo_debuginfo *cru, size_t sz);
 #endif /* #ifndef KERNEL */
+
+#define COALITION_INFO_PID_LIST_MAX_PIDS 512
 
 __END_DECLS
 

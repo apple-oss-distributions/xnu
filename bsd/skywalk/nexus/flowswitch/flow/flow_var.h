@@ -373,6 +373,7 @@ struct flow_entry {
 #define FLOWENTF_PARENT                 0x00040000 /* parent flow */
 #define FLOWENTF_NOWAKEFROMSLEEP        0x00080000 /* don't wake for this flow */
 #define FLOWENTF_CONNECTION_IDLE        0x00100000 /* connection is idle */
+#define FLOWENTF_DISABLED               0x00200000 /* flow disabled, awaiting filter qualification */
 #define FLOWENTF_ABORTED                0x01000000 /* has sent RST to peer */
 #define FLOWENTF_NONVIABLE              0x02000000 /* disabled; awaiting tear down */
 #define FLOWENTF_WITHDRAWN              0x04000000 /* flow has been withdrawn */
@@ -384,7 +385,7 @@ struct flow_entry {
 #define FLOWENTF_BITS                                            \
     "\020\01INITED\02AOP_OFFLOAD\03RX_STEERING\05TRACK\06CONNECTED\07LISTNER\011QOS_MARKING" \
     "\012LOW_LATENCY\015WAIT_CLOSE\016CLOSE_NOTIFY\017EXT_PORT"  \
-    "\020EXT_PROTO\021EXT_FLOWID\024NOWAKEFROMSLEEP\025CONNECTION_IDLE" \
+    "\020EXT_PROTO\021EXT_FLOWID\024NOWAKEFROMSLEEP\025CONNECTION_IDLE\026DISABLED" \
     "\031ABORTED\032NONVIABLE\033WITHDRAWN"  \
     "\034TORN_DOWN\035HALF_CLOSED\037DESTROYED\40LINGERING"
 
@@ -1082,6 +1083,9 @@ extern struct flow_stats *flow_stats_alloc(boolean_t cansleep);
 extern char *fk2str(const struct flow_key *fk, char *__counted_by(dsz)dst, size_t dsz);
 extern char *fe2str(const struct flow_entry *fe, char *__counted_by(dsz)dst, size_t dsz);
 #endif /* SK_LOG */
+
+extern int convert_flowkey_to_inet_td(struct flow_key *key,
+    struct ifnet_traffic_descriptor_inet *td);
 __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* !_SKYWALK_NEXUS_FLOWSIWTCH_FLOW_FLOWVAR_H_ */

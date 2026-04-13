@@ -41,4 +41,11 @@ T_DECL(sysctl_hw_cpu, "ensure vital product and CPU-related sysctls exist")
 	T_ASSERT_POSIX_SUCCESS(ret, "hw.cpu64bit_capable");
 
 	T_EXPECT_EQ(v, 1, "cpu is 64 bit capable");
+
+	v = 0;
+	v_size = sizeof(v);
+	ret = sysctlbyname("hw.engineering_sample", &v, &v_size, NULL, 0);
+	T_ASSERT_POSIX_SUCCESS(ret, "hw.engineering_sample");
+	/* we can't say anything about the `v` */
+	T_ASSERT_TRUE(v == 0 || v == 1, "hw.engineering_sample is in range");
 }

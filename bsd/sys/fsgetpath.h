@@ -49,7 +49,7 @@ __END_DECLS
 
 #endif /* KERNEL */
 
-#if PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/fsgetpath_private.h>
 #endif
 

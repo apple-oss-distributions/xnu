@@ -602,14 +602,6 @@ enum {
 	kIOPMDriverCallMethodInitialPowerStateForDomainState = 7
 };
 
-
-enum {
-	kIOPMDriverClassStorage   = 0x00000010,
-	kIOPMDriverClassNetwork   = 0x00000020,
-	kIOPMDriverClassDriverKit = 0x00000040,
-	kIOPMDriverClassDone      = (1ULL << 63),
-};
-
 extern uint64_t gLPWFlags;
 
 //******************************************************************************

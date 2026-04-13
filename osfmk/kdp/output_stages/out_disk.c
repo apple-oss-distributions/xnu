@@ -119,6 +119,10 @@ disk_stage_write(struct kdp_output_stage *stage, uint64_t offset, uint64_t lengt
 		if (kIOReturnSuccess != err) {
 			kern_coredump_log(NULL, "(disk_stage_write) IOPolledFileWrite(gIOPolledCoreFileVars, %p, 0x%llx, NULL) returned 0x%x\n",
 			    data, chunk, err);
+			if (err == kIOReturnOverrun) {
+				kern_coredump_log(NULL, "(disk_stage_write) coredump size limit exceeded: attempted %llu bytes, limit is %llu bytes\n",
+				    gIOPolledCoreFileVars->position + 1, gIOPolledCoreFileVars->fileSizeMax);
+			}
 			break;
 		}
 
@@ -262,6 +266,10 @@ disk_stage_outproc(struct kdp_output_stage *stage, unsigned int request,
 		if (kIOReturnSuccess != err) {
 			kern_coredump_log(NULL, "IOPolledFileWrite(gIOPolledCoreFileVars, %p, 0x%llx, NULL) returned 0x%x\n",
 			    data, length, err);
+			if (err == kIOReturnOverrun) {
+				kern_coredump_log(NULL, "(%s) coredump size limit exceeded: attempted %llu bytes, limit is %llu bytes\n", __func__,
+				    gIOPolledCoreFileVars->position + 1, gIOPolledCoreFileVars->fileSizeMax);
+			}
 			break;
 		}
 		stage_data->last_operation_was_write = true;

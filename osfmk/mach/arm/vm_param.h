@@ -268,9 +268,11 @@ extern int PAGE_SHIFT_CONST;
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 #endif // XNU_KERNEL_PRIVATE
 #else /* __BUILDING_XNU_LIBRARY__ */
-#define VM_MIN_KERNEL_ADDRESS ((vm_address_t)(0x100000000ULL))
-#define VM_MAX_KERNEL_ADDRESS ((vm_address_t)(0ULL + GiB(2)))
-#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
+/* When building in user-space unit-test, the address space is a normal
+ * user-space address that is usually used by the system */
+#define VM_MIN_KERNEL_ADDRESS ((vm_address_t)(0ULL + PAGE_SIZE))
+#define VM_MAX_KERNEL_ADDRESS ((vm_address_t)(0ULL + GiB(64)))
+#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  41
 #endif /*__BUILDING_XNU_LIBRARY__ */
 #else
 #error architecture not supported

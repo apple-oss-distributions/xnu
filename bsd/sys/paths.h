@@ -41,15 +41,21 @@
 #define _PATH_RSRCFORKSPEC     "/..namedfork/rsrc"
 
 /* Prefix Path Namespace */
-#define RESOLVE_NOFOLLOW_ANY  0x00000001       /* no symlinks allowed in path */
-#define RESOLVE_NODOTDOT      0x00000002       /* prevent '..' path traversal */
-#define RESOLVE_LOCAL         0x00000004       /* prevent a path lookup into a network filesystem */
-#define RESOLVE_NODEVFS       0x00000008       /* prevent a path lookup into `devfs` filesystem */
-#define RESOLVE_IMMOVABLE     0x00000010       /* prevent a path lookup into a removable filesystem */
-#define RESOLVE_UNIQUE        0x00000020       /* prevent a path lookup on a vnode with multiple links */
-#define RESOLVE_NOXATTRS      0x00000040       /* prevent a path lookup on named streams */
+#define RESOLVE_NOFOLLOW_ANY            0x00000001       /* no symlinks allowed in path */
+#define RESOLVE_NODOTDOT                0x00000002       /* prevent '..' path traversal */
+#define RESOLVE_LOCAL                   0x00000004       /* prevent a path lookup into a network filesystem */
+#define RESOLVE_NODEVFS                 0x00000008       /* prevent a path lookup into `devfs` filesystem */
+#define RESOLVE_IMMOVABLE               0x00000010       /* prevent a path lookup into a removable filesystem */
+#define RESOLVE_UNIQUE                  0x00000020       /* prevent a path lookup on a vnode with multiple links */
+#define RESOLVE_NOXATTRS                0x00000040       /* prevent a path lookup on named streams */
+#define RESOLVE_NOQUARANTINE            0x00000080       /* prevent operating on a quarantined file */
+#define RESOLVE_NOUNION                 0x00000100       /* prevent a path lookup on filesystem with MNT_UNION from traversing to covered filesystem */
 
-#define RESOLVE_VALIDMASK     0x0000007F
+#define RESOLVE_VALIDMASK               0x000001FF
+
+#ifdef XNU_KERNEL_PRIVATE
+#define RESOLVE_RESERVED_NONVFS_MASK (RESOLVE_IMMOVABLE | RESOLVE_NOQUARANTINE)
+#endif /* XNU_KERNEL_PRIVATE  */
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* !_SYS_PATHS_H_ */

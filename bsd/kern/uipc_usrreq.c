@@ -155,6 +155,8 @@ SYSCTL_UINT(_net_local, OID_AUTO, log, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_UINT(_net_local, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
     &unp_count, 0, "");
 
+static struct proc* UNP_FG_NOPROC = __unsafe_forge_single(struct proc *, FG_NOPROC);
+
 /*
  * mDNSResponder tracing.  When enabled, endpoints connected to
  * /var/run/mDNSResponder will be traced; during each send on
@@ -2461,7 +2463,8 @@ unp_externalize(struct mbuf *rights)
 out:
 	if (error) {
 		for (int i = 0; i < newfds; i++) {
-			unp_discard(rp[i], p);
+			/* rdar://168227949: FG_NOPROC to ensure any existing locks remain held */
+			unp_discard(rp[i], UNP_FG_NOPROC);
 		}
 		bzero(rp, newfds * sizeof(struct fileglob *));
 	}
@@ -2558,7 +2561,6 @@ unp_gc(thread_call_param_t arg0, thread_call_param_t arg1)
 	static struct fileglob **__indexable extra_ref;
 	struct fileglob **fpp;
 	int nunref, i;
-	static struct proc *UNP_FG_NOPROC = __unsafe_forge_single(struct proc *, FG_NOPROC);
 
 restart:
 	lck_mtx_lock(&uipc_lock);

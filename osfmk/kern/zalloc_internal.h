@@ -282,7 +282,7 @@ struct zone {
 	                             * sizeclass for a particualr kalloc tag */
 	    z_uses_tags        :1,
 	    z_log_on           :1,  /* zone logging was enabled by boot-arg */
-	    z_tbi_tag          :1;  /* Zone supports tbi tagging */
+	    _reserved2         :1;
 
 	uint8_t             z_cacheline1[0] __attribute__((aligned(64)));
 
@@ -411,7 +411,7 @@ struct zone {
  * modified after lockdown.
  */
 typedef struct zone_security_flags {
-	uint32_t
+	uint16_t
 	/*
 	 * Security sensitive configuration bits
 	 */
@@ -421,8 +421,7 @@ typedef struct zone_security_flags {
 	    z_lifo             :1,  /* depot and recirculation layer are LIFO */
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
-	    z_tag              :1,  /* zone supports TBI tagging */
-	    z_unused           :16;
+	    z_unused           :1;
 	/*
 	 * Signature equivalance zone
 	 */
@@ -515,7 +514,7 @@ __options_decl(kalloc_type_options_t, uint64_t, {
 __enum_decl(kt_var_heap_id_t, uint32_t, {
 	/*
 	 * Fake "data" heap used to link views of data-only allocation that
-	 * have been redirected to KHEAP_DATA_BUFFERS
+	 * have been redirected to KHEAP_DATA_PRIVATE
 	 */
 	KT_VAR_DATA_HEAP,
 	/*
@@ -1024,16 +1023,6 @@ extern bool     zone_owns(
 	zone_t          zone,
 	void           *addr);
 
-/**!
- * @function zone_submap
- *
- * @param zsflags       the security flags of a specified zone.
- * @returns             the zone (sub)map this zone allocates from.
- */
-__pure2
-extern vm_map_t zone_submap(
-	zone_security_flags_t   zsflags);
-
 #ifndef VM_TAG_SIZECLASSES
 #error MAX_TAG_ZONES
 #endif
@@ -1084,6 +1073,8 @@ extern zone_t kalloc_type_dst_zone;
 #if DEBUG || DEVELOPMENT
 extern vm_size_t zone_element_info(void *addr, vm_tag_t * ptag);
 #endif /* DEBUG || DEVELOPMENT */
+
+#define VM_SUBMAP_NULL_SAFETY_DELTA (PAGE_SIZE * 3)
 
 __exported_pop
 

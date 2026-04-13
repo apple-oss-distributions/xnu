@@ -13,9 +13,11 @@
 
 
 T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.ipsec"),
+	T_META_NAMESPACE("xnu.net.ipsec"),
 	T_META_ASROOT(true),
-	T_META_CHECK_LEAKS(false));
+	T_META_CHECK_LEAKS(false),
+	T_META_OWNER("fernandes")
+	);
 
 typedef enum {
 	TEST_INVALID = 0,

@@ -30,10 +30,12 @@ class VMPointerUnpacker(object):
     """
     def __init__(self, target, param_var):
         params = target.chkFindFirstGlobalVariable(param_var)
+
         self.base_relative = params.xGetScalarByName('vmpp_base_relative')
         self.bits          = params.xGetScalarByName('vmpp_bits')
         self.shift         = params.xGetScalarByName('vmpp_shift')
         self.base          = params.xGetScalarByName('vmpp_base')
+        self.target        = target
 
     def unpack(self, packed):
         """
@@ -65,6 +67,12 @@ class VMPointerUnpacker(object):
         """
         return self.unpack(sbv.chkGetValueAsUnsigned())
 
+    def make_value(self, addr, ty):
+        """
+        Conveniency wrapper for self.target.xCreateValueFromAddress(...)
+        """
+        return self.target.xCreateValueFromAddress(None, self.unpack(addr), ty)
+
 
 class KMem(object, metaclass=ABCMeta):
     """
@@ -72,8 +80,6 @@ class KMem(object, metaclass=ABCMeta):
     that is needed to make sense of the kernel memory layout,
     heap data structures, globals, ...
     """
-
-    _HEAP_NAMES = [ "", "early.", "data.", "data_shared.", "" ]
 
     @staticmethod
     def _parse_range(zone_info_v, name):
@@ -91,6 +97,7 @@ class KMem(object, metaclass=ABCMeta):
         #
         # Cache some globals everyone needs
         #
+        self.kalloc_heap_names = target.chkFindFirstGlobalVariable('kalloc_heap_names')
         self.page_shift = target.chkFindFirstGlobalVariable('page_shift').xGetValueAsInteger()
         self.page_size  = 1 << self.page_shift
         self.page_mask  = self.page_size - 1
@@ -107,9 +114,9 @@ class KMem(object, metaclass=ABCMeta):
         # Setup the number of CPUs we have
         #
         self.ncpus      = target.chkFindFirstGlobalVariable('zpercpu_early_count').xGetValueAsInteger()
-        self.master_cpu = target.chkFindFirstGlobalVariable('master_cpu').xGetValueAsInteger()
-        self.zcpus      = range(self.ncpus) if 'ZALLOC' in self.phases else (self.master_cpu, )
-        self.pcpus      = range(self.ncpus) if 'PERCPU' in self.phases else (self.master_cpu, )
+        self.boot_cpu_id = target.chkFindFirstGlobalVariable('boot_cpu_id').xGetValueAsInteger()
+        self.zcpus      = range(self.ncpus) if 'ZALLOC' in self.phases else (self.boot_cpu_id, )
+        self.pcpus      = range(self.ncpus) if 'PERCPU' in self.phases else (self.boot_cpu_id, )
 
         #
         # Load all the ranges we will need
@@ -169,16 +176,9 @@ class KMem(object, metaclass=ABCMeta):
         #
         self.kn_kq_packing = VMPointerUnpacker(target, 'kn_kq_packing_params')
         self.vm_page_packing = VMPointerUnpacker(target, 'vm_page_packing_params')
-        try:
-            self.rwlde_caller_packing = VMPointerUnpacker(target, 'rwlde_caller_packing_params')
-        except ValueError:
-            #
-            # Release kernel doesn't define DEBUG_RW thus rwlde_caller_packing_params is compiled out
-            #
-            self.rwlde_caller_packing = None
-
         self.c_slot_packing = VMPointerUnpacker(target, 'c_slot_packing_params')
-        self.vm_map_entry_packing = VMPointerUnpacker(target, 'vm_map_entry_packing_params')
+        self.vme_packing = VMPointerUnpacker(target, 'vme_packing_params')
+        self.vmn_packing = VMPointerUnpacker(target, 'vmn_packing_params')
 
     @staticmethod
     @caching.cache_statically

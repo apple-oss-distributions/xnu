@@ -84,11 +84,34 @@ struct IOKit_data_allocator {
 	}
 };
 
+struct IOKit_data_shared_allocator {
+	static void*
+	allocate(size_t bytes)
+	{
+		return IOMallocDataShareable(bytes);
+	}
+
+	static void*
+	allocate_zero(size_t bytes)
+	{
+		return IOMallocZeroDataShareable(bytes);
+	}
+
+	static void
+	deallocate(void* p, size_t bytes)
+	{
+		IOFreeDataShareable(p, bytes);
+	}
+};
+
 template <typename T>
 constexpr bool IOKit_is_data_v = KALLOC_TYPE_IS_DATA_ONLY(T);
 
 template <typename T, bool DataOnly = IOKit_is_data_v<T> >
 struct IOKit_typed_allocator;
+
+template <typename T, bool DataOnly = IOKit_is_data_v<T> >
+struct IOKit_typed_data_shared_allocator;
 
 template <typename T>
 struct IOKit_typed_allocator<T, false> {
@@ -121,6 +144,10 @@ struct IOKit_typed_allocator<T, false> {
 template <typename T>
 struct IOKit_typed_allocator<T, true> : IOKit_data_allocator {
 };
+
+template <typename T>
+struct IOKit_typed_data_shared_allocator<T, true> : IOKit_data_shared_allocator {
+};
 #endif
 } // end namespace os_detail
 
@@ -134,11 +161,24 @@ template <
 	>
 using OSAllocation = libkern::safe_allocation<T, Allocator, os_detail::panic_trapping_policy>;
 
+template <
+	typename T,
+#if KERNEL_PRIVATE
+	typename Allocator = os_detail::IOKit_typed_data_shared_allocator<T>
+#else
+	typename Allocator = os_detail::IOKit_allocator
+#endif
+	>
+using OSSharedAllocation = libkern::safe_allocation<T, Allocator, os_detail::panic_trapping_policy>;
+
 #ifdef KERNEL_PRIVATE
 // obsolete: just use the determination that OSAllocation<> does already.
 //           (this works around incorrect adoptions like 104478984).
 template <typename T>
 using OSDataAllocation = OSAllocation<T>;
+
+template <typename T>
+using OSDataSharedAllocation = OSSharedAllocation<T>;
 #endif
 
 inline constexpr auto OSAllocateMemory = libkern::allocate_memory;

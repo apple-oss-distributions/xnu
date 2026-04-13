@@ -291,6 +291,67 @@ out:
 	return error;
 }
 
+int
+fdesc_getbackingvnode(vnode_t fdesc_vp, vnode_t* out_vpp)
+{
+	struct fdescnode *fd;
+	struct fileproc *fp;
+	struct proc *p;
+	int error;
+	vnode_t backing_vp;
+
+	if (fdesc_vp == NULLVP || out_vpp == NULL) {
+		return EINVAL;
+	}
+
+	*out_vpp = NULLVP;
+
+	/* Check if this is actually a fdesc vnode */
+	if (vnode_tag(fdesc_vp) != VT_FDESC) {
+		return ENOENT;
+	}
+
+	/* Get the current process - this is the context we need for fd lookup */
+	p = current_proc();
+	if (p == NULL) {
+		return ESRCH;
+	}
+
+	fd = VTOFDESC(fdesc_vp);
+	if (fd == NULL || fd->fd_type != Fdesc) {
+		return ENOENT;
+	}
+
+	/* Look up the file descriptor to get the backing vnode */
+	error = fp_lookup(p, fd->fd_fd, &fp, 0);
+	if (error) {
+		return error;
+	}
+
+	/* Check if the file descriptor points to a vnode */
+	if (FILEGLOB_DTYPE(fp->fp_glob) != DTYPE_VNODE) {
+		/* Not a vnode, can't continue */
+		fp_drop(p, fd->fd_fd, fp, 0);
+		return ENOENT;
+	}
+
+	backing_vp = (vnode_t)fp_get_data(fp);
+	if (backing_vp == NULLVP) {
+		fp_drop(p, fd->fd_fd, fp, 0);
+		return ENOENT;
+	}
+
+	/* Take a reference on the vnode before dropping the fp reference */
+	error = vnode_getwithref(backing_vp);
+	fp_drop(p, fd->fd_fd, fp, 0);
+	if (error) {
+		return error;
+	}
+
+	*out_vpp = backing_vp;
+	return 0;
+}
+
 /*
  * vp is the current namei directory
  * ndp is the name to locate in that directory...

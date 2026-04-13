@@ -59,3 +59,48 @@ _cpc_sysctl_secure SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern_cpc, OID_AUTO, secure, CPC_SYSCTL_SECURE_PROT | CTLTYPE_INT,
     0, 0, _cpc_sysctl_secure, "I",
     "Whether the CPU Performance Counters system is operating securely.");
+
+#if DEVELOPMENT || DEBUG
+
+bool cpc_logging = false;
+
+static int
+_cpc_sysctl_log SYSCTL_HANDLER_ARGS
+{
+	int changed = 0;
+	int logging = cpc_logging;
+	int error = sysctl_io_number(req, logging, sizeof(logging), &logging,
+	    &changed);
+	if (error != 0) {
+		return error;
+	}
+	if (changed) {
+		cpc_logging = logging;
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_kern_cpc, OID_AUTO, log, CTLFLAG_RW | CTLTYPE_INT,
+    0, 0, _cpc_sysctl_log, "I",
+    "Log updates to the CPU Performance Counters system.");
+
+static int
+_cpc_sysctl_state SYSCTL_HANDLER_ARGS
+{
+	size_t size = 0;
+	char *state = cpc_state_create(false, &size);
+	int error = ENOBUFS;
+	if (state) {
+		int changed = 0;
+		error = sysctl_io_string(req, state, strlen(state), 0, &changed);
+		cpc_state_destroy(state, size);
+	}
+	return error;
+}
+
+SYSCTL_PROC(_kern_cpc, OID_AUTO, state,
+    CTLFLAG_RD | CTLTYPE_STRING | CTLFLAG_MASKED,
+    0, 0, _cpc_sysctl_state, "S",
+    "Describe the state of the CPU Performance Counters system.");
+
+#endif // DEVELOPMENT || DEBUG

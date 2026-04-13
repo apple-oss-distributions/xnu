@@ -1762,7 +1762,7 @@ fc_output:
 				tcp_set_lotimer_index(tp);
 			}
 
-			os_log(OS_LOG_DEFAULT,
+			os_log(tcp_log_handle,
 			    "%s: sent %s probe for %u > %u on interface %s"
 			    " (%u) %s(%d)",
 			    __func__,
@@ -2156,7 +2156,7 @@ tcp_run_timerlist(void * arg1, void * arg2)
 
 		listp->processed_count++;
 		if (listp->processed_count > num_entries) {
-			os_log(OS_LOG_DEFAULT, "tcp_run_timerlist done: processed_count %u > num_entries %u current %u",
+			os_log(tcp_log_handle, "tcp_run_timerlist done: processed_count %u > num_entries %u current %u",
 			    listp->processed_count, num_entries, listp->entries);
 			break;
 		}
@@ -2734,7 +2734,7 @@ tcp_interface_send_probe(u_int16_t probe_if_index)
 	lck_mtx_lock(&listp->mtx);
 	if (listp->probe_if_index > 0 && listp->probe_if_index != probe_if_index) {
 		tcpstat.tcps_probe_if_conflict++;
-		os_log(OS_LOG_DEFAULT,
+		os_log(tcp_log_handle,
 		    "%s: probe_if_index %u conflicts with %u, tcps_probe_if_conflict %u\n",
 		    __func__, probe_if_index, listp->probe_if_index,
 		    tcpstat.tcps_probe_if_conflict);
@@ -2743,7 +2743,7 @@ tcp_interface_send_probe(u_int16_t probe_if_index)
 
 	listp->probe_if_index = probe_if_index;
 	if (listp->running) {
-		os_log(OS_LOG_DEFAULT, "%s: timer list already running for if_index %u\n",
+		os_log(tcp_log_handle, "%s: timer list already running for if_index %u\n",
 		    __func__, probe_if_index);
 		goto done;
 	}
@@ -2758,7 +2758,7 @@ tcp_interface_send_probe(u_int16_t probe_if_index)
 		diff = timer_diff(listp->runtime, 0, tcp_now, offset);
 		if (diff <= 0) {
 			/* The timer will fire sooner than what's needed */
-			os_log(OS_LOG_DEFAULT,
+			os_log(tcp_log_handle,
 			    "%s: timer will fire sooner than needed for if_index %u\n",
 			    __func__, probe_if_index);
 			goto done;

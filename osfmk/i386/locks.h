@@ -152,7 +152,15 @@ extern void             kernel_preempt_check(void);
 #define LCK_MTX_HAS_WAITERS(l)  ((l)->lck_mtx_waiters != 0)
 #endif /* LCK_MTX_USE_ARCH */
 
+/*
+ * LOCK_SNOOP_SPINS is the default amount of free spins
+ * before the spin policies are consulted.
+ *
+ * LOCK_SNOOP_SPINS_MCS is similar but for spinners that use MCS queues,
+ * so that they can call lck_mcs_spin_step() more regularly.
+ */
 #define LOCK_SNOOP_SPINS        1000
+#define LOCK_SNOOP_SPINS_MCS    LOCK_SNOOP_SPINS
 #define LOCK_PRETEST            1
 
 #define lock_disable_preemption_for_thread(t)   disable_preemption_internal()
@@ -160,6 +168,7 @@ extern void             kernel_preempt_check(void);
 #define lock_preemption_disabled_for_thread(t)  (get_preemption_level() > 0)
 #define lock_enable_preemption()                enable_preemption_internal()
 #define current_thread()                        current_thread_fast()
+#define lock_get_timebase()                     ml_get_timebase()
 
 #define __hw_spin_wait_load(ptr, load_var, cond_result, cond_expr) ({ \
 	load_var = os_atomic_load(ptr, relaxed);                                \

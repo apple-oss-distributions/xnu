@@ -480,6 +480,7 @@ kernel_pmap_present_mapping(uint64_t vaddr, uint64_t * pvincr, uintptr_t * pvphy
 	return ppn;
 }
 
+
 static int
 pmap_traverse_present_mappings(pmap_t __unused pmap,
     vm_map_offset_t start,

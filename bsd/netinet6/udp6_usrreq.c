@@ -112,6 +112,7 @@
 #include <net/if_types.h>
 #include <net/ntstat.h>
 #include <net/dlil.h>
+#include <net/dlil_var_private.h>
 #include <net/net_api_stats.h>
 #include <net/droptap.h>
 
@@ -236,6 +237,23 @@ udp6_append(struct inpcb *last, struct ip6_hdr *ip6,
 	}
 }
 
+/*
+ * In the data path don't inline function that are unlikely
+ */
+__attribute__((noinline))
+static void
+udp6_proto_process_lpw_packet(struct mbuf *m, struct inpcb *inp, const char *reason)
+{
+	struct ifnet *ifp = m->m_pkthdr.rcvif;
+
+	if (inp != NULL) {
+		UDP_LOG(inp, "%s", reason);
+	}
+
+	if_ports_used_match_mbuf(ifp, PF_INET6, m);
+	if_exit_lpw(ifp, reason);
+}
+
 int
 udp6_input(struct mbuf **mp, int *offp, int proto)
 {
@@ -244,7 +262,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	struct ifnet *__single ifp;
 	struct ip6_hdr *ip6;
 	struct udphdr *uh;
-	struct inpcb *__single in6p;
+	struct inpcb *__single in6p = NULL;
 	struct  mbuf *__single opts = NULL;
 	int off = *offp;
 	int plen, ulen, ret = 0;
@@ -255,6 +273,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	u_int16_t pf_tag = 0;
 	boolean_t is_wake_pkt = false;
 	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
+	bool is_magic_packet = false;
 
 	IP6_EXTHDR_CHECK(m, off, sizeof(struct udphdr), return IPPROTO_DONE);
 
@@ -297,6 +316,19 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	if (udp6_input_checksum(m, uh, off, ulen)) {
 		drop_reason = DROP_REASON_IP6_BAD_UDP_CHECKSUM;
 		goto bad;
+	}
+
+	/*
+	 * Transition to full wake for a magic packet wether the packet is for
+	 * an open or closed port.
+	 */
+	if (__improbable(if_is_lpw_enabled(ifp))) {
+		/*
+		 * Need to transition to full wake for a magic packet
+		 */
+		if ((is_magic_packet = packet_has_magic_pattern(m))) {
+			udp6_proto_process_lpw_packet(m, in6p, "LPW UDP magic packet");
+		}
 	}
 
 	/*
@@ -439,6 +471,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 #endif /* NECP */
 			{
 				struct mbuf *__single n = NULL;
+
 				/*
 				 * KAME NOTE: do not
 				 * m_copy(m, offset, ...) below.
@@ -496,6 +529,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			udpstat.udps_noportmcast++;
 			IF_UDP_STATINC(ifp, port_unreach);
 			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
+
 			goto bad;
 		}
 
@@ -556,6 +590,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 				ip6 = mtod(m, struct ip6_hdr *);
 				uh = (struct udphdr *)(void *)((caddr_t)ip6 + off);
 			}
+
 			/* Check for NAT keepalive packet */
 			if (payload_len == 1 && *(u_int8_t*)
 			    ((caddr_t)uh + sizeof(struct udphdr)) == 0xFF) {
@@ -618,6 +653,15 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			IF_UDP_STATINC(ifp, linkheur_stealthdrop);
 			goto bad;
 		}
+
+		if (is_magic_packet) {
+			/*
+			 * Silently drop magic packet for a closed port
+			 */
+			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
+			goto bad;
+		}
+
 		icmp6_error(m, ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOPORT, 0);
 		return IPPROTO_DONE;
 	}
@@ -660,6 +704,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			goto bad;
 		}
 	}
+
 	m_adj(m, off + sizeof(struct udphdr));
 	if (nstat_collect) {
 		ifnet_count_type = IFNET_COUNT_TYPE(ifp);

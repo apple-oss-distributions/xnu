@@ -69,6 +69,13 @@
 #include "bpflib.h"
 #include "in_cksum.h"
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("dieter")
+	);
+
 static bool S_cleaning_up;
 
 #define ALL_ADDRS (uint32_t)(-1)
@@ -2014,14 +2021,22 @@ mac_nat_test_arp_in(switch_port_list_t port_list)
 	T_PASS("%s", __func__);
 }
 
+typedef struct {
+	switch_port_t   send_port;
+	bool            validate_chaddr;
+} mac_nat_dhcp_context, *mac_nat_dhcp_context_t;
+
 static void
 validate_mac_nat_dhcp(switch_port_t port, const ether_header_t * eh_p,
     u_int pkt_len, void * context)
 {
+	mac_nat_dhcp_context_t          ctx;
 	u_int                           dp_flags;
 	const struct bootp_packet *     pkt;
-	switch_port_t                   send_port = (switch_port_t)context;
+	switch_port_t                   send_port;
 
+	ctx = (mac_nat_dhcp_context_t)context;
+	send_port = ctx->send_port;
 
 	T_QUIET;
 	T_ASSERT_GE(pkt_len, (u_int)sizeof(*pkt), NULL);
@@ -2033,14 +2048,6 @@ validate_mac_nat_dhcp(switch_port_t port, const ether_header_t * eh_p,
 	if (port->mac_nat) {
 		bool            equal;
 
-		/* Broadcast bit must be set */
-		T_QUIET;
-		T_ASSERT_BITS_SET(dp_flags, (u_int)DHCP_FLAGS_BROADCAST,
-		    "%s -> %s: flags 0x%x must have 0x%x",
-		    send_port->member_ifname,
-		    port->member_ifname,
-		    dp_flags, DHCP_FLAGS_BROADCAST);
-
 		/* source must match MAC-NAT interface */
 		equal = (bcmp(eh_p->ether_shost, &port->member_mac,
 		    sizeof(port->member_mac)) == 0);
@@ -2051,6 +2058,27 @@ validate_mac_nat_dhcp(switch_port_t port, const ether_header_t * eh_p,
 		T_ASSERT_TRUE(equal, "%s -> %s source address translated",
 		    send_port->member_ifname,
 		    port->member_ifname);
+		if (ctx->validate_chaddr) {
+			/* chaddr must match MAC-NAT interface */
+			equal = (bcmp(pkt->bp_bootp.bp_chaddr,
+			    &port->member_mac,
+			    sizeof(port->member_mac)) == 0);
+			if (!equal) {
+				ethernet_frame_validate(eh_p, pkt_len, true);
+			}
+			T_QUIET;
+			T_ASSERT_TRUE(equal, "%s -> %s chaddr translated",
+			    send_port->member_ifname,
+			    port->member_ifname);
+		} else {
+			/* Broadcast bit must be set */
+			T_QUIET;
+			T_ASSERT_BITS_SET(dp_flags, (u_int)DHCP_FLAGS_BROADCAST,
+			    "%s -> %s: flags 0x%x must have 0x%x",
+			    send_port->member_ifname,
+			    port->member_ifname,
+			    dp_flags, DHCP_FLAGS_BROADCAST);
+		}
 	} else {
 		/* Broadcast bit must not be set */
 		T_QUIET;
@@ -2072,12 +2100,19 @@ validate_mac_nat_dhcp(switch_port_t port, const ether_header_t * eh_p,
 static void
 mac_nat_test_dhcp(switch_port_list_t port_list, bool link_layer_unicast)
 {
+	int             bridge_use_dhcp_xid = 0;
+	mac_nat_dhcp_context ctx;
 	u_int           i;
 	struct in_addr  ip_dst = { INADDR_BROADCAST };
 	struct in_addr  ip_src = { INADDR_ANY };
+	size_t          len;
 	switch_port_t   port;
 	ether_addr_t *  ether_dst;
 
+	len = sizeof(bridge_use_dhcp_xid);
+	(void)sysctlbyname("net.link.bridge.use_dhcp_xid",
+	    &bridge_use_dhcp_xid, &len, NULL, 0);
+	ctx.validate_chaddr = (bridge_use_dhcp_xid != 0);
 	if (link_layer_unicast) {
 		/* use link-layer address of MAC-NAT interface */
 		ether_dst = &port_list->list[0].member_mac;
@@ -2111,9 +2146,10 @@ mac_nat_test_dhcp(switch_port_list_t port_list, bool link_layer_unicast)
 		    &payload,
 		    payload_len);
 
+		ctx.send_port = port;
 		switch_port_list_check_receive(port_list, AF_INET, NULL, 0,
 		    validate_mac_nat_dhcp,
-		    port);
+		    &ctx);
 
 		check_received_count(port_list, port, 1);
 		if (link_layer_unicast) {
@@ -3473,7 +3509,7 @@ bridge_test_lro_disable(void)
 	verify_lro_capability(FETH0, true);
 }
 
-T_DECL(net_if_bridge_bcast,
+T_DECL(if_bridge_bcast,
     "bridge broadcast IPv4",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3481,7 +3517,7 @@ T_DECL(net_if_bridge_bcast,
 	    AF_INET, 5, 1);
 }
 
-T_DECL(net_if_bridge_bcast_many,
+T_DECL(if_bridge_bcast_many,
     "bridge broadcast many IPv4",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3489,7 +3525,7 @@ T_DECL(net_if_bridge_bcast_many,
 	    AF_INET, 5, 20);
 }
 
-T_DECL(net_if_bridge_unknown,
+T_DECL(if_bridge_unknown,
     "bridge unknown host IPv4",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3497,7 +3533,7 @@ T_DECL(net_if_bridge_unknown,
 	    AF_INET, 5, 1);
 }
 
-T_DECL(net_if_bridge_bcast_v6,
+T_DECL(if_bridge_bcast_v6,
     "bridge broadcast IPv6",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3505,7 +3541,7 @@ T_DECL(net_if_bridge_bcast_v6,
 	    AF_INET6, 5, 1);
 }
 
-T_DECL(net_if_bridge_bcast_many_v6,
+T_DECL(if_bridge_bcast_many_v6,
     "bridge broadcast many IPv6",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3513,7 +3549,7 @@ T_DECL(net_if_bridge_bcast_many_v6,
 	    AF_INET6, 5, 20);
 }
 
-T_DECL(net_if_bridge_unknown_v6,
+T_DECL(if_bridge_unknown_v6,
     "bridge unknown host IPv6",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3521,14 +3557,14 @@ T_DECL(net_if_bridge_unknown_v6,
 	    AF_INET6, 5, 1);
 }
 
-T_DECL(net_if_bridge_mac_nat_ipv4,
+T_DECL(if_bridge_mac_nat_ipv4,
     "bridge mac nat ipv4",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test_mac_nat_ipv4(5, 10);
 }
 
-T_DECL(net_if_bridge_mac_nat_ipv6,
+T_DECL(if_bridge_mac_nat_ipv6,
     "bridge mac nat ipv6",
     T_META_ASROOT(true),
     T_META_TAG_VM_PREFERRED,
@@ -3537,7 +3573,7 @@ T_DECL(net_if_bridge_mac_nat_ipv6,
 	bridge_test_mac_nat_ipv6(5, 10, 0);
 }
 
-T_DECL(net_if_bridge_mac_nat_ipv6_trailers,
+T_DECL(if_bridge_mac_nat_ipv6_trailers,
     "bridge mac nat ipv6 trailers",
     T_META_ASROOT(true),
     T_META_TAG_VM_PREFERRED,
@@ -3546,28 +3582,28 @@ T_DECL(net_if_bridge_mac_nat_ipv6_trailers,
 	bridge_test_mac_nat_ipv6(5, 10, SETUP_FLAGS_TRAILERS);
 }
 
-T_DECL(net_if_bridge_filter_ipv4,
+T_DECL(if_bridge_filter_ipv4,
     "bridge filter ipv4",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	filter_test(AF_INET);
 }
 
-T_DECL(net_if_bridge_filter_ipv6,
+T_DECL(if_bridge_filter_ipv6,
     "bridge filter ipv6",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	filter_test(AF_INET6);
 }
 
-T_DECL(net_if_bridge_checksum_offload,
+T_DECL(if_bridge_checksum_offload,
     "bridge checksum offload",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test_transfer(2, SETUP_FLAGS_CHECKSUM_OFFLOAD);
 }
 
-T_DECL(net_if_bridge_checksum_offload_trailers,
+T_DECL(if_bridge_checksum_offload_trailers,
     "bridge checksum offload with trailers+fcs",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
@@ -3575,21 +3611,21 @@ T_DECL(net_if_bridge_checksum_offload_trailers,
 	    SETUP_FLAGS_TRAILERS);
 }
 
-T_DECL(net_if_bridge_transfer,
+T_DECL(if_bridge_transfer,
     "bridge transfer",
     T_META_ASROOT(true))
 {
 	bridge_test_transfer(2, 0);
 }
 
-T_DECL(net_if_bridge_transfer_share_mac,
+T_DECL(if_bridge_transfer_share_mac,
     "bridge transfer share member's MAC",
     T_META_ASROOT(true))
 {
 	bridge_test_transfer(2, SETUP_FLAGS_SHARE_MEMBER_MAC);
 }
 
-T_DECL(net_if_bridge_lro_disable,
+T_DECL(if_bridge_lro_disable,
     "bridge LRO disable",
     T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {

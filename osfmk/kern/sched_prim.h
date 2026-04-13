@@ -95,8 +95,6 @@ uint64_t sched_get_quantum_us(void);
 #include <kern/waitq.h>
 
 /* Initialization */
-extern void             sched_init(void);
-
 extern void             sched_startup(void);
 
 extern void             sched_timebase_init(void);
@@ -268,6 +266,7 @@ __options_decl(sched_options_t, uint32_t, {
 	SCHED_PREEMPT   = 0x4,
 	SCHED_REBALANCE = 0x8,
 	SCHED_STIR_POT  = 0x10,
+	SCHED_CSW       = 0x20,
 });
 
 /* Reschedule thread for execution */
@@ -411,6 +410,38 @@ extern sched_ipi_type_t sched_ipi_policy(processor_t dst, thread_t thread,
 /* sched_ipi_deferred_policy() is the global default deferred IPI policy for all schedulers */
 extern sched_ipi_type_t sched_ipi_deferred_policy(processor_set_t pset,
     processor_t dst, thread_t thread, sched_ipi_event_t event);
+
+/*
+ * Enumeration for pending AST urgent set tracing reasons
+ */
+__enum_closed_decl(sched_pending_AST_URGENT_set_reason_t, int, {
+	SCHED_AST_URGENT_SET_REASON_RT_IDLE =          1,   /* realtime_setrun: idle processor */
+	SCHED_AST_URGENT_SET_REASON_RT_DISPATCHING =   2,   /* realtime_setrun: dispatching processor */
+	SCHED_AST_URGENT_SET_REASON_RT_RUNNING =       3,   /* realtime_setrun: running processor */
+	SCHED_AST_URGENT_SET_REASON_IPI_DEFAULT =      4,   /* sched_ipi_action: default case */
+	SCHED_AST_URGENT_SET_REASON_SETRUN_PREEMPT =   5,   /* processor_setrun: dispatching with preemption */
+	SCHED_AST_URGENT_SET_REASON_SETRUN_NOPREEMPT = 6,   /* processor_setrun: dispatching without preemption */
+	SCHED_AST_URGENT_SET_REASON_BLOCK =            7,   /* processor_setrun: blocking case */
+	SCHED_AST_URGENT_SET_REASON_AMP_SPILL =        8,   /* pset_signal_spill: AMP spill case */
+});
+
+/*
+ * Enumeration for pending AST urgent clear tracing reasons
+ */
+__enum_decl(sched_pending_AST_URGENT_clear_reason_t, int, {
+	SCHED_AST_URGENT_CLEAR_REASON_CSW_CHECK =      9,   /* csw_check: clearing on no preempt */
+	SCHED_AST_URGENT_CLEAR_REASON_BLOCK =         10,   /* processor_setrun: blocking case */
+	SCHED_AST_URGENT_CLEAR_REASON_CLEAR_ASTS =   100,   /* clear_pending_AST_bits: generic clearing */
+});
+
+/*
+ * Helper functions for pending AST urgent bit manipulation
+ */
+extern void processor_set_pending_AST_URGENT(processor_set_t pset, processor_t processor,
+    thread_t thread, sched_pending_AST_URGENT_set_reason_t reason);
+
+extern void processor_clear_pending_AST_URGENT(processor_set_t pset, processor_t processor,
+    sched_pending_AST_URGENT_clear_reason_t reason);
 
 #if defined(CONFIG_SCHED_TIMESHARE_CORE)
 
@@ -569,19 +600,19 @@ __BEGIN_DECLS
 
 #ifdef  XNU_KERNEL_PRIVATE
 
-extern kern_return_t thread_soft_bind_cluster_type(thread_t, char cluster_type);
+extern __result_use_check kern_return_t thread_soft_bind_pset_type(thread_t, char pset_type);
 
 __options_decl(thread_bind_option_t, uint64_t, {
-	/* Unbind a previously cluster bound thread */
+	/* Unbind a previously pset-bound thread */
 	THREAD_UNBIND                   = 0x1,
 	/*
-	 * Bind thread to the cluster only if it is eligible to run on that cluster. If
-	 * the thread is not eligible to run on the cluster, thread_soft_bind_cluster_id()
+	 * Bind thread to the pset only if it is eligible to run on that pset. If
+	 * the thread is not eligible to run on the pset, thread_soft_bind_pset_id()
 	 * returns KERN_INVALID_POLICY.
 	 */
 	THREAD_BIND_ELIGIBLE_ONLY       = 0x2,
 });
-extern kern_return_t thread_soft_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
+extern kern_return_t thread_soft_bind_pset_id(thread_t thread, pset_id_t pset_id, thread_bind_option_t options);
 
 extern int sched_get_rt_n_backup_processors(void);
 extern void sched_set_rt_n_backup_processors(int n);

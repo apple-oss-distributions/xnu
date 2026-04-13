@@ -26,6 +26,8 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#define MACH_KERNEL_PRIVATE 1
+
 #include <machine/asm.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/machine_routines_asm.h>
@@ -41,6 +43,7 @@
 #if __ARM_KERNEL_PROTECT__
 #include <arm/pmap.h>
 #endif
+
 
 // If __ARM_KERNEL_PROTECT__, eret is preceeded by an ISB before returning to userspace.
 // Otherwise, use BIT_ISB_PENDING flag to track that we need to issue an isb before eret if needed.
@@ -1481,7 +1484,11 @@ check_user_asts:
 #if MACH_ASSERT
 	ldr		w0, [x3, ACT_PREEMPT_CNT]
 	cbnz		w0, preempt_count_notzero			// Detect unbalanced enable/disable preemption
-#endif
+#if CONFIG_EXCLAVES
+	ldr		w0, [x3, TH_EXCLAVES_STATE]
+	cbnz		w0, th_exclaves_state_notzero
+#endif /* CONFIG_EXCLAVES */
+#endif /* MACH_ASSERT */
 
 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
 	ldr		x4, [x3, ACT_CPUDATAP]				// Get current CPU data pointer
@@ -1566,10 +1573,6 @@ no_asts:
 L_skip_user_set_debug_state:
 
 
-	ldrsh	x0, [x4, CPU_TPIDR_EL0]
-	msr		TPIDR_EL0, x0
-
-
 	b		exception_return_unint_tpidr_x3
 
 exception_return:
@@ -1592,9 +1595,10 @@ exception_return_unint_tpidr_x3:
 	 * It's also unconditionally skipped for translated threads,
 	 * as those are another use case, one where x18 must be preserved.
 	 */
-	ldr		w0, [x3, TH_ARM_MACHINE_FLAGS]
+
 	mov		x18, #0
-	tbz		w0, ARM_MACHINE_THREAD_PRESERVE_X18_SHIFT, Lexception_return_restore_registers
+	mrs		x1, TPIDR_EL0
+	tbz		x1, MACHDEP_TPIDR_FLAG_PRESERVE_X18_SHIFT, Lexception_return_restore_registers
 
 exception_return_unint_tpidr_x3_restore_x18:
 	ldr		x18, [sp, SS64_X18]
@@ -1824,6 +1828,14 @@ preempt_count_notzero:
 	str		w0, [sp, #8]
 	adr		x0, L_preempt_count_notzero_str				// Format string
 	CALL_EXTERN panic							// Game over
+
+#if CONFIG_EXCLAVES
+th_exclaves_state_notzero:
+	PUSH_FRAME
+	bl		EXT(exclaves_assert_invalid_th_exclaves_state)
+	brk		#0
+	/* Unreachable */
+#endif /* CONFIG_EXCLAVES */
 
 L_preempt_count_notzero_str:
 	.asciz "preemption count not 0 on thread %p (%u)"

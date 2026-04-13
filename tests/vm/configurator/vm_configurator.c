@@ -246,7 +246,6 @@ is_valid_alignment_mask(mach_vm_size_t mask)
 	return is_power_of_two(pow);
 }
 
-
 /*
  * Some vm_behavior_t values have a persistent effect on the vm entry.
  * Other behavior values are really one-shot memory operations.
@@ -266,7 +265,7 @@ const char *
 name_for_entry_kind(vm_entry_template_kind_t kind)
 {
 	static const char *kind_name[] = {
-		"END_ENTRIES", "allocation", "hole", "submap parent"
+		"END_ENTRIES", "allocation", "hole", "submap parent", "guard page"
 	};
 	assert(kind < countof(kind_name));
 	return kind_name[kind];
@@ -370,6 +369,26 @@ name_for_share_mode(uint8_t share_mode)
 
 	assert(share_mode < countof(share_mode_name));
 	return share_mode_name[share_mode];
+}
+
+const char *
+name_for_copy_strategy(copy_strategy_t copy_strategy)
+{
+	static const char *names[] = {
+		[copy_none] = "copy_none",
+		[copy_delay] = "copy_delay",
+		[copy_symmetric] = "copy_symmetric",
+		[copy_delay_fork] = "copy_delay_fork",
+	};
+	if (copy_strategy < countof(names)) {
+		const char *result = names[copy_strategy];
+		if (result) {
+			return result;
+		}
+	} else if (copy_strategy == copy_invalid) {
+		return "(invalid copy strategy)";
+	}
+	return "(unknown copy strategy)";
 }
 
 const char *
@@ -642,7 +661,6 @@ dump_hole_info(
 	}
 }
 
-__attribute__((overloadable))
 static void
 dump_region_info_in_range(
 	mach_vm_address_t range_start,
@@ -701,13 +719,44 @@ dump_region_info_for_entries(entry_checker_range_t list)
 	 * Ignore the submap depth of the checkers themselves.
 	 * Print starting at submap depth 0 and recurse.
 	 * Don't specially highlight any attributes.
+	 *
+	 * Prefer to dump large contiguous ranges in case the
+	 * checkers boundaries don't match the real map entries.
+	 * (The checker list may not be a single contiguous range
+	 * thanks to tests like vm_remap (out) which add new
+	 * checkers far away from the original address range.)
 	 */
-	mach_vm_address_t start = checker_range_start_address(list);
-	mach_vm_address_t end = checker_range_end_address(list);
-	dump_region_info_in_range(
-		start, end - start,
-		0 /* submap depth */, true /* recurse */,
-		normal_highlights());
+
+	/* Repeatedly accumulate a range of contiguous checkers and print it. */
+	mach_vm_address_t print_start = 0;
+	mach_vm_address_t print_size = 0;
+	FOREACH_CHECKER(checker, list) {
+		if (checker->address == print_start + print_size) {
+			/* This checker is contiguous; just add it in. */
+			print_size += checker->size;
+		} else {
+			/*
+			 * This checker is discontiguous.
+			 * Print the previous range and start a new one.
+			 */
+			if (print_size > 0) {
+				dump_region_info_in_range(
+					print_start, print_size,
+					0 /* submap depth */, true /* recurse */,
+					normal_highlights());
+			}
+			print_start = checker->address;
+			print_size = checker->size;
+		}
+	}
+
+	/* Print the last unprinted range, if any. */
+	if (print_size > 0) {
+		dump_region_info_in_range(
+			print_start, print_size,
+			0 /* submap depth */, true /* recurse */,
+			normal_highlights());
+	}
 }
 
 /*
@@ -761,10 +810,7 @@ object_checker_new(void)
 	return calloc(sizeof(vm_object_checker_t), 1);
 }
 
-/*
- * Returns true if obj_checker refers to a NULL vm object.
- */
-static bool
+bool
 object_is_null(vm_object_checker_t *obj_checker)
 {
 	if (obj_checker == NULL) {
@@ -777,6 +823,17 @@ object_is_null(vm_object_checker_t *obj_checker)
 		return obj_checker->object_id == 0;
 	}
 	return false;
+}
+
+static void
+object_checker_set_shadow(vm_object_checker_t *obj_checker,
+    vm_object_checker_t *shadow)
+{
+	object_checker_reference(shadow);
+	if (obj_checker->shadow) {
+		object_checker_dereference(obj_checker->shadow);
+	}
+	obj_checker->shadow = shadow;
 }
 
 static unsigned
@@ -818,10 +875,7 @@ object_checker_get_vm_region_ref_count(vm_object_checker_t *obj_checker)
 	return count;
 }
 
-/*
- * Increments an object checker's refcount, mirroring the VM's refcount.
- */
-static void
+void
 object_checker_reference(vm_object_checker_t *obj_checker)
 {
 	if (!object_is_null(obj_checker)) {
@@ -832,10 +886,7 @@ object_checker_reference(vm_object_checker_t *obj_checker)
 static void object_checker_deinit(vm_object_checker_t *obj_checker); /* forward */
 static void checker_list_free(checker_list_t *checker_list); /* forward */
 
-/*
- * Decrements an object checker's refcount, mirroring the VM's refcount.
- */
-static void
+void
 object_checker_dereference(vm_object_checker_t *obj_checker)
 {
 	if (!object_is_null(obj_checker)) {
@@ -858,6 +909,9 @@ object_checker_deinit(vm_object_checker_t *obj_checker)
 	if (obj_checker->kind != Deinited) {
 		object_checker_dereference(obj_checker->shadow);
 		obj_checker->shadow = NULL;
+		obj_checker->vo_copy = NULL;
+		free(obj_checker->pages);
+		obj_checker->pages = NULL;
 
 		if (obj_checker->submap_checkers) {
 			assert(obj_checker->kind == SubmapObject);
@@ -888,22 +942,32 @@ object_checker_free(vm_object_checker_t *obj_checker)
 }
 
 vm_object_checker_t *
-object_checker_clone(vm_object_checker_t *obj_checker)
+object_checker_clone(vm_object_checker_t *old_checker)
 {
-	assert(obj_checker->kind != SubmapObject);  /* unimplemented */
+	assert(old_checker->kind != Deinited);
+	assert(old_checker->kind != SubmapObject);  /* unimplemented */
 
-	vm_object_checker_t *result = object_checker_new();
-	*result = *obj_checker;
+	vm_object_checker_t *new_checker = object_checker_new();
+	new_checker->next = NULL;
+	new_checker->prev = NULL;
 
-	result->self_ref_count = 0;
-	result->object_id_mode = object_is_unknown;
-	result->object_id = 0;
-	result->shadow = NULL;
+	new_checker->kind = old_checker->kind;
+	new_checker->verify = old_checker->verify;
 
-	result->next = NULL;
-	result->prev = NULL;
+	new_checker->object_id = 0;
+	new_checker->object_id_mode = object_is_unknown;
+	new_checker->copy_strategy = copy_symmetric;
 
-	return result;
+	new_checker->self_ref_count = 0;
+	new_checker->size = old_checker->size;
+	new_checker->fill_pattern = old_checker->fill_pattern;
+	new_checker->pages = calloc(new_checker->size / xnu_vm_page_size(), sizeof(page_status_t));
+	new_checker->shadow = NULL;
+	new_checker->shadow_offset = 0;
+	new_checker->vo_copy = NULL;
+	new_checker->submap_checkers = NULL;
+
+	return new_checker;
 }
 
 
@@ -953,6 +1017,7 @@ make_null_object_checker(checker_list_t *checker_list)
 
 	obj_checker->object_id_mode = object_has_known_id;
 	obj_checker->object_id = 0;
+	obj_checker->copy_strategy = copy_invalid;  /* NULL object doesn't have a copy strategy */
 
 	obj_checker->size = ~0u;
 	obj_checker->self_ref_count = 0;
@@ -982,10 +1047,12 @@ make_anonymous_object_checker(checker_list_t *checker_list, mach_vm_size_t size)
 	/* don't know the object's id yet, we'll look it up later */
 	obj_checker->object_id_mode = object_is_unknown;
 	obj_checker->object_id = 0;
+	obj_checker->copy_strategy = copy_symmetric;
 
 	obj_checker->size = size;
 	obj_checker->self_ref_count = 0;
 	obj_checker->fill_pattern.mode = DontFill;
+	obj_checker->pages = calloc(size / xnu_vm_page_size(), sizeof(page_status_t));
 
 	obj_checker->next = NULL;
 	obj_checker->prev = NULL;
@@ -1018,6 +1085,7 @@ make_submap_object_checker(
 	/* Look up the object_id stored in the parent map's submap entry. */
 	obj_checker->object_id = get_object_id_for_address(submap_start); /* submap_depth==0 */
 	obj_checker->object_id_mode = object_has_known_id;
+	obj_checker->copy_strategy = copy_invalid;  /* NULL object doesn't have a copy strategy */
 
 	obj_checker->size = submap_size;
 	obj_checker->self_ref_count = 0;
@@ -1031,9 +1099,18 @@ make_submap_object_checker(
 	/*
 	 * Slide the submap checkers as if they were
 	 * checking a submap remapping at address 0.
+	 * Also remove needs_copy, to match vm_map_seal().
 	 */
 	FOREACH_CHECKER(submap_checker, submap_checkers->entries) {
 		submap_checker->address -= submap_start;
+		submap_checker->needs_copy = false;
+	}
+
+	/* Change the submap's objects to copy_delay, to match vm_map_seal(). */
+	for (vm_object_checker_t *submap_content_object = submap_checkers->objects;
+	    submap_content_object;
+	    submap_content_object = submap_content_object->next) {
+		submap_content_object->copy_strategy = copy_delay;
 	}
 
 	/* Move the submap list's object checkers into the parent list. */
@@ -1051,7 +1128,7 @@ checker_new(void)
 	return calloc(sizeof(vm_entry_checker_t), 1);
 }
 
-static void
+void
 checker_free(vm_entry_checker_t *checker)
 {
 	object_checker_dereference(checker->object);
@@ -1063,12 +1140,7 @@ static checker_list_t *
 checker_list_new(void)
 {
 	checker_list_t *list = calloc(sizeof(*list), 1);
-
-	list->entries.head = NULL;
-	list->entries.tail = NULL;
-
 	make_null_object_checker(list);
-
 	return list;
 }
 
@@ -1079,7 +1151,8 @@ checker_list_append_object(
 {
 	/* object list is only stored in the top-level checker list */
 	if (list->parent) {
-		return checker_list_append_object(list, obj_checker);
+		assert(list != list->parent);
+		return checker_list_append_object(list->parent, obj_checker);
 	}
 
 	/* first object must be the null object */
@@ -1167,7 +1240,7 @@ checker_range_size(entry_checker_range_t checker_range)
 /*
  * Add a checker to the end of a checker range.
  */
-static void
+void
 checker_range_append(entry_checker_range_t *list, vm_entry_checker_t *inserted)
 {
 	inserted->prev = list->tail;
@@ -1190,7 +1263,7 @@ checker_range_free(entry_checker_range_t range)
 {
 	/* not FOREACH_CHECKER due to use-after-free */
 	vm_entry_checker_t *checker = range.head;
-	vm_entry_checker_t *end = range.tail->next;
+	vm_entry_checker_t *end = range.tail ? range.tail->next : NULL;
 	while (checker != end) {
 		vm_entry_checker_t *dead = checker;
 		checker = checker->next;
@@ -1204,6 +1277,9 @@ checker_list_free(checker_list_t *list)
 	/* Free map entry checkers */
 	checker_range_free(list->entries);
 
+	/* Free guard page checkers */
+	checker_range_free(list->guard_pages);
+
 	/* Free object checkers. */
 	vm_object_checker_t *obj_checker = list->objects;
 	while (obj_checker) {
@@ -1215,12 +1291,7 @@ checker_list_free(checker_list_t *list)
 	free(list);
 }
 
-/*
- * Clone a vm entry checker.
- * The new clone increases its object's refcount.
- * The new clone is unlinked from the checker list.
- */
-static vm_entry_checker_t *
+vm_entry_checker_t *
 checker_clone(vm_entry_checker_t *old)
 {
 	vm_entry_checker_t *new_checker = checker_new();
@@ -1231,10 +1302,794 @@ checker_clone(vm_entry_checker_t *old)
 	return new_checker;
 }
 
-static void
-checker_set_pages_resident(vm_entry_checker_t *checker, mach_vm_size_t pages)
+/*
+ * Return the entry's object's page index for the given address.
+ * The address is allowed to be the checker's end address, even though
+ * that page index may not be a valid index in the object's page array.
+ */
+static mach_vm_size_t
+checker_get_object_page_index_for_address_including_end(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr)
 {
-	checker->pages_resident = (uint32_t)pages;
+	assert(checker_contains_address(checker, addr) || addr == checker_end_address(checker));
+	assert(checker->object);
+	mach_vm_address_t truncated_addr = addr & ~(mach_vm_address_t)PAGE_MASK;
+	mach_vm_size_t offset_in_entry = truncated_addr - checker->address;
+	mach_vm_size_t offset_in_object = offset_in_entry + checker->object_offset;
+	assert(offset_in_object <= checker->object->size); /* one past the end is OK */
+	mach_vm_size_t page_index = offset_in_object / xnu_vm_page_size();
+	return page_index;
+}
+
+/*
+ * Return the entry's object's page index for the given address.
+ * The checker's end address is not allowed.
+ */
+static mach_vm_size_t
+checker_get_object_page_index_for_address(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr)
+{
+	assert(addr != checker_end_address(checker));
+	return checker_get_object_page_index_for_address_including_end(checker, addr);
+}
+
+/*
+ * page_index is an index in obj_checker's page array.
+ * Transform it into the equivalent index in its shadow's page array.
+ */
+static mach_vm_size_t
+object_checker_page_index_in_shadow(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index)
+{
+	assert(obj_checker->shadow);
+	return page_index + (obj_checker->shadow_offset / xnu_vm_page_size());
+}
+
+/*
+ * Get the bounds of this entry's subset of its object's pages.
+ * The entry's object must not be NULL.
+ * Use this to loop through an entry's object pages.
+ */
+void
+checker_get_object_page_bounds(
+	vm_entry_checker_t *checker,
+	mach_vm_size_t * const out_page_start,
+	mach_vm_size_t * const out_page_end)
+{
+	*out_page_start = checker_get_object_page_index_for_address(checker, checker->address);
+	*out_page_end = checker_get_object_page_index_for_address_including_end(checker, checker_end_address(checker));
+}
+
+/*
+ * Get the bounds of this object's pages
+ * (the indexes of its first page and one past the last page)
+ * in its shadow object's page array.
+ */
+static void
+object_checker_get_page_bounds_in_shadow(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t * const out_page_start,
+	mach_vm_size_t * const out_page_end)
+{
+	*out_page_start = object_checker_page_index_in_shadow(obj_checker, 0);
+	*out_page_end = object_checker_page_index_in_shadow(obj_checker, obj_checker->size / xnu_vm_page_size());
+}
+
+/*
+ * Get the bounds of vo_copy's pages
+ * (the indexes of its first page and one past the last page)
+ * in this object's page array.
+ */
+static void
+object_checker_get_page_bounds_of_copy(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t * const out_page_start,
+	mach_vm_size_t * const out_page_end)
+{
+	assert(obj_checker->vo_copy);
+	object_checker_get_page_bounds_in_shadow(obj_checker->vo_copy,
+	    out_page_start, out_page_end);
+}
+
+/*
+ * Get the page index of a page in vo_copy
+ * matching page_index in this object.
+ * This object must have a vo_copy copy object.
+ * The copy object must span this page.
+ */
+static mach_vm_size_t
+object_checker_page_index_in_copy(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index)
+{
+	assert(obj_checker->vo_copy);
+
+	/*
+	 * Verify that page_index is within the copy's bounds.
+	 * The end index after the last page is allowed.
+	 */
+	mach_vm_size_t copy_page_start, copy_page_end;
+	object_checker_get_page_bounds_of_copy(obj_checker,
+	    &copy_page_start, &copy_page_end);
+	assert(page_index >= copy_page_start && page_index <= copy_page_end);
+
+	return page_index - obj_checker->vo_copy->shadow_offset / xnu_vm_page_size();
+}
+
+/*
+ * Returns true if this object has a copy object
+ * that spans page_index.
+ *
+ * Returns false if this object has no copy object.
+ * Returns false if this object has a copy object,
+ * but the copy object doesn't span that page.
+ */
+static bool
+object_checker_copy_spans_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index)
+{
+	if (obj_checker->vo_copy == NULL) {
+		return false;
+	}
+	mach_vm_size_t copy_page_start, copy_page_end;
+	object_checker_get_page_bounds_of_copy(obj_checker,
+	    &copy_page_start, &copy_page_end);
+	return copy_page_start <= page_index && page_index < copy_page_end;
+}
+
+/*
+ * Returns true if this object has a copy object
+ * and that copy object does not have its own copy
+ * of this object's page at page_index.
+ *
+ * Returns false if this object has no copy object.
+ * Returns false if this object has a copy object,
+ * but the copy object doesn't span that page.
+ */
+static bool
+object_checker_copy_needs_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index)
+{
+	if (!object_checker_copy_spans_page(obj_checker, page_index)) {
+		return false;
+	}
+	mach_vm_size_t copy_page_index =
+	    object_checker_page_index_in_copy(obj_checker, page_index);
+	return obj_checker->vo_copy->pages[copy_page_index] == page_is_absent;
+}
+
+/*
+ * Try to unlink obj_checker from its shadow, if any.
+ * (If the object already has all of its pages
+ * then it no longer needs the shadow.)
+ */
+static void
+object_checker_try_collapse_shadow(vm_object_checker_t *obj_checker)
+{
+	if (!obj_checker->shadow) {
+		return;  /* no shadow present */
+	}
+
+	for (mach_vm_size_t page_index = 0;
+	    page_index < obj_checker->size / xnu_vm_page_size();
+	    page_index++) {
+		if (obj_checker->pages[page_index] == page_is_absent) {
+			return;  /* object is missing a page, can't unlink the shadow */
+		}
+	}
+
+	/* We have all of our pages. We don't need our shadow. */
+	vm_object_checker_t *shadow = obj_checker->shadow;
+	if (shadow->vo_copy == obj_checker) {
+		shadow->vo_copy = NULL;
+	}
+	/* do this last, it might deallocate shadow */
+	object_checker_set_shadow(obj_checker, NULL);
+}
+
+/*
+ * Copy a page to an object from somewhere in its shadow chain.
+ * The page is copied from *pageref (part of page_owner)
+ * to dst_page_index in this object.
+ * Afterwards, try to collapse the shadow.
+ */
+static void
+object_checker_pull_page_from_shadow(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t dst_page_index,
+	page_status_t *pageref,
+	vm_object_checker_t *page_owner)
+{
+	assert(page_owner != obj_checker);
+
+	/* Copy the page */
+	assert(obj_checker->pages[dst_page_index] == page_is_absent);
+	obj_checker->pages[dst_page_index] = *pageref;
+
+	/* Try to collapse the shadow chain. */
+	object_checker_try_collapse_shadow(obj_checker);
+}
+
+/*
+ * Copy a page from an object to its copy object (vo_copy).
+ * The page is copied from page_index in this object
+ * to the appropriate location in vo_copy.
+ * Do nothing if the copy object does not span this page.
+ * Do nothing if the copy object already has its own copy of this page.
+ */
+static void
+object_checker_push_page_into_copy(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index)
+{
+	assert(page_index < obj_checker->size / xnu_vm_page_size());
+	if (object_checker_copy_needs_page(obj_checker, page_index)) {
+		mach_vm_size_t copy_page_index =
+		    object_checker_page_index_in_copy(obj_checker, page_index);
+		obj_checker->vo_copy->pages[copy_page_index] =
+		    obj_checker->pages[page_index];
+	}
+}
+
+/*
+ * Look for a page in an object and its shadow chain.
+ * page_index in obj_checker is the desired page.
+ *
+ * Returns false if no copy of the page is
+ * present in obj_checker or its shadow chain.
+ * Returns true if some copy of the page was found,
+ * and sets *out_pageref and *out_page_owner to the copy
+ * of the page closest to obj_checker in the shadow chain.
+ *
+ * Example: if obj_checker already has the page
+ * then return true with *out_page_owner == obj_checker.
+ */
+static bool
+object_checker_find_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index,
+	page_status_t ** const out_pageref,
+	vm_object_checker_t ** const out_page_owner)
+{
+	if (obj_checker == NULL) {
+		/* recursive base case */
+		return false;
+	}
+
+	if (object_is_null(obj_checker)) {
+		/* null object never has pages */
+		return false;
+	}
+
+	assert(obj_checker->pages);
+	if (obj_checker->pages[page_index]) {
+		/* we have the page */
+		*out_pageref = &obj_checker->pages[page_index];
+		*out_page_owner = obj_checker;
+		return true;
+	}
+
+	if (obj_checker->shadow) {
+		mach_vm_size_t shadow_page_index =
+		    object_checker_page_index_in_shadow(obj_checker, page_index);
+		if (object_checker_find_page(obj_checker->shadow, shadow_page_index,
+		    out_pageref, out_page_owner)) {
+			/* shadow chain has the page */
+			return true;
+		}
+	}
+
+	/* didn't find the page */
+	return false;
+}
+
+/*
+ * Mark a page as newly allocated in an object.
+ * page_index in obj_checker is the page to allocate.
+ * On entry that page must be absent.
+ * Also sets *out_pageref and *out_page_owner for convenience
+ * in code that parallels object_checker_find_page().
+ */
+static void
+object_checker_allocate_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index,
+	page_status_t ** const out_pageref,
+	vm_object_checker_t ** const out_page_owner)
+{
+	assert(obj_checker->pages[page_index] == page_is_absent);
+	obj_checker->pages[page_index] = page_is_resident;
+	*out_pageref = &obj_checker->pages[page_index];
+	*out_page_owner = obj_checker;
+}
+
+/*
+ * Find a page in an object or its shadow chain,
+ * and allocate a new page if no copy is available.
+ * page_index in obj_checker is the desired page.
+ * On exit the page found or allocated is
+ * returned in *out_pageref and *out_page_owner.
+ */
+static void
+object_checker_find_or_allocate_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index,
+	page_status_t ** const out_pageref,
+	vm_object_checker_t ** const out_page_owner)
+{
+	if (!object_checker_find_page(obj_checker, page_index, out_pageref, out_page_owner)) {
+		object_checker_allocate_page(obj_checker, page_index, out_pageref, out_page_owner);
+	}
+}
+
+/*
+ * Process some pages in an object.
+ * [start_page, end_page) in obj_checker are all processed as follows:
+ * 1. if pull_from_shadow, pages in the shadow chain are copied into this object
+ * 2. all missing pages are zerofilled in this object
+ * 3. if push_into_copy, pages are copied into this object's vo_copy
+ *
+ * Used for fault and wire.
+ */
+void
+object_checker_allocate_pull_push_pages(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t start_page,
+	mach_vm_size_t end_page,
+	bool pull_from_shadow,
+	bool push_into_copy)
+{
+	for (mach_vm_size_t page_index = start_page;
+	    page_index < end_page;
+	    page_index++) {
+		/* Find the page. Zerofill it locally if it is missing. */
+		page_status_t *pageref;
+		vm_object_checker_t *page_owner;
+		object_checker_find_or_allocate_page(obj_checker, page_index, &pageref, &page_owner);
+		if (pull_from_shadow && page_owner != obj_checker) {
+			/* Page is in the shadow chain. Copy it here. */
+			object_checker_pull_page_from_shadow(
+				obj_checker, page_index, pageref, page_owner);
+		}
+
+		if (push_into_copy && obj_checker->vo_copy) {
+			/* Try to push the page into the copy object. */
+			object_checker_push_page_into_copy(obj_checker, page_index);
+		}
+	}
+}
+
+/*
+ * Convenience wrapper for object_checker_allocate_pull_push_pages()
+ * but for only one page.
+ */
+static void
+object_checker_allocate_pull_push_page(
+	vm_object_checker_t *obj_checker,
+	mach_vm_size_t page_index,
+	bool pull_from_shadow,
+	bool push_into_copy)
+{
+	object_checker_allocate_pull_push_pages(obj_checker,
+	    page_index, page_index + 1, pull_from_shadow, push_into_copy);
+}
+
+/*
+ * Perform a delayed COW copy of an entry.
+ * This may create a new object that shadows the old object,
+ * or it may re-use an existing copy of the old object.
+ */
+static void
+checker_copy_delayed(checker_list_t *list, vm_entry_checker_t *checker)
+{
+	vm_object_checker_t *old_object = checker->object;
+	vm_object_checker_t *old_copy_object = old_object->vo_copy;
+	vm_object_checker_t *new_object;
+
+	/*
+	 * If there is already a copy object, and no pages have been pushed
+	 * to the copy object, then we can re-use it.
+	 * TODO real VM can resize the existing copy object; we don't try that here
+	 */
+	if (old_copy_object &&
+	    old_copy_object->size == old_object->size &&
+	    checker_count_vm_region_pages_resident_owned_by_object(checker, old_copy_object) == 0) {
+		/* Copy object owns no pages yet. Re-use it. */
+		new_object = old_copy_object;
+	} else {
+		/* Make a new object and insert it as the new old_object->vo_copy. */
+
+		new_object = object_checker_clone(checker->object);
+		checker_list_append_object(list, new_object);
+
+		/*
+		 * was: old_object <--shadow-- old_copy_object
+		 *                 --vo_copy-->
+		 *
+		 * now: old_object <--shadow-- new_object <--shadow-- old_copy_object
+		 *                 --vo_copy-->
+		 *
+		 * new_object completely covers old_object, so
+		 * (1) new_object's shadow_offset is 0
+		 * (2) old_copy_object's shadow_offset is unchanged
+		 */
+		object_checker_set_shadow(new_object, old_object);
+		old_object->vo_copy = new_object;
+		if (old_copy_object) {
+			assert(old_copy_object->shadow == old_object);
+
+			/*
+			 * do this after setting new_object->shadow
+			 * or else it might deallocate old_object
+			 */
+			object_checker_set_shadow(old_copy_object, new_object);
+		}
+
+		new_object->copy_strategy = copy_symmetric;
+	}
+
+	checker_set_object(checker, new_object);
+	checker->needs_copy = true;
+}
+
+/*
+ * Unconditionally set checker's object to a new object that shadows its old object.
+ * If you want to allow optimizations when the new object is not required,
+ * use checker_make_shadow_object().
+ */
+void
+checker_make_shadow_object_forced(checker_list_t *list, vm_entry_checker_t *checker)
+{
+	vm_object_checker_t *old_object = checker->object;
+	vm_object_checker_t *new_object = object_checker_clone(checker->object);
+	checker_list_append_object(list, new_object);
+
+	/*
+	 * New object only covers the part of the
+	 * old object that the map entry covers.
+	 */
+	new_object->size = checker->size;
+	new_object->shadow_offset = checker->object_offset;
+	checker->object_offset = 0;
+
+	object_checker_set_shadow(new_object, old_object);
+	checker_set_object(checker, new_object);
+
+	new_object->copy_strategy = copy_symmetric;
+	checker->needs_copy = false;
+}
+
+/*
+ * Set checker's object to a new object that shadows its old object if necessary.
+ * In cases where the new object is not necessary, instead leave the
+ * checker's object alone and change the checker to needs_copy = false.
+ */
+void
+checker_make_shadow_object(checker_list_t *list, vm_entry_checker_t *checker)
+{
+	/* Optimization: try not to shadow if we don't have to. */
+	vm_object_checker_t *obj_checker = checker->object;
+	if (obj_checker->self_ref_count != 1) {
+		/* Multiple entries may point to this object. Must shadow. */
+		goto really_shadow;
+	}
+	if (obj_checker->shadow && obj_checker->shadow->vo_copy) {
+		/* Object's shadow has a copy. Must shadow. (TODO why?) */
+		goto really_shadow;
+	}
+	if (checker->size != obj_checker->size) {
+		/* Checker doesn't cover the whole object. Must shadow. */
+		goto really_shadow;
+	}
+	if (checker->submap_depth > 0) {
+		/*
+		 * We're inside a submap which may be mapped in multiple places.
+		 * Must shadow.
+		 */
+		goto really_shadow;
+	}
+
+	/* Nothing else can be using this object. No need for a new shadow. */
+	checker->needs_copy = false;
+	return;
+
+really_shadow:
+	checker_make_shadow_object_forced(list, checker);
+}
+
+kern_return_t
+checker_fault_address(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr,
+	vm_prot_t fault_prot)
+{
+	assert(checker_contains_address(checker, addr));
+
+	/* write fault also requires read permission */
+	vm_prot_t required_prot = fault_prot;
+	if (prot_contains_all(required_prot, VM_PROT_WRITE)) {
+		required_prot |= VM_PROT_READ;
+	}
+
+	/* Check permissions and resolve null object if necessary. */
+	if (is_new_vm()) {
+		/*
+		 * Null object is resolved before checking permissions,
+		 * with only a narrow optimization to avoid resolving it.
+		 */
+		if (checker->max_protection == VM_PROT_NONE) {
+			/* access denied, optimized case */
+			return KERN_PROTECTION_FAILURE;
+		}
+		checker_resolve_null_vm_object(checker_list, checker);
+		if (!prot_contains_all(checker->protection, required_prot)) {
+			/* access denied, general case */
+			return KERN_PROTECTION_FAILURE;
+		}
+	} else {
+		/* Null object is only resolved after checking permissions. */
+		if (!prot_contains_all(checker->protection, required_prot)) {
+			/* access denied */
+			return KERN_PROTECTION_FAILURE;
+		}
+		checker_resolve_null_vm_object(checker_list, checker);
+	}
+
+	/* Resolve symmetric COW by making a new object. */
+	if ((fault_prot & VM_PROT_WRITE) && checker->needs_copy) {
+		checker_make_shadow_object(checker_list, checker);
+	}
+
+	/*
+	 * Find the page in the entry's object or its shadow chain.
+	 * Zero-fill a new page if it does not exist yet.
+	 * If it's a write fault, copy the page up the shadow chain as needed.
+	 */
+	bool should_copy_page = fault_prot & VM_PROT_WRITE;
+	vm_object_checker_t *obj_checker = checker->object;
+	mach_vm_size_t page_index =
+	    checker_get_object_page_index_for_address(checker, addr);
+	object_checker_allocate_pull_push_page(obj_checker, page_index,
+	    should_copy_page /* pull from shadow */,
+	    should_copy_page /* push to copy */);
+
+	return KERN_SUCCESS;
+}
+
+void
+checker_clip_and_resolve_cow_for_wire(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker,
+	mach_vm_address_t range_address,
+	mach_vm_size_t range_size)
+{
+	mach_vm_address_t range_end = range_address + range_size;
+	if (checker->user_wired_count > 0) {
+		/* already wired, nothing to resolve */
+	} else if (object_is_null(checker->object)) {
+		/* Resolve NULL object. New VM should already have done this. */
+		assert(!is_new_vm());
+		checker_resolve_null_vm_object(checker_list, checker);
+	} else if (checker->needs_copy) {
+		/* resolve COW */
+		checker_make_shadow_object(checker_list, checker);
+	} else if (checker->object->copy_strategy == copy_symmetric) {
+		/* copy_symmetric without needs_copy: clip first then resolve COW */
+		checker_clip_left(checker_list, checker, range_address);
+		checker_clip_right(checker_list, checker, range_end);
+		checker_make_shadow_object(checker_list, checker);
+	}
+
+	/* If it's still copy_symmetric, change it. */
+	if (checker->object->copy_strategy == copy_symmetric) {
+		checker->object->copy_strategy = copy_delay;
+	}
+
+	/* Clip now if we haven't already. */
+	checker_clip_left(checker_list, checker, range_address);
+	checker_clip_right(checker_list, checker, range_end);
+}
+
+/*
+ * Resolve COW before a checker's memory is shared.
+ * copy_symmetric objects cannot be shared, so
+ * the object's copy strategy may be changed or
+ * a new copy object may be created.
+ */
+static void
+checker_resolve_cow_for_share(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker)
+{
+	vm_object_checker_t *obj_checker = checker->object;
+
+	if (obj_checker->copy_strategy == copy_delay) {
+		/* copy_delay object. We're free to share it. */
+	} else if (obj_checker->copy_strategy == copy_symmetric &&
+	    !checker->needs_copy &&
+	    checker->object->self_ref_count == 1) {
+		/*
+		 * copy_symmetric object with only one owner.
+		 * We're free to share this object
+		 * after changing it to copy_delay.
+		 */
+		obj_checker->copy_strategy = copy_delay;
+	} else if (obj_checker->copy_strategy == copy_symmetric) {
+		/*
+		 * copy_symmetric with possibly multiple map entries using it.
+		 * Make a new object, or use the same object if we can
+		 * prove that nothing else uses it. Then make the new object
+		 * copy_delay and share that.
+		 */
+		checker_make_shadow_object(checker_list, checker);
+		obj_checker = checker->object;  /* maybe changed */
+		obj_checker->copy_strategy = copy_delay;
+		checker->needs_copy = false;
+	} else {
+		T_FAIL("unimplemented copy_strategy %s",
+		    name_for_copy_strategy(obj_checker->copy_strategy));
+	}
+
+	assert(!checker->needs_copy);
+	assert(obj_checker == checker->object);
+	assert(obj_checker->copy_strategy == copy_delay);
+}
+
+vm_entry_checker_t *
+checker_clone_share(
+	checker_list_t *list,
+	vm_entry_checker_t *src_checker)
+{
+	switch (src_checker->kind) {
+	case Allocation:
+		/* Special case: inaccessible and null object */
+		if (src_checker->protection == VM_PROT_NONE &&
+		    src_checker->max_protection == VM_PROT_NONE &&
+		    object_is_null(src_checker->object)) {
+			break;
+		}
+
+		/* Need a non-null object to share. */
+		checker_resolve_null_vm_object(list, src_checker);
+
+		/* Some COW states must be resolved before sharing. */
+		checker_resolve_cow_for_share(list, src_checker);
+		break;
+	case Hole:
+	case Submap:
+		break;
+	case Guard:
+	case EndEntries:
+	default:
+		assert(0);
+	}
+
+	vm_entry_checker_t *dst_checker = checker_clone(src_checker);
+	return dst_checker;
+}
+
+vm_entry_checker_t *
+checker_clone_copy(checker_list_t *list, vm_entry_checker_t *src_checker)
+{
+	vm_entry_checker_t *dst_checker = NULL;
+	switch (src_checker->kind) {
+	case Allocation:
+		/* remap-copy resolves NULL objects at the source. */
+		if (object_is_null(src_checker->object)) {
+			checker_resolve_null_vm_object(list, src_checker);
+		}
+		/* Make a copy using the appropriate copy strategy. */
+		switch (src_checker->object->copy_strategy) {
+		case copy_delay:
+			dst_checker = checker_clone(src_checker);
+			checker_copy_delayed(list, dst_checker);
+			break;
+		case copy_symmetric:
+			src_checker->needs_copy = true;
+			dst_checker = checker_clone(src_checker);
+			break;
+		default:
+			T_FAIL("unimplemented copy_strategy %s",
+			    name_for_copy_strategy(src_checker->object->copy_strategy));
+			break;
+		}
+		break;
+	case Hole:
+		dst_checker = checker_clone(src_checker);
+		break;
+	case Submap:
+	case Guard:
+	case EndEntries:
+	default:
+		assert(0);
+	}
+	return dst_checker;
+}
+
+bool
+checker_page_at_address_is_resident_owned_by_object(
+	vm_entry_checker_t *checker,
+	mach_vm_address_t addr,
+	vm_object_checker_t *matching_owner)
+{
+	/* null object and submap objects never have resident pages */
+	if (object_is_null(checker->object) ||
+	    checker->object->kind == SubmapObject) {
+		return false;
+	}
+
+	mach_vm_size_t page_index = checker_get_object_page_index_for_address(checker, addr);
+	page_status_t *pageref;
+	vm_object_checker_t *page_owner;
+	if (object_checker_find_page(checker->object, page_index, &pageref, &page_owner)) {
+		if (matching_owner != NULL && page_owner != matching_owner) {
+			/* page's owner is not the requested owner */
+			return false;
+		}
+		return *pageref == page_is_resident;
+	}
+
+	/* page not allocated in any object */
+	return false;
+}
+
+uint32_t
+checker_count_vm_region_pages_resident_owned_by_object(
+	vm_entry_checker_t *checker,
+	vm_object_checker_t *matching_owner)
+{
+	/* null object and submap objects never have pages */
+	if (object_is_null(checker->object) ||
+	    checker->object->kind == SubmapObject) {
+		return 0;
+	}
+
+	uint32_t pages_resident = 0;
+	for (mach_vm_address_t addr = checker->address;
+	    addr < checker_end_address(checker);
+	    addr += xnu_vm_page_size()) {
+		if (checker_page_at_address_is_resident_owned_by_object(checker, addr, matching_owner)) {
+			pages_resident++;
+		}
+	}
+
+	/* Convert units from xnu_vm_page_size() to PAGE_SIZE. */
+	assert(xnu_vm_page_size() >= PAGE_SIZE);
+	return pages_resident * xnu_vm_page_size() / PAGE_SIZE;
+}
+
+uint32_t
+checker_count_vm_region_pages_resident(vm_entry_checker_t *checker)
+{
+	return checker_count_vm_region_pages_resident_owned_by_object(checker, NULL);
+}
+
+uint32_t
+checker_get_local_pages_resident(vm_entry_checker_t *checker)
+{
+	/* null object and submap objects never have pages */
+	if (object_is_null(checker->object) ||
+	    checker->object->kind == SubmapObject) {
+		return 0;
+	}
+
+	uint32_t pages_resident = 0;
+	mach_vm_size_t start_page, end_page;
+	checker_get_object_page_bounds(checker, &start_page, &end_page);
+	for (mach_vm_size_t page_index = start_page;
+	    page_index < end_page;
+	    page_index++) {
+		if (checker->object->pages[page_index] == page_is_resident) {
+			pages_resident++;
+		}
+	}
+	return pages_resident;
 }
 
 /*
@@ -1309,12 +2164,6 @@ unslide_submap_checkers(checker_list_t *submap_checkers)
  */
 
 typedef struct {
-	mach_vm_address_t address;
-	mach_vm_address_t size;
-	uint32_t pages_resident;
-} checker_tweaks_t;
-
-typedef struct {
 	/* save the checker list so we can use attribute(cleanup) */
 	checker_list_t *tweaked_checker_list;
 
@@ -1330,23 +2179,19 @@ static void
 checker_tweak_for_vm_region(vm_entry_checker_t *checker, vm_entry_checker_t *submap_parent)
 {
 	/* clamp checker bounds to the submap window */
-	mach_vm_size_t old_size = checker->size;
+	mach_vm_address_t old_address = checker->address;
 	clamp_address_size_to_checker(&checker->address, &checker->size, submap_parent);
 
-	/*
-	 * scale pages_resident, on the assumption that either
-	 * all pages are resident, or none of them (TODO page modeling)
-	 */
-	if (checker->size != old_size) {
-		assert(checker->size < old_size);
-		double scale = (double)checker->size / old_size;
-		checker->pages_resident *= scale;
-	}
+	/* also update object_offset to match; pages_resident calculation needs it */
+	uint64_t object_offset_increase = checker->address - old_address;
+	checker->object_offset += object_offset_increase;
 
 	/*
-	 * vm_region does NOT adjust the reported object offset,
-	 * so don't tweak it here
+	 * vm_region does NOT adjust the reported object offset.
+	 * Remember the change we just applied so we can negate it
+	 * when comparing to vm_region output.
 	 */
+	checker->vm_region_object_offset_tweak = -object_offset_increase;
 }
 
 static checker_list_tweaks_t
@@ -1377,7 +2222,9 @@ submap_checkers_tweak_for_vm_region(
 	tweaks.new_head_original_contents = *new_head;
 	tweaks.new_tail_original_contents = *new_tail;
 	checker_tweak_for_vm_region(new_head, submap_parent);
-	checker_tweak_for_vm_region(new_tail, submap_parent);
+	if (new_tail != new_head) {
+		checker_tweak_for_vm_region(new_tail, submap_parent);
+	}
 
 	return tweaks;
 }
@@ -1416,26 +2263,6 @@ checker_set_object(vm_entry_checker_t *checker, vm_object_checker_t *obj_checker
 		object_checker_dereference(checker->object);
 	}
 	checker->object = obj_checker;
-
-	/* if the object has a fill pattern then the pages will be resident already */
-	if (checker->object->fill_pattern.mode == Fill) {
-		checker_set_pages_resident(checker, checker->size / PAGE_SIZE);
-	}
-}
-
-void
-checker_make_shadow_object(checker_list_t *list, vm_entry_checker_t *checker)
-{
-	vm_object_checker_t *old_object = checker->object;
-	vm_object_checker_t *new_object = object_checker_clone(checker->object);
-	checker_list_append_object(list, new_object);
-
-	new_object->size = checker->size;
-	checker->object_offset = 0;
-
-	new_object->shadow = old_object;
-	object_checker_reference(old_object);
-	checker_set_object(checker, new_object);
 }
 
 /*
@@ -1480,7 +2307,8 @@ checker_share_mode(vm_entry_checker_t *checker)
 /*
  * Translate a share mode into a "narrowed" form.
  * - SM_TRUESHARED is mapped to SM_SHARED
- * - SM_SHARED_ALIASED is unsupported.
+ * - SM_PRIVATE_ALIASED is mapped to SM_SHARED
+ * - SM_SHARED_ALIASED is mapped to SM_SHARED
  * - TODO: SM_LARGE_PAGE
  */
 static unsigned
@@ -1488,11 +2316,9 @@ narrow_share_mode(unsigned share_mode)
 {
 	switch (share_mode) {
 	case SM_TRUESHARED:
-		return SM_SHARED;
 	case SM_PRIVATE_ALIASED:
-		return SM_PRIVATE_ALIASED;
 	case SM_SHARED_ALIASED:
-		T_FAIL("unexpected/unimplemented share mode SM_SHARED_ALIASED");
+		return SM_SHARED;
 	case SM_LARGE_PAGE:
 		T_FAIL("unexpected/unimplemented share mode SM_LARGE_PAGE");
 	default:
@@ -1569,7 +2395,7 @@ make_checker_for_anonymous_private(
 		.user_tag = (uint8_t)user_tag,
 
 		.object_offset = 0,
-		.pages_resident = 0,
+		.vm_region_object_offset_tweak = 0,
 		.needs_copy = false,
 
 		.verify = vm_entry_attributes_with_default(true)
@@ -1578,6 +2404,25 @@ make_checker_for_anonymous_private(
 	checker_set_null_object(list, checker);
 
 	return checker;
+}
+
+void
+append_checker_for_guard_page(
+	checker_list_t *list,
+	mach_vm_address_t address,
+	mach_vm_size_t size)
+{
+	vm_entry_checker_t *checker;
+	checker = make_checker_for_anonymous_private(list, Guard,
+	    address, size, VM_PROT_NONE, VM_PROT_NONE, 0, false);
+
+	/*
+	 * Don't check object_offset. The object offset stored in the
+	 * last guard page depends on the size of the arena allocation.
+	 */
+	checker->verify.object_offset_attr = false;
+
+	checker_range_append(&list->guard_pages, checker);
 }
 
 vm_entry_checker_t *
@@ -1654,7 +2499,7 @@ make_checker_for_shared(
 		.user_tag = (uint8_t)user_tag,
 
 		.object_offset = object_offset,
-		.pages_resident = 0,
+		.vm_region_object_offset_tweak = 0,
 		.needs_copy = false,
 
 		.verify = vm_entry_attributes_with_default(true)
@@ -1689,8 +2534,8 @@ make_checker_for_submap(
 		.user_tag = 0,
 		.submap_depth = 0,
 		.object_offset = object_offset,
-		.pages_resident = 0,
-		.needs_copy = false,
+		.vm_region_object_offset_tweak = 0,
+		.needs_copy = true,  /* like a shared region submap */
 
 		.verify = vm_entry_attributes_with_default(true),
 		);
@@ -1754,6 +2599,7 @@ dump_checker_info_with_highlighting(
 	T_LOG("%s    %suser wired count:  %d%s", submap_prefix, HIGHLIGHT(checker->user_wired_count, entry.user_wired_count_attr));
 	T_LOG("%s    %suser tag:       %d%s", submap_prefix, HIGHLIGHT(checker->user_tag, entry.user_tag_attr));
 	T_LOG("%s    %sobject offset:  0x%llx%s", submap_prefix, HIGHLIGHT(checker->object_offset, entry.object_offset_attr));
+	T_LOG("%s    %svm_region object offset:  0x%llx%s", submap_prefix, HIGHLIGHT(checker->object_offset + checker->vm_region_object_offset_tweak, entry.object_offset_attr));
 
 	vm_object_checker_t *obj_checker = checker->object;
 	if (object_is_null(obj_checker)) {
@@ -1764,9 +2610,19 @@ dump_checker_info_with_highlighting(
 		T_LOG("%s    %sobject id:      %s%s", submap_prefix, HIGHLIGHT("unknown, not null", entry.object_attr));
 	} else {
 		assert(obj_checker->object_id_mode == object_has_known_id);
-		T_LOG("%s    %sobject id:      0x%llx%s", submap_prefix, HIGHLIGHT(obj_checker->object_id, object.object_id_attr));
-		for (vm_object_checker_t *shadow = obj_checker->shadow; shadow; shadow = shadow->shadow) {
-			T_LOG("%s        %sshadow:         0x%llx%s", submap_prefix, HIGHLIGHT(shadow->object_id, object.object_id_attr));
+		if (obj_checker->shadow == NULL) {
+			/* no shadow chain, simple display */
+			T_LOG("%s    %sobject id:      0x%llx%s", submap_prefix, HIGHLIGHT(obj_checker->object_id, object.object_id_attr));
+		} else {
+			/* include shadow chain and page counts */
+			const char *field_name = "object id:";
+			for (vm_object_checker_t *obj = obj_checker; obj; obj = obj->shadow) {
+				T_LOG("%s    %s%s%s     %s0x%llx%s %s(owns %u resident pages)%s", submap_prefix,
+				    HIGHLIGHT(field_name, object.object_id_attr),
+				    HIGHLIGHT(obj->object_id, object.object_id_attr),
+				    HIGHLIGHT(checker_count_vm_region_pages_resident_owned_by_object(checker, obj), object.object_id_attr));
+				field_name = "    shadow:   ";
+			}
 		}
 		T_LOG("%s    %sobject size:    0x%llx%s", submap_prefix, HIGHLIGHT(obj_checker->size, object.size_attr));
 		T_LOG("%s    %sref_count:      %u%s", submap_prefix, HIGHLIGHT(object_checker_get_vm_region_ref_count(obj_checker), object.ref_count_attr));
@@ -1774,11 +2630,16 @@ dump_checker_info_with_highlighting(
 		T_LOG("%s    %sself_ref_count: %u%s", submap_prefix, HIGHLIGHT(object_checker_get_self_ref_count(obj_checker), object.ref_count_attr));
 	}
 
-	T_LOG("%s    %spages resident: %u%s", submap_prefix, HIGHLIGHT(checker->pages_resident, entry.pages_resident_attr));
+	T_LOG("%s    %spages resident: %u%s", submap_prefix, HIGHLIGHT(checker_count_vm_region_pages_resident(checker), entry.pages_resident_attr));
 	T_LOG("%s    %sshare mode:     %s%s", submap_prefix, HIGHLIGHT(name_for_share_mode(checker_share_mode(checker)), entry.share_mode_attr));
 	T_LOG("%s    %sis submap:      %s%s", submap_prefix, HIGHLIGHT(name_for_bool(checker_is_submap(checker)), entry.is_submap_attr));
 	T_LOG("%s    %ssubmap_depth:   %u%s", submap_prefix, HIGHLIGHT(checker->submap_depth, entry.submap_depth_attr));
 	T_LOG("%s    %spermanent:      %s%s", submap_prefix, HIGHLIGHT(name_for_bool(checker->permanent), entry.permanent_attr));
+
+	T_LOG("%s    %sneeds copy:     %s%s", submap_prefix, highlight_prefix(IgnoredHighlight), name_for_bool(checker->needs_copy), highlight_suffix(IgnoredHighlight));
+	if (!object_is_null(obj_checker)) {
+		T_LOG("%s    %scopy strat:     %s%s", submap_prefix, highlight_prefix(IgnoredHighlight), name_for_copy_strategy(obj_checker->copy_strategy), highlight_suffix(IgnoredHighlight));
+	}
 }
 
 
@@ -1850,6 +2711,20 @@ overestimate_size(const vm_entry_template_t templates[], unsigned count)
 	return size;
 }
 
+static void
+protect_guard_page(mach_vm_address_t addr, mach_vm_size_t guard_page_size)
+{
+	kern_return_t kr;
+
+	kr = mach_vm_protect(mach_task_self(), addr, guard_page_size,
+	    false /* set max */, VM_PROT_NONE);
+	assert(kr == KERN_SUCCESS);
+
+	kr = mach_vm_protect(mach_task_self(), addr, guard_page_size,
+	    true /* set max */, VM_PROT_NONE);
+	assert(kr == KERN_SUCCESS);
+}
+
 /*
  * The arena is a contiguous address range where the VM regions for
  * a test are placed. Here we allocate the entire space to reserve it.
@@ -1857,20 +2732,84 @@ overestimate_size(const vm_entry_template_t templates[], unsigned count)
  *
  * Problem: We want to generate unallocated holes and verify later that
  * they are still unallocated. But code like Rosetta compilation and
- * Mach exceptions can allocate VM space outside out control. If those
+ * Mach exceptions can allocate VM space outside of our control. If those
  * allocations land in our unallocated holes then a test may spuriously fail.
- * Solution: The arena is allocated with VM_FLAGS_RANDOM_ADDR to keep it
- * well away from the VM's allocation frontier. This does not prevent the
- * problem entirely but so far it appears to dodge it with high probability.
+ * Mitigations:
+ * - Allocate the arena with VM_FLAGS_RANDOM_ADDR to keep it away from the
+ *   VM's allocation frontier.
+ * - Allocate more memory than necessary and then free the first part, leaving
+ *   it available for first-fit allocations before landing inside the arena.
+ * - Allocate one guard page before and after, to protect any unallocated hole
+ *   at the start or end of the arena from being claimed by part of an
+ *   outside allocation.
+ * Together these do not prevent the problem entirely but
+ * so far appear to dodge it with high probability.
  * TODO: make this more reliable or completely safe somehow.
  */
-static void
-allocate_arena(
+mach_vm_address_t
+allocate_with_guards(
 	mach_vm_size_t arena_size,
 	mach_vm_size_t arena_alignment_mask,
-	mach_vm_address_t * const out_arena_address)
+	mach_vm_size_t guard_page_size,
+	vm_prot_t cur_prot,
+	vm_prot_t max_prot)
 {
-	mach_vm_size_t arena_unaligned_size;
+	/*
+	 * Layout:
+	 * [ space to free | first guard page | arena | last guard page ]
+	 */
+
+	/*
+	 * leading_size covers space to free and first guard page as described above.
+	 * It must be at least guard_page_size bytes.
+	 * It must be at least arena_size bytes.
+	 * It must preserve alignment of the arena following it.
+	 */
+	mach_vm_size_t alignment_grain = arena_alignment_mask + 1;
+	if (alignment_grain < PAGE_SIZE) {
+		alignment_grain = PAGE_SIZE;
+	}
+	mach_vm_size_t leading_size = alignment_grain;
+	while (leading_size < arena_size || leading_size < guard_page_size) {
+		leading_size += alignment_grain;
+	}
+
+	/* Allocate and partition. */
+	mach_vm_size_t allocated_size = leading_size + arena_size + guard_page_size;
+	mach_vm_address_t allocated_addr;
+	kern_return_t kr;
+
+	allocated_addr = allocate_at_random_address(allocated_size,
+	    arena_alignment_mask, cur_prot, max_prot);
+
+	mach_vm_address_t allocated_end = allocated_addr + allocated_size;
+	mach_vm_address_t last_guard_page = allocated_end - guard_page_size;
+	mach_vm_address_t arena_addr = last_guard_page - arena_size;
+	mach_vm_address_t first_guard_page = arena_addr - guard_page_size;
+	mach_vm_address_t space_to_free = arena_addr - leading_size;
+	assert(space_to_free == allocated_addr);
+	assert((arena_addr & arena_alignment_mask) == 0);
+
+	/* Deallocate the leading space to free. */
+	kr = mach_vm_deallocate(mach_task_self(),
+	    space_to_free, leading_size - guard_page_size);
+	assert(kr == 0);
+
+	/* Protect the guard pages. */
+	protect_guard_page(first_guard_page, guard_page_size);
+	protect_guard_page(last_guard_page, guard_page_size);
+
+	return arena_addr;
+}
+
+mach_vm_address_t
+allocate_at_random_address(
+	mach_vm_size_t size,
+	mach_vm_size_t alignment_mask,
+	vm_prot_t cur_prot,
+	vm_prot_t max_prot)
+{
+	mach_vm_size_t unaligned_size;
 	mach_vm_address_t allocated = 0;
 	kern_return_t kr;
 
@@ -1879,50 +2818,72 @@ allocate_arena(
 	 * when using a large alignment mask.
 	 * We instead allocate oversized and perform the alignment manually.
 	 */
-	if (arena_alignment_mask > PAGE_MASK) {
-		arena_unaligned_size = arena_size + arena_alignment_mask + 1;
+	if (alignment_mask > PAGE_MASK) {
+		unaligned_size = size + alignment_mask + 1;
 	} else {
-		arena_unaligned_size = arena_size;
+		unaligned_size = size;
 	}
 
-	kr = mach_vm_map(mach_task_self(), &allocated, arena_unaligned_size,
+	kr = mach_vm_map(mach_task_self(), &allocated, unaligned_size,
 	    0 /* alignment mask */, VM_FLAGS_ANYWHERE | VM_FLAGS_RANDOM_ADDR,
-	    0, 0, 0, 0, 0, 0);
+	    0, 0, 0, cur_prot, max_prot, VM_INHERIT_DEFAULT);
 
 	if (kr == KERN_NO_SPACE) {
 		/*
 		 * VM_FLAGS_RANDOM_ADDR can spuriously fail even without alignment.
-		 * Try again without it.
+		 * Try again without VM_FLAGS_RANDOM_ADDR.
 		 */
-		kr = mach_vm_map(mach_task_self(), &allocated, arena_unaligned_size,
+		kr = mach_vm_map(mach_task_self(), &allocated, unaligned_size,
 		    0 /* alignment mask */, VM_FLAGS_ANYWHERE,
-		    0, 0, 0, 0, 0, 0);
+		    0, 0, 0, cur_prot, max_prot, VM_INHERIT_DEFAULT);
 		if (kr == KERN_SUCCESS) {
 			T_LOG("note: forced to allocate arena without VM_FLAGS_RANDOM_ADDR");
 		}
 	}
 
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "arena allocation "
-	    "(size 0x%llx, alignment 0x%llx)", arena_size, arena_alignment_mask);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "allocation at random address "
+	    "(size 0x%llx, alignment 0x%llx, unaligned addr 0x%llx)",
+	    size, alignment_mask, allocated);
 
-	if (arena_alignment_mask > PAGE_MASK) {
+	if (size != unaligned_size) {
 		/* Align manually within the oversized allocation. */
-		mach_vm_address_t aligned = (allocated & ~arena_alignment_mask) + arena_alignment_mask + 1;
-		mach_vm_address_t aligned_end = aligned + arena_size;
-		mach_vm_address_t allocated_end = allocated + arena_unaligned_size;
+		mach_vm_address_t aligned = (allocated & ~alignment_mask) + alignment_mask + 1;
+		mach_vm_address_t aligned_end = aligned + size;
+		mach_vm_address_t allocated_end = allocated + unaligned_size;
 
 		assert(aligned >= allocated && aligned_end <= allocated_end);
-		assert((aligned & arena_alignment_mask) == 0);
+		assert((aligned & alignment_mask) == 0);
 		assert((aligned & PAGE_MASK) == 0);
 
 		/* trim the overallocation */
 		(void)mach_vm_deallocate(mach_task_self(), allocated, aligned - allocated);
 		(void)mach_vm_deallocate(mach_task_self(), aligned_end, allocated_end - aligned_end);
 
-		*out_arena_address = aligned;
+		return aligned;
 	} else {
 		/* No alignment needed. */
-		*out_arena_address = allocated;
+		return allocated;
+	}
+}
+
+/*
+ * If this object's fill pattern would write its memory then
+ * mark all of this object's pages as resident in this object.
+ * Use this when initializing a new object checker.
+ */
+static void
+object_checker_allocate_initial_pages(
+	vm_object_checker_t *obj_checker)
+{
+	assert(!obj_checker->shadow);  /* unimplemented */
+	assert(!obj_checker->vo_copy); /* unimplemented */
+
+	if (obj_checker->fill_pattern.mode == Fill) {
+		for (mach_vm_size_t page_index = 0;
+		    page_index < obj_checker->size / xnu_vm_page_size();
+		    page_index++) {
+			obj_checker->pages[page_index] = page_is_resident;
+		}
 	}
 }
 
@@ -2054,6 +3015,40 @@ typedef struct {
 	vm_object_checker_t *checker;
 } object_scratch_t;
 
+/*
+ * Force a range of memory to have a non-NULL vm_object
+ * but also no resident pages.
+ * If read this memory will be zero filled.
+ */
+static void
+force_vm_object_with_no_resident_pages(mach_vm_address_t address, mach_vm_size_t size)
+{
+	/* Fill with zeros. Then kill the pages. */
+	kern_return_t kr;
+	write_fill_pattern(address, size, (fill_pattern_t){Fill, 0});
+	kr = mach_vm_behavior_set(mach_task_self(),
+	    address, size, VM_BEHAVIOR_FREE);
+	assert(kr == 0);
+	kr = mach_vm_behavior_set(mach_task_self(),
+	    address, size, VM_BEHAVIOR_PAGEOUT);
+	assert(kr == 0);
+
+	/* PAGEOUT may be asynchronous. Wait until the pages are definitely gone. */
+	vm_region_submap_info_data_64_t info;
+	for (int retries = 0; retries < 10; retries++) {
+		mach_vm_address_t actual_address = address;
+		mach_vm_size_t actual_size = 0;
+		get_info_for_address_fast(&actual_address, &actual_size, &info);
+		if (info.pages_resident == 0) {
+			return;  /* success */
+		}
+		T_LOG("note: pages still resident after VM_BEHAVIOR_PAGEOUT, sleeping...");
+		sleep(1);
+	}
+	T_FAIL("%u pages still resident after VM_BEHAVIOR_PAGEOUT", info.pages_resident);
+	T_END;  /* stop test now, don't risk stalling all the way to test timeout */
+}
+
 static void
 allocate_submap_storage_and_checker(
 	checker_list_t *checker_list,
@@ -2095,20 +3090,23 @@ allocate_submap_storage_and_checker(
 	checker_list_t *submap_checkers = create_vm_state(
 		object_tmpl->submap.entries, object_tmpl->submap.entry_count,
 		object_tmpl->submap.objects, object_tmpl->submap.object_count,
-		SUBMAP_ALIGNMENT_MASK, "submap construction");
+		SUBMAP_ALIGNMENT_MASK,
+		false /* no guard pages for submap contents */,
+		"submap construction");
 
 	/*
 	 * Update the returned submap checkers for vm_map_seal and submap lowering.
 	 * - set the submap depth
 	 * - resolve null objects
 	 * - disable share mode verification (TODO vm_region says SM_COW, we say SM_PRIVATE)
-	 * - TODO resolve needs_copy COW and change to COPY_DELAY
 	 */
 	FOREACH_CHECKER(submap_checker, submap_checkers->entries) {
 		T_QUIET; T_ASSERT_EQ(submap_checker->submap_depth, 0, "nested submaps not allowed");
 		submap_checker->submap_depth = 1;
 		checker_resolve_null_vm_object(submap_checkers, submap_checker);
-		submap_checker->verify.share_mode_attr = false;
+		submap_checker->needs_copy = false;
+		submap_checker->object->copy_strategy = copy_delay;
+		submap_checker->verify.share_mode_attr = false; /* TODO hack */
 	}
 
 	mach_vm_address_t submap_start = checker_range_start_address(submap_checkers->entries);
@@ -2173,8 +3171,6 @@ allocate_object_storage_and_checker(
 		 * Each entry will copy or share it when the entries
 		 * are created. Then this temporary allocation will be freed.
 		 */
-		// fixme double-check that freeing this backing store
-		// does not interfere with COW state
 		mach_vm_address_t address = 0;
 		kr = mach_vm_allocate(mach_task_self(), &address, size,
 		    VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_SCENEKIT));
@@ -2186,8 +3182,17 @@ allocate_object_storage_and_checker(
 		object_scratch->checker = make_anonymous_object_checker(
 			checker_list, size);
 
-		write_fill_pattern(address, size, object_tmpl->fill_pattern);
+		if (object_tmpl->fill_pattern.mode == DontFill) {
+			/*
+			 * We must have a vm_object to share, but
+			 * the test may also want no resident pages.
+			 */
+			force_vm_object_with_no_resident_pages(address, size);
+		} else {
+			write_fill_pattern(address, size, object_tmpl->fill_pattern);
+		}
 		object_scratch->checker->fill_pattern = object_tmpl->fill_pattern;
+		object_checker_allocate_initial_pages(object_scratch->checker);
 	} else {
 		T_FAIL("unexpected/unimplemented: object is neither private nor anonymous nor submap");
 	}
@@ -2302,6 +3307,7 @@ create_vm_state(
 	const vm_object_template_t object_templates[],
 	unsigned object_template_count,
 	mach_vm_size_t alignment_mask,
+	bool allocate_guard_pages,
 	const char *message)
 {
 	const vm_object_template_t *start_object_templates = &object_templates[0];
@@ -2486,13 +3492,23 @@ create_vm_state(
 	}
 
 	/* Allocate a range large enough to span all requested entries. */
+	mach_vm_size_t guard_page_size = allocate_guard_pages ? PAGE_SIZE : 0;
 	mach_vm_address_t arena_address = 0;
 	mach_vm_address_t arena_end = 0;
 	{
 		mach_vm_size_t arena_size =
 		    overestimate_size(entry_templates, entry_template_count);
-		allocate_arena(arena_size, alignment_mask, &arena_address);
+		arena_address = allocate_with_guards(arena_size,
+		    alignment_mask, guard_page_size, VM_PROT_NONE, VM_PROT_NONE);
 		arena_end = arena_address + arena_size;
+	}
+
+	/* Add special checkers for the guard pages allocated by allocate_with_guards. */
+	if (guard_page_size > 0) {
+		append_checker_for_guard_page(checker_list,
+		    arena_address - guard_page_size, guard_page_size);
+		append_checker_for_guard_page(checker_list,
+		    arena_end, guard_page_size);
 	}
 
 	/* Carve up the allocated range into the requested entries. */
@@ -2529,37 +3545,42 @@ create_vm_state(
 			 * New map entry is shared: it shares
 			 * the same object as some other map entry.
 			 *
-			 * Create the entry using mach_make_memory_entry()
+			 * Create the map entry using mach_make_memory_entry()
 			 * and mach_vm_map(). The source is the object's
 			 * temporary backing store (or a portion thereof).
 			 *
 			 * We don't use vm_remap to share because it can't
-			 * set the user_tag.
+			 * set the user_tag and (in the partial case) we
+			 * don't want to clip our source.
 			 */
 
 			/* must not extend beyond object's temporary backing store */
 			assert(tmpl->offset + tmpl->size <= object_scratch->allocated_size);
 
-			/* create the memory entry covering the entire source object */
-			mach_vm_size_t size = tmpl->size;
+			/*
+			 * Create a memory entry covering the *entire* source
+			 * object. (Covering only the part of the source that
+			 * we want to remap might clip the source.)
+			 */
+			mach_vm_size_t memory_entry_size = object_scratch->allocated_size;
 			mach_port_t memory_entry_port;
 			kr = mach_make_memory_entry_64(mach_task_self(),
-			    &size,
-			    object_scratch->allocated_address + tmpl->offset, /* src */
-			    tmpl->protection | MAP_MEM_VM_SHARE,
-			    &memory_entry_port, MEMORY_OBJECT_NULL);
+			    &memory_entry_size,
+			    object_scratch->allocated_address,
+			    tmpl->protection,
+			    &memory_entry_port, MEMORY_OBJECT_NULL /* parent */);
 			assert(kr == 0);
-			assert(size == tmpl->size);
+			assert(memory_entry_size == object_scratch->allocated_size);
 
-			/* map the memory entry */
+			/* Map from the desired part of the memory entry. */
 			mach_vm_address_t allocated_address = arena_address;
 			kr = mach_vm_map(mach_task_self(),
 			    &allocated_address,
 			    tmpl->size,
 			    0,             /* alignment mask */
 			    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_MAKE_TAG(assigned_tag) | permanent_flag,
-			    memory_entry_port,  /* src */
-			    0, /* offset - already applied during mmme */
+			    memory_entry_port,  /* source */
+			    tmpl->offset, /* offset in source */
 			    false, /* copy */
 			    tmpl->protection,
 			    tmpl->max_protection,
@@ -2567,15 +3588,16 @@ create_vm_state(
 			assert(kr == 0);
 			assert(allocated_address == arena_address);
 
-			/* tear down the memory entry */
+			/* Tear down the memory entry. */
 			mach_port_deallocate(mach_task_self(), memory_entry_port);
 
-			/* set up the checkers */
+			/* Set up the checkers. */
 			vm_entry_checker_t *checker = make_checker_for_shared(
 				checker_list, tmpl->kind,
 				allocated_address, tmpl->size, tmpl->offset,
 				tmpl->protection, tmpl->max_protection,
 				assigned_tag, tmpl->permanent, object_scratch->checker);
+			object_scratch->checker->copy_strategy = copy_delay;
 			checker_range_append(&checker_list->entries, checker);
 
 			arena_address = allocated_address + tmpl->size;
@@ -2643,19 +3665,9 @@ create_vm_state(
 					obj_checker->fill_pattern = tmpl->object->fill_pattern;
 					write_fill_pattern(checker->address, checker->size,
 					    obj_checker->fill_pattern);
+					object_checker_allocate_initial_pages(obj_checker);
 				} else {
-					/*
-					 * no object template: fill with zeros
-					 * to get a vm object, then kill its pages.
-					 */
-					write_fill_pattern(checker->address, checker->size,
-					    (fill_pattern_t){Fill, 0});
-					kr = mach_vm_behavior_set(mach_task_self(),
-					    checker->address, checker->size, VM_BEHAVIOR_FREE);
-					assert(kr == 0);
-					kr = mach_vm_behavior_set(mach_task_self(),
-					    checker->address, checker->size, VM_BEHAVIOR_PAGEOUT);
-					assert(kr == 0);
+					force_vm_object_with_no_resident_pages(checker->address, checker->size);
 				}
 				checker_set_object(checker, obj_checker);
 			} else if (tmpl->object != NULL) {
@@ -2803,7 +3815,8 @@ create_vm_state_from_config(
 	checker_list_t *list = create_vm_state(
 		config->entry_templates, config->entry_template_count,
 		config->object_templates, config->object_template_count,
-		config->alignment_mask, "before test");
+		config->alignment_mask, true /* guard pages */,
+		"before test");
 
 	/*
 	 * Adjusted start and end address are relative to the
@@ -2825,7 +3838,7 @@ create_vm_state_from_config(
 static void
 checker_deallocate_allocation(checker_list_t *list, vm_entry_checker_t *checker)
 {
-	assert(checker->kind == Allocation || checker->kind == Submap);
+	assert(checker->kind == Allocation || checker->kind == Submap || checker->kind == Guard);
 
 	kern_return_t kr = mach_vm_deallocate(mach_task_self(),
 	    checker->address, checker->size);
@@ -2862,6 +3875,7 @@ checker_deallocate_allocation(checker_list_t *list, vm_entry_checker_t *checker)
 /*
  * Deallocate the VM allocations covered by the checkers.
  * Updates the checkers so that entry permanence can be verified later.
+ * Does not deallocate any guard pages.
  *
  * Not recommended after verification errors because the
  * true VM allocations may not match the checkers' list.
@@ -2871,15 +3885,41 @@ deallocate_vm_allocations(checker_list_t *list)
 {
 	/* not FOREACH_CHECKER due to use-after-free */
 	vm_entry_checker_t *checker = list->entries.head;
-	vm_entry_checker_t *end = list->entries.tail->next;
+	vm_entry_checker_t *end = list->entries.tail ? list->entries.tail->next : NULL;
 	while (checker != end) {
 		vm_entry_checker_t *next = checker->next;
 
-		if (checker->kind == Allocation || checker->kind == Submap) {
+		switch (checker->kind) {
+		case Allocation:
+		case Submap:
 			checker_deallocate_allocation(list, checker);
+			break;
+		case Hole:
+		case Guard:
+		case EndEntries:
+			/* nothing allocated */
+			break;
 		}
 
 		checker = next;
+	}
+}
+
+/*
+ * Deallocate the memory backing any guard pages in the checker list.
+ * Does not update the checkers themselves.
+ *
+ * Not recommended after verification errors because the
+ * true VM allocations may not match the checkers' list.
+ */
+static void
+deallocate_guard_page_allocations(checker_list_t *list)
+{
+	FOREACH_CHECKER(checker, list->guard_pages) {
+		assert(checker->kind == Guard);
+		kern_return_t kr = mach_vm_deallocate(mach_task_self(),
+		    checker->address, checker->size);
+		assert(kr == 0);
 	}
 }
 
@@ -2931,7 +3971,7 @@ verify_allocation(
 	vm_object_attribute_list_t bad_object_attr =
 	    vm_object_attributes_with_default(false);
 
-	assert(checker->kind == Allocation || checker->kind == Submap);
+	assert(checker->kind == Allocation || checker->kind == Submap || checker->kind == Guard);
 
 	/* Call vm_region to get the actual VM state */
 	mach_vm_address_t actual_address = checker->address;
@@ -3000,7 +4040,7 @@ verify_allocation(
 	}
 
 	if (checker->verify.object_offset_attr &&
-	    info.offset != checker->object_offset) {
+	    info.offset != checker->object_offset + checker->vm_region_object_offset_tweak) {
 		T_FAIL("%s: wrong object offset", message);
 		bad_entry_attr.object_offset_attr = true;
 	}
@@ -3105,11 +4145,13 @@ verify_allocation(
 	}
 
 	/* do this after checking the object */
-	if (checker->verify.pages_resident_attr &&
-	    info.pages_resident != checker->pages_resident) {
-		T_FAIL("%s: wrong pages resident count (want %d, got %d)",
-		    message, checker->pages_resident, info.pages_resident);
-		bad_entry_attr.pages_resident_attr = true;
+	if (checker->verify.pages_resident_attr) {
+		uint32_t checker_pages_resident = checker_count_vm_region_pages_resident(checker);
+		if (info.pages_resident != checker_pages_resident) {
+			T_FAIL("%s: wrong pages resident count (want %u, got %u)",
+			    message, checker_pages_resident, info.pages_resident);
+			bad_entry_attr.pages_resident_attr = true;
+		}
 	}
 
 	/*
@@ -3168,7 +4210,7 @@ verify_hole(vm_entry_checker_t *checker, const char *message)
 	return good;
 }
 
-test_result_t
+static bool
 verify_vm_state_nested(checker_list_t *checker_list, bool in_submap, const char *message)
 {
 	bool good = true;
@@ -3208,6 +4250,7 @@ verify_vm_state_nested(checker_list_t *checker_list, bool in_submap, const char 
 			good &= verify_vm_state_nested(submap_checkers, true, message);
 			break;
 		}
+		case Guard:
 		case EndEntries:
 		default:
 			assert(0);
@@ -3224,14 +4267,47 @@ verify_vm_state_nested(checker_list_t *checker_list, bool in_submap, const char 
 		dump_region_info_for_entries(checker_list->entries);
 	}
 
-	return good ? TestSucceeded : TestFailed;
+	return good;
 }
+
+static bool
+verify_guard_pages(checker_list_t *checker_list, const char *message)
+{
+	bool good = true;
+
+	if (Verbose) {
+		T_LOG("*** %s: verifying guard pages ***", message);
+	}
+
+	vm_entry_checker_t *last_checked;
+
+	last_checked = NULL;
+	FOREACH_CHECKER(checker, checker_list->guard_pages) {
+		last_checked = checker;
+		assert(checker->kind == Guard);
+		good &= verify_allocation(checker_list, checker, message);
+	}
+	assert(last_checked == checker_list->guard_pages.tail);
+
+	if (!good || Verbose) {
+		T_LOG("*** %s: all expected guard pages ***", message);
+		dump_checker_range(checker_list->guard_pages);
+		T_LOG("*** %s: all actual guard pages ***", message);
+		dump_region_info_for_entries(checker_list->guard_pages);
+	}
+
+	return good;
+}
+
 
 test_result_t
 verify_vm_state(checker_list_t *checker_list, const char *message)
 {
 	assert(!checker_list->is_slid);
-	return verify_vm_state_nested(checker_list, false, message);
+	bool good = true;
+	good &= verify_guard_pages(checker_list, message);
+	good &= verify_vm_state_nested(checker_list, false, message);
+	return good ? TestSucceeded : TestFailed;
 }
 
 
@@ -3251,6 +4327,7 @@ get_expected_errors_for_faults(
 {
 	switch (checker->kind) {
 	case Allocation:
+	case Guard:
 		/* mapped: error is either none or protection failure */
 		switch (checker->protection & (VM_PROT_READ | VM_PROT_WRITE)) {
 		case VM_PROT_READ | VM_PROT_WRITE:
@@ -3755,12 +4832,6 @@ checker_simplify_left(
 
 		/* update other properties that may differ */
 
-		if (left->verify.pages_resident_attr != right->verify.pages_resident_attr) {
-			T_LOG("note: can't verify page counts after simplify "
-			    "merged two entries with different page count verification");
-		}
-		right->pages_resident += left->pages_resident;
-
 		/*
 		 * unlink and free left checker
 		 * update the checker list if we are deleting its head
@@ -3792,6 +4863,45 @@ checker_list_simplify(
 
 	FOREACH_CHECKER(checker, limit) {
 		checker_simplify_left(list, checker);
+	}
+}
+
+
+void
+checker_list_insert(
+	checker_list_t *list,
+	vm_entry_checker_t *inserted)
+{
+	if (list->entries.head == NULL) {
+		/* List is empty. */
+		list->entries.head = list->entries.tail = inserted;
+	} else if (checker_end_address(inserted) <= list->entries.head->address) {
+		/* Insertion goes before every item in the list. */
+		checker_insert_left(inserted, list->entries.head);
+		list->entries.head = inserted;
+	} else if (checker_end_address(list->entries.tail) <= inserted->address) {
+		/* Insertion goes after every item in the list. */
+		checker_insert_right(list->entries.tail, inserted);
+		list->entries.tail = inserted;
+	} else {
+		/*
+		 * Insertion goes in the middle somewhere.
+		 * Find every entry that precedes the inserted item
+		 * in address order and insert after the last of those.
+		 */
+		mach_vm_size_t size = inserted->address - list->entries.head->address;
+		entry_checker_range_t found;
+		found = checker_list_find_range_including_holes(
+			list, list->entries.head->address, size);
+		checker_insert_right(found.tail, inserted);
+	}
+
+	/* Verify address order. */
+	if (inserted->next) {
+		assert(checker_end_address(inserted) <= inserted->next->address);
+	}
+	if (inserted->prev) {
+		assert(checker_end_address(inserted->prev) <= inserted->address);
 	}
 }
 
@@ -3878,39 +4988,57 @@ checker_resolve_null_vm_object(
 }
 
 void
-checker_fault_for_prot_not_cow(
+checker_fault_all(
 	checker_list_t *checker_list,
 	vm_entry_checker_t *checker,
 	vm_prot_t fault_prot)
 {
 	assert(fault_prot != VM_PROT_NONE);
 
-	/* write fault also requires read permission */
-	vm_prot_t required_prot = fault_prot;
-	if (prot_contains_all(required_prot, VM_PROT_WRITE)) {
-		required_prot |= VM_PROT_READ;
+	for (mach_vm_address_t address = checker->address;
+	    address < checker_end_address(checker);
+	    address += PAGE_SIZE) {
+		kern_return_t kr = checker_fault_address(
+			checker_list, checker, address, fault_prot);
+		if (kr != KERN_SUCCESS) {
+			return;
+		}
 	}
-	if (!prot_contains_all(checker->protection, required_prot)) {
-		/* access denied */
-		return;
-	}
-
-	checker_resolve_null_vm_object(checker_list, checker);
-	if (fault_prot & VM_PROT_WRITE) {
-		/* cow resolution is hard, don't try it here */
-		assert(checker_share_mode(checker) != SM_COW);
-	}
-
-	/* entry is 100% resident */
-	checker_set_pages_resident(checker, checker->size / PAGE_SIZE);
 }
+
+void
+checker_write_new_fill_pattern(
+	checker_list_t *checker_list,
+	vm_entry_checker_t *checker)
+{
+	/*
+	 * Choose a random fill pattern that differs from the old one.
+	 * Random pattern also means we are unlikely to duplicate any
+	 * pattern used previously by this checker or by any other checker.
+	 */
+	fill_pattern_t old_fill = checker_fill_pattern(checker);
+	fill_pattern_t new_fill = {
+		.mode = Fill,
+		.pattern = 0
+	};
+	do {
+		arc4random_buf(&new_fill.pattern, sizeof(new_fill.pattern));
+	} while (new_fill.pattern == old_fill.pattern);
+
+	/* Update memory. */
+	write_fill_pattern(checker->address, checker->size, new_fill);
+
+	/* Update checker state. */
+	checker_fault_all(checker_list, checker, VM_PROT_WRITE);
+	checker->object->fill_pattern = new_fill;
+}
+
 
 vm_entry_checker_t *
 checker_list_try_unnest_one_entry_in_submap(
 	checker_list_t *checker_list,
 	vm_entry_checker_t *submap_parent,
 	bool unnest_readonly,
-	bool all_overwritten,
 	mach_vm_address_t * const inout_next_address)
 {
 	mach_vm_address_t unnest_start;
@@ -3949,6 +5077,8 @@ checker_list_try_unnest_one_entry_in_submap(
 			return NULL;
 		case Submap:
 			assert(0 && "nested submaps not allowed");
+		case Guard:
+			assert(0 && "guard pages in submaps not allowed");
 		default:
 			assert(0 && "unknown checker kind");
 		}
@@ -4004,25 +5134,24 @@ checker_list_try_unnest_one_entry_in_submap(
 
 	/*
 	 * Set unnested_checker's vm object.
-	 * unnesting is a copy-on-write copy, but in our
-	 * tests it is sometimes immediately overwritten so we skip that step.
+	 * unnesting is a copy-on-write copy.
 	 */
 	checker_set_object(unnested_checker, obj_checker);
-	bool is_null = object_is_null(obj_checker);
-	if (is_null && all_overwritten) {
-		checker_resolve_null_vm_object(checker_list, unnested_checker);
-	} else if (is_null) {
-		/* no object change */
-	} else if (all_overwritten && (submap_protection & VM_PROT_WRITE)) {
-		/* writeable and will be overwritten - skip COW representation */
-		obj_checker = object_checker_clone(obj_checker);
-		checker_list_append_object(checker_list, obj_checker);
-		unnested_checker->needs_copy = false;
-		checker_set_object(unnested_checker, obj_checker);
-		unnested_checker->object_offset = 0;
-	} else {
-		/* won't be overwritten - model a COW copy */
-		checker_make_shadow_object(checker_list, unnested_checker);
+	if (!object_is_null(obj_checker)) {
+		/*
+		 * Constant submap contents are never copy_symmetric.
+		 * Copy strategies other than copy_delay are unimplemented here.
+		 */
+		assert(obj_checker->copy_strategy == copy_delay);
+		checker_copy_delayed(checker_list, unnested_checker);
+
+		if (is_new_vm() && !(submap_protection & VM_PROT_WRITE)) {
+			/*
+			 * TODO new VM makes another copy when writing to
+			 * an unwriteable submap?
+			 */
+			checker_copy_delayed(checker_list, unnested_checker);
+		}
 	}
 
 	/* TODO: tpro, permanent, VM_PROT_EXEC */
@@ -4253,6 +5382,11 @@ run_one_vm_test(
 
 	/* Prepare the VM state. */
 	config = configure_fn();
+	if (Verbose) {
+		T_LOG("");
+		T_LOG("*******************");  /* extra divider between tests */
+		T_LOG("");
+	}
 	T_LOG("note: starting test: %s %s (%s) ...", funcname, testname, config->config_name);
 
 	create_vm_state_from_config(config, &checker_list,
@@ -4291,6 +5425,9 @@ run_one_vm_test(
 		if (result == TestSucceeded) {
 			deallocate_vm_allocations(checker_list);
 			result = verify_vm_state(checker_list, "after final deallocation");
+		}
+		if (result == TestSucceeded) {
+			deallocate_guard_page_allocations(checker_list);
 		}
 		break;
 	case TestFailed:

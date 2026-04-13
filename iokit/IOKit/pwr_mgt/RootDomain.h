@@ -431,6 +431,7 @@ public:
 	IOReturn acquireDriverKitSyncedAssertion(IOService * from, IOPMDriverAssertionID * assertionID);
 	void releaseDriverKitSyncedAssertion(IOPMDriverAssertionID assertionID);
 	int32_t considerRunMode(IOService * service, uint64_t pmDriverClass);
+	void handleRegisterPowerDriver(IOService * child);
 #endif
 
 	void        copyWakeReasonString( char * outBuf, size_t bufSize );
@@ -888,7 +889,7 @@ private:
 	uint32_t             _aotPendingFlags;
 public:
 	IOPMAOTMetrics      * _aotMetrics;
-	uint32_t              _aotMode;
+	uint64_t              _aotMode;
 private:
 	uint32_t             _aotLingerTime;
 	uint8_t              _aotNow;
@@ -900,6 +901,8 @@ private:
 	uint64_t             _aotWakePreWindow;
 	uint64_t             _aotWakePostWindow;
 	uint64_t             _aotRunMode;
+	uint64_t             _aotWakeEventRunMode;
+	uint64_t             _aotWakeEventRunModeImpliesStorage;
 
 	size_t               _driverKitMatchingAssertionCount;
 	IOPMDriverAssertionID _driverKitMatchingAssertion;
@@ -1000,6 +1003,10 @@ private:
 	void        evaluateSystemSleepPolicyFinal( void );
 	void        setLockdownModeHibernation(uint32_t status);
 #endif /* HIBERNATION */
+
+	IOReturn    getAssertionLog(IOPMAssertionLogData *outLog);
+	IOReturn    setAssertionLogNotificationPort(mach_port_t port);
+	IOReturn    setAssertionLogNotificationThreshold(uint64_t threshold);
 
 	bool        latchDisplayWranglerTickle( bool latch );
 	void        setDisplayPowerOn( uint32_t options );

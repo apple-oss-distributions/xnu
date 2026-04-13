@@ -57,6 +57,11 @@
 #define FSOPT_RETURN_REALDEV     0x00000200
 #define FSOPT_NOFOLLOW_ANY       0x00000800
 #define FSOPT_RESOLVE_BENEATH    0x00001000
+#define FSOPT_UNIQUE             0x00002000
+
+#ifdef PRIVATE
+/* Additional FSOPT values in attr_private.h */
+#endif
 
 /* we currently aren't anywhere near this amount for a valid
  * fssearchblock.sizeofsearchparams1 or fssearchblock.sizeofsearchparams2
@@ -605,9 +610,11 @@ typedef struct vol_attributes_attr {
 #define SRCHFS_SKIPINVISIBLE                    0x00000020
 #define SRCHFS_SKIPPACKAGES                     0x00000040
 #define SRCHFS_SKIPINAPPROPRIATE                0x00000080
+#define SRCHFS_NOFOLLOW                         0x00000100
+#define SRCHFS_NOFOLLOW_ANY                     0x00000200
 
 #define SRCHFS_NEGATEPARAMS                     0x80000000
-#define SRCHFS_VALIDOPTIONSMASK                 0x800000FF
+#define SRCHFS_VALIDOPTIONSMASK                 0x800003FF
 
 struct fssearchblock {
 	struct attrlist         *returnattrs;
@@ -666,8 +673,8 @@ struct searchstate {
 
 #endif /* __APPLE_API_UNSTABLE */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/attr_private.h>
-#endif
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* !_SYS_ATTR_H_ */

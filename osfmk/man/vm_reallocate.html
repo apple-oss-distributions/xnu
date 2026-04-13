@@ -1,0 +1,201 @@
+<h2>vm_reallocate</h2>
+<hr>
+<p>
+<strong>Function</strong> - Reallocate a region of virtual memory.
+<h3>SYNOPSIS</h3>
+<pre>
+<strong>kern_return_t   vm_reallocate</strong>
+                <strong>(vm_task_t</strong>                          <var>target_task</var>,
+                 <strong>vm_address_t</strong>                               <var>src</var>,
+                 <strong>vm_size_t</strong>                             <var>src_size</var>,
+                 <strong>vm_address_t</strong>                              <var>*dst</var>,
+                 <strong>vm_size_t</strong>                             <var>dst_size</var>,
+                 <strong>vm_offset_t</strong>                         <var>align_mask</var>,
+                 <strong>int</strong>                                    <var>options</var>,
+                 <strong>int</strong>                                      <var>flags</var><strong>);</strong>
+</pre>
+<h3>PARAMETERS</h3>
+<dl>
+<p>
+<dt> <var>target_task</var> 
+<dd>
+[in task send right]
+The port for the task whose address space the region is to be reallocated in.
+<p>
+<dt> <var>src</var> 
+<dd>
+[in scalar]
+The starting address for the source region.
+<p>
+<dt> <var>src_size</var> 
+<dd>
+[in scalar]
+The size of the source region in bytes.
+<p>
+<dt> <var>dst</var> 
+<dd>
+[pointer to in/out scalar]
+The starting address for the destination region, or a minimum address hint,
+depending on <var>flags</var>.
+<p>
+<dt> <var>dst_size</var> 
+<dd>
+[in scalar]
+The size of the destination region in bytes; must be at least <var>src_size</var>.
+<p>
+<dt> <var>align_mask</var> 
+<dd>
+[in scalar]
+Alignment bitmask for destination address. Must be of the form (2^n - 1). The
+result of <var>align_mask</var> | <strong>page_mask</strong> will be used for
+alignment.
+<p>
+<dt> <var>options</var> 
+<dd>
+[in scalar]
+Reallocation options.
+<dl>
+<p>
+<dt><strong>VM_REALLOCATE_DEALLOCATE_SOURCE</strong>
+<dd>
+The kernel deallocates the source.
+<p>
+</dl>
+<dl>
+<p>
+<dt><strong>VM_REALLOCATE_ZERO_FILL_SOURCE</strong>
+<dd>
+The kernel zero-fills the source.
+<p>
+</dl>
+<dt> <var>flags</var> 
+<dd>
+[in scalar]
+Flags that determine how the destination address is interpreted. The user tag
+is passed in the high order byte.
+<dl>
+<p>
+<dt><strong>VM_FLAGS_ANYWHERE</strong>
+<dd>
+The kernel will find an address, starting from <var>*dst</var>, to place the
+reallocated region.
+<p>
+</dl>
+<dl>
+<p>
+<dt><strong>VM_FLAGS_FIXED</strong>
+<dd>
+The kernel will attempt to place the reallocated region directly at
+<var>*dst</var>, and will fail if the address range is already mapped.
+<p>
+</dl>
+<dl>
+<p>
+<dt><strong>VM_FLAGS_OVERWRITE</strong>
+<dd>
+The kernel will overwrite any existing allocations when
+<strong>VM_FLAGS_FIXED</strong> is specified. All <var>dst_size</var> bytes of
+the destination must already be mapped without holes. On failure, the contents
+of the destination are undefined, and should not be relied upon.
+<p>
+</dl>
+<h3>DESCRIPTION</h3>
+<p>
+The <strong>vm_reallocate</strong> function causes the <var>src_size</var> bytes
+starting at address <var>src</var> to be reallocated as <var>dst_size</var>
+bytes, and writes the new address to <var>*dst</var>.
+<p>
+If <strong>KERN_SUCCESS</strong> is returned, the data will only be accessible
+through <var>*dst</var>. This restriction allows reallocation without making any
+copies of the source data. Using <strong>vm_reallocate</strong> is therefore
+more efficient than creating a new allocation and using <strong>memcpy</strong>
+or <strong>vm_copy</strong> to "reallocate" memory.
+<p>
+The expanded region will be zero-filled.
+
+<strong>vm_reallocate</strong> affects only <var>target_task</var>.  Other tasks
+that have access to the deallocated memory can continue to reference it.
+<h3>NOTES</h3>
+<p>
+<strong>vm_deallocate</strong> can be used to deallocate memory passed
+as out-of-line data in a 
+message.
+<p>
+<h3>RETURN VALUES</h3>
+<dl>
+<p>
+<dt> <strong>KERN_INVALID_ARGUMENT</strong>
+<dd>
+Unsupported Mach VM flags are specified in <var>flags</var>.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ARGUMENT</strong>
+<dd>
+An unsupported reallocation option is specified in <var>options</var>.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ARGUMENT</strong>
+<dd>
+<var>dst_size</var> or <var>src_size</var> is not a multiple of
+<strong>PAGE_SIZE</strong>.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ARGUMENT</strong>
+<dd>
+<var>dst_size</var> is smaller than <var>src_size</var>.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ADDRESS</strong>
+<dd>
+<var>src</var> is not page-aligned.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ADDRESS</strong>
+<dd>
+<strong>VM_FLAGS_FIXED</strong> is specified, and <var>*dst</var> is not
+page/<var>align_mask</var>-aligned.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ADDRESS</strong>
+<dd>
+Any portion of [<var>src</var>, <var>src</var> + <var>src_size</var>) is not
+mapped, is permanent, or is a sub-map.
+</dl>
+<p>
+<dt> <strong>KERN_INVALID_ADDRESS</strong>
+<dd>
+<strong>VM_FLAGS_FIXED</strong> | <strong>VM_FLAGS_OVERWRITE</strong> specified,
+and [<var>dst</var>, <var>dst</var> + <var>dst_size</var>) overlaps
+[<var>src</var>, <var>src</var> + <var>src_size</var>).
+</dl>
+<p>
+<dt> <strong>KERN_NO_SPACE</strong>
+<dd>
+<strong>VM_FLAGS_ANYWHERE</strong> is specified, and no contiguous range of
+<var>dst_size</var> bytes could be found at or after <var>*dst</var>.
+</dl>
+<p>
+<dt> <strong>KERN_NO_SPACE</strong>
+<dd>
+<strong>VM_FLAGS_FIXED</strong> is specified without
+<strong>VM_FLAGS_OVERWRITE</strong> and any portion of [<var>*dst</var>,
+<var>*dst</var> + <var>dst_size</var>) is already mapped.
+</dl>
+<p>
+<dt> <strong>KERN_NOT_SUPPORTED</strong>
+<dd>
+The process is running with non-native page size (e.g., Rosetta).
+</dl>
+<p>
+<dt> <strong>KERN_NOT_SUPPORTED</strong>
+<dd>
+Otherwise, <strong>vm_reallocate</strong> cannot perform the reallocation.
+</dl>
+<p>
+<h3>RELATED INFORMATION</h3>
+<p>
+Functions:
+<a href="mach_msg.html"><strong>mach_msg</strong></a>,
+<a href="vm_allocate.html"><strong>vm_allocate</strong></a>,
+<a href="vm_deallocate.html"><strong>vm_deallocate</strong></a>,
+<a href="host_page_size.html"><strong>host_page_size</strong></a>.

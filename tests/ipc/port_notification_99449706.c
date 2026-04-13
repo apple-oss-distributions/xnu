@@ -41,8 +41,8 @@ static mach_port_t
 create_voucher(void)
 {
 	mach_voucher_attr_recipe_data_t dummy_voucher = {
-		.key                = MACH_VOUCHER_ATTR_KEY_IMPORTANCE,
-		.command            = MACH_VOUCHER_ATTR_IMPORTANCE_SELF,
+		.key                = MACH_VOUCHER_ATTR_KEY_ALL,
+		.command            = MACH_VOUCHER_ATTR_COPY,
 		.previous_voucher   = MACH_VOUCHER_NULL,
 		.content_size       = 0,
 	};

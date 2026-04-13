@@ -66,7 +66,12 @@ typedef void* (*amfi_query_context_to_object)(CEQueryContext_t ctx);
 #pragma mark OSEntitlements
 
 #define KERN_AMFI_SUPPORTS_OSENTITLEMENTS_API 1
-#define OSENTITLEMENTS_INTERFACE_VERSION 1u
+#define OSENTITLEMENTS_INTERFACE_VERSION 2u
+
+typedef kern_return_t (*OSEntitlements_adjustContext)(
+	void *os_entitlements,
+	struct cs_blob *code_signing_blob,
+	const CEContext_t *ce_ctx);
 
 typedef kern_return_t (*OSEntitlements_adjustContextWithMonitor)(
 	void* os_entitlements,
@@ -117,6 +122,7 @@ typedef kern_return_t (*OSEntitlements_copyEntitlementAsOSObjectWithProc)(
 
 typedef struct _OSEntitlementsInterface {
 	uint32_t version;
+	OSEntitlements_adjustContext adjustContext;
 	OSEntitlements_adjustContextWithMonitor adjustContextWithMonitor;
 	OSEntitlements_adjustContextWithoutMonitor adjustContextWithoutMonitor;
 	OSEntitlements_queryEntitlementBoolean queryEntitlementBoolean;
@@ -246,13 +252,13 @@ typedef struct _TrustCacheInterface {
 #define APPLE_FEATURE_MTE 1
 
 #pragma mark AMFI MTE support
-#define KERN_AMFI_SUPPORTS_MTE 3
+#define KERN_AMFI_SUPPORTS_MTE 4
 /* KERN_AMFI_SUPPORTS_MTE >= 1 */
 typedef bool (*amfi_has_mte_soft_mode)(const proc_t proc);
 /* KERN_AMFI_SUPPORTS_MTE >= 2 */
 typedef bool (*amfi_has_mte_opt_out)(struct cs_blob*);
 typedef bool (*amfi_has_mte_inheritance_opt_out)(struct cs_blob*);
-typedef bool (*amfi_has_mte_data_tagging_opt_in)(struct cs_blob*);
+typedef bool (*amfi_has_mte_data_tagging_override)(struct cs_blob*);
 /* KERN_AMFI_SUPPORTS_MTE >= 3 */
 typedef bool (*amfi_has_mte_alias_restriction_opt_in)(struct cs_blob*);
 
@@ -285,7 +291,11 @@ typedef struct _amfi {
 #if KERN_AMFI_SUPPORTS_MTE >= 2
 	amfi_has_mte_opt_out has_mte_opt_out;
 	amfi_has_mte_inheritance_opt_out has_mte_inheritance_opt_out;
-	amfi_has_mte_data_tagging_opt_in has_mte_data_tagging_opt_in;
+#if KERN_AMFI_SUPPORTS_MTE >= 4
+	amfi_has_mte_data_tagging_override has_mte_data_tagging_opt_out;
+#else /* KERN_AMFI_SUPPORTS_MTE >= 4 */
+	amfi_has_mte_data_tagging_override has_mte_data_tagging_opt_in;
+#endif /* KERN_AMFI_SUPPORTS_MTE >= 4 */
 #endif /* KERN_AMFI_SUPPORTS_MTE >= 2 */
 #if KERN_AMFI_SUPPORTS_MTE >= 3
 	amfi_has_mte_alias_restriction_opt_in has_mte_alias_restriction_opt_in;

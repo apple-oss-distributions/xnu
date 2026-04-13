@@ -19,6 +19,8 @@
 #include <signal.h>
 #include <libproc.h>
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_priv.h>
 #include <dlfcn.h>
@@ -139,11 +141,26 @@ build_faulting_shared_cache_address(uint8_t flags)
 		fault_address |= 0x2000000000000000;
 	}
 
+	T_LOG("built fault address @ %p (flags = 0x%x)\n"
+	    "\tshared cache @ %p, length = 0x%lx (slide = 0x%lx)\n",
+	    (void *)fault_address, flags, shared_cache_location, shared_cache_len, slide);
+
 	return (char *)fault_address;
 }
 
 #define INDUCE_CRASH_READ       (0x01)
 #define INDUCE_CRASH_WRITE      (0x02)
+
+static int
+process_is_zombie(pid_t pid)
+{
+	struct kinfo_proc info;
+	size_t size = sizeof(info);
+	int name[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctl(name, 4, &info, &size, NULL, 0), "fill kinfo_proc struct for pid=%d", pid);
+	return info.kp_proc.p_stat == SZOMB;
+}
 
 static void
 induce_crash(volatile char *ptr, uint8_t how_to_crash)
@@ -154,13 +171,56 @@ induce_crash(volatile char *ptr, uint8_t how_to_crash)
 	if (child == 0) {
 		if (how_to_crash == INDUCE_CRASH_READ) {
 			ptr[1];
+			T_LOG("[child] reading %p did not crash\n", &ptr[1]);
 		} else if (how_to_crash == INDUCE_CRASH_WRITE) {
 			ptr[1] = 'a';
+			T_LOG("[child] writing %p did not crash\n", &ptr[1]);
 		} else {
 			exit(1);
 		}
+
+		/* Should not have survived. What happened? */
+		kern_return_t                   kr;
+		vm_region_basic_info_data_64_t  info;
+		mach_vm_address_t               addr = (mach_vm_address_t)&ptr[1];
+		mach_msg_type_number_t          icount = VM_REGION_BASIC_INFO_COUNT_64;
+		mach_vm_size_t                  size = 1;
+		kr = mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
+		    (vm_region_info_t) &info, &icount, &(mach_port_t){0});
+		if (kr != KERN_SUCCESS) {
+			T_LOG("[child] mach_vm_region(%p) failed (kr = %d)", &ptr[1], kr);
+		} else {
+			T_LOG("[child] mach_vm_region(%p):\n"
+			    "\tcur protection = 0x%x (%c%c%c)\n"
+			    "\tmax protection = 0x%x (%c%c%c)\n"
+			    "\tinheritance    = 0x%x\n"
+			    "\tshared         = %d\n"
+			    "\treserved       = %d\n"
+			    "\toffset         = 0x%llx\n"
+			    "\tbehavior       = 0x%x\n"
+			    "\twired count    = %hu",
+			    &ptr[1],
+			    info.protection,
+			    (info.protection & VM_PROT_READ) ? 'r' : '-',
+			    (info.protection & VM_PROT_WRITE) ? 'w' : '-',
+			    (info.protection & VM_PROT_EXECUTE) ? 'x' : '-',
+			    info.max_protection,
+			    (info.max_protection & VM_PROT_READ) ? 'r' : '-',
+			    (info.max_protection & VM_PROT_WRITE) ? 'w' : '-',
+			    (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-',
+			    info.inheritance,
+			    info.shared,
+			    info.reserved,
+			    info.offset,
+			    info.behavior,
+			    info.user_wired_count);
+		}
 	} else {
-		sleep(1);
+		/* Wait for the child to exit, but don't reap it. */
+		while (!process_is_zombie(child)) {
+			usleep(1000);
+		}
+
 		struct proc_exitreasonbasicinfo exit_reason = {0};
 		T_ASSERT_POSIX_SUCCESS(proc_pidinfo(child, PROC_PIDEXITREASONBASICINFO, 1, &exit_reason, sizeof(exit_reason)), "basic exit reason");
 
@@ -175,7 +235,7 @@ induce_crash(volatile char *ptr, uint8_t how_to_crash)
 
 		if (ptr) {
 			if (how_to_crash == INDUCE_CRASH_READ) {
-				T_ASSERT_EQ_ULLONG(exit_reason.beri_code, (unsigned long long)SIGSEGV, "child should have received SIGSEGV");
+				T_ASSERT_EQ_ULLONG(exit_reason.beri_code, (unsigned long long)SIGBUS, "child should have received SIGBUS");
 			}
 
 			if (how_to_crash == INDUCE_CRASH_WRITE) {

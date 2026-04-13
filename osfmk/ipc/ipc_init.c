@@ -151,14 +151,13 @@ ipc_init(void)
 #endif
 
 	ipc_kernel_map = kmem_suballoc(kernel_map, &ipc_kernel_range.min_address,
-	    IPC_KERNEL_MAP_SIZE, VM_MAP_CREATE_PAGEABLE,
-	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
+	    IPC_KERNEL_MAP_SIZE, VM_MAP_CREATE_DEFAULT,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL,
 	    VM_KERN_MEMORY_IPC).kmr_submap;
 
 	ipc_kernel_copy_map = kmem_suballoc(kernel_map, &ipc_kernel_copy_range.min_address,
-	    IPC_KERNEL_COPY_MAP_SIZE,
-	    VM_MAP_CREATE_PAGEABLE | VM_MAP_CREATE_DISABLE_HOLELIST,
-	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
+	    IPC_KERNEL_COPY_MAP_SIZE, VM_MAP_CREATE_DEFAULT,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_NOFAIL,
 	    VM_KERN_MEMORY_IPC).kmr_submap;
 
 	ipc_kernel_copy_map->no_zero_fill = TRUE;
@@ -167,6 +166,4 @@ ipc_init(void)
 	ipc_host_init();
 	ux_handler_init();
 }
-#ifndef __BUILDING_XNU_LIB_UNITTEST__ /* unittests don't support creating submap in kernel_map */
 STARTUP(MACH_IPC, STARTUP_RANK_LAST, ipc_init);
-#endif /* __BUILDING_XNU_LIB_UNITTEST__ */

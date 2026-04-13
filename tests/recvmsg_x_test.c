@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -47,7 +47,11 @@
 #define NMSGS       5
 #define BUFFERLEN   1000
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.net"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("vlubet"));
 
 static void
 sendPackets(int s, struct sockaddr *dst, unsigned int numMsg, size_t bufferLen)

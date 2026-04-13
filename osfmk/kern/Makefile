@@ -39,10 +39,13 @@ PRIVATE_DATAFILES = $(sort \
 	debug.h \
 	panic_call.h \
 	ecc.h \
+	llc_error.h \
 	lock_stat.h \
 	monotonic.h \
 	remote_time.h \
 	restartable.h \
+	stackshot_kpi.h \
+	telemetry.h \
 	trustcache.h \
 	turnstile.h \
 	socd_client.h \
@@ -107,7 +110,6 @@ EXPORT_FILES = \
 	startup.h \
 	task.h \
 	task_ref.h \
-	telemetry.h \
 	trap_telemetry.h \
 	thread.h \
 	thread_call.h \
@@ -129,6 +131,7 @@ PRIVATE_EXPORT_FILES = \
 	smr.h \
 	smr_hash.h \
 	socd_client_kern.h \
+	stackshot_kpi.h \
 	task_ident.h \
 	ticket_lock.h \
 	zalloc_ro_shim.h
@@ -138,6 +141,7 @@ XNU_ONLY_EXPORTS = \
 	arcade.h \
 	btlog.h \
 	cpc.h \
+	cpc_private.h \
 	host_statistics.h \
 	iotrace.h \
 	ipc_kobject.h \

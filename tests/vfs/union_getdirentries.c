@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-/* compile: xcrun -sdk macosx.internal clang -arch arm64e -arch x86_64 -ldarwintest -o union_getdirentries union_getdirentries.c */
+/* compile: xcrun -sdk macosx.internal clang -arch arm64e -arch x86_64 -ldarwintest -lsandbox -o union_getdirentries union_getdirentries.c */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +38,7 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <sandbox/libsandbox.h>
 
 #include <darwintest.h>
 #include <darwintest/utils.h>
@@ -54,6 +55,8 @@
 static char template[MAXPATHLEN];
 static char *testdir = NULL;
 static int testdir_fd = -1;
+static sandbox_params_t params = NULL;
+static sandbox_profile_t profile = NULL;
 
 extern ssize_t __getdirentries64(int, void *, size_t, off_t *);
 
@@ -68,6 +71,13 @@ T_GLOBAL_META(
 static void
 cleanup(void)
 {
+	if (params) {
+		sandbox_free_params(params);
+	}
+	if (profile) {
+		sandbox_free_profile(profile);
+	}
+
 	unmount(DIRECTORY, MNT_FORCE);
 
 	if (testdir_fd != -1) {
@@ -156,5 +166,141 @@ T_DECL(union_getdirentries_open_lifecycle,
 	rmdir(dir_path);
 	rmdir(testdir);
 
+	free(buf);
+}
+
+static void
+create_profile_string(char *buff, size_t size)
+{
+	snprintf(buff, size, "(version 1) \n\
+                          (allow default) \n\
+                          (deny file-read* (filesystem-name \"apfs\")) \n");
+}
+
+static void
+run_fopendir(int eperm)
+{
+	int fd;
+	DIR *dirp = NULL;
+
+	T_EXPECT_POSIX_SUCCESS((fd = open(DIRECTORY, O_RDONLY)), "Opening mount point");
+	if (fd >= 0) {
+		dirp = fdopendir(fd);
+		if (eperm) {
+			T_EXPECT_POSIX_FAILURE(dirp ? 0 : -1, EPERM, "Calling fdopendir -> should fail with EPERM");
+		} else {
+			T_EXPECT_POSIX_NOTNULL(dirp, "Calling fdopendir -> should PASS");
+		}
+		if (dirp) {
+			closedir(dirp);
+		}
+		close(fd);
+	}
+}
+
+T_DECL(union_getdirentries_sandbox,
+    "Ensure getdirentries() enforces MAC policies on union mounts")
+{
+	int fd;
+	char *sberror = NULL;
+	char profile_string[1000];
+
+#if (!RUN_TEST)
+	T_SKIP("Not macOS");
+#endif
+
+	if (geteuid() != 0) {
+		T_SKIP("Test should run as root");
+	}
+
+	T_ATEND(cleanup);
+
+	T_SETUPBEGIN;
+
+	snprintf(template, sizeof(template), "%s/union_getdirentries-XXXXXX", dt_tmpdir());
+	T_ASSERT_POSIX_NOTNULL((testdir = mkdtemp(template)), "Creating test root dir");
+	T_ASSERT_POSIX_SUCCESS((testdir_fd = open(testdir, O_SEARCH, 0777)), "Opening test root directory %s", testdir);
+
+	T_ASSERT_POSIX_SUCCESS(mkdirat(testdir_fd, DIRECTORY, 0777), "Creating %s/%s", testdir, DIRECTORY);
+	T_ASSERT_POSIX_SUCCESS((fd = openat(testdir_fd, FILE, O_CREAT | O_RDWR, 0777)), "Creating %s", FILE);
+	close(fd);
+
+	T_ASSERT_POSIX_ZERO(chdir(testdir), "Changing current directory to: %s", testdir);
+
+	T_ASSERT_POSIX_SUCCESS(mount(FSTYPE_DEVFS, DIRECTORY, MNT_UNION, NULL), "Mounting temporary %s mount at %s", FSTYPE_DEVFS, DIRECTORY);
+
+	/* Create sandbox variables */
+	T_ASSERT_POSIX_NOTNULL(params = sandbox_create_params(), "Creating Sandbox params object");
+	create_profile_string(profile_string, sizeof(profile_string));
+	T_ASSERT_POSIX_NOTNULL(profile = sandbox_compile_string(profile_string, params, &sberror), "Creating Sandbox profile object");
+
+	T_SETUPEND;
+
+	/* Run without sandbox profile */
+	run_fopendir(0);
+
+	/* Apply sandbox profile */
+	T_ASSERT_POSIX_SUCCESS(sandbox_apply(profile), "Applying Sandbox profile");
+
+	/* Run with sandbox profile */
+	run_fopendir(1);
+}
+
+T_DECL(union_getdirentries_type,
+    "Ensure getdirentries64 does not turn directory descriptors into non-directory descriptors")
+{
+	int fd;
+	struct stat sb;
+	struct dirent *buf;
+	off_t offset = 0;
+
+#if (!RUN_TEST)
+	T_SKIP("Not macOS");
+#endif
+
+	if (geteuid() != 0) {
+		T_SKIP("Test should run as root");
+	}
+
+	T_ATEND(cleanup);
+
+	T_SETUPBEGIN;
+
+	T_ASSERT_POSIX_NOTNULL((buf = malloc(4096)), "Allocating data buffer");
+
+	snprintf(template, sizeof(template), "%s/union_getdirentries_type-XXXXXX", dt_tmpdir());
+	T_ASSERT_POSIX_NOTNULL((testdir = mkdtemp(template)), "Creating test root dir");
+	T_ASSERT_POSIX_SUCCESS((testdir_fd = open(testdir, O_SEARCH, 0777)), "Opening test root directory %s", testdir);
+
+	T_ASSERT_POSIX_SUCCESS(mkdirat(testdir_fd, DIRECTORY, 0777), "Creating %s/%s", testdir, DIRECTORY);
+	T_ASSERT_POSIX_SUCCESS((fd = openat(testdir_fd, FILE, O_CREAT | O_RDWR, 0777)), "Creating %s", FILE);
+	close(fd);
+
+	T_ASSERT_POSIX_ZERO(chdir(testdir), "Changing current directory to: %s", testdir);
+
+	T_ASSERT_POSIX_SUCCESS(mount(FSTYPE_DEVFS, DIRECTORY, MNT_UNION, NULL), "Mounting temporary %s mount at %s", FSTYPE_DEVFS, FILE);
+
+	T_ASSERT_POSIX_SUCCESS(mkdirat(testdir_fd, FILE, 0777), "Creating directory %s/%s", testdir, FILE);
+
+	T_SETUPEND;
+
+	T_EXPECT_POSIX_SUCCESS((fd = open(FILE, O_RDONLY)), "Opening mount point");
+	if (fd >= 0) {
+		while (1) {
+			ssize_t r = __getdirentries64(fd, buf, 4096, &offset);
+			if (r <= 0) {
+				break;
+			}
+		}
+
+		if (fstat(fd, &sb) != 0) {
+			T_FAIL("fstat failed");
+			return;
+		}
+
+		T_EXPECT_TRUE(S_ISDIR(sb.st_mode), "Validating ISDIR file type");
+	}
+
+	unlinkat(testdir_fd, FILE, AT_REMOVEDIR);
 	free(buf);
 }

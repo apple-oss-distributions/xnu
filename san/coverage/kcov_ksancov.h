@@ -128,6 +128,8 @@ void kcov_ksancov_pcs_init(uintptr_t *, uintptr_t *);
 void kcov_ksancov_trace_cmp(kcov_thread_data_t *, uint32_t, uint64_t, uint64_t, void*);
 void kcov_ksancov_trace_cmp_func(kcov_thread_data_t *, uint32_t, const void*, size_t, const void*, size_t, void*, bool);
 bool kcov_ksancov_must_instrument(uintptr_t);
+int ksancov_can_print_serial(void);
+int ksancov_serial_print(const char *fmt, ...);
 void ksancov_on_panic_log(void);
 
 __END_DECLS
@@ -143,6 +145,8 @@ __END_DECLS
 #define kcov_ksancov_trace_cmp(data, type, arg1, arg2, caller)
 #define kcov_ksancov_trace_cmp_func(data, type, arg1, arg2, size, caller, always_log)
 #define kcov_ksancov_must_instrument(addr)
+#define ksancov_can_print_serial() 0
+#define ksancov_serial_print(...)
 #define ksancov_on_panic_log()
 
 #endif /* CONFIG_KSANCOV */

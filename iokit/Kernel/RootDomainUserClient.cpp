@@ -34,6 +34,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOSubMemoryDescriptor.h>
+#include <AssertMacros.h>
 #include "RootDomainUserClient.h"
 #include <IOKit/pwr_mgt/IOPMLibDefs.h>
 #include <IOKit/pwr_mgt/IOPMPrivate.h>
@@ -264,9 +266,52 @@ RootDomainUserClient::secureSetLockdownModeHibernation(
 }
 
 IOReturn
+RootDomainUserClient::secureGetAssertionLog(
+	IOPMAssertionLogData *outLog)
+{
+	if (!fOwner) {
+		return kIOReturnError;
+	}
+
+	return fOwner->getAssertionLog(outLog);
+}
+
+IOReturn
+RootDomainUserClient::secureSetAssertionLogNotificationThreshold(
+	uint64_t threshold)
+{
+	if (!fOwner) {
+		return kIOReturnError;
+	}
+
+	return fOwner->setAssertionLogNotificationThreshold(threshold);
+}
+
+IOReturn
+RootDomainUserClient::secureSetAssertionLogNotificationPort(
+	mach_port_t port)
+{
+	if (!fOwner) {
+		return kIOReturnError;
+	}
+
+	IOReturn ret = fOwner->setAssertionLogNotificationPort(port);
+
+	if (ret == kIOReturnSuccess) {
+		fAssertionLogNotificationPortRegistered = (port != MACH_PORT_NULL);
+	}
+
+	return ret;
+}
+
+IOReturn
 RootDomainUserClient::clientClose( void )
 {
 	terminate();
+
+	if (fAssertionLogNotificationPortRegistered) {
+		secureSetAssertionLogNotificationPort(MACH_PORT_NULL);
+	}
 
 	return kIOReturnSuccess;
 }
@@ -280,6 +325,17 @@ RootDomainUserClient::stop( IOService *provider)
 	}
 
 	super::stop(provider);
+}
+
+IOReturn
+RootDomainUserClient::registerNotificationPort(mach_port_t port, UInt32 type, UInt32 refCon)
+{
+	switch ((IOPMUserClientNotificationType)type) {
+	case IOPMUserClientNotificationType_AssertionLog:
+		return secureSetAssertionLogNotificationPort(port);
+	}
+
+	return kIOReturnSuccess;
 }
 
 IOReturn
@@ -448,6 +504,24 @@ RootDomainUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 			.allowAsync               = false,
 			.checkEntitlement         = NULL,
 		},
+		[kPMGetAssertionLog] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = sizeof(IOPMAssertionLogData),
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
+		[kPMSetAssertionLogThreshold] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 1,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 0,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
 	};
 
 	return dispatchExternalMethod(selector, args, dispatchArray, sizeof(dispatchArray) / sizeof(dispatchArray[0]), this, NULL);
@@ -455,8 +529,24 @@ RootDomainUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 IOReturn
 RootDomainUserClient::externalMethodDispatched(OSObject * target, void * reference, IOExternalMethodArguments * arguments)
 {
-	IOReturn    ret = kIOReturnBadArgument;
-	RootDomainUserClient * me = (typeof(me))target;
+	IOReturn              ret = kIOReturnBadArgument;
+	RootDomainUserClient *me = (typeof(me))target;
+	IOMemoryDescriptor   *outMD = nullptr;
+	IOMemoryMap          *outMap = nullptr;
+
+	if (arguments->structureOutputSize > 0 || arguments->structureOutputDescriptorSize > 0) {
+		if (arguments->structureOutputDescriptor) {
+			outMD = arguments->structureOutputDescriptor;
+			outMD->retain();
+		} else {
+			outMD = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)arguments->structureOutput, arguments->structureOutputSize, kIODirectionIn, kernel_task);
+		}
+
+		require_action(outMD != nullptr, out, ret = kIOReturnError);
+		outMap = outMD->map();
+		require_action(outMap != nullptr, out, ret = kIOReturnError);
+	}
+
 	switch (arguments->selector) {
 	case kPMSetAggressiveness:
 		ret = me->secureSetAggressiveness(
@@ -566,11 +656,28 @@ RootDomainUserClient::externalMethodDispatched(OSObject * target, void * referen
 		ret = me->secureSetLockdownModeHibernation((uint32_t)arguments->scalarInput[0]);
 		break;
 
+	case kPMGetAssertionLog:
+		require_action(outMap != nullptr, out, ret = kIOReturnBadArgument);
+		ret = me->secureGetAssertionLog((IOPMAssertionLogData *)outMap->getAddress());
+		break;
+
+	case kPMSetAssertionLogThreshold:
+		ret = me->secureSetAssertionLogNotificationThreshold(arguments->scalarInput[0]);
+		break;
 
 	default:
 		// bad selector
-		return kIOReturnBadArgument;
+		ret = kIOReturnBadArgument;
+		break;
 	}
+
+out:
+	if (outMap) {
+		outMap->unmap();
+	}
+
+	OSSafeReleaseNULL(outMap);
+	OSSafeReleaseNULL(outMD);
 
 	return ret;
 }

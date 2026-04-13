@@ -53,6 +53,12 @@ __BEGIN_DECLS
 #ifdef __APPLE_API_PRIVATE
 #ifdef __APPLE_API_UNSTABLE
 
+/*
+ * An old-style snapshot for a thread.  See `struct microstackshot_thread` for
+ * microstackshot-specific fields.
+ *
+ * XXX This is ABI for tools and the order of its fields must not change.
+ */
 struct thread_snapshot {
 	uint32_t                snapshot_magic;
 	uint32_t                nkern_frames;
@@ -71,17 +77,12 @@ struct thread_snapshot {
 	char                    ts_rqos;     /* requested qos */
 	char                    ts_rqos_override; /* requested qos override */
 	char                    io_tier;
-	/*
-	 * In microstackshots, the low two bytes are the start of the first async
-	 * frame in the thread's user space call stack.  If the call stack lacks
-	 * async stack frames, it's `UINT16_MAX`.
-	 */
 	char                    _reserved[3]; /* pad for 4 byte alignement packing */
 
 	/*
 	 * I/O Statistics
-	 * XXX: These fields must be together
 	 */
+
 	uint64_t                disk_reads_count;
 	uint64_t                disk_reads_size;
 	uint64_t                disk_writes_count;
@@ -96,14 +97,18 @@ struct thread_snapshot {
 	uint64_t                data_size;
 	uint64_t                metadata_count;
 	uint64_t                metadata_size;
-	/* XXX: I/O Statistics end */
 
 	uint64_t                voucher_identifier; /* obfuscated voucher identifier */
 	uint64_t                total_syscalls;
 	char                    pth_name[STACKSHOT_MAX_THREAD_NAME_SIZE];
 } __attribute__((packed));
 
-/* old, non kcdata format */
+/*
+ * An old-style snapshot for a task.  See `struct microstackshot_task` for the
+ * microstackshot-specific field meanings.
+ *
+ * XXX This is ABI for tools and the order of its fields must not change.
+ */
 struct task_snapshot {
 	uint32_t snapshot_magic;
 	int32_t pid;
@@ -119,15 +124,7 @@ struct task_snapshot {
 	int                     pageins;        /* number of actual pageins */
 	int                     cow_faults;     /* number of copy-on-write faults */
 	uint32_t                ss_flags;
-	/*
-	 * In microstackshots, `p_start_sec` is actually the resource coalition ID
-	 * that this thread belongs to.
-	 */
 	uint64_t                p_start_sec;    /* from the bsd proc struct */
-	/*
-	 * In microstackshots, `p_stat_usec` is actually the resource coalition ID
-	 * that this thread is doing work on behalf of.
-	 */
 	uint64_t                p_start_usec;   /* from the bsd proc struct */
 
 	/*
@@ -143,10 +140,6 @@ struct task_snapshot {
 	/*
 	 * I/O Statistics
 	 * XXX: These fields must be together.
-	 */
-	/*
-	 * In microstackshots, `disk_reads_count` is actually
-	 * the full 64-bits of ss_flags.
 	 */
 	uint64_t                disk_reads_count;
 	uint64_t                disk_reads_size;
@@ -231,19 +224,23 @@ struct _dyld_cache_image_text_info {
 
 
 enum micro_snapshot_flags {
-	/*
-	 * (Timer) interrupt records are no longer supported.
-	 */
-	kInterruptRecord        = 0x01,
-	/*
-	 * Timer arming records are no longer supported.
-	 */
-	kTimerArmingRecord      = 0x02,
-	kUserMode               = 0x04, /* interrupted usermode, or armed by usermode */
-	kIORecord               = 0x08,
-	kPMIRecord              = 0x10,
+	kPageGrabRecord         = 0x02, /* triggered by a page grab */
+	kUserMode               = 0x04, /* interrupted user space */
+	kIORecord               = 0x08, /* triggered by I/O writes */
+	kPMIRecord              = 0x10, /* triggered by a CPU Performance Monitor Interrupt */
 	kMACFRecord             = 0x20, /* armed by MACF policy */
 	kKernelThread           = 0x40, /* sampled a kernel thread */
+	kVMFaultRecord          = 0x80, /* triggered by VM fault */
+	/*
+	 * XXX: This must fit in a byte, see `struct micro_snapshot`.
+	 */
+
+	/*
+	 * Obsolete flags, no longer supported.
+	 */
+
+	kInterruptRecord        = 0x01, /* triggered by a timer interrupt */
+	kTimerArmingRecord      = 0x02, /* triggered by arming a timer, repurposed */
 };
 
 /*
@@ -405,7 +402,7 @@ __options_decl(eph_panic_flags_t, uint64_t, {
 
 #define MAX_PANIC_INITIATOR_SIZE 256
 
-#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 6
+#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 8
 #define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
 #define EMBEDDED_PANIC_HEADER_OSVERSION_LEN 32
 
@@ -445,6 +442,8 @@ struct embedded_panic_header {
 	uint32_t eph_ext_paniclog_len;
 	uint32_t eph_panic_initiator_offset;
 	uint32_t eph_panic_initiator_len;
+	char eph_device_target_type[16];                               /* Device-specific target type buffer */
+	char eph_device_model_type[32];                                /* Device-specific model type buffer */
 } __attribute__((packed));
 
 

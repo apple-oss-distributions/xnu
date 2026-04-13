@@ -212,8 +212,8 @@ __BEGIN_DECLS
 #define MACH_CALLOUT            0x4     /* callouts */
 #define MACH_STACK_DETACH       0x5
 #define MACH_MAKE_RUNNABLE      0x6     /* make thread runnable */
-#define MACH_PROMOTE            0x7     /* promoted due to resource (replaced by MACH_PROMOTED) */
-#define MACH_DEMOTE             0x8     /* promotion undone (replaced by MACH_UNPROMOTED) */
+/* unused  MACH_PROMOTE            0x7 was: promoted due to resource (replaced by MACH_PROMOTED) */
+/* unused  MACH_DEMOTE             0x8 was: promotion undone (replaced by MACH_UNPROMOTED) */
 #define MACH_IDLE               0x9     /* processor idling */
 #define MACH_STACK_DEPTH        0xa     /* stack depth at switch */
 #define MACH_MOVED              0xb     /* did not use original scheduling decision */
@@ -298,6 +298,7 @@ __BEGIN_DECLS
 #define MACH_SUSPEND_DRIVERKIT_USERSPACE 0x66 /* one driverkit process is suspended/unsuspended by iokit */
 #define MACH_SCHED_PREFERRED_PSET        0x67 /* Recommendation change for a thread group at a specific QoS */
 #define MACH_SCHED_ONCORE_PREEMPT        0x68 /* CLPC requested thread preemption */
+#define MACH_SCHED_MODE_CHANGE           0x69 /* thread scheduling mode change */
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
 #define MACH_SCHED_CLUTCH_ROOT_BUCKET_STATE     0x0 /* __unused */
@@ -404,7 +405,6 @@ __BEGIN_DECLS
 
 #define DBG_VM_MAP_LOOKUP_ENTRY_FAILURE     0x143
 
-#if defined(XNU_KERNEL_PRIVATE)
 #define DBG_VM_REFILL_MTE                   0x144
 #define DBG_VM_PAGE_MTE_WAIT_BLOCK          0x145
 #define DBG_VM_PAGE_GRAB_MTE                0x146
@@ -415,9 +415,17 @@ __BEGIN_DECLS
 #define DBG_VM_PAGEOUT_FREE_MTE             0x14b
 #define DBG_VM_PAGE_MTE_ZFOD                0x14c
 /* Previously DBG_VM_MTE_INFO* [0x14d,0x150] */
-#endif /* defined(XNU_KERNEL_PRIVATE) */
 
 #define DBG_VM_FAULT_DEACTIVATE_BEHIND      0x160
+#define DBG_VM_PMAP_UNNEST                  0x161
+#define DBG_VM_FAULT_SLOW_OBJECT_CONTENTION 0x162
+
+#define DBG_VM_REALLOCATE_CALL                  0x163
+#define DBG_VM_RELOCATE_TRY_IN_PLACE            0x164
+#define DBG_VM_RELOCATE_SUCCESS_IN_PLACE        0x165
+#define DBG_VM_RELOCATE_SUCCESS_OUT_OF_PLACE    0x166
+
+#define DBG_VM_PAGE_LOCAL_TO_GLOBAL_ACTIVE      0x169
 
 /*
  * Codes for Working Set Measurement (DBG_MACH_WORKINGSET)
@@ -452,6 +460,8 @@ __BEGIN_DECLS
 /*
  * Codes for VM Compressor (DBG_MACH_VM_COMPRESSOR)
  */
+#define DBG_CSEG_BUSY                    0x01
+#define DBG_CSEG_SLEEP                   0x02
 #define DBG_COMPACT_AND_SWAP             0x03
 #define DBG_COMPACT_DEFERRED             0x04
 #define DBG_COMPACT_SPECIAL              0x05
@@ -460,6 +470,7 @@ __BEGIN_DECLS
 #define DBG_COMPACT_MINOR                0x08
 #define DBG_COMPACT_MAJOR                0x09
 #define DBG_COMPACT_COALESCE             0x0a
+#define DBG_SWAPOUT_ENQUEUE              0x0b
 
 /* Codes for IPC (DBG_MACH_IPC) */
 /* unused MACH_TASK_SUSPEND                     0x0 was: Suspended a task */
@@ -712,6 +723,8 @@ __BEGIN_DECLS
 #define DBG_MEMINFO_PGCNT6                  0x06
 #define DBG_MEMINFO_PGCNT7                  0x07
 #define DBG_MEMINFO_PGCNT8                  0x08
+#define DBG_MEMINFO_PGCNT9                  0x09
+#define DBG_MEMINFO_PGCNT10                 0x0A
 
 /* Page eviction statistics */
 #define DBG_MEMINFO_PGOUT1                  0x11
@@ -720,10 +733,17 @@ __BEGIN_DECLS
 #define DBG_MEMINFO_PGOUT4                  0x14
 #define DBG_MEMINFO_PGOUT5                  0x15
 #define DBG_MEMINFO_PGOUT6                  0x16
+#define DBG_MEMINFO_PGOUT7                  0x17
+#define DBG_MEMINFO_PGOUT8                  0x18
 
 /* Page demand statistics */
 #define DBG_MEMINFO_DEMAND1                 0x21
 #define DBG_MEMINFO_DEMAND2                 0x22
+/* DBG_MEMINFO_DEMAND3 defined below. */
+
+/* VM lock contention statistics */
+#define DBG_MEMINFO_CONTENTION1             0x23
+#define DBG_MEMINFO_CONTENTION2             0x24
 
 /* Compressor statistics */
 #define DBG_MEMINFO_CSEG1                   0x31
@@ -735,10 +755,19 @@ __BEGIN_DECLS
 #define DBG_MEMINFO_CSWAP1                  0x41
 #define DBG_MEMINFO_CSWAP2                  0x42
 #define DBG_MEMINFO_CSWAP3                  0x43
+#define DBG_MEMINFO_CSWAP4                  0x44
+#define DBG_MEMINFO_CSWAP5                  0x45
 
 #define DBG_MEMINFO_COMPACTOR1              0x46
 #define DBG_MEMINFO_COMPACTOR2              0x47
 #define DBG_MEMINFO_COMPACTOR3              0x48
+
+/* MTE refill thread/subsystem statistics */
+#define DBG_MEMINFO_MTE1                    0x60
+#define DBG_MEMINFO_MTE2                    0x61
+
+/* Page demand statistics, cont. */
+#define DBG_MEMINFO_DEMAND3                 0x70
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP       1       /* Internet Protocol */
@@ -851,6 +880,7 @@ __BEGIN_DECLS
 #define DBG_DRVVIRTIO        32 /* Hypervisor VirtIO */
 #define DBG_DRVCELLULAR      33 /* Cellular */
 #define DBG_DRVSPMI          34 /* System Power Management Interface */
+#define DBG_DRVCORECAPTURE   35 /* CoreCapture */
 
 /* Backwards compatibility */
 #define DBG_DRVPOINTING         DBG_DRVHID      /* OBSOLETE: Use DBG_DRVHID instead */
@@ -1272,7 +1302,6 @@ __BEGIN_DECLS
 #define ZFREE_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 7)
 
 #define MEMSTAT_CODE(code) BSDDBG_CODE(DBG_BSD_MEMSTAT, code)
-
 #define VM_RECLAIM_CODE(code) MACHDBG_CODE(DBG_MACH_VM_RECLAIM, code)
 #define VMDBG_CODE(code) MACHDBG_CODE(DBG_MACH_VM, code)
 #define VM_COMPRESSOR_EVENTID(code) KDBG_EVENTID(DBG_MACH, DBG_MACH_VM_COMPRESSOR, code)
@@ -1326,9 +1355,9 @@ __BEGIN_DECLS
 
 __END_DECLS
 
-#if defined(KERNEL) || defined(PRIVATE)
+#if defined(KERNEL) || (defined(PRIVATE) && !defined(MODULES_SUPPORTED))
 #include <sys/kdebug_private.h>
-#endif // defined(KERNEL) || defined(PRIVATE)
+#endif // defined(KERNEL) || (defined(PRIVATE) && !defined(MODULES_SUPPORTED))
 
 #ifdef KERNEL
 #include <sys/kdebug_kernel.h>

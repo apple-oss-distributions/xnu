@@ -538,8 +538,8 @@ class Zone(object):
             return None
 
         heap_id = zsec.xGetIntegerByName('z_kheap_id')
-
-        return KMem._HEAP_NAMES[heap_id] + zone.xGetCStringByName('z_name')
+        heap_name = kmem.kalloc_heap_names.chkGetChildAtIndex(heap_id).xGetValueAsCString()
+        return heap_name + zone.xGetCStringByName('z_name')
 
     @staticmethod
     @caching.cache_dynamically

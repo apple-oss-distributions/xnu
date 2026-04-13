@@ -291,13 +291,13 @@ struct ifkpi {
 
 #pragma pack()
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 /*
  * IFREQ_OPAQUE means that ifreq is an opaque structure
  * in the public header, and redeclared in if_private.h.
  */
 #define IFREQ_OPAQUE
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 /*
  * Interface request structure used for socket
@@ -495,8 +495,8 @@ __END_DECLS
 #include <net/kpi_interface.h>
 #endif
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <net/if_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* !_NET_IF_H_ */

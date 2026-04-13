@@ -40,29 +40,30 @@
 void
 kperf_meminfo_sample(task_t task, struct meminfo *mi)
 {
-	ledger_amount_t credit, debit;
 	kern_return_t kr;
 
 	assert(mi != NULL);
 
 	BUF_INFO(PERF_MI_SAMPLE | DBG_FUNC_START);
 
-	mi->phys_footprint = get_task_phys_footprint(task);
+	kr = ledger_get_balance(task->ledger,
+	    task_ledgers.phys_footprint, LEO_NO_SETTLE,
+	    (ledger_amount_t *)&mi->phys_footprint);
+	if (kr != KERN_SUCCESS) {
+		mi->phys_footprint = UINT64_MAX;
+	}
 
-	kr = ledger_get_entries(task->ledger, task_ledgers.purgeable_volatile,
-	    &credit, &debit);
-	if (kr == KERN_SUCCESS) {
-		mi->purgeable_volatile = credit - debit;
-	} else {
+	kr = ledger_get_balance(task->ledger,
+	    task_ledgers.purgeable_volatile, LEO_NO_SETTLE,
+	    (ledger_amount_t *)&mi->purgeable_volatile);
+	if (kr != KERN_SUCCESS) {
 		mi->purgeable_volatile = UINT64_MAX;
 	}
 
-	kr = ledger_get_entries(task->ledger,
-	    task_ledgers.purgeable_volatile_compressed,
-	    &credit, &debit);
-	if (kr == KERN_SUCCESS) {
-		mi->purgeable_volatile_compressed = credit - debit;
-	} else {
+	kr = ledger_get_balance(task->ledger,
+	    task_ledgers.purgeable_volatile_compress, LEO_NO_SETTLE,
+	    (ledger_amount_t *)&mi->purgeable_volatile_compressed);
+	if (kr != KERN_SUCCESS) {
 		mi->purgeable_volatile_compressed = UINT64_MAX;
 	}
 

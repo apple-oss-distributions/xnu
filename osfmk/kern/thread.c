@@ -180,10 +180,12 @@
 
 LCK_GRP_DECLARE(thread_lck_grp, "thread");
 
+static TUNABLE(bool, enable_user_go, "ugo", true);
 static SECURITY_READ_ONLY_LATE(zone_t) thread_zone;
 ZONE_DEFINE_ID(ZONE_ID_THREAD_RO, "threads_ro", struct thread_ro, ZC_READONLY);
 
 static void thread_port_with_flavor_no_senders(ipc_port_t, mach_port_mscount_t);
+static void thread_suspension_no_senders(ipc_port_t, mach_port_mscount_t);
 
 IPC_KOBJECT_DEFINE(IKOT_THREAD_CONTROL,
     .iko_op_movable_send = true,  /* see ipc_should_mark_immovable_send */
@@ -193,6 +195,8 @@ IPC_KOBJECT_DEFINE(IKOT_THREAD_READ,
     .iko_op_label_free = ipc_kobject_label_free);
 IPC_KOBJECT_DEFINE(IKOT_THREAD_INSPECT,
     .iko_op_no_senders = thread_port_with_flavor_no_senders);
+IPC_KOBJECT_DEFINE(IKOT_THREAD_RESUME,
+    .iko_op_no_senders = thread_suspension_no_senders);
 
 static struct mpsc_daemon_queue thread_stack_queue;
 static struct mpsc_daemon_queue thread_terminate_queue;
@@ -293,8 +297,6 @@ int task_threadmax = CONFIG_THREAD_MAX;
 
 static uint64_t         thread_unique_id = 100;
 
-struct _thread_ledger_indices thread_ledgers = { .cpu_time = -1 };
-static ledger_template_t thread_ledger_template = NULL;
 static void init_thread_ledgers(void);
 
 #if CONFIG_JETSAM
@@ -303,25 +305,23 @@ void jetsam_on_ledger_cpulimit_exceeded(void);
 
 extern int task_thread_soft_limit;
 
-
-/*
- * Level (in terms of percentage of the limit) at which the CPU usage monitor triggers telemetry.
- *
- * (ie when any thread's CPU consumption exceeds 70% of the limit, start taking user
- *  stacktraces, aka micro-stackshots)
- */
-#define CPUMON_USTACKSHOTS_TRIGGER_DEFAULT_PCT 70
-
-/* Percentage. Level at which we start gathering telemetry. */
-static TUNABLE(uint8_t, cpumon_ustackshots_trigger_pct,
-    "cpumon_ustackshots_trigger_pct", CPUMON_USTACKSHOTS_TRIGGER_DEFAULT_PCT);
-void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void);
-
 #if DEVELOPMENT || DEBUG
 TUNABLE_WRITEABLE(int, exc_resource_threads_enabled, "exc_resource_threads_enabled", 1);
 
 void __attribute__((noinline)) SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t, int);
 #endif /* DEVELOPMENT || DEBUG */
+
+static void thread_cpu_time_usage_exceeded(ledger_warning_t warning, const void *arg0)
+asm("_SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU");
+
+SECURITY_READ_ONLY_LATE(struct _thread_ledger_indices) thread_ledgers;
+
+static SECURITY_READ_ONLY_LATE(struct ledger_entry_template) thread_ledger_entries[] = {
+	LEDGER_ENTRY_CALLBACK("cpu_time", "sched", "ns", LFEAT_REFILL,
+    thread_cpu_time_usage_exceeded, NULL),
+};
+
+LEDGER_TEMPLATE_DEFINE(thread_ledger_template, "Per-thread ledger", thread_ledger_entries);
 
 /*
  * The smallest interval over which we support limiting CPU consumption is 1ms
@@ -1371,7 +1371,7 @@ thread_create_internal(
 
 	lck_mtx_init(&new_thread->mutex, &thread_lck_grp, LCK_ATTR_NULL);
 
-	ipc_thread_init(parent_task, new_thread, &tro_tpl);
+	ipc_thread_init(parent_task, new_thread);
 
 	thread_ro_create(parent_task, new_thread, &tro_tpl);
 
@@ -1388,14 +1388,14 @@ thread_create_internal(
 #endif /* CONFIG_SCHED_CLUTCH */
 
 #if CONFIG_SCHED_EDGE
-	new_thread->th_bound_cluster_enqueued = false;
+	new_thread->th_bound_pset_enqueued = false;
 	for (cluster_shared_rsrc_type_t shared_rsrc_type = CLUSTER_SHARED_RSRC_TYPE_MIN; shared_rsrc_type < CLUSTER_SHARED_RSRC_TYPE_COUNT; shared_rsrc_type++) {
 		new_thread->th_shared_rsrc_enqueued[shared_rsrc_type] = false;
 		new_thread->th_shared_rsrc_heavy_user[shared_rsrc_type] = false;
 		new_thread->th_shared_rsrc_heavy_perf_control[shared_rsrc_type] = false;
 	}
 #endif /* CONFIG_SCHED_EDGE */
-	new_thread->th_bound_cluster_id = THREAD_BOUND_CLUSTER_NONE;
+	new_thread->th_bound_pset_id = THREAD_BOUND_PSET_NONE;
 
 	/* Allocate I/O Statistics structure */
 	new_thread->thread_io_stats = kalloc_data(sizeof(struct io_stat_info),
@@ -1432,6 +1432,13 @@ thread_create_internal(
 		task_unlock(parent_task);
 	}
 #endif
+
+	if (enable_user_go &&
+	    task_has_fatal_vm_guards(parent_task) &&
+	    task_has_guard_objects(parent_task) &&
+	    parent_task->thread_count == 1) {
+		vm_map_guard_object_slab_init(parent_task->map);
+	}
 
 	lck_mtx_lock(&tasks_threads_lock);
 	task_lock(parent_task);
@@ -1473,12 +1480,8 @@ thread_create_internal(
 		act_set_astledger(new_thread);
 	}
 
-	/* Instantiate a thread ledger. Do not fail thread creation if ledger creation fails. */
-	if ((new_thread->t_threadledger = ledger_instantiate(thread_ledger_template,
-	    LEDGER_CREATE_INACTIVE_ENTRIES)) != LEDGER_NULL) {
-		ledger_entry_setactive(new_thread->t_threadledger, thread_ledgers.cpu_time);
-	}
-
+	/* Instantiate a thread ledger */
+	new_thread->t_threadledger = ledger_instantiate(&thread_ledger_template);
 	new_thread->t_bankledger = LEDGER_NULL;
 	new_thread->t_deduct_bank_ledger_time = 0;
 	new_thread->t_deduct_bank_ledger_energy = 0;
@@ -1558,6 +1561,7 @@ thread_create_internal(
 	}
 	new_thread->corpse_dup = FALSE;
 	new_thread->turnstile = turnstile_alloc();
+	new_thread->vm_map_lock_ctx_held = NULL;
 	new_thread->ctsid = turnstile_compact_id_get();
 
 
@@ -1643,7 +1647,7 @@ thread_create_with_options_internal(
 		return result;
 	}
 
-	thread->user_stop_count = 1;
+	thread->user_stop_count = thread->legacy_user_stop_count = 1;
 	thread_hold(thread);
 	if (task->suspend_count > 0) {
 		thread_hold(thread);
@@ -2464,7 +2468,7 @@ thread_ast_mach_exception(
 	exception_type_t exception_type,
 	mach_exception_data_type_t code,
 	mach_exception_data_type_t subcode,
-	bool fatal,
+	bool sticky,
 	bool ktriage)
 {
 	assert(thread == current_thread());
@@ -2484,10 +2488,10 @@ thread_ast_mach_exception(
 	 * returning to userspace. It's possible that there is
 	 * already a pending guard exception.
 	 *
-	 * Fatal guard exceptions cannot be overwritten; non-fatal
-	 * guards can be overwritten by fatal guards.
+	 * Sticky guard exceptions cannot be overwritten; non-sticky
+	 * guards can be overwritten by sticky guards.
 	 */
-	if (thread->mach_exc_info.code && (thread->mach_exc_fatal || !fatal)) {
+	if (thread->mach_exc_info.code && (thread->mach_exc_sticky || !sticky)) {
 		return;
 	}
 
@@ -2495,7 +2499,7 @@ thread_ast_mach_exception(
 	thread->mach_exc_info.exception_type = exception_type;
 	thread->mach_exc_info.code = code;
 	thread->mach_exc_info.subcode = subcode;
-	thread->mach_exc_fatal = fatal;
+	thread->mach_exc_sticky = sticky;
 	thread->mach_exc_ktriage = ktriage;
 
 	spl_t s = splsched();
@@ -2509,10 +2513,10 @@ thread_guard_violation(
 	thread_t                thread,
 	mach_exception_data_type_t code,
 	mach_exception_data_type_t subcode,
-	bool                    fatal)
+	bool                    sticky)
 {
 	assert(EXC_GUARD_DECODE_GUARD_TYPE(code));
-	thread_ast_mach_exception(thread, OS_REASON_GUARD, EXC_GUARD, code, subcode, fatal, false);
+	thread_ast_mach_exception(thread, OS_REASON_GUARD, EXC_GUARD, code, subcode, sticky, false);
 }
 
 #if CONFIG_DEBUG_SYSCALL_REJECTION
@@ -2546,6 +2550,11 @@ guard_ast(thread_t t,
 	case GUARD_TYPE_VIRT_MEMORY:
 		virt_memory_guard_ast(t, code, subcode);
 		break;
+#if CONFIG_FREEZE
+	case GUARD_TYPE_FROZEN_SWAPIN:
+		frozen_swapin_guard_ast(t, code, subcode);
+		break;
+#endif /* CONFIG_FREEZE */
 #if CONFIG_DEBUG_SYSCALL_REJECTION
 	case GUARD_TYPE_REJECTED_SC:
 		rejected_syscall_guard_ast(t, code, subcode);
@@ -2568,7 +2577,7 @@ mach_exception_ast(thread_t t)
 	    ktriage = t->mach_exc_ktriage;
 
 	bzero(&t->mach_exc_info, sizeof(t->mach_exc_info));
-	t->mach_exc_fatal = 0;
+	t->mach_exc_sticky = 0;
 	t->mach_exc_ktriage = 0;
 
 	if (os_reason == OS_REASON_INVALID) {
@@ -2583,43 +2592,32 @@ mach_exception_ast(thread_t t)
 			flags |= PX_KTRIAGE;
 		}
 
-		exception_info_t info = {
-			.os_reason = os_reason,
-			.exception_type = exception_type,
-			.mx_code = code,
-			.mx_subcode = subcode,
-		};
-		exit_with_mach_exception(bsd_info, info, flags);
+		/* Perform fatal exception logic. */
+		exit_with_fatal_exception_and_notify(bsd_info, os_reason,
+		    exception_type, code, subcode, flags);
 	}
 }
 
 static void
-thread_cputime_callback(int warning, __unused const void *arg0, __unused const void *arg1)
+thread_cpu_time_usage_exceeded(ledger_warning_t warning, const void *arg0)
 {
-	if (warning == 0) {
-		SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU();
-	}
-}
-
-void __attribute__((noinline))
-SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
-{
-	int          pid                = 0;
-	task_t           task                           = current_task();
-	thread_t     thread             = current_thread();
-	uint64_t     tid                = thread->thread_id;
-	const char       *procname          = "unknown";
-	time_value_t thread_total_time  = {0, 0};
-	time_value_t thread_system_time;
-	time_value_t thread_user_time;
-	int          action;
-	uint8_t      percentage;
-	uint32_t     usage_percent = 0;
-	uint32_t     interval_sec;
-	uint64_t     interval_ns;
-	uint64_t     balance_ns;
-	boolean_t        fatal = FALSE;
-	boolean_t        send_exc_resource = TRUE; /* in addition to RESOURCE_NOTIFY */
+#pragma unused(warning, arg0)
+	int             pid                = 0;
+	task_t          task               = current_task();
+	thread_t        thread             = current_thread();
+	uint64_t        tid                = thread->thread_id;
+	const char     *procname           = "unknown";
+	time_value_t    thread_total_time  = {0, 0};
+	time_value_t    thread_system_time;
+	time_value_t    thread_user_time;
+	int             action;
+	uint8_t         percentage;
+	uint32_t        usage_percent = 0;
+	uint32_t        interval_sec;
+	uint64_t        interval_ns;
+	uint64_t        balance_ns;
+	boolean_t       fatal = FALSE;
+	boolean_t       send_exc_resource = TRUE; /* in addition to RESOURCE_NOTIFY */
 	kern_return_t   kr;
 
 #ifdef EXC_RESOURCE_MONITORS
@@ -2627,6 +2625,8 @@ SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU(void)
 #endif /* EXC_RESOURCE_MONITORS */
 	struct ledger_entry_info        lei;
 
+	/* we never set a warning percentage */
+	assert(warning == LEDGER_WARNING_LEVEL_CRITICAL);
 	assert(thread->t_threadledger != LEDGER_NULL);
 
 	/*
@@ -2854,27 +2854,11 @@ thread_update_io_stats(thread_t thread, int size, int io_flags)
 static void
 init_thread_ledgers(void)
 {
-	ledger_template_t t;
-	int idx;
+	ledger_template_t t = &thread_ledger_template;
 
-	assert(thread_ledger_template == NULL);
+	ledger_template_finalize(t, LEDGER_TPL_NONE);
 
-	if ((t = ledger_template_create("Per-thread ledger")) == NULL) {
-		panic("couldn't create thread ledger template");
-	}
-
-	if ((idx = ledger_entry_add(t, "cpu_time", "sched", "ns")) < 0) {
-		panic("couldn't create cpu_time entry for thread ledger template");
-	}
-
-	if (ledger_set_callback(t, idx, thread_cputime_callback, NULL, NULL) < 0) {
-		panic("couldn't set thread ledger callback for cpu_time entry");
-	}
-
-	thread_ledgers.cpu_time = idx;
-
-	ledger_template_complete(t);
-	thread_ledger_template = t;
+	LEDGER_KEY_MEMOIZE(t, thread_ledgers, cpu_time);
 }
 
 /*
@@ -2948,14 +2932,6 @@ thread_get_cpulimit(int *action, uint8_t *percentage, uint64_t *interval_ns)
 	*interval_ns = 0;
 	*action      = 0;
 
-	if (thread->t_threadledger == LEDGER_NULL) {
-		/*
-		 * This thread has no per-thread ledger, so it can't possibly
-		 * have a CPU limit applied.
-		 */
-		return KERN_SUCCESS;
-	}
-
 	ledger_get_period(thread->t_threadledger, thread_ledgers.cpu_time, interval_ns);
 	ledger_get_limit(thread->t_threadledger, thread_ledgers.cpu_time, &abstime);
 
@@ -2996,7 +2972,7 @@ int
 thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 {
 	thread_t        thread = current_thread();
-	ledger_t        l;
+	ledger_t        l      = thread->t_threadledger;
 	uint64_t        limittime = 0;
 	uint64_t        abstime = 0;
 
@@ -3015,34 +2991,13 @@ thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 		/*
 		 * Remove CPU limit, if any exists.
 		 */
-		if (thread->t_threadledger != LEDGER_NULL) {
-			l = thread->t_threadledger;
-			ledger_set_limit(l, thread_ledgers.cpu_time, LEDGER_LIMIT_INFINITY, 0);
-			ledger_set_action(l, thread_ledgers.cpu_time, LEDGER_ACTION_IGNORE);
-			thread->options &= ~(TH_OPT_PROC_CPULIMIT | TH_OPT_PRVT_CPULIMIT);
-		}
-
+		ledger_set_limit(l, thread_ledgers.cpu_time, LEDGER_LIMIT_INFINITY, 0);
+		thread->options &= ~(TH_OPT_PROC_CPULIMIT | TH_OPT_PRVT_CPULIMIT);
 		return 0;
 	}
 
 	if (interval_ns < MINIMUM_CPULIMIT_INTERVAL_MS * NSEC_PER_MSEC) {
 		return KERN_INVALID_ARGUMENT;
-	}
-
-	l = thread->t_threadledger;
-	if (l == LEDGER_NULL) {
-		/*
-		 * This thread doesn't yet have a per-thread ledger; so create one with the CPU time entry active.
-		 */
-		if ((l = ledger_instantiate(thread_ledger_template, LEDGER_CREATE_INACTIVE_ENTRIES)) == LEDGER_NULL) {
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		/*
-		 * We are the first to create this thread's ledger, so only activate our entry.
-		 */
-		ledger_entry_setactive(l, thread_ledgers.cpu_time);
-		thread->t_threadledger = l;
 	}
 
 	/*
@@ -3051,7 +3006,8 @@ thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 	 */
 	limittime = (interval_ns * percentage) / 100;
 	nanoseconds_to_absolutetime(limittime, &abstime);
-	ledger_set_limit(l, thread_ledgers.cpu_time, abstime, cpumon_ustackshots_trigger_pct);
+	ledger_set_limit(l, thread_ledgers.cpu_time, abstime, 0);
+
 	/*
 	 * Refill the thread's allotted CPU time every interval_ns nanoseconds.
 	 */
@@ -3083,7 +3039,7 @@ thread_set_cpulimit(int action, uint8_t percentage, uint64_t interval_ns)
 		thread->options |= TH_OPT_PRVT_CPULIMIT;
 		/* The per-thread ledger template by default has a callback for CPU time */
 		ledger_disable_callback(l, thread_ledgers.cpu_time);
-		ledger_set_action(l, thread_ledgers.cpu_time, LEDGER_ACTION_BLOCK);
+		ledger_set_blocking(l, thread_ledgers.cpu_time);
 	}
 
 	return 0;
@@ -3274,13 +3230,13 @@ thread_shared_rsrc_policy_get(__unused thread_t thread, __unused cluster_shared_
 kern_return_t
 thread_shared_rsrc_policy_set(thread_t thread, uint32_t index, __unused cluster_shared_rsrc_type_t type, __unused shared_rsrc_policy_agent_t agent)
 {
-	return thread_soft_bind_cluster_id(thread, index, THREAD_BIND_ELIGIBLE_ONLY);
+	return thread_soft_bind_pset_id(thread, (pset_id_t)index, THREAD_BIND_ELIGIBLE_ONLY);
 }
 
 kern_return_t
 thread_shared_rsrc_policy_clear(thread_t thread, __unused cluster_shared_rsrc_type_t type, __unused shared_rsrc_policy_agent_t agent)
 {
-	return thread_soft_bind_cluster_id(thread, 0, THREAD_UNBIND);
+	return thread_soft_bind_pset_id(thread, THREAD_BOUND_PSET_NONE, THREAD_UNBIND);
 }
 
 #endif /* CONFIG_SCHED_EDGE */
@@ -4045,7 +4001,6 @@ thread_kern_get_kernel_maxpri(void)
 static void
 thread_port_with_flavor_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 {
-	thread_ro_t tro;
 	thread_t thread;
 	mach_thread_flavor_t flavor;
 	ipc_kobject_type_t kotype;
@@ -4091,8 +4046,7 @@ thread_port_with_flavor_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 	 * that vends out send rights to this port could resurrect it between
 	 * this notification being generated and actually being handled here.
 	 */
-	tro = get_thread_ro(thread);
-	if (tro->tro_ports[flavor] != port ||
+	if (thread->thread_ports[flavor] != port ||
 	    !ipc_kobject_is_mscount_current_locked(port, mscount)) {
 		ip_mq_unlock(port);
 		thread_mtx_unlock(thread);
@@ -4100,10 +4054,49 @@ thread_port_with_flavor_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 		return;
 	}
 
-	zalloc_ro_clear_field(ZONE_ID_THREAD_RO, tro, tro_ports[flavor]);
+	thread->thread_ports[flavor] = IP_NULL;
 	thread_mtx_unlock(thread);
 
 	ipc_kobject_dealloc_port_and_unlock(port, mscount, kotype);
+
+	thread_deallocate(thread);
+}
+
+static void
+thread_suspension_no_senders(ipc_port_t suspend_token, mach_port_mscount_t mscount)
+{
+	thread_t thread = THREAD_NULL;
+
+	if (IP_VALID(suspend_token)) {
+		ip_mq_lock(suspend_token);
+		thread = ipc_kobject_get_locked(suspend_token, IKOT_THREAD_RESUME);
+		if (thread != THREAD_NULL) {
+			thread_reference(thread);
+		}
+		ip_mq_unlock(suspend_token);
+	}
+
+	if (thread == THREAD_NULL) {
+		return;
+	}
+
+	assert(get_threadtask(thread) != kernel_task);
+
+	thread_mtx_lock(thread);
+
+	/*
+	 * Check if the mscount is still current before resuming.
+	 * This prevents a race where a concurrent thread_suspend2() happens
+	 * after this no-senders notification was queued. Since thread_suspend2()
+	 * increments the mscount while holding the thread mutex, any new suspend
+	 * will cause this check to fail, preventing us from incorrectly resuming
+	 * a thread that was just suspended.
+	 */
+	if (ipc_kobject_is_mscount_current(suspend_token, mscount)) {
+		(void)thread_resume_internal(thread, THREAD_SUSPEND_ALL);
+	}
+
+	thread_mtx_unlock(thread);
 
 	thread_deallocate(thread);
 }
@@ -4138,6 +4131,7 @@ thread_self_region_page_shift_set(
 	 */
 	current_thread()->thread_region_page_shift = pgshift;
 }
+
 
 __startup_func
 __static_testable void
@@ -4339,6 +4333,13 @@ kasan_get_thread_data(thread_t thread)
 	return &thread->kasan_data;
 }
 #endif
+
+/* Accessor functions for thread block hint information */
+uint32_t
+thread_get_block_hint(thread_t thread)
+{
+	return (uint32_t)thread->block_hint;
+}
 
 #if CONFIG_KCOV
 kcov_thread_data_t *

@@ -41,10 +41,13 @@ def ShowInterrupts(cmd_args=None):
             cpu_data_entry = Cast(element, 'cpu_data_t *')
             print("CPU {} IRQ: {:d}\n".format(y, cpu_data_entry.cpu_stat.irq_ex_cnt))
             print("CPU {} IPI: {:d}\n".format(y, cpu_data_entry.cpu_stat.ipi_cnt))
+            pmi_count = '-'
             try:
-                print("CPU {} PMI: {:d}\n".format(y, cpu_data_entry.cpu_monotonic.mtc_npmis))
-            except AttributeError:
+                # PMIs are only tracked on `CONFIG_CPU_COUNTERS` kernels.
+                pmi_count = f'{cpu_data_entry.cpu_cpc.ccp_cpmu_pmi_count:d}'
+            except KeyError:
                 pass
+            print("CPU {} PMI: {}\n".format(y, pmi_count))
             print("CPU {} TMR: {:d}\n".format(y, cpu_data_entry.cpu_stat.timer_cnt))
             x = x + 1
         y = y + 1
@@ -642,13 +645,6 @@ def ShowScheduler(cmd_args=None):
     """  Routine to print information of all psets and processors
          Usage: showscheduler
     """
-    if GetEnumValue('pset_cluster_type_t', 'MAX_PSET_TYPES') > 1:
-        # AMP platform
-        node = addressof(kern.globals.pset_nodes[0])
-    else:
-        # SMP platform
-        node = addressof(kern.globals.pset_node0)
-
     show_priority_runq = 0
     show_priority_pset_runq = 0
     show_clutch = 0
@@ -690,6 +686,7 @@ def ShowScheduler(cmd_args=None):
 
     print()
 
+    node = kern.globals.sched_boot_pset_node
     while node != 0:
         pset = node.psets
         pset = kern.GetValueFromAddress(unsigned(pset), 'struct processor_set *')
@@ -786,10 +783,8 @@ def ShowScheduler(cmd_args=None):
             print()
 
             if show_clutch or show_edge:
-                cluster_type = 'SMP'
-                if pset.pset_cluster_type != 0:
-                    cluster_type = GetEnumName('pset_cluster_type_t', pset.pset_cluster_type, 'PSET_AMP_')
-                print("=== Clutch Scheduler Hierarchy Pset{:d} (Type: {:s}) ] ===\n\n".format(pset.pset_cluster_id, cluster_type))
+                pset_type = GetEnumName('pset_type_t', pset.pset_type, "PSET_")
+                print("=== Clutch Scheduler Hierarchy Pset{:d} (Type: {:s}) ] ===\n\n".format(pset.pset_id, pset_type))
                 ShowSchedClutchForPset(pset)
 
             pset = pset.pset_list
@@ -1290,4 +1285,3 @@ def ShowAllCallouts(cmd_args=None):
     PrintThreadCallThreads()
 
 # EndMacro: showallcallouts
-

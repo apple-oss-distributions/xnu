@@ -3414,9 +3414,7 @@ kauth_cred_init(void)
 	smr_shash_init(&kauth_cred_hash, SMRSH_BALANCED, maxproc / 4);
 	vfs_context0.vc_ucred = posix_cred_create(&kernel_cred_template);
 }
-#ifndef __BUILDING_XNU_LIB_UNITTEST__ /* smr not supported in user-mode */
 STARTUP(ZALLOC, STARTUP_RANK_LAST, kauth_cred_init);
-#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
 
 uid_t
 kauth_getuid(void)

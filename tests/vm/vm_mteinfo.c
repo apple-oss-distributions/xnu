@@ -72,7 +72,12 @@ typedef struct vm_page_free_queue {
 	uint32_t                       vmpfq_count;
 } *vm_page_free_queue_t;
 
+/*
+ * TODO: Handle this in a way that doesn't break when using other TUNABLE_*
+ *       variants in the real vm_mteinfo.c file.
+ */
 #define TUNABLE(t, var, name, value) t var = value
+#define TUNABLE_DT_DEV_WRITEABLE(type_t, var, dt_base, dt_name, boot_arg, default_value, flags) type_t var = default_value
 
 typedef struct vm_page {
 	TAILQ_ENTRY(vm_page) vmp_pageq;
@@ -314,7 +319,7 @@ verify_cell_list(mte_cell_state_t state, mte_cell_list_idx_t idx)
 	mte_cell_bucket_t n    = cell_list_idx_buckets(idx);
 	mte_cell_list_t   list = &mte_info_lists[idx];
 
-	T_QUIET; T_ASSERT_LE(list->mask, (uint32_t)mask(n),
+	T_QUIET; T_ASSERT_LE(list->mask, (uint32_t)bits_mask(n),
 	    "mask has less than %d bits set", n);
 
 	for (mte_cell_bucket_t i = 0; i < n; i++) {
@@ -486,11 +491,10 @@ static void
 t_set_activating(cell_idx_t idx)
 {
 	cell_t   *cell     = cell_from_idx(idx);
-	vm_page_t tag_page = vm_tag_storage_page_get(idx);
 
 	assert_cell_state(cell, MTE_MASK_INACTIVE);
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_ACTIVATING;
 	});
 }
@@ -499,11 +503,10 @@ static void
 t_set_deactivating(cell_idx_t idx)
 {
 	cell_t   *cell     = cell_from_idx(idx);
-	vm_page_t tag_page = vm_tag_storage_page_get(idx);
 
 	assert_cell_state(cell, MTE_MASK_ACTIVE);
 
-	CELL_UPDATE(cell, tag_page, false, {
+	CELL_UPDATE(cell, false, {
 		cell->state = MTE_STATE_DEACTIVATING;
 	});
 }
@@ -512,9 +515,8 @@ static void
 t_set_reclaiming(cell_idx_t idx)
 {
 	cell_t   *cell     = cell_from_idx(idx);
-	vm_page_t tag_page = vm_tag_storage_page_get(idx);
 
-	mteinfo_tag_storage_set_reclaiming(cell, tag_page);
+	mteinfo_tag_storage_set_reclaiming(cell);
 }
 
 
@@ -749,7 +751,7 @@ cell_with(uint32_t tagged, uint32_t free)
 {
 	return (cell_t){
 		       .mte_page_count = tagged,
-		       .free_mask = (uint32_t)mask(free),
+		       .free_mask = (uint32_t)bits_mask(free),
 		       .state = MTE_STATE_ACTIVE,
 	};
 }

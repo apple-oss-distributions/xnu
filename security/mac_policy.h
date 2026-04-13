@@ -3720,8 +3720,7 @@ typedef int mpo_proc_check_get_task_with_flavor_t(
  *
  *  Determine whether the subject identified by the credential can expose
  *  the passed process's task port of given flavor.
- *  This call is used by the accessor APIs like processor_set_tasks() and
- *  processor_set_threads().
+ *  This call is used by the accessor APIs like processor_set_tasks().
  *
  *  @return Return 0 if access is granted, otherwise an appropriate value for
  *  errno should be returned. Suggested failure: EACCES for label mismatch,
@@ -4461,6 +4460,32 @@ typedef int mpo_vnode_check_lookup_preflight_t(
 	const char *path,
 	size_t pathlen
 	);
+
+/**
+ *  @brief Access control check for lookup
+ *  @param cred Subject credential
+ *  @param vp Object vnode
+ *  @param label Policy label for vp
+ *  @param resolve_flags The resolve prefix flags
+ *
+ *   This MACF hook, invoked during lookup after vnode acquisition,
+ *   provides resolve flags. This enables kernel extensions (like
+ *   Sandbox) to handle relevant policies.
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned. Suggested failure: EACCES for label mismatch or
+ *  EPERM for lack of privilege.
+ *
+ *  @note This hook will be called only for a defined subset of specific flags, not
+ *  for the entire set of valid resolve flags.
+ */
+typedef int mpo_vnode_check_lookup_postflight_t(
+	kauth_cred_t cred,
+	struct vnode *vp,
+	struct label *label,
+	uint32_t resolve_flags
+	);
+
 /**
  *  @brief Access control check for lookup
  *  @param cred Subject credential
@@ -5963,7 +5988,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 91 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 92 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -6106,7 +6131,7 @@ struct mac_policy_ops {
 	mpo_proc_notify_exec_complete_t         *mpo_proc_notify_exec_complete;
 	mpo_proc_notify_cs_invalidated_t        *mpo_proc_notify_cs_invalidated;
 	mpo_proc_check_syscall_unix_t           *mpo_proc_check_syscall_unix;
-	mpo_reserved_hook_t                     *mpo_reserved45;
+	mpo_vnode_check_lookup_postflight_t     *mpo_vnode_check_lookup_postflight;
 	mpo_proc_check_set_host_special_port_t  *mpo_proc_check_set_host_special_port;
 	mpo_proc_check_set_host_exception_port_t *mpo_proc_check_set_host_exception_port;
 	mpo_exc_action_check_exception_send_t   *mpo_exc_action_check_exception_send;

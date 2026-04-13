@@ -40,6 +40,7 @@
 #include <sys/mcache.h>
 #include <sys/protosw.h>
 #include <sys/syslog.h>
+#include <os/log.h>
 #include <net/if_var.h>
 #include <net/if_dl.h>
 #include <net/dlil.h>
@@ -56,6 +57,7 @@
 #include <kern/locks.h>
 #include <kern/clock.h>
 #include <kern/uipc_domain.h>
+#include <kern/bits.h>
 #include <sys/sockio.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -84,6 +86,8 @@
 #if SKYWALK
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/netif/nx_netif.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/flowswitch/fsw_var.h>
 #endif /* SKYWALK */
 
 extern uint64_t if_creation_generation_count;
@@ -683,7 +687,7 @@ ifnet_set_flags(ifnet_t interface, u_int16_t new_flags, u_int16_t mask)
 	}
 
 	old_flags = interface->if_flags;
-	interface->if_flags = (new_flags & mask) | (interface->if_flags & ~mask);
+	interface->if_flags = (short)((new_flags & mask) | (interface->if_flags & ~mask));
 	/* If we are modifying the multicast flag, set/unset the silent flag */
 	if ((old_flags & IFF_MULTICAST) !=
 	    (interface->if_flags & IFF_MULTICAST)) {
@@ -3122,6 +3126,73 @@ ifnet_get_local_ports_extended_inner(ifnet_t ifp, protocol_family_t protocol,
 	return 0;
 }
 
+static void
+ifnet_log_local_ports_info(ifnet_t ifp, protocol_family_t protocol, u_int32_t flags,
+    const u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN])
+{
+	const char *ifp_name = (ifp != NULL) ? __null_terminated_to_indexable(if_name(ifp)) : "NULL";
+	const char *protocol_str;
+	char flags_str[256];
+	size_t offset = 0;
+	int ret;
+
+	/* Array of flag-name pairs for data-driven flag checking */
+	static const struct {
+		u_int32_t flag;
+		const char *name;
+	} flag_names[] = {
+		{ IFNET_GET_LOCAL_PORTS_WILDCARDOK, "WILDCARDOK" },
+		{ IFNET_GET_LOCAL_PORTS_NOWAKEUPOK, "NOWAKEUPOK" },
+		{ IFNET_GET_LOCAL_PORTS_TCPONLY, "TCPONLY" },
+		{ IFNET_GET_LOCAL_PORTS_UDPONLY, "UDPONLY" },
+		{ IFNET_GET_LOCAL_PORTS_RECVANYIFONLY, "RECVANYIFONLY" },
+		{ IFNET_GET_LOCAL_PORTS_EXTBGIDLEONLY, "EXTBGIDLEONLY" },
+		{ IFNET_GET_LOCAL_PORTS_ACTIVEONLY, "ACTIVEONLY" },
+		{ IFNET_GET_LOCAL_PORTS_ANYTCPSTATEOK, "ANYTCPSTATEOK" },
+	};
+
+	switch (protocol) {
+	case PF_UNSPEC:
+		protocol_str = "PF_UNSPEC";
+		break;
+	case PF_INET:
+		protocol_str = "PF_INET";
+		break;
+	case PF_INET6:
+		protocol_str = "PF_INET6";
+		break;
+	default:
+		protocol_str = "UNKNOWN";
+		break;
+	}
+
+	/* Build flags string using data-driven loop */
+	flags_str[0] = '\0';
+	for (size_t i = 0; i < sizeof(flag_names) / sizeof(flag_names[0]); i++) {
+		if (flags & flag_names[i].flag) {
+			ret = snprintf(flags_str + offset, sizeof(flags_str) - offset, "%s|", flag_names[i].name);
+			if (ret > 0) {
+				offset = MIN((size_t)(offset + ret), sizeof(flags_str) - 1);
+			}
+		}
+	}
+
+	/* Remove trailing '|' if any flags were set */
+	if (offset > 0 && offset < sizeof(flags_str) && flags_str[offset - 1] == '|') {
+		flags_str[offset - 1] = '\0';
+	} else if (offset == 0) {
+		snprintf(flags_str, sizeof(flags_str), "0x%x", flags);
+	}
+
+	/* Count the number of set bits in the output bitfield */
+	u_int32_t bit_count = bitmap_count((const bitmap_t *)(const void *)bitfield, IP_PORTRANGE_SIZE);
+
+	/* Log input parameters and output bitmap statistics */
+	os_log(wake_packet_log_handle,
+	    "%s: ifp=%s protocol=%s flags=%s output bitmap has %u bits set",
+	    __func__, ifp_name, protocol_str, flags_str, bit_count);
+}
+
 errno_t
 ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
     u_int32_t flags, u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN])
@@ -3151,6 +3222,10 @@ ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
 		ifnet_get_local_ports_extended_inner(parent_ifp, protocol,
 		    flags, bitfield);
 		ifnet_release_delegate_parent(ifp);
+	}
+
+	if (if_ports_used_verbose > 0) {
+		ifnet_log_local_ports_info(ifp, protocol, flags, bitfield);
 	}
 
 	return 0;
@@ -3760,4 +3835,38 @@ ifnet_enable_cellular_thread_group(ifnet_t ifp)
 	VERIFY(ifp->if_refflags & IFRF_EMBRYONIC);
 
 	if_set_xflags(ifp, IFXF_REQUIRE_CELL_THREAD_GROUP);
+}
+
+errno_t
+ifnet_get_rx_steering_rules(ifnet_t interface,
+    struct ifnet_rx_steering_rule *__counted_by(buffer_count) rules_buffer, uint32_t buffer_count, uint32_t *count_out)
+{
+	struct nx_flowswitch *fsw;
+	errno_t error;
+
+	if (__improbable(interface == NULL || count_out == NULL)) {
+		return EINVAL;
+	}
+
+	if (__improbable(buffer_count == 0 || rules_buffer == NULL)) {
+		return EINVAL;
+	}
+
+	*count_out = 0;
+
+	if (!ifnet_get_ioref(interface)) {
+		return ENXIO;
+	}
+
+	fsw = fsw_ifp_to_fsw(interface);
+	if (fsw == NULL) {
+		error = ENODEV;
+		goto done;
+	}
+
+	error = fsw_get_rx_steering_rules(fsw, rules_buffer, buffer_count, count_out);
+
+done:
+	ifnet_decr_iorefcnt(interface);
+	return error;
 }

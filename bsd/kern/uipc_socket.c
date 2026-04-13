@@ -1477,6 +1477,43 @@ done:
 }
 
 /*
+ * Perform tracker lookup and update socket state. Skips if lookup was already
+ * performed. Returns true if domain was set from tracker lookup.
+ * Socket must be locked by caller.
+ */
+bool
+socket_tracker_lookup_locked(struct socket *so, struct sockaddr *sa)
+{
+	tracker_metadata_t metadata = { };
+	bool domain_was_set = false;
+
+	if (so->so_flags1 & SOF1_TRACKER_LOOKUP_DONE) {
+		return false;
+	}
+
+	if (!IS_INET(so)) {
+		return false;
+	}
+
+	if (tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, sa, &metadata) == 0) {
+		if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER) {
+			so->so_flags1 |= SOF1_KNOWN_TRACKER;
+		}
+		if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED) {
+			so->so_flags1 |= SOF1_APPROVED_APP_DOMAIN;
+		}
+		if (metadata.domain[0] != 0) {
+			domain_was_set = true;
+			necp_set_socket_domain_attributes(so,
+			    __unsafe_null_terminated_from_indexable(metadata.domain),
+			    __unsafe_null_terminated_from_indexable(metadata.domain_owner));
+		}
+	}
+	so->so_flags1 |= SOF1_TRACKER_LOOKUP_DONE;
+	return domain_was_set;
+}
+
+/*
  * Returns:	0			Success
  *		EOPNOTSUPP		Operation not supported on socket
  *		EISCONN			Socket is connected
@@ -1494,7 +1531,6 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 {
 	int error;
 	struct proc *p = current_proc();
-	tracker_metadata_t metadata = { };
 
 	if (dolock) {
 		socket_lock(so, 1);
@@ -1543,36 +1579,19 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 	    (error = sodisconnectlocked(so)))) {
 		error = EISCONN;
 	} else {
-		/*
-		 * For connected v4/v6 sockets, check if destination address associates with a domain name and if it is
-		 * a tracker domain.  Mark socket accordingly.  Skip lookup if socket has already been marked a tracker.
-		 */
-		if (!(so->so_flags1 & SOF1_KNOWN_TRACKER) && IS_INET(so)) {
-			if (tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, nam, &metadata) == 0) {
-				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER) {
-					so->so_flags1 |= SOF1_KNOWN_TRACKER;
-				}
-				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED) {
-					so->so_flags1 |= SOF1_APPROVED_APP_DOMAIN;
-				}
+		bool tracker_lookup_set_domain = socket_tracker_lookup_locked(so, nam);
 #if NECP
-				set_domain_from_tracker_lookup = (metadata.domain[0] != 0);
-#endif /* NECP */
-				necp_set_socket_domain_attributes(so,
-				    __unsafe_null_terminated_from_indexable(metadata.domain),
-				    __unsafe_null_terminated_from_indexable(metadata.domain_owner));
-			}
-		}
-
-#if NECP
+		set_domain_from_tracker_lookup = tracker_lookup_set_domain;
 		/* Update NECP evaluation after setting any domain via the tracker checks */
 		so_update_necp_policy(so, NULL, nam);
 		if (set_domain_from_tracker_lookup && (so->so_flags1 & SOF1_DOMAIN_MATCHED_POLICY)) {
-			// Mark extended timeout on tracker lookup to ensure that the entry stays around
+			/* Mark extended timeout on tracker lookup to ensure that the entry stays around */
 			tracker_metadata_t update_metadata = { };
 			update_metadata.flags = SO_TRACKER_ATTRIBUTE_FLAGS_EXTENDED_TIMEOUT;
 			(void)tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, nam, &update_metadata);
 		}
+#else
+		(void)tracker_lookup_set_domain;
 #endif /* NECP */
 
 		/*
@@ -1638,7 +1657,6 @@ soconnectxlocked(struct socket *so, struct sockaddr *src,
     uint32_t arglen, uio_t auio, user_ssize_t *bytes_written)
 {
 	int error;
-	tracker_metadata_t metadata = { };
 
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
@@ -1678,26 +1696,12 @@ soconnectxlocked(struct socket *so, struct sockaddr *src,
 	    (error = sodisconnectlocked(so)) != 0)) {
 		error = EISCONN;
 	} else {
-		/*
-		 * For TCP, check if destination address is a tracker and mark the socket accordingly
-		 * (only if it hasn't been marked yet).
-		 */
-		if (SOCK_CHECK_TYPE(so, SOCK_STREAM) && SOCK_CHECK_PROTO(so, IPPROTO_TCP) &&
-		    !(so->so_flags1 & SOF1_KNOWN_TRACKER)) {
-			if (tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, dst, &metadata) == 0) {
-				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER) {
-					so->so_flags1 |= SOF1_KNOWN_TRACKER;
-				}
-				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED) {
-					so->so_flags1 |= SOF1_APPROVED_APP_DOMAIN;
-				}
+		bool tracker_lookup_set_domain = socket_tracker_lookup_locked(so, dst);
 #if NECP
-				set_domain_from_tracker_lookup = (metadata.domain[0] != 0);
+		set_domain_from_tracker_lookup = tracker_lookup_set_domain;
+#else
+		(void)tracker_lookup_set_domain;
 #endif /* NECP */
-				necp_set_socket_domain_attributes(so, __unsafe_null_terminated_from_indexable(metadata.domain),
-				    __unsafe_null_terminated_from_indexable(metadata.domain_owner));
-			}
-		}
 
 		if ((so->so_proto->pr_flags & PR_DATA_IDEMPOTENT) &&
 		    (flags & CONNECT_DATA_IDEMPOTENT)) {
@@ -2475,6 +2479,8 @@ out_locked:
 		}
 	}
 
+	soclearfastopen(so);
+
 	if (sblocked) {
 		sbunlock(&so->so_snd, FALSE);   /* will unlock socket */
 	} else {
@@ -2493,8 +2499,6 @@ out_locked:
 	if (dgram_flow_entry != NULL) {
 		soflow_free_flow(dgram_flow_entry);
 	}
-
-	soclearfastopen(so);
 
 	if (en_tracing) {
 		/* resid passed here is the bytes left in uio */
@@ -2987,10 +2991,24 @@ soreceive_ctl(struct socket *so, struct mbuf **controlp, int flags,
 	do {
 		if (flags & MSG_PEEK) {
 			if (controlp != NULL) {
+				/*
+				 * We do not want to duplicate the full chain
+				 * so temporarily unlink the next mbuf
+				 */
+				mbuf_ref_t m_tmp;
+
 				if (*controlp == NULL) {
 					msgpcm = controlp;
 				}
-				*controlp = m_copy(m, 0, m->m_len);
+				/*
+				 * Need to create a new mbuf to make sure
+				 * the externalize callback is not called
+				 * again on the same mbuf cluster
+				 */
+				m_tmp = m->m_next;
+				m->m_next = NULL;
+				*controlp = m_dup(m, M_NOWAIT);
+				m->m_next = m_tmp;
 
 				/*
 				 * If we failed to allocate an mbuf,

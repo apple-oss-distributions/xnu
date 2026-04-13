@@ -136,6 +136,11 @@ __options_decl(lck_grp_options_t, uint32_t, {
 #endif
 });
 
+#if MACH_KERNEL_PRIVATE
+#define LCK_GRP_ID_BITS         24
+#define LCK_TYPE_BITS            8
+#endif
+
 #if CONFIG_DTRACE
 typedef struct _lck_grp_stat_ {
 	uint64_t lgs_count;

@@ -39,7 +39,6 @@
 
 #include <mach/boolean.h>
 #include <kern/bits.h>
-#include <kern/ecc.h>
 #include <kern/thread.h>
 #include <kern/sched.h>
 #include <kern/zalloc.h>
@@ -327,10 +326,6 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
 
 #if DEVELOPMENT || DEBUG
 int vm_footprint_suspend_allowed = 1;
-
-extern int pmap_ledgers_panic;
-extern int pmap_ledgers_panic_leeway;
-
 #endif /* DEVELOPMENT || DEBUG */
 
 #if DEVELOPMENT || DEBUG
@@ -465,6 +460,7 @@ SECURITY_READ_ONLY_LATE(pmap_paddr_t) cpu_ttep = 0;                     /* set b
 
 /* Lock group used for all pmap object locks. */
 lck_grp_t pmap_lck_grp MARK_AS_PMAP_DATA;
+lck_attr_t pmap_lck_rw_attr MARK_AS_PMAP_DATA;
 
 #if DEVELOPMENT || DEBUG
 int nx_enabled = 1;                                     /* enable no-execute protection */
@@ -979,7 +975,7 @@ PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t * kr), PMAP_CREATE_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
-	void,
+	bool,
 	pmap_destroy, (pmap_t pmap), PMAP_DESTROY_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
@@ -1336,7 +1332,6 @@ PMAP_SUPPORT_PROTOTYPES(
 
 
 
-
 #if DEVELOPMENT || DEBUG
 PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t,
@@ -1435,7 +1430,6 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 	[PMAP_ACCELERATE_ENTITLEMENTS_INDEX] = pmap_accelerate_entitlements_internal,
 #endif
 	[PMAP_TRIM_INDEX] = pmap_trim_internal,
-	[PMAP_LEDGER_VERIFY_SIZE_INDEX] = pmap_ledger_verify_size_internal,
 	[PMAP_LEDGER_ALLOC_INDEX] = pmap_ledger_alloc_internal,
 	[PMAP_LEDGER_FREE_INDEX] = pmap_ledger_free_internal,
 #if HAS_APPLE_PAC
@@ -1453,7 +1447,6 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 #if DEVELOPMENT || DEBUG
 	[PMAP_TEST_TEXT_CORRUPTION_INDEX] = pmap_test_text_corruption_internal,
 #endif /* DEVELOPMENT || DEBUG */
-
 };
 #endif
 
@@ -1674,40 +1667,23 @@ pmap_set_range_xprr_perm(
 
 #endif /* XNU_MONITOR */
 
-static inline void
-PMAP_ZINFO_PALLOC(
-	pmap_t pmap, int bytes)
-{
-	pmap_ledger_credit(pmap, task_ledgers.tkm_private, bytes);
-}
-
-static inline void
-PMAP_ZINFO_PFREE(
-	pmap_t pmap,
-	int bytes)
-{
-	pmap_ledger_debit(pmap, task_ledgers.tkm_private, bytes);
-}
-
 void
-pmap_tt_ledger_credit(
-	pmap_t          pmap,
-	vm_size_t       size)
+pmap_tt_ledger_credit(pmap_t pmap, vm_size_t size, bool tkm_private)
 {
-	if (pmap != kernel_pmap) {
-		pmap_ledger_credit(pmap, task_ledgers.phys_footprint, size);
-		pmap_ledger_credit(pmap, task_ledgers.page_table, size);
+	pmap_ledger_credit(pmap, task_ledgers.phys_footprint, size);
+	pmap_ledger_credit(pmap, task_ledgers.page_table, size);
+	if (tkm_private) {
+		pmap_ledger_credit(pmap, task_ledgers.tkm_private, size);
 	}
 }
 
 void
-pmap_tt_ledger_debit(
-	pmap_t          pmap,
-	vm_size_t       size)
+pmap_tt_ledger_debit(pmap_t pmap, vm_size_t size, bool tkm_private)
 {
-	if (pmap != kernel_pmap) {
-		pmap_ledger_debit(pmap, task_ledgers.phys_footprint, size);
-		pmap_ledger_debit(pmap, task_ledgers.page_table, size);
+	pmap_ledger_debit(pmap, task_ledgers.phys_footprint, size);
+	pmap_ledger_debit(pmap, task_ledgers.page_table, size);
+	if (tkm_private) {
+		pmap_ledger_debit(pmap, task_ledgers.tkm_private, size);
 	}
 }
 
@@ -2264,6 +2240,8 @@ pmap_bootstrap(
 	vm_map_offset_t maxoffset;
 
 	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
+	lck_attr_setdefault(&pmap_lck_rw_attr);
+	pmap_lck_rw_attr.lck_attr_val |= LCK_ATTR_RW_NO_SLEEP;
 
 #if XNU_MONITOR
 #if (DEVELOPMENT || DEBUG) || CONFIG_CSR_FROM_DT
@@ -2325,7 +2303,7 @@ pmap_bootstrap(
 	/* Align the range of available hardware ASIDs to a multiple of 64 to enable the
 	 * masking used by the PLRU scheme.  This means we must handle the case in which
 	 * the returned hardware ASID is MAX_HW_ASIDS, which we do in alloc_asid() and free_asid(). */
-	_Static_assert(sizeof(asid_plru_bitmap[0] == sizeof(uint64_t)), "bitmap_t is not a 64-bit integer");
+	_Static_assert(sizeof(asid_plru_bitmap[0]) == sizeof(uint64_t), "bitmap_t is not a 64-bit integer");
 	_Static_assert(((MAX_HW_ASIDS + 1) % 64) == 0, "MAX_HW_ASIDS + 1 is not divisible by 64");
 	asid_chunk_size = (pmap_asid_plru ? (MAX_HW_ASIDS + 1) : MAX_HW_ASIDS);
 #endif /* HAS_16BIT_ASIDS */
@@ -2411,8 +2389,7 @@ pmap_bootstrap(
 
 #if PMAP_CS_PPL_MONITOR
 	/* Initialize the PPL trust cache read-write lock */
-	lck_rw_init(&ppl_trust_cache_rt_lock, &pmap_lck_grp, 0);
-	ppl_trust_cache_rt_lock.lck_rw_can_sleep = FALSE;
+	lck_rw_init(&ppl_trust_cache_rt_lock, &pmap_lck_grp, &pmap_lck_rw_attr);
 #endif
 
 #if DEVELOPMENT || DEBUG
@@ -2643,7 +2620,7 @@ pmap_virtual_region(
 #if defined(ARM_LARGE_MEMORY)
 		*size = ((KERNEL_PMAP_HEAP_RANGE_START - *startp) & ~PAGE_MASK);
 #else
-		*size = ((VM_MAX_KERNEL_ADDRESS - *startp) & ~PAGE_MASK);
+		*size = ((VM_MAX_KERNEL_ADDRESS + 1 - *startp) & ~PAGE_MASK);
 #endif
 		ret = TRUE;
 	}
@@ -2721,30 +2698,10 @@ pmap_virtual_region(
  * Routines to track and allocate physical pages during early boot.
  * On most systems that memory runs from first_avail through to avail_end
  * with no gaps.
- *
- * If the system supports ECC and ecc_bad_pages_count > 0, we
- * need to skip those pages.
  */
 
 static unsigned int avail_page_count = 0;
 static bool need_ram_ranges_init = true;
-
-
-/**
- * Checks to see if a given page is in
- * the array of known bad pages
- *
- * @param ppn page number to check
- */
-bool
-pmap_is_bad_ram(__unused ppnum_t ppn)
-{
-	return false;
-}
-
-/**
- * Prepare bad ram pages to be skipped.
- */
 
 /*
  * Initialize the count of available pages. No lock needed here,
@@ -2802,7 +2759,6 @@ pmap_next_page(
 		initialize_ram_ranges();
 	}
 
-
 	if (first_avail != avail_end) {
 		*pnum = (ppnum_t)atop(first_avail);
 		first_avail += PAGE_SIZE;
@@ -2813,7 +2769,6 @@ pmap_next_page(
 	assert(avail_page_count == 0);
 	return FALSE;
 }
-
 
 /**
  * Helper function to check wheter the given physical
@@ -3357,12 +3312,12 @@ pmap_deallocate_all_leaf_tts(pmap_t pmap, tt_entry_t * first_ttep, unsigned leve
  *	Should only be called if the map contains
  *	no valid mappings.
  */
-MARK_AS_PMAP_TEXT void
+MARK_AS_PMAP_TEXT bool
 pmap_destroy_internal(
 	pmap_t pmap)
 {
 	if (pmap == PMAP_NULL) {
-		return;
+		return false;
 	}
 
 	validate_pmap(pmap);
@@ -3371,7 +3326,7 @@ pmap_destroy_internal(
 
 	int32_t ref_count = os_atomic_dec(&pmap->ref_count, release);
 	if (ref_count > 0) {
-		return;
+		return false;
 	} else if (__improbable(ref_count < 0)) {
 		panic("pmap %p: refcount underflow", pmap);
 	} else if (__improbable(pmap == kernel_pmap)) {
@@ -3469,6 +3424,7 @@ pmap_destroy_internal(
 	pmap_lock_destroy(pmap);
 	zfree(pmap_zone, pmap);
 #endif
+	return true;
 }
 
 __mockable void
@@ -3480,14 +3436,15 @@ pmap_destroy(
 	ledger_t ledger = pmap->ledger;
 
 #if XNU_MONITOR
-	pmap_destroy_ppl(pmap);
-
-	pmap_ledger_check_balance(pmap);
+	const bool destroyed = pmap_destroy_ppl(pmap);
+	pmap_ledger_flush();
 #else
-	pmap_destroy_internal(pmap);
+	const bool destroyed = pmap_destroy_internal(pmap);
 #endif
 
-	ledger_dereference(ledger);
+	if (destroyed) {
+		ledger_dereference(ledger);
+	}
 
 	PMAP_TRACE(1, PMAP_CODE(PMAP__DESTROY) | DBG_FUNC_END);
 }
@@ -3553,12 +3510,14 @@ pmap_tt1_allocate(
 		tt1 = (tt_entry_t *)free_tt_list;
 		free_tt_list = (tt_free_entry_t *)((tt_free_entry_t *)tt1)->next;
 	}
-	pmap_simple_unlock(&tt1_lock);
+	pmap_simple_unlock_nopreempt(&tt1_lock);
 
 	if (tt1 != NULL) {
-		pmap_tt_ledger_credit(pmap, size);
+		pmap_tt_ledger_credit(pmap, size, false);
+		pmap_simple_enable_preemption();
 		return (tt_entry_t *)tt1;
 	}
+	pmap_simple_enable_preemption();
 
 	ret = pmap_pages_alloc_zeroed(&pa, (unsigned)((size < PAGE_SIZE)? PAGE_SIZE : size), ((option & PMAP_TT_ALLOCATE_NOWAIT)? PMAP_PAGES_ALLOCATE_NOWAIT : 0));
 
@@ -3593,7 +3552,14 @@ pmap_tt1_allocate(
 	 * Depending on the device, this can vary between 512b and 16K. */
 	OSAddAtomic((uint32_t)(size / PMAP_ROOT_ALLOC_SIZE), (pmap == kernel_pmap ? &inuse_kernel_tteroot_count : &inuse_user_tteroot_count));
 	OSAddAtomic64(size / PMAP_ROOT_ALLOC_SIZE, &alloc_tteroot_count);
-	pmap_tt_ledger_credit(pmap, size);
+
+#if XNU_MONITOR
+	pmap_tt_ledger_credit(pmap, size, false);
+#else
+	disable_preemption();
+	pmap_tt_ledger_credit(pmap, size, false);
+	enable_preemption();
+#endif
 
 	return (tt_entry_t *) phystokv(pa);
 }
@@ -3634,8 +3600,9 @@ pmap_tt1_deallocate(
 	}
 
 	if (option & PMAP_TT_DEALLOCATE_NOBLOCK) {
-		pmap_simple_unlock(&tt1_lock);
-		pmap_tt_ledger_debit(pmap, size);
+		pmap_simple_unlock_nopreempt(&tt1_lock);
+		pmap_tt_ledger_debit(pmap, size, false);
+		pmap_simple_enable_preemption();
 		return;
 	}
 
@@ -3653,8 +3620,9 @@ pmap_tt1_deallocate(
 		pmap_simple_lock(&tt1_lock);
 	}
 
-	pmap_simple_unlock(&tt1_lock);
-	pmap_tt_ledger_debit(pmap, size);
+	pmap_simple_unlock_nopreempt(&tt1_lock);
+	pmap_tt_ledger_debit(pmap, size, false);
+	pmap_simple_enable_preemption();
 }
 
 MARK_AS_PMAP_TEXT static kern_return_t
@@ -3717,9 +3685,13 @@ pmap_tt_allocate(
 			OSAddAtomic(1, (pmap == kernel_pmap ? &inuse_kernel_ptepages_count : &inuse_user_ptepages_count));
 		}
 
-		pmap_tt_ledger_credit(pmap, PAGE_SIZE);
-
-		PMAP_ZINFO_PALLOC(pmap, PAGE_SIZE);
+#if XNU_MONITOR
+		pmap_tt_ledger_credit(pmap, PAGE_SIZE, true);
+#else
+		disable_preemption();
+		pmap_tt_ledger_credit(pmap, PAGE_SIZE, true);
+		enable_preemption();
+#endif
 
 		pvh_update_head_unlocked(pai_to_pvh(pa_index(pa)), ptdp, PVH_TYPE_PTDP);
 		/* Clear all PVH flags when using a page for a PTD to avoid tripping unexpected page flag usage checks. */
@@ -3733,8 +3705,14 @@ pmap_tt_allocate(
 			if (!pmap_lock_preempt(pmap, PMAP_LOCK_EXCLUSIVE)) {
 				/* Deallocate all allocated resources so far. */
 				pvh_update_head_unlocked(pai_to_pvh(pa_index(pa)), PV_ENTRY_NULL, PVH_TYPE_NULL);
-				PMAP_ZINFO_PFREE(pmap, PAGE_SIZE);
-				pmap_tt_ledger_debit(pmap, PAGE_SIZE);
+#if XNU_MONITOR
+				pmap_tt_ledger_debit(pmap, PAGE_SIZE, true);
+#else
+				disable_preemption();
+				pmap_tt_ledger_debit(pmap, PAGE_SIZE, true);
+				enable_preemption();
+#endif
+
 				pmap_pages_free(pa, PAGE_SIZE);
 				ptd_deallocate(ptdp);
 
@@ -3832,6 +3810,9 @@ pmap_tt_deallocate(
 		pmap->tt_entry_free = ttp;
 	}
 
+	if (free_page != 0) {
+		pmap_tt_ledger_debit(pmap, PAGE_SIZE, true);
+	}
 	pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
 
 	if (free_page != 0) {
@@ -3843,8 +3824,6 @@ pmap_tt_deallocate(
 		} else {
 			OSAddAtomic(-1, (pmap == kernel_pmap ? &inuse_kernel_ptepages_count : &inuse_user_ptepages_count));
 		}
-		PMAP_ZINFO_PFREE(pmap, PAGE_SIZE);
-		pmap_tt_ledger_debit(pmap, PAGE_SIZE);
 	}
 }
 
@@ -4155,7 +4134,6 @@ pmap_set_ptov_ap(unsigned int pai __unused, unsigned int ap __unused, boolean_t 
 #endif
 }
 #endif /* defined(PVH_FLAG_EXEC) */
-
 
 
 MARK_AS_PMAP_TEXT int
@@ -4547,8 +4525,7 @@ pmap_remove_options(
 
 #if XNU_MONITOR
 		va = pmap_remove_options_ppl(pmap, va, l, options);
-
-		pmap_ledger_check_balance(pmap);
+		pmap_ledger_flush();
 #else
 		va = pmap_remove_options_internal(pmap, va, l, options);
 #endif
@@ -4573,7 +4550,7 @@ pmap_remove_some_phys(
  * Implementation of PMAP_SWITCH_USER that Mach VM uses to
  * switch a thread onto a new vm_map.
  */
-void
+__mockable void
 pmap_switch_user(thread_t thread, vm_map_t new_map)
 {
 	pmap_t new_pmap = new_map->pmap;
@@ -4810,6 +4787,8 @@ pmap_switch(
 	thread_t thread __unused)
 {
 	PMAP_TRACE(1, PMAP_CODE(PMAP__SWITCH) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(pmap), PMAP_VASID(pmap), pmap->hw_asid);
+
+	ledger_tab_open(&task_ledger_template, pmap->ledger);
 #if XNU_MONITOR
 	pmap_switch_ppl(pmap);
 #else
@@ -4915,7 +4894,6 @@ pmap_page_protect_options_with_flush_range(
 		panic("%s: PA 0x%llx is pinned.", __func__, (uint64_t)phys);
 	}
 #endif
-
 
 	orig_pte_p = pte_p = PT_ENTRY_NULL;
 	orig_pve_p = pve_p = PV_ENTRY_NULL;
@@ -5031,13 +5009,14 @@ pmap_page_protect_options_with_flush_range(
 			const bool is_internal = ppattr_pve_is_internal(pai, pve_p, pve_ptep_idx);
 			const bool is_altacct = ppattr_pve_is_altacct(pai, pve_p, pve_ptep_idx);
 			const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
+			uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
 			pt_entry_t spte = *pte_p;
 
 			if (pte_is_wired(spte)) {
 				pte_set_wired(pmap, pte_p, 0);
 				spte = *pte_p;
 				if (pmap != kernel_pmap) {
-					pmap_ledger_debit(pmap, task_ledgers.wired_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.wired_mem, amount);
 				}
 			}
 
@@ -5060,37 +5039,37 @@ pmap_page_protect_options_with_flush_range(
 			update = true;
 			++pass1_updated;
 
-			pmap_ledger_debit(pmap, task_ledgers.phys_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+			pmap_ledger_debit(pmap, task_ledgers.phys_mem, amount);
 
 			if (pmap != kernel_pmap) {
 				if (ppattr_test_reusable(pai) &&
 				    is_internal &&
 				    !is_altacct) {
-					pmap_ledger_debit(pmap, task_ledgers.reusable, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.reusable, amount);
 				} else if (!is_internal) {
-					pmap_ledger_debit(pmap, task_ledgers.external, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.external, amount);
 				}
 
 				if (is_altacct) {
 					assert(is_internal);
-					pmap_ledger_debit(pmap, task_ledgers.internal, pt_attr_page_size(pt_attr) * PAGE_RATIO);
-					pmap_ledger_debit(pmap, task_ledgers.alternate_accounting, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.internal, amount);
+					pmap_ledger_debit(pmap, task_ledgers.alternate_accounting, amount);
 					if (options & PMAP_OPTIONS_COMPRESSOR) {
-						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, pt_attr_page_size(pt_attr) * PAGE_RATIO);
-						pmap_ledger_credit(pmap, task_ledgers.alternate_accounting_compressed, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, amount);
+						pmap_ledger_credit(pmap, task_ledgers.alternate_accounting_compressed, amount);
 					}
 					ppattr_pve_clr_internal(pai, pve_p, pve_ptep_idx);
 					ppattr_pve_clr_altacct(pai, pve_p, pve_ptep_idx);
 				} else if (ppattr_test_reusable(pai)) {
 					assert(is_internal);
 					if (options & PMAP_OPTIONS_COMPRESSOR) {
-						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, amount);
 						/* was not in footprint, but is now */
-						pmap_ledger_credit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_credit(pmap, task_ledgers.phys_footprint, amount);
 					}
 					ppattr_pve_clr_internal(pai, pve_p, pve_ptep_idx);
 				} else if (is_internal) {
-					pmap_ledger_debit(pmap, task_ledgers.internal, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.internal, amount);
 
 					/*
 					 * Update all stats related to physical footprint, which only
@@ -5101,13 +5080,13 @@ pmap_page_protect_options_with_flush_range(
 						 * This removal is only being done so we can send this page to
 						 * the compressor; therefore it mustn't affect total task footprint.
 						 */
-						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_credit(pmap, task_ledgers.internal_compressed, amount);
 					} else {
 						/*
 						 * This internal page isn't going to the compressor, so adjust stats to keep
 						 * phys_footprint up to date.
 						 */
-						pmap_ledger_debit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_debit(pmap, task_ledgers.phys_footprint, amount);
 					}
 					ppattr_pve_clr_internal(pai, pve_p, pve_ptep_idx);
 				} else {
@@ -5335,7 +5314,6 @@ protect_finish:
 		sync_tlb_flush();
 	}
 
-
 	pvh_unlock(pai);
 
 	if (remove) {
@@ -5463,7 +5441,7 @@ pmap_protect(
 	pmap_protect_options(pmap, b, e, prot, 0, NULL);
 }
 
-MARK_AS_PMAP_TEXT vm_map_address_t
+__mockable MARK_AS_PMAP_TEXT vm_map_address_t
 pmap_protect_options_internal(
 	pmap_t pmap,
 	vm_map_address_t start,
@@ -5942,6 +5920,8 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 	__unreachable_ok_pop
 
 	if (success && *old_pte != new_pte) {
+		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
+
 		if (pte_is_valid(*old_pte)) {
 			bool need_strong_sync = false;
 			FLUSH_PTE_STRONG();
@@ -5950,7 +5930,7 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 				need_strong_sync = true;
 			}
 #endif /* HAS_FEAT_XS */
-			PMAP_UPDATE_TLBS(pmap, v, v + (pt_attr_page_size(pt_attr) * PAGE_RATIO), need_strong_sync, true);
+			PMAP_UPDATE_TLBS(pmap, v, v + amount, need_strong_sync, true);
 		} else {
 			FLUSH_PTE();
 			__builtin_arm_isb(ISB_SY);
@@ -5963,15 +5943,15 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 			SInt16  *ptd_wiredcnt_ptr = (SInt16 *)&(ptep_get_info(pte_p)->wiredcnt);
 			if (new_pte & ARM_PTE_WIRED) {
 				OSAddAtomic16(1, ptd_wiredcnt_ptr);
-				pmap_ledger_credit(pmap, task_ledgers.wired_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				pmap_ledger_credit(pmap, task_ledgers.wired_mem, amount);
 			} else {
 				OSAddAtomic16(-1, ptd_wiredcnt_ptr);
-				pmap_ledger_debit(pmap, task_ledgers.wired_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				pmap_ledger_debit(pmap, task_ledgers.wired_mem, amount);
 			}
 		}
 
 		PMAP_TRACE(4 + pt_attr_leaf_level(pt_attr), PMAP_CODE(PMAP__TTE), VM_KERNEL_ADDRHIDE(pmap),
-		    VM_KERNEL_ADDRHIDE(v), VM_KERNEL_ADDRHIDE(v + (pt_attr_page_size(pt_attr) * PAGE_RATIO)), new_pte);
+		    VM_KERNEL_ADDRHIDE(v), VM_KERNEL_ADDRHIDE(v + amount), new_pte);
 	}
 	return success;
 }
@@ -6488,7 +6468,6 @@ pmap_enter_options_internal(
 #endif
 
 
-
 			committed = pmap_enter_pte(pmap, pte_p, &spte, pte, v);
 			if (!committed) {
 				pvh_unlock(pai);
@@ -6553,14 +6532,16 @@ pmap_enter_options_internal(
 			}
 
 			if (!had_valid_mapping && (pmap != kernel_pmap)) {
-				pmap_ledger_credit(pmap, task_ledgers.phys_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
+
+				pmap_ledger_credit(pmap, task_ledgers.phys_mem, amount);
 
 				if (is_internal) {
 					/*
 					 * Make corresponding adjustments to
 					 * phys_footprint statistics.
 					 */
-					pmap_ledger_credit(pmap, task_ledgers.internal, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_credit(pmap, task_ledgers.internal, amount);
 					if (is_altacct) {
 						/*
 						 * If this page is internal and
@@ -6582,20 +6563,20 @@ pmap_enter_options_internal(
 						 * is 0. That means: don't
 						 * touch phys_footprint here.
 						 */
-						pmap_ledger_credit(pmap, task_ledgers.alternate_accounting, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+						pmap_ledger_credit(pmap, task_ledgers.alternate_accounting, amount);
 					} else {
 						if (ARM_PTE_IS_COMPRESSED(spte, pte_p) && !(spte & ARM_PTE_COMPRESSED_ALT)) {
 							/* Replacing a compressed page (with internal accounting). No change to phys_footprint. */
 							skip_footprint_debit = true;
 						} else {
-							pmap_ledger_credit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+							pmap_ledger_credit(pmap, task_ledgers.phys_footprint, amount);
 						}
 					}
 				}
 				if (is_reusable) {
-					pmap_ledger_credit(pmap, task_ledgers.reusable, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_credit(pmap, task_ledgers.reusable, amount);
 				} else if (is_external) {
-					pmap_ledger_credit(pmap, task_ledgers.external, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_credit(pmap, task_ledgers.external, amount);
 				}
 			}
 		} else {
@@ -6643,17 +6624,18 @@ pmap_enter_options_internal(
 		}
 		if (committed) {
 			if (ARM_PTE_IS_COMPRESSED(spte, pte_p)) {
+				uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
 				assert(pmap != kernel_pmap);
 
 				/* One less "compressed" */
-				pmap_ledger_debit(pmap, task_ledgers.internal_compressed,
-				    pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				pmap_ledger_debit(pmap, task_ledgers.internal_compressed, amount);
+
 
 				if (spte & ARM_PTE_COMPRESSED_ALT) {
-					pmap_ledger_debit(pmap, task_ledgers.alternate_accounting_compressed, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.alternate_accounting_compressed, amount);
 				} else if (!skip_footprint_debit) {
 					/* Was part of the footprint */
-					pmap_ledger_debit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+					pmap_ledger_debit(pmap, task_ledgers.phys_footprint, amount);
 				}
 				/* The old entry held a reference so drop the extra one that we took above. */
 				drop_refcnt = true;
@@ -6720,7 +6702,7 @@ pmap_enter_options_addr(
 	} while (kr == KERN_RESOURCE_SHORTAGE || kr == KERN_ABORTED);
 
 #if XNU_MONITOR
-	pmap_ledger_check_balance(pmap);
+	pmap_ledger_flush();
 #endif
 
 	PMAP_TRACE(2, PMAP_CODE(PMAP__ENTER) | DBG_FUNC_END, kr);
@@ -6813,12 +6795,14 @@ pmap_change_wiring_internal(
 
 	assertf(pte_is_valid(*pte_p), "invalid pte %p (=0x%llx)", pte_p, (uint64_t)*pte_p);
 	if (wired != pte_is_wired(*pte_p)) {
+		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
+
 		pte_set_wired(pmap, pte_p, wired);
 		if (pmap != kernel_pmap) {
 			if (wired) {
-				pmap_ledger_credit(pmap, task_ledgers.wired_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				pmap_ledger_credit(pmap, task_ledgers.wired_mem, amount);
 			} else if (!wired) {
-				pmap_ledger_debit(pmap, task_ledgers.wired_mem, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+				pmap_ledger_debit(pmap, task_ledgers.wired_mem, amount);
 			}
 		}
 	}
@@ -6850,7 +6834,7 @@ pmap_change_wiring(
 		kr = pmap_change_wiring_ppl(pmap, v, wired);
 	} while (kr == KERN_ABORTED);
 
-	pmap_ledger_check_balance(pmap);
+	pmap_ledger_flush();
 #else
 	/* Since we verified preemptibility, call the helper only once. */
 	kr = pmap_change_wiring_internal(pmap, v, wired);
@@ -6934,6 +6918,7 @@ pmap_find_phys_nofault(
 	return ppn;
 }
 
+__mockable
 ppnum_t
 pmap_find_phys(
 	pmap_t pmap,
@@ -7757,7 +7742,7 @@ pmap_clear_refmod(
 	pmap_clear_refmod_options(pn, mask, 0, NULL);
 }
 
-unsigned int
+__mockable unsigned int
 pmap_disconnect_options(
 	ppnum_t pn,
 	unsigned int options,
@@ -8095,6 +8080,7 @@ arm_force_fast_fault_with_flush_range(
 		const pmap_t pmap = ptdp->pmap;
 		const vm_map_address_t va = ptd_get_va(ptdp, pte_p);
 		const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
+		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
 
 		assert(va >= pmap->min && va < pmap->max);
 
@@ -8111,10 +8097,10 @@ arm_force_fast_fault_with_flush_range(
 		    is_internal &&
 		    pmap != kernel_pmap) {
 			/* one less "reusable" */
-			pmap_ledger_debit(pmap, task_ledgers.reusable, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+			pmap_ledger_debit(pmap, task_ledgers.reusable, amount);
 			/* one more "internal" */
-			pmap_ledger_credit(pmap, task_ledgers.internal, pt_attr_page_size(pt_attr) * PAGE_RATIO);
-			pmap_ledger_credit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+			pmap_ledger_credit(pmap, task_ledgers.internal, amount);
+			pmap_ledger_credit(pmap, task_ledgers.phys_footprint, amount);
 
 			/*
 			 * Since the page is being marked non-reusable, we assume that it will be
@@ -8127,9 +8113,9 @@ arm_force_fast_fault_with_flush_range(
 		    is_internal &&
 		    pmap != kernel_pmap) {
 			/* one more "reusable" */
-			pmap_ledger_credit(pmap, task_ledgers.reusable, pt_attr_page_size(pt_attr) * PAGE_RATIO);
-			pmap_ledger_debit(pmap, task_ledgers.internal, pt_attr_page_size(pt_attr) * PAGE_RATIO);
-			pmap_ledger_debit(pmap, task_ledgers.phys_footprint, pt_attr_page_size(pt_attr) * PAGE_RATIO);
+			pmap_ledger_credit(pmap, task_ledgers.reusable, amount);
+			pmap_ledger_debit(pmap, task_ledgers.internal, amount);
+			pmap_ledger_debit(pmap, task_ledgers.phys_footprint, amount);
 		}
 
 		bool wiredskip = pte_is_wired(*pte_p) &&
@@ -9578,8 +9564,7 @@ pmap_trim(
 		assert(old_state != state);
 	}
 
-	pmap_ledger_check_balance(grand);
-	pmap_ledger_check_balance(subord);
+	pmap_ledger_flush();
 #else
 	state = pmap_trim_internal(grand, subord, vstart, size, state);
 
@@ -9842,8 +9827,7 @@ pmap_set_shared_region(
 		}
 	} while (kr != KERN_SUCCESS);
 
-	pmap_ledger_check_balance(grand);
-	pmap_ledger_check_balance(subord);
+	pmap_ledger_flush();
 #else
 	/**
 	 * We don't need to check KERN_RESOURCE_SHORTAGE or KERN_ABORTED because
@@ -10156,8 +10140,7 @@ pmap_nest(
 		vlast = vaddr;
 	}
 
-	pmap_ledger_check_balance(grand);
-	pmap_ledger_check_balance(subord);
+	pmap_ledger_flush();
 #else
 	/**
 	 * We don't need to check KERN_RESOURCE_SHORTAGE or KERN_ABORTED because
@@ -11762,7 +11745,7 @@ pmap_insert_commpage(
 		}
 	} while (kr == KERN_RESOURCE_SHORTAGE || kr == KERN_ABORTED);
 
-	pmap_ledger_check_balance(pmap);
+	pmap_ledger_flush();
 #else
 	do {
 		kr = pmap_insert_commpage_internal(pmap);
@@ -11854,7 +11837,7 @@ pmap_is_empty_internal(
 		if ((tte_p != PT_ENTRY_NULL) && tte_is_valid_table(*tte_p)) {
 			pte_p = (pt_entry_t *) ttetokv(*tte_p);
 			bpte_p = &pte_p[pte_index(pt_attr, block_start)];
-			epte_p = &pte_p[pte_index(pt_attr, block_end)];
+			epte_p = bpte_p + ((block_end - block_start) >> pt_attr_leaf_shift(pt_attr));
 
 			for (pte_p = bpte_p; pte_p < epte_p; pte_p++) {
 				if (*pte_p != ARM_PTE_EMPTY) {
@@ -12130,7 +12113,6 @@ pmap_ppl_lockdown_page_with_prot(vm_address_t kva, uint64_t lockdown_flag, bool 
 		    __func__, kva, (uint64_t)pvh_flags);
 	}
 
-
 	pvh_set_flags(pvh, pvh_flags | lockdown_flag);
 
 	/* Update the physical aperture mapping to prevent kernel write access. */
@@ -12182,7 +12164,6 @@ pmap_ppl_unlockdown_page_locked(unsigned int pai, uint64_t lockdown_flag, bool p
 		panic("%s: unlockdown attempt on not locked down pai %d, type=0x%llx, PVH flags=0x%llx",
 		    __func__, pai, (unsigned long long)lockdown_flag, (unsigned long long)pvh_flags);
 	}
-
 
 	pvh_set_flags(pvh, pvh_flags & ~lockdown_flag);
 
@@ -12602,7 +12583,7 @@ pmap_query_resident_internal(
 	if (tte_is_valid_table(*tte_p)) {
 		pte_p = (pt_entry_t *) ttetokv(*tte_p);
 		bpte = &pte_p[pte_index(pt_attr, start)];
-		epte = &pte_p[pte_index(pt_attr, end)];
+		epte = bpte + ((end - start) >> pt_attr_leaf_shift(pt_attr));
 
 		for (; bpte < epte; bpte++) {
 			if (ARM_PTE_IS_COMPRESSED(*bpte, bpte)) {
@@ -12955,7 +12936,6 @@ pmap_user_va_size(pmap_t pmap)
 	return 1ULL << pmap_user_va_bits(pmap);
 }
 
-#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
 static vm_map_address_t
 pmap_strip_user_addr(pmap_t pmap, vm_map_address_t ptr)
 {
@@ -12990,6 +12970,11 @@ pmap_strip_kernel_addr(pmap_t pmap, vm_map_address_t ptr)
 	return ptr | pmap->min;
 }
 
+/*
+ * NB: This function is called by a variety of clients, including those that
+ * use unsanitized input that could be attacker-controlled. Take care that
+ * any modifications to this function don't have any unintended side effects.
+ */
 vm_map_address_t
 pmap_strip_addr(pmap_t pmap, vm_map_address_t ptr)
 {
@@ -12998,7 +12983,6 @@ pmap_strip_addr(pmap_t pmap, vm_map_address_t ptr)
 	return pmap == kernel_pmap ? pmap_strip_kernel_addr(pmap, ptr) :
 	       pmap_strip_user_addr(pmap, ptr);
 }
-#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 
 
@@ -13039,7 +13023,7 @@ SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t) ppl_trust_cache_rt;
 MARK_AS_PMAP_DATA TrustCacheMutableRuntime_t ppl_trust_cache_mut_rt;
 
 /* Lock for the trust cache runtime */
-MARK_AS_PMAP_DATA decl_lck_rw_data(, ppl_trust_cache_rt_lock);
+MARK_AS_PMAP_DATA lck_rw_new_t ppl_trust_cache_rt_lock;
 
 MARK_AS_PMAP_TEXT kern_return_t
 pmap_check_trust_cache_runtime_for_uuid_internal(
@@ -13048,7 +13032,7 @@ pmap_check_trust_cache_runtime_for_uuid_internal(
 	kern_return_t ret = KERN_DENIED;
 
 	/* Lock the runtime as shared */
-	lck_rw_lock_shared(&ppl_trust_cache_rt_lock);
+	lck_rw_lock_shared_spin(&ppl_trust_cache_rt_lock);
 
 	TCReturn_t tc_ret = amfi->TrustCache.checkRuntimeForUUID(
 		&ppl_trust_cache_rt,
@@ -13056,7 +13040,7 @@ pmap_check_trust_cache_runtime_for_uuid_internal(
 		NULL);
 
 	/* Unlock the runtime */
-	lck_rw_unlock_shared(&ppl_trust_cache_rt_lock);
+	lck_rw_unlock_shared_spin(&ppl_trust_cache_rt_lock);
 
 	if (tc_ret.error == kTCReturnSuccess) {
 		ret = KERN_SUCCESS;
@@ -13110,7 +13094,6 @@ pmap_load_trust_cache_with_type_internal(
 				NULL,
 				"com.apple.private.pmap.load-trust-cache",
 				TCTypeConfig[type].entitlementValue,
-				false,
 				true);
 
 			if (entitlement_satisfied == false) {
@@ -13158,7 +13141,7 @@ pmap_load_trust_cache_with_type_internal(
 	}
 
 	/* Exclusively lock the runtime */
-	lck_rw_lock_exclusive(&ppl_trust_cache_rt_lock);
+	lck_rw_lock_exclusive_spin(&ppl_trust_cache_rt_lock);
 
 	/* Load the trust cache */
 	TCReturn_t tc_ret = amfi->TrustCache.load(
@@ -13169,7 +13152,7 @@ pmap_load_trust_cache_with_type_internal(
 		(const uintptr_t)img4_manifest, img4_manifest_len);
 
 	/* Unlock the runtime */
-	lck_rw_unlock_exclusive(&ppl_trust_cache_rt_lock);
+	lck_rw_unlock_exclusive_spin(&ppl_trust_cache_rt_lock);
 
 	if (tc_ret.error == kTCReturnSuccess) {
 		ret = KERN_SUCCESS;
@@ -13243,7 +13226,7 @@ pmap_query_trust_cache_safe(
 	}
 
 	/* Lock the runtime as shared */
-	lck_rw_lock_shared(&ppl_trust_cache_rt_lock);
+	lck_rw_lock_shared_spin(&ppl_trust_cache_rt_lock);
 
 	TCReturn_t tc_ret = amfi->TrustCache.query(
 		&ppl_trust_cache_rt,
@@ -13252,7 +13235,7 @@ pmap_query_trust_cache_safe(
 		query_token);
 
 	/* Unlock the runtime */
-	lck_rw_unlock_shared(&ppl_trust_cache_rt_lock);
+	lck_rw_unlock_shared_spin(&ppl_trust_cache_rt_lock);
 
 	if (tc_ret.error == kTCReturnSuccess) {
 		ret = KERN_SUCCESS;
@@ -13605,14 +13588,13 @@ RB_PROTOTYPE(pmap_cs_profiles_rbtree, _pmap_cs_profile, link, pmap_cs_profiles_r
 RB_GENERATE(pmap_cs_profiles_rbtree, _pmap_cs_profile, link, pmap_cs_profiles_rbtree_compare);
 
 /* Lock for the profile red-black tree */
-MARK_AS_PMAP_DATA decl_lck_rw_data(, pmap_cs_profiles_rbtree_lock);
+MARK_AS_PMAP_DATA lck_rw_new_t pmap_cs_profiles_rbtree_lock;
 
 void
 pmap_initialize_provisioning_profiles(void)
 {
 	/* Initialize the profiles red-black tree lock */
-	lck_rw_init(&pmap_cs_profiles_rbtree_lock, &pmap_lck_grp, 0);
-	pmap_cs_profiles_rbtree_lock.lck_rw_can_sleep = FALSE;
+	lck_rw_init(&pmap_cs_profiles_rbtree_lock, &pmap_lck_grp, &pmap_lck_rw_attr);
 
 	/* Initialize the red-black tree itself */
 	RB_INIT(&pmap_cs_registered_profiles);
@@ -13624,26 +13606,19 @@ static bool
 pmap_is_testflight_profile(
 	pmap_cs_profile_t *profile_obj)
 {
-	const char *entitlement_name = "beta-reports-active";
-	const size_t entitlement_length = strlen(entitlement_name);
-	CEQueryOperation_t query[2] = {0};
+	const CEContext_t *entitlements_ctx = profile_obj->entitlements_ctx;
+	CEElement_t value = {0};
+	CEReturn_t ce_ret = kCEReturnError;
 
 	/* If the profile provisions no entitlements, then it isn't a test flight one */
-	if (profile_obj->entitlements_ctx == NULL) {
+	if (entitlements_ctx == NULL) {
 		return false;
 	}
 
-	/* Build our CoreEntitlements query */
-	query[0].opcode = kCEOpSelectKey;
-	memcpy(query[0].parameters.stringParameter.data, entitlement_name, entitlement_length);
-	query[0].parameters.stringParameter.length = entitlement_length;
-	query[1] = CEMatchBool(true);
-
-	CEError_t ce_err = amfi->CoreEntitlements.ContextQuery(
-		profile_obj->entitlements_ctx,
-		query, 2);
-
-	if (ce_err == amfi->CoreEntitlements.kNoError) {
+	ce_ret = libCoreEntitlements->contextValueForKey(entitlements_ctx, "beta-reports-active", &value);
+	if (ce_ret != kCEReturnSuccess) {
+		return false;
+	} else if (libCoreEntitlements->elementMatchBool(&value, true) == kCEReturnSuccess) {
 		return true;
 	}
 
@@ -13654,15 +13629,12 @@ static bool
 pmap_is_development_profile(
 	pmap_cs_profile_t *profile_obj)
 {
+	const CEContext_t *profile_ctx = profile_obj->profile_ctx;
+
 	/* Check for UPP */
-	const der_vm_context_t upp_ctx = amfi->CoreEntitlements.der_vm_execute(
-		*profile_obj->profile_ctx,
-		CESelectDictValue("ProvisionsAllDevices"));
-	if (amfi->CoreEntitlements.der_vm_context_is_valid(upp_ctx) == true) {
-		if (amfi->CoreEntitlements.der_vm_bool_from_context(upp_ctx) == true) {
-			pmap_cs_log_info("%p: [UPP] non-development profile", profile_obj);
-			return false;
-		}
+	if (is_profile_upp(profile_ctx) == true) {
+		pmap_cs_log_info("%p: [UPP] non-development profile", profile_obj);
+		return false;
 	}
 
 	/* Check for TestFlight profile */
@@ -13679,47 +13651,28 @@ static kern_return_t
 pmap_initialize_profile_entitlements(
 	pmap_cs_profile_t *profile_obj)
 {
-	const der_vm_context_t entitlements_der_ctx = amfi->CoreEntitlements.der_vm_execute(
-		*profile_obj->profile_ctx,
-		CESelectDictValue("Entitlements"));
+	const CEContext_t *profile_ctx = profile_obj->profile_ctx;
+	CEElement_t entitlements_element = {0};
+	CEBuffer_t entitlements = {0};
+	CEReturn_t ce_ret = kCEReturnError;
 
-	if (amfi->CoreEntitlements.der_vm_context_is_valid(entitlements_der_ctx) == false) {
-		memset(&profile_obj->entitlements_ctx_storage, 0, sizeof(struct CEQueryContext));
+	ce_ret = libCoreEntitlements->contextValueForKey(profile_ctx, "Entitlements", &entitlements_element);
+	if (ce_ret != kCEReturnSuccess) {
+		memset(&profile_obj->entitlements_ctx_storage, 0, sizeof(profile_obj->entitlements_ctx_storage));
 		profile_obj->entitlements_ctx = NULL;
-
 		pmap_cs_log_info("%p: profile provisions no entitlements", profile_obj);
 		return KERN_NOT_FOUND;
 	}
+	libCoreEntitlements->elementGetCEBuffer(&entitlements_element, &entitlements);
 
-	const uint8_t *der_start = entitlements_der_ctx.state.der_start;
-	const uint8_t *der_end = entitlements_der_ctx.state.der_end;
-
-	CEValidationResult ce_result = {0};
-	CEError_t ce_err = amfi->CoreEntitlements.Validate(
+	ce_ret = libCoreEntitlements->contextInitWithTypeLegacy(
 		pmap_cs_core_entitlements_runtime,
-		&ce_result,
-		der_start, der_end);
-	if (ce_err != amfi->CoreEntitlements.kNoError) {
-		pmap_cs_log_error("unable to validate profile entitlements: %s",
-		    amfi->CoreEntitlements.GetErrorString(ce_err));
-
+		kCEContextTypeProvisioningProfileEntitlements, &profile_obj->entitlements_ctx_storage,
+		entitlements.data, entitlements.length);
+	if (ce_ret != kCEReturnSuccess) {
+		pmap_cs_log_error("unable to validate profile entitlements: %u", ce_ret);
 		return KERN_ABORTED;
 	}
-
-	struct CEQueryContext query_ctx = {0};
-	ce_err = amfi->CoreEntitlements.AcquireUnmanagedContext(
-		pmap_cs_core_entitlements_runtime,
-		ce_result,
-		&query_ctx);
-	if (ce_err != amfi->CoreEntitlements.kNoError) {
-		pmap_cs_log_error("unable to acquire context for profile entitlements: %s",
-		    amfi->CoreEntitlements.GetErrorString(ce_err));
-
-		return KERN_ABORTED;
-	}
-
-	/* Setup the entitlements context within the profile object */
-	profile_obj->entitlements_ctx_storage = query_ctx;
 	profile_obj->entitlements_ctx = &profile_obj->entitlements_ctx_storage;
 
 	pmap_cs_log_info("%p: profile entitlements successfully setup", profile_obj);
@@ -13735,6 +13688,8 @@ pmap_register_provisioning_profile_internal(
 	pmap_cs_profile_t *profile_obj = NULL;
 	pmap_profile_payload_t *profile_payload = NULL;
 	vm_size_t max_profile_blob_size = 0;
+	CEReturn_t ce_ret = kCEReturnError;
+	CEContext_t profile_ctx = {0};
 	const uint8_t *profile_content = NULL;
 	size_t profile_content_length = 0;
 
@@ -13789,12 +13744,11 @@ pmap_register_provisioning_profile_internal(
 		    profile_content, profile_content_length);
 	}
 
-	der_vm_context_t profile_ctx_storage = amfi->CoreEntitlements.der_vm_context_create(
+	ce_ret = libCoreEntitlements->contextInitWithTypeLegacy(
 		pmap_cs_core_entitlements_runtime,
-		CCDER_CONSTRUCTED_SET,
-		false,
-		profile_content, profile_content + profile_content_length);
-	if (amfi->CoreEntitlements.der_vm_context_is_valid(profile_ctx_storage) == false) {
+		kCEContextTypeProvisioningProfile, &profile_ctx,
+		profile_content, profile_content_length);
+	if (ce_ret != kCEReturnSuccess) {
 		panic("PMAP_CS: unable to create a CoreEntitlements context for the profile");
 	}
 
@@ -13803,7 +13757,7 @@ pmap_register_provisioning_profile_internal(
 	profile_obj = (pmap_cs_profile_t*)phystokv(kvtophys_nofail((vm_offset_t)profile_obj));
 
 	profile_obj->original_payload = profile_payload;
-	profile_obj->profile_ctx_storage = profile_ctx_storage;
+	profile_obj->profile_ctx_storage = profile_ctx;
 	profile_obj->profile_ctx = &profile_obj->profile_ctx_storage;
 	os_atomic_store(&profile_obj->reference_count, 0, release);
 
@@ -13820,11 +13774,11 @@ pmap_register_provisioning_profile_internal(
 	profile_obj->profile_validated = true;
 
 	/* Add the profile to the red-black tree */
-	lck_rw_lock_exclusive(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_lock_exclusive_spin(&pmap_cs_profiles_rbtree_lock);
 	if (RB_INSERT(pmap_cs_profiles_rbtree, &pmap_cs_registered_profiles, profile_obj) != NULL) {
 		panic("PMAP_CS: Anomaly, profile already exists in the tree: %p", profile_obj);
 	}
-	lck_rw_unlock_exclusive(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_unlock_exclusive_spin(&pmap_cs_profiles_rbtree_lock);
 
 	pmap_cs_log_info("%p: profile successfully registered", profile_obj);
 	return KERN_SUCCESS;
@@ -13861,7 +13815,7 @@ pmap_unregister_provisioning_profile_internal(
 	kern_return_t ret = KERN_DENIED;
 
 	/* Lock the red-black tree exclusively */
-	lck_rw_lock_exclusive(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_lock_exclusive_spin(&pmap_cs_profiles_rbtree_lock);
 
 	if (RB_FIND(pmap_cs_profiles_rbtree, &pmap_cs_registered_profiles, profile_obj) == NULL) {
 		panic("PMAP_CS: unregistering an unknown profile: %p", profile_obj);
@@ -13881,7 +13835,7 @@ pmap_unregister_provisioning_profile_internal(
 
 exit:
 	/* Unlock the red-black tree */
-	lck_rw_unlock_exclusive(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_unlock_exclusive_spin(&pmap_cs_profiles_rbtree_lock);
 
 	if (ret == KERN_SUCCESS) {
 		/* Get the original payload address */
@@ -13928,7 +13882,7 @@ pmap_associate_provisioning_profile_internal(
 	}
 
 	/* Lock the red-black tree as shared */
-	lck_rw_lock_shared(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_lock_shared_spin(&pmap_cs_profiles_rbtree_lock);
 
 	if (RB_FIND(pmap_cs_profiles_rbtree, &pmap_cs_registered_profiles, profile_obj) == NULL) {
 		panic("PMAP_CS: associating an unknown profile: %p", profile_obj);
@@ -13946,14 +13900,14 @@ pmap_associate_provisioning_profile_internal(
 	}
 
 	/* Unlock the red-black tree */
-	lck_rw_unlock_shared(&pmap_cs_profiles_rbtree_lock);
+	lck_rw_unlock_shared_spin(&pmap_cs_profiles_rbtree_lock);
 
 	/* Association was a success */
 	pmap_cs_log_info("associated profile %p with signature %p", profile_obj, cd_entry);
 	ret = KERN_SUCCESS;
 
 exit:
-	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	lck_rw_unlock_exclusive_spin(&cd_entry->rwlock);
 
 	return ret;
 }
@@ -13989,7 +13943,7 @@ pmap_disassociate_provisioning_profile_internal(
 	ret = KERN_SUCCESS;
 
 exit:
-	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	lck_rw_unlock_exclusive_spin(&cd_entry->rwlock);
 
 	if (ret == KERN_SUCCESS) {
 		/* Decrement the reference count on the profile object */
@@ -14036,7 +13990,7 @@ pmap_associate_kernel_entitlements_internal(
 	ret = KERN_SUCCESS;
 
 out:
-	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	lck_rw_unlock_exclusive_spin(&cd_entry->rwlock);
 	return ret;
 }
 
@@ -14101,7 +14055,7 @@ pmap_resolve_kernel_entitlements_internal(
 out:
 	/* Unlock the code signature object */
 	if (cd_entry != NULL) {
-		lck_rw_unlock_shared(&cd_entry->rwlock);
+		lck_rw_unlock_shared_spin(&cd_entry->rwlock);
 		cd_entry = NULL;
 	}
 
@@ -14125,22 +14079,94 @@ pmap_resolve_kernel_entitlements(
 	return ret;
 }
 
-kern_return_t
+MARK_AS_PMAP_TEXT uint8_t*
+pmap_ce_allocate_acceleration_buffer(
+	size_t size)
+{
+	pmap_cs_ce_acceleration_buffer_t *acceleration_buf = NULL;
+
+	/* Ensure the acceleration lock has been held */
+	pmap_simple_lock_assert(&pmap_cs_acceleration_buf_lock, LCK_ASSERT_OWNED);
+
+	acceleration_buf = pmap_cs_acceleration_buf;
+	if (acceleration_buf == NULL) {
+		panic("PMAP_CS: CoreEntitlements allocating index without buffer");
+	} else if (acceleration_buf->length != size) {
+		panic("PMAP_CS: CoreEntitlements allocating index with mismatched size: %lu | %u",
+		    size, acceleration_buf->length);
+	}
+	pmap_cs_acceleration_buf = NULL;
+
+	/* Release the acceleration buffer lock so other clients can come in */
+	pmap_simple_unlock(&pmap_cs_acceleration_buf_lock);
+
+	return acceleration_buf->buffer;
+}
+
+MARK_AS_PMAP_TEXT void
+pmap_ce_free_acceleration_buffer(
+	uint8_t *index_data,
+	size_t size)
+{
+	pmap_cs_ce_acceleration_buffer_t *acceleration_buf = NULL;
+	size_t total_length = 0;
+
+	/* Regardless of how the index was allocated, zero it out */
+	memset(index_data, 0, size);
+
+	/*
+	 * If the index wasn't allocated, then we don't need to free anything since
+	 * it'll be deallocated when the code signature itself is deallocated. When
+	 * the signature is deallocated, we need to track back to the blob we get,
+	 * and then deallocate it manually here.
+	 */
+	acceleration_buf = __container_of(
+		(void*)index_data,
+		pmap_cs_ce_acceleration_buffer_t,
+		buffer);
+
+	if (acceleration_buf->magic != PMAP_CS_ACCELERATION_BUFFER_MAGIC) {
+		panic("PMAP_CS: magic number mismatch on acceleration buffer: %u", acceleration_buf->magic);
+	} else if (acceleration_buf->allocated == false) {
+		pmap_cs_log_debug("[free] acceleration buffer thru signature: %p", acceleration_buf);
+		return;
+	}
+
+	total_length = acceleration_buf->length + sizeof(pmap_cs_ce_acceleration_buffer_t);
+	if (total_length > pmap_cs_blob_limit) {
+		/* The buffer should be page aligned for certain */
+		assert(((vm_address_t)acceleration_buf & PAGE_MASK) == 0);
+
+		/* Return the page to the PPL free list */
+		pmap_paddr_t phys_addr = kvtophys_nofail((vm_address_t)acceleration_buf);
+		pmap_pages_free(phys_addr, PAGE_SIZE);
+
+		pmap_cs_log_debug("[free] acceleration buffer thru page: %p", acceleration_buf);
+		return;
+	}
+
+	struct pmap_cs_blob *bucket = __container_of(
+		(void*)acceleration_buf,
+		struct pmap_cs_blob,
+		blob);
+
+	/* Return the blob bucket back to the free list */
+	pmap_cs_blob_free(bucket, total_length);
+
+	pmap_cs_log_debug("[free] acceleration buffer thru bucket: %p", acceleration_buf);
+}
+
+MARK_AS_PMAP_TEXT kern_return_t
 pmap_accelerate_entitlements_internal(
 	pmap_cs_code_directory_t *cd_entry)
 {
-	const coreentitlements_t *CoreEntitlements = NULL;
 	const CS_SuperBlob *superblob = NULL;
 	pmap_cs_ce_acceleration_buffer_t *acceleration_buf = NULL;
 	size_t signature_length = 0;
 	size_t acceleration_length = 0;
 	size_t required_length = 0;
 	kern_return_t ret = KERN_DENIED;
-
-	/* Setup the CoreEntitlements interface */
-	CoreEntitlements = &amfi->CoreEntitlements;
-
-	CEError_t ce_err = CoreEntitlements->kMalformedEntitlements;
+	CEReturn_t ce_ret = kCEReturnError;
 
 	/* Acquire the lock on the code directory */
 	pmap_cs_lock_code_directory(cd_entry);
@@ -14162,21 +14188,20 @@ pmap_accelerate_entitlements_internal(
 	if (cd_entry->ce_ctx == NULL) {
 		ret = KERN_SUCCESS;
 		goto out;
-	} else if (CoreEntitlements->ContextIsAccelerated(cd_entry->ce_ctx) == true) {
+	} else if (libCoreEntitlements->contextCheckAcceleration(cd_entry->ce_ctx) == kCEReturnSuccess) {
 		ret = KERN_SUCCESS;
 		goto out;
 	}
 
 	/* We only support accelerating when size <= PAGE_SIZE */
-	ce_err = CoreEntitlements->IndexSizeForContext(cd_entry->ce_ctx, &acceleration_length);
-	if (ce_err != CoreEntitlements->kNoError) {
-		if (ce_err == CoreEntitlements->kNotEligibleForAcceleration) {
+	ce_ret = libCoreEntitlements->contextEvaluateAcceleration(cd_entry->ce_ctx, &acceleration_length);
+	if (ce_ret != kCEReturnSuccess) {
+		if (ce_ret == kCEReturnV1NotEligibleForAcceleration) {
 			/* Small entitlement blobs aren't eligible */
 			ret = KERN_SUCCESS;
 			goto out;
 		}
-		panic("PMAP_CS: unable to gauge index size for entitlements acceleration: %p | %s",
-		    cd_entry, CoreEntitlements->GetErrorString(ce_err));
+		panic("PMAP_CS: unable to gauge index size for entitlements acceleration: %p | %u", cd_entry, ce_ret);
 	} else if (acceleration_length > PAGE_SIZE) {
 		ret = KERN_ABORTED;
 		goto out;
@@ -14251,11 +14276,10 @@ pmap_accelerate_entitlements_internal(
 	pmap_cs_acceleration_buf = acceleration_buf;
 
 	/* Accelerate the entitlements */
-	ce_err = CoreEntitlements->BuildIndexForContext(cd_entry->ce_ctx);
-	if (ce_err != CoreEntitlements->kNoError) {
-		panic("PMAP_CS: unable to accelerate entitlements: %p | %s",
-		    cd_entry, CoreEntitlements->GetErrorString(ce_err));
-	} else if (CoreEntitlements->ContextIsAccelerated(cd_entry->ce_ctx) != true) {
+	ce_ret = libCoreEntitlements->contextAccelerate(cd_entry->ce_ctx);
+	if (ce_ret != kCEReturnSuccess) {
+		panic("PMAP_CS: unable to accelerate entitlements: %p | %u", cd_entry, ce_ret);
+	} else if (libCoreEntitlements->contextCheckAcceleration(cd_entry->ce_ctx) != kCEReturnSuccess) {
 		panic("PMAP_CS: entitlements not marked as accelerated: %p", cd_entry);
 	}
 
@@ -14268,7 +14292,7 @@ pmap_accelerate_entitlements_internal(
 	ret = KERN_SUCCESS;
 
 out:
-	lck_rw_unlock_exclusive(&cd_entry->rwlock);
+	lck_rw_unlock_exclusive_spin(&cd_entry->rwlock);
 	return ret;
 }
 
@@ -14288,6 +14312,25 @@ pmap_accelerate_entitlements(
 	}
 
 	return ret;
+}
+
+#else /* PMAP_CS_INCLUDE_CODE_SIGNING */
+
+uint8_t* __attribute__((noreturn))
+pmap_ce_allocate_acceleration_buffer(
+	size_t __unused size)
+{
+	/* This function should never be called on non-PMAP_CS platforms */
+	panic("%s called on an unsupported platform.", __FUNCTION__);
+}
+
+void __attribute__((noreturn))
+pmap_ce_free_acceleration_buffer(
+	uint8_t __unused *data,
+	size_t __unused size)
+{
+	/* This function should never be called on non-PMAP_CS platforms */
+	panic("%s called on an unsupported platform.", __FUNCTION__);
 }
 
 #endif /* PMAP_CS_INCLUDE_CODE_SIGNING */
@@ -15203,5 +15246,4 @@ pmap_test_text_corruption_internal(pmap_paddr_t pa)
 
 	return KERN_SUCCESS;
 }
-
 #endif /* DEVELOPMENT || DEBUG */

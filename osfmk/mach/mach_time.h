@@ -84,7 +84,7 @@ uint64_t                        mach_continuous_speculative_time(void);
 
 __END_DECLS
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <mach/mach_time_private.h>
 #endif
 

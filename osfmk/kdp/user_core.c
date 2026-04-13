@@ -49,7 +49,7 @@ user_dump_init(void *refcon, void *context)
 	}
 
 	// Skip inactive tasks
-	if (!uccontext->task->active) {
+	if (!uccontext->task->active && !uccontext->emergency_dump) {
 		kern_coredump_log(context, "%s: skipping inactive task\n", __func__);
 		goto finish;
 	}

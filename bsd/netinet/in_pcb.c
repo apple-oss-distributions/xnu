@@ -1010,6 +1010,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				error = EADDRINUSE;
+				INP_LOG(inp, nam, NULL, "error EADDRINUSE port %u is restricted", ntohs(lport));
 				goto done;
 			}
 
@@ -1033,6 +1034,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 				    !(so->so_flags & SOF_NOTIFYCONFLICT)) {
 					conflict = 1;
 				}
+
+				INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 
 				lck_rw_done(&pcbinfo->ipi_lock);
 
@@ -1060,6 +1063,8 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 					    !(so->so_flags & SOF_NOTIFYCONFLICT)) {
 						conflict = 1;
 					}
+
+					INP_LOG_PAIR(inp, nam, NULL, t, "EADDRINUSE caused by");
 
 					lck_rw_done(&pcbinfo->ipi_lock);
 
@@ -1091,6 +1096,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 				if (res_err != 0) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
+					INP_LOG(inp, nam, NULL, "error EADDRINUSE netns_reserve returned %d for port %u", res_err, ntohs(lport));
 					error = EADDRINUSE;
 					goto done;
 				}
@@ -1862,6 +1868,7 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
 	}
 
 	if (pcb != NULL) {
+		INP_LOG(pcb, NULL, nam, "already connected, causing error EADDRINUSE");
 		in_pcb_checkstate(pcb, WNT_RELEASE, pcb == inp ? 1 : 0);
 		return EADDRINUSE;
 	}

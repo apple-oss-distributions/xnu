@@ -74,6 +74,10 @@
 extern int              vm_num_swap_files;
 extern uint64_t         vm_swap_volume_capacity;
 
+/* Wakeup condition variable for the swapout thread */
+extern sched_cond_atomic_t vm_swapout_cond;
+extern thread_t vm_swapout_thread;
+
 struct swapfile;
 
 boolean_t vm_swap_create_file(void);
@@ -95,8 +99,9 @@ struct swapout_io_completion {
 void vm_swapout_iodone(void *, int);
 
 
-kern_return_t vm_swap_put_finish(struct swapfile *, uint64_t *, int, boolean_t);
-kern_return_t vm_swap_put(vm_offset_t, uint64_t*, uint32_t, c_segment_t, struct swapout_io_completion *);
+extern kern_return_t vm_swap_put_finish(struct swapfile *, uint64_t *, int, boolean_t);
+extern kern_return_t vm_swap_put(vm_offset_t, uint64_t*, uint32_t, c_segment_t, struct swapout_io_completion *);
+extern kern_return_t vm_swap_get(c_segment_t, uint64_t, uint64_t);
 
 void vm_swap_flush(void);
 void vm_swap_reclaim(void);
@@ -107,9 +112,6 @@ uint64_t vm_swap_get_max_configured_space(void);
 void vm_swap_reset_max_segs_tracking(uint64_t *alloced_max, uint64_t *used_max);
 
 extern __startup_func void vm_compressor_swap_init_swap_file_limit(void);
-
-
-
 
 #endif /* MACH_KERNEL_PRIVATE */
 

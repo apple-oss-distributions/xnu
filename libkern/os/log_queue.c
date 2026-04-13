@@ -42,7 +42,8 @@
 #define LQ_MIN_LOG_SZ_ORDER 5
 #define LQ_MAX_LOG_SZ_ORDER 11
 #define LQ_BATCH_SIZE 24
-#define LQ_MAX_LM_SLOTS 9
+#define LQ_MAX_LM_SLOTS 18
+#define LQ_LM_SLOTS_DEFAULT (LQ_MAX_LM_SLOTS / 2)
 #define LQ_LOW_MEM_SCALE 3
 #define LQ_MIN_ALLOCATED_LM_SLOTS 2
 #define LQ_METADATA_START_SLOT 0
@@ -128,11 +129,12 @@ extern bool os_log_disabled(void);
  * needed allows to capture the vast majority of logs and avoid drops.
  */
 TUNABLE(size_t, lq_bootarg_size_order, "lq_size_order", LQ_DEFAULT_SZ_ORDER);
-TUNABLE(size_t, lq_bootarg_nslots, "lq_nslots", LQ_MAX_LM_SLOTS);
+TUNABLE(size_t, lq_bootarg_nslots, "lq_nslots", LQ_LM_SLOTS_DEFAULT);
 
-atomic_size_t lq_max_slots = LQ_MAX_LM_SLOTS;
+atomic_size_t lq_available_slots = LQ_LM_SLOTS_DEFAULT;
 #if DEVELOPMENT || DEBUG
-SYSCTL_UINT(_debug, OID_AUTO, log_queue_max_slots, CTLFLAG_RW, (unsigned int *)&lq_max_slots, 0, "");
+SYSCTL_UINT(_debug, OID_AUTO, log_queue_max_slots, CTLFLAG_RW, (unsigned int *)&lq_available_slots, 0, "");
+SYSCTL_UINT(_debug, OID_AUTO, log_queue_available_slots, CTLFLAG_RW, (unsigned int *)&lq_available_slots, 0, "");
 #endif
 
 SCALABLE_COUNTER_DEFINE(log_queue_cnt_received);
@@ -395,22 +397,41 @@ log_queue_mem_init(log_queue_t lq, size_t idx, void *buf, size_t buflen)
 }
 
 void
-log_queue_set_max_slots(size_t max_slots)
+log_queue_set_available_slots(size_t slots)
 {
-	max_slots = MAX(max_slots, LQ_MIN_ALLOCATED_LM_SLOTS);
-	assert(max_slots <= LQ_MAX_LM_SLOTS);
-	assert(max_slots >= LQ_MIN_ALLOCATED_LM_SLOTS);
-	atomic_store_explicit((atomic_size_t *)&lq_max_slots, max_slots, memory_order_relaxed);
+	slots = MAX(slots, LQ_MIN_ALLOCATED_LM_SLOTS);
+	assert(slots <= LQ_MAX_LM_SLOTS);
+	assert(slots >= LQ_MIN_ALLOCATED_LM_SLOTS);
+	atomic_store_explicit((atomic_size_t *)&lq_available_slots, slots, memory_order_relaxed);
+}
+
+void
+os_log_adjust_buffering_capacity(os_log_buffering_capacity_t type)
+{
+	size_t slots = LQ_MIN_ALLOCATED_LM_SLOTS;
+	switch (type) {
+	case LOG_BUFFERING_CAPACITY_DEFAULT:
+		slots = lq_bootarg_nslots;
+		break;
+	case LOG_BUFFERING_CAPACITY_MAX:
+		slots = LQ_MAX_LM_SLOTS;
+		break;
+	default:
+		assert(false);
+		break;
+	}
+
+	log_queue_set_available_slots(slots);
 }
 
 static size_t
-log_queue_mem_max_slots(void)
+log_queue_mem_available_slots(void)
 {
-	size_t max_slots = atomic_load_explicit((atomic_size_t *)&lq_max_slots, memory_order_relaxed);
-	max_slots = MAX(max_slots, LQ_MIN_ALLOCATED_LM_SLOTS);
-	assert(max_slots <= LQ_MAX_LM_SLOTS);
-	assert(max_slots >= LQ_MIN_ALLOCATED_LM_SLOTS);
-	return max_slots;
+	size_t available_slots = atomic_load_explicit((atomic_size_t *)&lq_available_slots, memory_order_relaxed);
+	available_slots = MAX(available_slots, LQ_MIN_ALLOCATED_LM_SLOTS);
+	assert(available_slots <= LQ_MAX_LM_SLOTS);
+	assert(available_slots >= LQ_MIN_ALLOCATED_LM_SLOTS);
+	return available_slots;
 }
 
 static int
@@ -546,7 +567,7 @@ static boolean_t
 log_queue_needs_memory(log_queue_t lq, boolean_t new_suspend)
 {
 	// Store the current upper bound before potentially growing the queue.
-	lq->lq_cnt_mem_max = log_queue_mem_max_slots();
+	lq->lq_cnt_mem_max = log_queue_mem_available_slots();
 
 	if (new_suspend || log_queue_low_mem(lq)) {
 		return lq->lq_cnt_mem_active < lq->lq_cnt_mem_max;
@@ -628,7 +649,7 @@ log_queue_dispatch(void)
 		break;
 	case LQ_MEM_STATE_ALLOCATING:
 		log_queue_order_memory(lq);
-	/* FALLTHROUGH */
+		OS_FALLTHROUGH;
 	case LQ_MEM_STATE_READY:
 		log_queue_dispatch_logs(logs_count, logs);
 		break;
@@ -675,7 +696,7 @@ __startup_func
 static size_t
 log_queue_init_memory(log_queue_t lq)
 {
-	lq->lq_cnt_mem_max = log_queue_mem_max_slots();
+	lq->lq_cnt_mem_max = log_queue_mem_available_slots();
 	assert(lq->lq_cnt_mem_max <= LQ_MAX_LM_SLOTS);
 
 	for (size_t i = 0; i < lq->lq_cnt_mem_max; i++) {
@@ -710,7 +731,7 @@ oslog_init_log_queues(void)
 
 	lq_bootarg_nslots = MAX(lq_bootarg_nslots, LQ_MIN_ALLOCATED_LM_SLOTS);
 	lq_bootarg_nslots = MIN(lq_bootarg_nslots, LQ_MAX_LM_SLOTS);
-	log_queue_set_max_slots(lq_bootarg_nslots);
+	log_queue_set_available_slots(lq_bootarg_nslots);
 
 	lq_low_mem_limit = MAX(1 << (lq_bootarg_size_order - LQ_LOW_MEM_SCALE), 1024);
 

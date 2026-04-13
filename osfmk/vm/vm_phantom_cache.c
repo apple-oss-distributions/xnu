@@ -53,8 +53,7 @@ unsigned phantom_cache_contiguous_periods = 4;
 unsigned phantom_cache_contiguous_periods = 2;
 #endif /* !XNU_TARGET_OS_OSX */
 
-clock_sec_t     pc_start_of_eval_period_sec = 0;
-clock_nsec_t    pc_start_of_eval_period_nsec = 0;
+uint64_t        pc_eval_start;
 boolean_t       pc_need_eval_reset = FALSE;
 
 /* One bit per recent sampling period. Bit 0 = current period. */
@@ -421,14 +420,13 @@ is_thrashing(uint32_t added, uint32_t found, uint32_t threshold)
 boolean_t
 vm_phantom_cache_check_pressure()
 {
-	clock_sec_t     cur_ts_sec;
-	clock_nsec_t    cur_ts_nsec;
 	uint64_t        elapsed_msecs_in_eval;
 	boolean_t       pressure_detected = FALSE;
 
-	clock_get_system_nanotime(&cur_ts_sec, &cur_ts_nsec);
-
-	elapsed_msecs_in_eval = vm_compressor_compute_elapsed_msecs(cur_ts_sec, cur_ts_nsec, pc_start_of_eval_period_sec, pc_start_of_eval_period_nsec);
+	uint64_t now = mach_absolute_time();
+	uint64_t delta_ns;
+	absolutetime_to_nanoseconds(now - pc_eval_start, &delta_ns);
+	elapsed_msecs_in_eval = delta_ns / NSEC_PER_MSEC;
 
 	/*
 	 * Reset evaluation period after phantom_cache_eval_period_in_msecs or
@@ -460,8 +458,7 @@ vm_phantom_cache_check_pressure()
 		sample_period_ghost_added_count_ssd = 0;
 		sample_period_ghost_found_count_ssd = 0;
 
-		pc_start_of_eval_period_sec = cur_ts_sec;
-		pc_start_of_eval_period_nsec = cur_ts_nsec;
+		pc_eval_start = now;
 		pc_history <<= 1;
 		pc_need_eval_reset = FALSE;
 	} else {

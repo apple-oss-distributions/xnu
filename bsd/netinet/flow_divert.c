@@ -154,6 +154,25 @@ static struct ip6protosw                *g_tcp6_protosw         = NULL;
 static struct protosw                   *g_udp_protosw          = NULL;
 static struct ip6protosw                *g_udp6_protosw         = NULL;
 
+static uint32_t                         g_guard_proxy_ctl_unit  = FLOW_DIVERT_GUARD_PROXY_CTL_UNIT_RST;
+int guard_proxy_disable_flag = 1;
+int debug_log                = 0;
+
+SYSCTL_NODE(_net, OID_AUTO, flow_divert, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "flow_divert");
+SYSCTL_INT(_net_flow_divert, OID_AUTO, debug_log, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &debug_log, 0, "");
+
+#ifdef FLOW_DIVERT_GUARD_PROXY_DEBUG
+SYSCTL_INT(_net_flow_divert, OID_AUTO, disable_guard_proxy, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &guard_proxy_disable_flag, 0, "");
+#endif
+
+static boolean_t
+flow_divert_is_guard_proxy_enabled()
+{
+	return !guard_proxy_disable_flag;
+}
+
 static KALLOC_TYPE_DEFINE(flow_divert_group_zone, struct flow_divert_group,
     NET_KT_DEFAULT);
 static KALLOC_TYPE_DEFINE(flow_divert_pcb_zone, struct flow_divert_pcb,
@@ -210,10 +229,16 @@ flow_divert_packet_type2str(uint8_t packet_type)
 		return "close";
 	case FLOW_DIVERT_PKT_READ_NOTIFY:
 		return "read notification";
+	case FLOW_DIVERT_PKT_GROUP_INIT:
+		return "group init";
 	case FLOW_DIVERT_PKT_PROPERTIES_UPDATE:
 		return "properties update";
 	case FLOW_DIVERT_PKT_APP_MAP_CREATE:
 		return "app map create";
+	case FLOW_DIVERT_PKT_FLOW_STATES_REQUEST:
+		return "flow states request";
+	case FLOW_DIVERT_PKT_FLOW_STATES:
+		return "flow states";
 	default:
 		return "unknown";
 	}
@@ -1344,7 +1369,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 			goto done;
 		}
 
-		necp_with_inp_domain_name(so, connect_packet, flow_divert_append_domain_name);
+		necp_with_inp_domain_name_locked(so, connect_packet, flow_divert_append_domain_name);
 	}
 
 	if (fd_cb->local_endpoint.sa.sa_family == AF_INET || fd_cb->local_endpoint.sa.sa_family == AF_INET6) {
@@ -1391,6 +1416,16 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 		cfil_sock_id = cfil_sock_id_from_datagram_socket(so, NULL, to);
 	} else {
 		cfil_sock_id = cfil_sock_id_from_socket(so);
+		if (CFIL_SOCK_ID_NONE == cfil_sock_id) {
+			// In this case add TLV (guard proxy control unit) to the message so NEFlow does not invoke callback up to the GuardProxyProvider.
+			error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_GUARD_PROXY_CTL_UNIT, sizeof(g_guard_proxy_ctl_unit), &g_guard_proxy_ctl_unit);
+			if (debug_log) {
+				FDLOG(LOG_INFO, fd_cb, "flow_divert_create_connect_packet() adding Guard Proxy control unit TLV: %d (error: %d)", g_guard_proxy_ctl_unit, error);
+			}
+			if (error) {
+				goto done;
+			}
+		}
 	}
 
 	if (cfil_sock_id != CFIL_SOCK_ID_NONE) {
@@ -1424,6 +1459,10 @@ flow_divert_send_connect_packet(struct flow_divert_pcb *fd_cb)
 	int             error                   = 0;
 	mbuf_ref_t      connect_packet          = fd_cb->connect_packet;
 	mbuf_ref_t      saved_connect_packet    = NULL;
+
+	if (debug_log) {
+		FDLOG0(LOG_ERR, fd_cb, "flow_divert_send_connect_packet");
+	}
 
 	if (connect_packet != NULL) {
 		error = mbuf_copym(connect_packet, 0, mbuf_pkthdr_len(connect_packet), MBUF_DONTWAIT, &saved_connect_packet);
@@ -1526,6 +1565,35 @@ flow_divert_send_close(struct flow_divert_pcb *fd_cb, int how)
 	if (error) {
 		goto done;
 	}
+
+done:
+	if (error && packet != NULL) {
+		mbuf_freem(packet);
+	}
+
+	return error;
+}
+
+static int
+flow_divert_send_cfil_verdict(struct flow_divert_pcb *fd_cb, uint32_t verdict)
+{
+	int         error   = 0;
+	mbuf_ref_t  packet  = NULL;
+
+	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_CFIL_VERDICT, &packet);
+	if (error) {
+		FDLOG(LOG_ERR, fd_cb, "failed to create a cfil verdict packet: %d", error);
+		goto done;
+	}
+
+	error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_CFIL_VERDICT, sizeof(verdict), &verdict);
+	if (error) {
+		FDLOG(LOG_ERR, fd_cb, "failed to add the cfil verdict TLV: %d", error);
+		goto done;
+	}
+
+	error = flow_divert_send_packet(fd_cb, packet);
+	FDLOG(LOG_INFO, fd_cb, "flow_divert_send_cfil_verdict(). Sent with error: %d and verdict: %d", error, verdict);
 
 done:
 	if (error && packet != NULL) {
@@ -2540,6 +2608,11 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_ref_t pack
 	struct socket *so = fd_cb->so;
 	bool local_address_is_valid = false;
 
+	if (so == NULL) {
+		FDLOG0(LOG_ERR, fd_cb, "flow_divert_handle_connect_result: (so) is NULL");
+		return;
+	}
+
 	memset(&local_endpoint, 0, sizeof(local_endpoint));
 	memset(&remote_endpoint, 0, sizeof(remote_endpoint));
 
@@ -2793,6 +2866,58 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, int o
 		socantrcvmore(so);
 	} else if (how == SHUT_WR && is_connected) {
 		socantsendmore(so);
+	}
+}
+
+void flow_divert_handle_close_from_cfil(struct socket *so);
+void flow_divert_handle_pass_from_cfil(struct socket *so);
+
+void
+flow_divert_handle_close_from_cfil(struct socket *so)
+{
+	struct flow_divert_pcb *fd_cb = so->so_fd_pcb;
+	if (fd_cb == NULL) {
+		FDLOG0(LOG_INFO, &nil_pcb, "flow_divert_handle_close_from_cfil()");
+		return;
+	} else {
+		FDLOG0(LOG_INFO, fd_cb, "flow_divert_handle_close_from_cfil()");
+	}
+
+	flow_divert_send_cfil_verdict(fd_cb, FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP);
+}
+
+void
+flow_divert_handle_pass_from_cfil(struct socket *so)
+{
+	struct flow_divert_pcb *fd_cb = so->so_fd_pcb;
+	if (fd_cb == NULL) {
+		FDLOG0(LOG_INFO, &nil_pcb, "flow_divert_handle_pass_from_cfil(). nil_pcb, exiting...");
+		return;
+	} else {
+		FDLOG0(LOG_INFO, fd_cb, "flow_divert_handle_pass_from_cfil()");
+	}
+
+	flow_divert_send_cfil_verdict(fd_cb, FLOW_DIVERT_GUARD_PROXY_VERDICT_PASS);
+}
+
+void
+flow_divert_handle_cfil_verdict(struct socket *so, uint32_t verdict)
+{
+	if (!flow_divert_is_guard_proxy_enabled() || (FLOW_DIVERT_GUARD_PROXY_CTL_UNIT_RST == g_guard_proxy_ctl_unit)) {
+		return;
+	}
+
+	struct flow_divert_pcb *fd_cb = so->so_fd_pcb;
+	if (fd_cb == NULL) {
+		FDLOG(LOG_INFO, &nil_pcb, "flow_divert_handle_cfil_verdict received %s verdict for (so %p)", (verdict == FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP) ? "DROP" : "PASS", so);
+	} else {
+		FDLOG(LOG_INFO, fd_cb, "flow_divert_handle_cfil_verdict received %s verdict for (so %p)", (verdict == FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP) ? "DROP" : "PASS", so);
+	}
+
+	if (verdict == FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP) {
+		flow_divert_handle_close_from_cfil(so);
+	} else {
+		flow_divert_handle_pass_from_cfil(so);
 	}
 }
 
@@ -3062,6 +3187,21 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_ref_t packet
 		group->order = order;
 	}
 
+	if (order == FLOW_DIVERT_ORDER_GUARD_PROXY) {
+		// Try to fetch guard proxy control unit
+		FDLOG(LOG_INFO, &nil_pcb, "Trying to fetch the guard proxy control as the order is %u", order);
+
+		uint32_t gpctlunit = 0;
+		error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_GUARD_PROXY_CTL_UNIT, sizeof(gpctlunit), &gpctlunit, NULL);
+		if (!error) {
+			g_guard_proxy_ctl_unit = gpctlunit;
+			FDLOG(LOG_INFO, &nil_pcb, "Successfully set the guard proxy control unit to %u (order is %u).", g_guard_proxy_ctl_unit, order);
+		} else {
+			// Apply delta to the order value as it's not the guard proxy group initialization
+			order += GUARD_PROXY_DELTA;
+		}
+	}
+
 	lck_rw_done(&group->lck);
 }
 
@@ -3310,6 +3450,9 @@ flow_divert_handle_flow_states_request(struct flow_divert_group *group)
 	}
 
 	ctl_unit = group->ctl_unit;
+	if (debug_log) {
+		FDLOG(LOG_INFO, &nil_pcb, "flow_divert_handle_flow_states_request started with ctl_unit %d", ctl_unit);
+	}
 
 	RB_FOREACH(fd_cb, fd_pcb_tree, &group->pcb_tree) {
 		FDRETAIN(fd_cb);
@@ -3371,6 +3514,9 @@ flow_divert_input(mbuf_ref_t packet, struct flow_divert_group *group)
 	}
 
 	hdr.conn_id = ntohl(hdr.conn_id);
+	if (debug_log) {
+		FDLOG(LOG_NOTICE, &nil_pcb, "flow_divert_input(): Got a %s (%d) message from group %d for a conn_id: %u", flow_divert_packet_type2str(hdr.packet_type), hdr.packet_type, group->ctl_unit, hdr.conn_id);
+	}
 
 	if (hdr.conn_id == 0) {
 		switch (hdr.packet_type) {
@@ -3408,7 +3554,14 @@ flow_divert_input(mbuf_ref_t packet, struct flow_divert_group *group)
 			flow_divert_handle_connect_result(fd_cb, packet, sizeof(hdr));
 			break;
 		case FLOW_DIVERT_PKT_CLOSE:
-			flow_divert_handle_close(fd_cb, packet, sizeof(hdr));
+			if (g_guard_proxy_ctl_unit == group->ctl_unit && (so->so_flags & SOF_CONTENT_FILTER) && flow_divert_is_guard_proxy_enabled()) {
+				if (debug_log) {
+					FDLOG(LOG_NOTICE, &nil_pcb, "flow_divert_input(): Skipping FLOW_DIVERT_PKT_CLOSE for Guard Proxy (with ctl_unit: %u).", g_guard_proxy_ctl_unit);
+				}
+				break;
+			} else {
+				flow_divert_handle_close(fd_cb, packet, sizeof(hdr));
+			}
 			break;
 		case FLOW_DIVERT_PKT_DATA:
 			error = flow_divert_handle_data(fd_cb, packet, sizeof(hdr));
@@ -3843,6 +3996,9 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 				if (!(fd_cb->flags & FLOW_DIVERT_FLOW_IS_TRANSPARENT) || IN6_IS_ADDR_UNSPECIFIED(&(satosin6(to)->sin6_addr))) {
 					error = 0;
 				} else {
+					if (ifp != NULL) {
+						ifnet_release(ifp);
+					}
 					goto done;
 				}
 			}
@@ -3876,6 +4032,9 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 				if (!(fd_cb->flags & FLOW_DIVERT_FLOW_IS_TRANSPARENT) || satosin(to)->sin_addr.s_addr == INADDR_ANY) {
 					error = 0;
 				} else {
+					if (ifp != NULL) {
+						ifnet_release(ifp);
+					}
 					goto done;
 				}
 			}
@@ -4118,7 +4277,7 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_ref_t data, struct socka
 			}
 		}
 
-		FDLOG(LOG_DEBUG, fd_cb, "app wrote %lu bytes", data_size);
+		FDLOG(LOG_DEBUG, fd_cb, "app (pid: %d) wrote %lu bytes", p->p_pid, data_size);
 		fd_cb->bytes_written_by_app += data_size;
 
 		error = flow_divert_send_app_data(fd_cb, data, data_size, to);
@@ -4666,6 +4825,10 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 		}
 
 		g_flow_divert_groups[unit] = NULL;
+
+		if (g_guard_proxy_ctl_unit == unit) {
+			g_guard_proxy_ctl_unit = FLOW_DIVERT_GUARD_PROXY_CTL_UNIT_RST;
+		}
 	} else {
 		group = (struct flow_divert_group *)unitinfo;
 		if (TAILQ_EMPTY(&g_flow_divert_in_process_group_list)) {

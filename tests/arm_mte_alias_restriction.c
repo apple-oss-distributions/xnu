@@ -20,7 +20,6 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"),
-	T_META_ENABLED(true),
 	XNU_T_META_SOC_SPECIFIC
 	);
 
@@ -34,7 +33,9 @@ T_GLOBAL_META(
 T_DECL(process_with_alias_restricted_opt_in_cannot_receive_mte_alias,
     "Ensure a process which opts in to alias restrictions may not receive "
     "an alias to tagged memory, and that an attempt to do so triggers a fatal guard.",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
+    /* Disabled in BATS due to signing issues */
+    T_META_ENABLED(false),
     XNU_T_META_SOC_SPECIFIC) {
 	/*
 	 * Given a binary signed in such a way that it should never be allowed to
@@ -88,7 +89,7 @@ T_DECL(process_with_alias_restricted_opt_in_cannot_receive_mte_alias,
 
 T_DECL(vm_update_pointers_with_remote_tags_without_debugger,
     "Ensure mach_vm_update_pointers_with_remote_tags is unusable when not debugged",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC) {
 	/* Given a tagged buffer */
 	const mach_vm_size_t alloc_size = PAGE_SIZE;
@@ -125,7 +126,7 @@ T_DECL(vm_update_pointers_with_remote_tags_without_debugger,
 
 T_DECL(vm_update_pointers_with_remote_tags_invalid_inputs,
     "Ensure mach_vm_update_pointers_with_remote_tags fails when the input sizes don't match",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_REQUIRES_SYSCTL_EQ("security.mac.amfi.developer_mode_status", 1),
     /* It's not straightforward to ptrace on platforms other than macOS, so don't bother */
     T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX),
@@ -231,7 +232,7 @@ T_DECL(vm_update_pointers_with_remote_tags_invalid_inputs,
 
 T_DECL(vm_update_pointers_with_remote_tags,
     "Validate the behavior of the API that allows reading remote tag info",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     T_META_REQUIRES_SYSCTL_EQ("security.mac.amfi.developer_mode_status", 1),
     /* It's not straightforward to ptrace on platforms other than macOS, so don't bother */
     T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX),

@@ -136,11 +136,16 @@ __nexus_attr_set(const nexus_attr_t nxa, const nexus_attr_type_t type,
 		nxa->nxa_large_buf_size = value;
 		break;
 
+	case NEXUS_ATTR_USER_PACKET_POOL:
+		nxa->nxa_requested |= NXA_REQ_USER_PACKET_POOL;
+		nxa->nxa_user_packet_pool = (value != 0);
+		break;
+
+
 	case NEXUS_ATTR_FLOWADV_MAX:
 	case NEXUS_ATTR_STATS_SIZE:
 	case NEXUS_ATTR_SLOT_META_SIZE:
 	case NEXUS_ATTR_CHECKSUM_OFFLOAD:
-	case NEXUS_ATTR_USER_PACKET_POOL:
 	case NEXUS_ATTR_ADV_SIZE:
 		err = ENOTSUP;
 		break;
@@ -397,6 +402,14 @@ __nexus_provider_reg_prepare(struct nxprov_reg *reg, const uint8_t *__null_termi
 			reg->nxpreg_requested |= NXPREQ_LARGE_BUF_SIZE;
 			p->nxp_large_buf_size =
 			    (uint32_t)nxa->nxa_large_buf_size;
+		}
+		if (nxa->nxa_requested & NXA_REQ_USER_PACKET_POOL) {
+			reg->nxpreg_requested |= NXPREQ_USER_PACKET_POOL;
+			if (nxa->nxa_user_packet_pool != 0) {
+				p->nxp_capabilities |= NXPCAP_USER_PACKET_POOL;
+			} else {
+				p->nxp_capabilities &= ~NXPCAP_USER_PACKET_POOL;
+			}
 		}
 	}
 done:

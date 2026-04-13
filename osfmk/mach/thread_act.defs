@@ -423,4 +423,17 @@ routine thread_adopt_exception_handler(
 		behavior_mask : exception_behavior_t;
 		flavor_mask :thread_state_flavor_t);
 
+/*
+ * New thread suspend interface that returns a suspend token
+ */
+routine	thread_suspend2(
+		target_act	: thread_read_t;
+	out suspend_token : mach_port_move_send_t);
+
+/*
+ * New thread resume interface that takes a suspend token
+ */
+routine	thread_resume2(
+		suspend_token : mach_port_move_send_t);
+
 /* vim: set ft=c : */

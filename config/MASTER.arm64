@@ -56,9 +56,9 @@
 #endif /*SOC_IS_VIRTUALIZED*/
 #  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp CPU_COUNTERS_BASE kperf ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
-#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace]
-#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace]
-#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter phys_write_acct config_io_compression_stats config_service_port_info config_ledger_interval_max ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace config_memory_microstackshot ]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace lock_stats zleaks kdp_interactive_debugging alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace config_memory_microstackshot ]
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter phys_write_acct config_io_compression_stats config_service_port_info ]
 #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
 #  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_task_suspend_stats ]
 #  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_task_suspend_stats ]

@@ -30,6 +30,7 @@
 #define _VM_VM_KERN_INTERNAL_H_
 
 #include <sys/cdefs.h>
+#include <vm/vm_map_store_internal.h>
 #include <vm/vm_kern_xnu.h>
 
 __BEGIN_DECLS
@@ -38,8 +39,8 @@ __BEGIN_DECLS
 
 #pragma mark kmem range methods
 
-extern struct mach_vm_range kmem_ranges[KMEM_RANGE_COUNT];
-extern struct mach_vm_range kmem_large_ranges[KMEM_RANGE_COUNT];
+struct vm_map_entry;
+
 #define KMEM_RANGE_MASK       0x3fff
 #define KMEM_HASH_SET         0x4000
 #define KMEM_DIRECTION_MASK   0x8000
@@ -83,6 +84,14 @@ extern bool kmem_range_id_contains(
 	vm_map_size_t           size);
 
 __pure2
+extern struct mach_vm_range *kmem_range(
+	vm_map_range_id_t       range_id);
+
+__pure2
+extern vm_guard_object_slab_t kmem_slab(
+	vm_map_kernel_flags_t   vmk_flags);
+
+__pure2
 extern kmem_range_id_t kmem_addr_get_range(
 	vm_map_offset_t         addr,
 	vm_map_size_t           size);
@@ -90,7 +99,12 @@ extern kmem_range_id_t kmem_addr_get_range(
 extern kmem_range_id_t kmem_adjust_range_id(
 	uint32_t                hash);
 
+extern bool kmem_is_ptr_range(
+	vm_map_range_id_t       range_id);
 
+extern mach_vm_range_t kmem_validate_range_for_overwrite(
+	vm_map_offset_t         addr,
+	vm_map_size_t           size);
 
 __startup_func
 extern uint16_t kmem_get_random16(

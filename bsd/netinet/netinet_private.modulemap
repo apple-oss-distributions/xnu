@@ -1,9 +1,8 @@
-module DarwinPrivate.netinet [system] {
+module DarwinPrivate.netinet {
   module in {
     header "netinet/in_private.h"
+    private textual header "netinet6/in6_private.h"
     export *
-
-    exclude header "netinet6/in6_private.h"
   }
 
   module in_stat {

@@ -356,11 +356,11 @@ ZONE_DEFINE_ID(ZONE_ID_MBUF_REF, "mbuf.ref", struct ext_ref,
 ZONE_DEFINE_ID(ZONE_ID_MBUF, "mbuf", struct mbuf,
     ZC_CACHING | ZC_KASAN_NOQUARANTINE);
 ZONE_DEFINE_ID(ZONE_ID_CLUSTER_2K, "mbuf.cluster.2k", union mcluster,
-    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_SHARED_DATA);
 ZONE_DEFINE_ID(ZONE_ID_CLUSTER_4K, "mbuf.cluster.4k", union mbigcluster,
-    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_SHARED_DATA);
 ZONE_DEFINE_ID(ZONE_ID_CLUSTER_16K, "mbuf.cluster.16k", union m16kcluster,
-    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_DATA);
+    ZC_CACHING | ZC_KASAN_NOQUARANTINE | ZC_SHARED_DATA);
 static_assert(sizeof(union mcluster) == MCLBYTES);
 static_assert(sizeof(union mbigcluster) == MBIGCLBYTES);
 static_assert(sizeof(union m16kcluster) == M16KCLBYTES);

@@ -1283,7 +1283,9 @@ struct build_tool_version {
 #define PLATFORM_TVOSSIMULATOR 8
 #define PLATFORM_WATCHOSSIMULATOR 9
 #define PLATFORM_DRIVERKIT 10
-#define PLATFORM_MAX PLATFORM_DRIVERKIT
+#define PLATFORM_XROS 11
+#define PLATFORM_XROSSIMULATOR 12
+#define PLATFORM_MAX PLATFORM_XROSSIMULATOR
 /* Addition of simulated platfrom also needs to update proc_is_simulated() */ 
 
 /* Known values for the tool field above. */

@@ -58,7 +58,10 @@ __BEGIN_DECLS
  *
  * @abstract Represent an MTE tag exclusion mask, used in tag generation.
  */
+#ifndef MTE_EXCLUDE_MASK_T
+#define MTE_EXCLUDE_MASK_T
 typedef uint64_t mte_exclude_mask_t;
+#endif /* MTE_EXCLUDE_MASK_T */
 
 #define MTE_TAG_SPAN_SIZE              (16)
 #define MTE_TAGS_PER_SIZE(s)           (roundup(s, 16) / MTE_TAG_SPAN_SIZE)

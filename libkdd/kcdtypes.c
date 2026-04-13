@@ -294,22 +294,25 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 
 	case STACKSHOT_KCTYPE_GLOBAL_MEM_STATS: {
 		i = 0;
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, snapshot_magic);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, free_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, active_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, inactive_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, purgeable_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, wired_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, speculative_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, throttled_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, filebacked_pages);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, compressions);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, decompressions);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, compressor_size);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, busy_buffer_count);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, pages_wanted);
-		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot, pages_reclaimed);
-		_SUBTYPE(KC_ST_UINT8, struct mem_and_io_snapshot, pages_wanted_reclaimed_valid);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, snapshot_magic);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, free_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, active_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, inactive_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, purgeable_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, wired_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, speculative_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, throttled_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, filebacked_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, compressions);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, decompressions);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, compressor_size);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, busy_buffer_count);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, pages_wanted);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, pages_reclaimed);
+		_SUBTYPE(KC_ST_UINT8, struct mem_and_io_snapshot_v2, pages_wanted_reclaimed_valid);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, shared_region_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, compressed_pages);
+		_SUBTYPE(KC_ST_UINT32, struct mem_and_io_snapshot_v2, swapped_pages);
 		setup_type_definition(retval, type_id, i, "mem_and_io_snapshot");
 		break;
 	}
@@ -1025,6 +1028,20 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, 1, "core_allowed");
 		break;
 	}
+	case TASK_CRASHINFO_VOUCHER_INFO: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct crashinfo_voucher, thread_id);
+		_SUBTYPE(KC_ST_UINT32, struct crashinfo_voucher, originator_pid);
+		_SUBTYPE(KC_ST_UINT32, struct crashinfo_voucher, proximate_pid);
+		setup_type_definition(retval, type_id, i, "voucher_info");
+		break;
+	}
+	case TASK_CRASHINFO_SANDBOX_PROFILE: {
+		i = 0;
+		_STRINGTYPE("sandbox_profile");
+		setup_type_definition(retval, type_id, i, "sandbox_profile");
+		break;
+	}
 	case EXIT_REASON_SNAPSHOT: {
 		_SUBTYPE(KC_ST_UINT32, struct exit_reason_snapshot, ers_namespace);
 		_SUBTYPE(KC_ST_UINT64, struct exit_reason_snapshot, ers_code);
@@ -1236,6 +1253,22 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		_SUBTYPE(KC_ST_UINT8, struct mte_info_cell, mic_wired_tagged_count);
 		_SUBTYPE(KC_ST_UINT8, struct mte_info_cell, mic_kernel_wired_tagged_count);
 		setup_type_definition(retval, type_id, i, "mte_info_cell");
+		break;
+	}
+	case STACKSHOT_KCTYPE_VMRL_BLOCKING_RELS: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_vmrl_blocking_relationship, waiter_tid);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_vmrl_blocking_relationship, blocker_tid);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_vmrl_blocking_relationship, entry_hash);
+		_SUBTYPE(KC_ST_UINT32, struct stackshot_vmrl_blocking_relationship, flags);
+		setup_type_definition(retval, type_id, i, "vmrl_blocking_relationship_t");
+		break;
+	}
+	case STACKSHOT_KCTYPE_LOCK_STATE: {
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_device_lock_state, flags);
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_device_lock_state, passcode_status);
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_device_lock_state, lock_state);
+		setup_type_definition(retval, type_id, i, "device_lock_state");
 		break;
 	}
 	default:

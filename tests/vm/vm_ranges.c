@@ -365,7 +365,9 @@ T_DECL(range_mmap_alias_tag, "ensure anon mapping with tag is honored", T_META_T
 }
 
 T_DECL(range_mmap_with_low_hint,
-    "ensure allocation is within target range when hint is below range", T_META_TAG_VM_PREFERRED)
+    "ensure allocation is within target range when hint is below range",
+    T_META_REQUIRES_SYSCTL_EQ("vm.guard_objects_enabled", 0),
+    T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -376,7 +378,9 @@ T_DECL(range_mmap_with_low_hint,
 }
 
 T_DECL(range_mmap_with_high_hint,
-    "ensure allocation is within target range when hint is within range", T_META_TAG_VM_PREFERRED)
+    "ensure allocation is within target range when hint is within range",
+    T_META_REQUIRES_SYSCTL_EQ("vm.guard_objects_enabled", 0),
+    T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -389,7 +393,9 @@ T_DECL(range_mmap_with_high_hint,
 }
 
 T_DECL(range_mmap_with_bad_hint,
-    "ensure allocation fails when hint is above range", T_META_TAG_VM_PREFERRED)
+    "ensure allocation fails when hint is above range",
+    T_META_REQUIRES_SYSCTL_EQ("vm.guard_objects_enabled", 0),
+    T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -401,7 +407,9 @@ T_DECL(range_mmap_with_bad_hint,
 }
 
 T_DECL(range_mach_vm_map_with_bad_hint,
-    "ensure mach_vm_map fails when hint is above range", T_META_TAG_VM_PREFERRED)
+    "ensure mach_vm_map fails when hint is above range",
+    T_META_REQUIRES_SYSCTL_EQ("vm.guard_objects_enabled", 0),
+    T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -437,7 +445,9 @@ T_DECL(range_mach_vm_remap_default,
 }
 
 T_DECL(range_mach_vm_remap_heap_with_hint,
-    "ensure mach_vm_remap is successful in heap range", T_META_TAG_VM_PREFERRED)
+    "ensure mach_vm_remap is successful in heap range",
+    T_META_REQUIRES_SYSCTL_EQ("vm.guard_objects_enabled", 0),
+    T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 

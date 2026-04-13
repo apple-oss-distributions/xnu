@@ -101,7 +101,15 @@ extern bool                has_lock_pv;
 
 #ifdef LOCK_PRIVATE
 
+/*
+ * LOCK_SNOOP_SPINS is the default amount of free spins
+ * before the spin policies are consulted.
+ *
+ * LOCK_SNOOP_SPINS_MCS is similar but for spinners that use MCS queues,
+ * so that they can call lck_mcs_spin_step() more regularly.
+ */
 #define LOCK_SNOOP_SPINS        100
+#define LOCK_SNOOP_SPINS_MCS    10
 #define LOCK_PRETEST            0
 
 #define wait_for_event()        __builtin_arm_wfe()
@@ -117,7 +125,7 @@ extern bool                has_lock_pv;
 	os_atomic_store(__dpft_countp, __dpft_count + 1, compiler_acq_rel);     \
                                                                                 \
 	if (static_if(sched_debug_preemption_disable)) {                        \
-	       if (__dpft_count == 0 && sched_preemption_disable_debug_mode) {  \
+	       if (__dpft_count == 0) {                                         \
 	               _prepare_preemption_disable_measurement();               \
 	       }                                                                \
 	}                                                                       \
@@ -136,6 +144,7 @@ extern void lock_disable_preemption_for_thread(thread_t);
 #define lock_preemption_level_for_thread(t)     get_preemption_level_for_thread(t)
 #define lock_preemption_disabled_for_thread(t)  (get_preemption_level_for_thread(t) != 0)
 #define current_thread()                        current_thread_fast()
+#define lock_get_timebase()                     ml_get_hwclock_speculative()
 
 #define __hw_spin_wait_load(ptr, load_var, cond_result, cond_expr) ({ \
 	load_var = os_atomic_load_exclusive(ptr, relaxed);                      \

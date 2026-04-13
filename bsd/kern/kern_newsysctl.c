@@ -166,6 +166,11 @@ sysctl_register_oid_locked(struct sysctl_oid *new_oidp,
 	struct sysctl_oid_list *parent_rw = NULL;
 	struct sysctl_oid *p, **prevp;
 
+	if (new_oidp->oid_number == OID_AUTO) {
+		/* remember OID_AUTO so we can restore OID_AUTO on unregister */
+		new_oidp->oid_kind |= CTLFLAG_OID_AUTO;
+	}
+
 	p = SLIST_FIRST(parent);
 	if (p && p->oid_number == OID_MUTABLE_ANCHOR) {
 		parent_rw = p->oid_arg1;
@@ -396,6 +401,10 @@ sysctl_unregister_oid(struct sysctl_oid *oidp)
 	while (removed_oidp && removed_oidp->oid_refcnt) {
 		lck_rw_sleep(&sysctl_geometry_lock, LCK_SLEEP_EXCLUSIVE,
 		    &removed_oidp->oid_refcnt, THREAD_UNINT);
+	}
+
+	if (oidp->oid_kind & CTLFLAG_OID_AUTO) {
+		oidp->oid_number = OID_AUTO;
 	}
 
 	/* Release the write lock */
@@ -1346,6 +1355,8 @@ sysctl_sysctl_oidfmt(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 	int error;
 	u_int namelen = arg2;
 	struct sysctl_oid *oid;
+	int kind;
+
 
 	lck_rw_lock_shared(&sysctl_geometry_lock);
 
@@ -1359,8 +1370,8 @@ sysctl_sysctl_oidfmt(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 		goto err;
 	}
 
-	error = SYSCTL_OUT(req,
-	    &oid->oid_kind, sizeof(oid->oid_kind));
+	kind = oid->oid_kind & ~CTLFLAG_KERNEL_PRIVATE_MASK;
+	error = SYSCTL_OUT(req, &kind, sizeof(kind));
 	if (!error) {
 		error = SYSCTL_OUT(req, oid->oid_fmt,
 		    strlen(oid->oid_fmt) + 1);
@@ -2333,7 +2344,7 @@ sysctl_register_test_startup(struct sysctl_test_setup_spec *spec)
 }
 
 
-extern void vm_analytics_tick(void *arg0, void *arg1);
+extern void vm_analytics_daily_tick(void *arg0, void *arg1);
 
 /* Manual trigger of vm_analytics_tick for testing on dev/debug kernel. */
 static int
@@ -2345,7 +2356,7 @@ sysctl_vm_analytics_tick SYSCTL_HANDLER_ARGS
 	if (error || !req->newptr) {
 		return error;
 	}
-	vm_analytics_tick(NULL, NULL);
+	vm_analytics_daily_tick(NULL, NULL);
 	return 0;
 }
 

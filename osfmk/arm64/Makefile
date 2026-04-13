@@ -12,6 +12,9 @@ ARM_PRIVATE_HEADERS = \
 	proc_reg.h
 
 
+INSTINC_SUBDIRS_ARM64 += \
+	sptm
+
 EXPINC_SUBDIRS_ARM64 += \
 	sptm
 
@@ -30,25 +33,23 @@ INSTALL_KF_MD_LIST = $(ARM_HEADER_FILES)
 INSTALL_KF_MD_LCL_LIST = \
 	hv_hvc.h \
 	lowglobals.h \
-	machine_kpc.h \
 	machine_remote_time.h \
 	monotonic.h \
 	proc_reg.h \
 	tlb.h \
+	x86_64_compat.h \
 	$(ARM_HEADER_FILES)
 
 # Headers installed into System.framework/PrivateHeaders
 INSTALL_SF_MD_LCL_LIST = \
 	$(ARM_PRIVATE_HEADERS)
 
-# TODO: Is there a reason that machine_machdep.h is not in this list? If not, these lists can be consolidated.
 # Headers used to compile xnu
 EXPORT_MD_LIST = \
 	cpc_arm64.h \
 	hv_hvc.h \
 	lowglobals.h \
 	machine_cpuid.h \
-	machine_kpc.h \
 	machine_remote_time.h \
 	monotonic.h \
 	proc_reg.h \
@@ -58,7 +59,8 @@ EXPORT_MD_LIST = \
 	tlb.h \
 	pal_hibernate.h \
 	mte.h \
-	mte_xnu.h
+	mte_xnu.h \
+	x86_64_compat.h
 
 # These headers will be available with #include <arm64/header_file.h>
 EXPORT_MD_DIR = arm64

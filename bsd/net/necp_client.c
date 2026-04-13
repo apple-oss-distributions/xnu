@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -51,6 +51,9 @@
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_cache.h>
 #include <netinet6/in6_var.h>
+#include <netinet/in_arp.h>
+#include <netinet/if_ether.h>
+#include <netinet6/nd6.h>
 
 #include <sys/domain.h>
 #include <sys/file_internal.h>
@@ -218,7 +221,16 @@ static int necp_client_tracing_pid = 0;
 	uuid_unparse_lower(client->client_id, client_uuid_str);                                                     \
 	uuid_string_t flow_uuid_str = { };                                                                          \
 	uuid_unparse_lower(flow->registration_id, flow_uuid_str);                                                   \
-	NECPLOG(LOG_NOTICE, "NECP CLIENT FLOW TRACE <pid %d %s> <flow %s>: " fmt "\n", client ? client->proc_pid : 0, client_uuid_str, flow_uuid_str, ##__VA_ARGS__); \
+	NECPLOG(LOG_NOTICE, "NECP CLIENT FLOW TRACE <pid %d %s> <flow %s> <filter - flow %X client %X>: " fmt "\n", client ? client->proc_pid : 0, client_uuid_str, flow_uuid_str, flow->aggregate_filter_control_unit, client->filter_control_unit, ##__VA_ARGS__); \
+    }
+
+#define NECP_CLIENT_FLOW_ERR(client, flow, err, fmt, ...)                                                     \
+    if (client && flow) {                                                                                       \
+    uuid_string_t client_uuid_str = { };                                                                        \
+    uuid_unparse_lower(client->client_id, client_uuid_str);                                                     \
+    uuid_string_t flow_uuid_str = { };                                                                          \
+    uuid_unparse_lower(flow->registration_id, flow_uuid_str);                                                   \
+    NECPLOG(LOG_ERR, "NECP CLIENT FLOW ERROR <pid %d %s> <flow %s> <filter - flow %X client %X> <err %d>: " fmt "\n", client ? client->proc_pid : 0, client_uuid_str, flow_uuid_str, flow->aggregate_filter_control_unit, client->filter_control_unit, err, ##__VA_ARGS__); \
     }
 
 #define NECP_CLIENT_PARAMS_LOG(client, fmt, ...)                                                                \
@@ -227,6 +239,20 @@ static int necp_client_tracing_pid = 0;
     uuid_unparse_lower(client->client_id, client_uuid_str);                                                     \
     NECPLOG(LOG_NOTICE, "NECP_CLIENT_PARAMS_LOG <pid %d %s>: " fmt "\n", client ? client->proc_pid : 0, client_uuid_str, ##__VA_ARGS__); \
     }
+
+#define NECP_CLIENT_RESULT_LOG(client, fmt, ...)                                                                       \
+    if (client && NECP_ENABLE_CLIENT_TRACE(NECP_CLIENT_TRACE_LEVEL_PARAMS)) {                                   \
+    uuid_string_t client_uuid_str = { };                                                                        \
+    uuid_unparse_lower(client->client_id, client_uuid_str);                                                     \
+    NECPLOG(LOG_NOTICE, "NECP_CLIENT_RESULT_LOG <pid %d %s> <result %d> <tunnel %d> <scope %d> <flowdivert %d> <filter %d>: " fmt "\n", client ? client->proc_pid : 0, client_uuid_str, \
+	client->policy_result, \
+	client->policy_result_parameter.tunnel_interface_index, \
+	client->policy_result_parameter.scoped_interface_index, \
+	client->policy_result_parameter.flow_divert_control_unit, \
+	client->policy_result_parameter.filter_control_unit, \
+	##__VA_ARGS__); \
+    }
+
 
 #define NECP_SOCKET_PID(so) \
     ((so->so_flags & SOF_DELEGATED) ? so->e_pid : so->last_pid)
@@ -442,6 +468,9 @@ struct necp_client_flow {
 	unsigned check_tcp_heuristics : 1;
 	unsigned aop_offload : 1;
 	unsigned aop_stat_index_valid : 1;
+	unsigned local_ether_valid : 1;  // Local MAC address is valid
+	unsigned remote_ether_valid : 1; // Remote MAC address is valid
+	uint8_t arp_nd_timer_callout_count; // Number of timer callouts for this flow (max 5)
 	union {
 		uuid_t nexus_agent;
 		struct {
@@ -456,8 +485,12 @@ struct necp_client_flow {
 	struct necp_client_flow_protoctl_event protoctl_event;
 	union necp_sockaddr_union local_addr;
 	union necp_sockaddr_union remote_addr;
+	struct ether_addr local_ether;   // Local MAC address
+	struct ether_addr remote_ether;  // Remote MAC address
 	uint32_t flow_tag;
 	uint32_t stats_index;           // Index associated with AOP flows
+	eventhandler_tag route_eh_tag;  // Route event handler tag for this flow
+	struct rtentry *route_eh;       // Route entry for monitoring
 
 	size_t assigned_results_length;
 	u_int8_t *__counted_by(assigned_results_length) assigned_results;
@@ -470,6 +503,7 @@ struct necp_client_flow_registration {
 	LIST_ENTRY(necp_client_flow_registration) collect_stats_chain;
 	uuid_t registration_id;
 	u_int32_t flags;
+	u_int32_t aggregate_filter_control_unit; // received flow qualification from each filter
 	unsigned flow_result_read : 1;
 	unsigned defunct : 1;
 	unsigned aop_offload : 1;
@@ -764,6 +798,14 @@ static LCK_RW_DECLARE_ATTR(necp_update_all_clients_lock, &necp_fd_mtx_grp, &necp
 #define NECP_UPDATE_ALL_CLIENTS_SHARED() lck_rw_lock_shared(&necp_update_all_clients_lock)
 #define NECP_UPDATE_ALL_CLIENTS_UNLOCK() lck_rw_done(&necp_update_all_clients_lock)
 
+/* Global ARP/ND resolution timer for all offload clients */
+static thread_call_t necp_client_arp_nd_tcall;
+
+#define NECP_CLIENT_ARP_ND_MAX_TIMER_CALLOUTS 5
+
+static void necp_client_setup_offload_ethernet_flow_route_monitoring(struct necp_client *client, struct necp_client_flow_registration *flow_registration);
+static int necp_client_setup_route_monitor(struct necp_client *client, struct necp_client_flow *flow, struct necp_client_flow_registration *flow_registration);
+
 // Array of PIDs that will trigger in-process flow divert, protected by NECP_FD_LIST_LOCK
 #define NECP_MAX_FLOW_DIVERT_NEEDED_PIDS 4
 static pid_t necp_flow_divert_needed_pids[NECP_MAX_FLOW_DIVERT_NEEDED_PIDS];
@@ -796,9 +838,12 @@ static void *necp_arena_sysctls_obj(struct necp_fd_data *fd_data, mach_vm_offset
 
 static int necp_aop_offload_stats_initialize(struct necp_client_flow_registration *flow_registration, uuid_t netagent_uuid);
 static void necp_aop_offload_stats_destroy(struct necp_client_flow *flow);
+static errno_t necp_client_flow_populate_mac_addresses(struct necp_client_flow *flow);
 
 void necp_copy_inp_domain_info(struct inpcb *, struct socket *, nstat_domain_info *);
-void necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx));
+void necp_with_inp_domain_name_locked(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx));
+
+static void necp_flow_route_monitor_unregister(struct rtentry *, eventhandler_tag);
 
 #if __has_ptrcheck
 static inline
@@ -1020,6 +1065,37 @@ necp_find_client_and_lock(uuid_t client_id)
 		struct necp_client find;
 		uuid_copy(find.client_id, client_id);
 		client = RB_FIND(_necp_client_global_tree, &necp_client_global_tree, &find);
+	}
+
+	if (client != NULL) {
+		NECP_CLIENT_LOCK(client);
+	}
+
+	return client;
+}
+
+/*
+ * Locate flow with flow_id.  If found, lock client
+ */
+static struct necp_client *
+necp_find_flow_locked(uuid_t flow_id, struct necp_client_flow_registration * __single * __single found_flow)
+{
+	NECP_CLIENT_TREE_ASSERT_LOCKED();
+
+	struct necp_client *client = NULL;
+
+	if (necp_client_id_is_flow(flow_id)) {
+		NECP_FLOW_TREE_LOCK_SHARED();
+		struct necp_client_flow_registration find;
+		uuid_copy(find.registration_id, flow_id);
+		struct necp_client_flow_registration *flow = RB_FIND(_necp_client_flow_global_tree, &necp_client_flow_global_tree, &find);
+		if (flow != NULL) {
+			client = flow->client;
+			if (found_flow != NULL) {
+				*found_flow = flow;
+			}
+		}
+		NECP_FLOW_TREE_UNLOCK();
 	}
 
 	if (client != NULL) {
@@ -1533,6 +1609,182 @@ necp_collect_stats_client_callout(__unused thread_call_param_t dummy,
 	necp_schedule_collect_stats_clients(TRUE); // recurring collection
 }
 
+/* Forward declarations for ARP/ND resolution functions */
+typedef struct {
+	struct rtentry *rt;                 /* Route for target lookup */
+	struct rtentry *__single gwrt;      /* Gateway route (if indirect) */
+	struct sockaddr *target_sa;         /* Target sockaddr for resolution */
+	struct rtentry *target_rt;          /* Target route (locked on success) */
+	bool is_onlink;                     /* True if direct route, false if via gateway */
+} necp_route_resolution_info_t;
+
+static bool necp_client_lookup_route_target(struct necp_client_flow *flow, necp_route_resolution_info_t *info);
+static void necp_client_cleanup_route_target(necp_route_resolution_info_t *info);
+static void necp_client_trigger_arp_nd_resolution(ifnet_t ifp, struct sockaddr *target_sa, struct rtentry *target_rt, bool is_onlink);
+static void necp_client_schedule_global_arp_nd_timer(void);
+
+static void
+necp_client_arp_nd_global_timer_callout(__unused thread_call_param_t param0,
+    __unused thread_call_param_t param1)
+{
+	struct necp_client *client = NULL;
+	bool has_unresolved_clients = false;
+
+	NECP_CLIENT_TREE_LOCK_SHARED();
+
+	RB_FOREACH(client, _necp_client_global_tree, &necp_client_global_tree) {
+		struct necp_client_flow_registration *flow_registration = NULL;
+		struct necp_client_flow *flow = NULL;
+		bool client_has_unresolved = false;
+
+		NECP_CLIENT_LOCK(client);
+
+		/* Iterate through all flow registrations to find unresolved offload flows */
+		RB_FOREACH(flow_registration, _necp_client_flow_tree, &client->flow_registrations) {
+			LIST_FOREACH(flow, &flow_registration->flow_list, flow_chain) {
+				/* Check if this is an offload flow that needs resolution */
+				if (flow->nexus && flow->aop_offload && flow->assigned) {
+					/* Skip if flow already has valid remote Ethernet address or has exceeded timer limit */
+					if (flow->remote_ether_valid || flow->arp_nd_timer_callout_count >= NECP_CLIENT_ARP_ND_MAX_TIMER_CALLOUTS) {
+						continue;
+					}
+
+					/* Get interface */
+					ifnet_t ifp = NULL;
+					ifnet_head_lock_shared();
+					if (flow->interface_index != IFSCOPE_NONE && flow->interface_index <= if_index) {
+						ifp = ifindex2ifnet[flow->interface_index];
+						if (ifp != NULL) {
+							ifnet_reference(ifp);
+						}
+					}
+					ifnet_head_done();
+
+					if (ifp != NULL && IFNET_IS_ETHERNET(ifp)) {
+						/* Check if flow still needs resolution */
+						necp_route_resolution_info_t route_info;
+						if (necp_client_lookup_route_target(flow, &route_info)) {
+							/* Check if MAC is resolved */
+							if (SDL(route_info.target_rt->rt_gateway)->sdl_alen != ETHER_ADDR_LEN) {
+								/* Still unresolved - trigger resolution */
+								necp_client_trigger_arp_nd_resolution(ifp, route_info.target_sa,
+								    route_info.target_rt, route_info.is_onlink);
+								flow->arp_nd_timer_callout_count++;
+								client_has_unresolved = true;
+							} else {
+								/* Update flow's remote MAC address from route info */
+								struct sockaddr_dl *sdl = SDL(route_info.target_rt->rt_gateway);
+								bcopy(LLADDR(sdl), flow->remote_ether.octet, ETHER_ADDR_LEN);
+								flow->remote_ether_valid = 1;
+								/* Reset timer callout counter since flow is now resolved */
+								flow->arp_nd_timer_callout_count = 0;
+							}
+							necp_client_cleanup_route_target(&route_info);
+						} else {
+							/* Route lookup failed - increment counter and consider unresolved */
+							flow->arp_nd_timer_callout_count++;
+							client_has_unresolved = true;
+						}
+					}
+
+					if (ifp != NULL) {
+						ifnet_release(ifp);
+					}
+				}
+			}
+		}
+
+		/* Track if we found any unresolved flows across all clients */
+		if (client_has_unresolved) {
+			has_unresolved_clients = true;
+		}
+
+		NECP_CLIENT_UNLOCK(client);
+	}
+
+	/* Reschedule global timer if we still have unresolved clients */
+	if (has_unresolved_clients) {
+		necp_client_schedule_global_arp_nd_timer();
+	}
+
+	NECP_CLIENT_TREE_UNLOCK();
+}
+
+static void
+necp_client_schedule_global_arp_nd_timer(void)
+{
+	uint64_t deadline;
+	uint64_t leeway;
+
+	/* Schedule timer for 1 second from now */
+	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
+	clock_interval_to_absolutetime_interval(100, NSEC_PER_MSEC, &leeway);  /* 100ms leeway */
+
+	thread_call_enter_delayed_with_leeway(necp_client_arp_nd_tcall, NULL,
+	    deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+}
+
+static void
+necp_client_setup_offload_ethernet_flow_route_monitoring(struct necp_client *client, struct necp_client_flow_registration *flow_registration)
+{
+	necp_route_resolution_info_t route_info;
+	int error = 0;
+
+	assert(client != NULL);
+	assert(flow_registration != NULL);
+	NECP_CLIENT_ASSERT_LOCKED(client);
+
+	/* Get the first flow from the registration */
+	struct necp_client_flow *flow = LIST_FIRST(&flow_registration->flow_list);
+	if (flow == NULL || !flow->nexus || !flow->aop_offload) {
+		/* No suitable offload flow found */
+		return;
+	}
+
+	/* Check if interface is Ethernet before setting up route monitoring */
+	ifnet_t ifp = NULL;
+	ifnet_head_lock_shared();
+	if (flow->interface_index != IFSCOPE_NONE && flow->interface_index <= if_index) {
+		ifp = ifindex2ifnet[flow->interface_index];
+	}
+	ifnet_head_done();
+
+	if (ifp != NULL && IFNET_IS_ETHERNET(ifp)) {
+		error = necp_client_setup_route_monitor(client, flow, flow_registration);
+		if (error != 0) {
+			NECPLOG(LOG_ERR, "necp_client_setup_offload_ethernet_flow_route_monitoring: failed to setup route monitor for offload flow (error %d)", error);
+			return;
+		}
+
+		/* Route monitor set up successfully, proceed with ARP/ND resolution */
+	} else {
+		NECPLOG0(LOG_DEBUG, "necp_client_setup_offload_ethernet_flow_route_monitoring: skipping route monitor setup - interface is not Ethernet");
+		return;
+	}
+
+	/* Look up route target information */
+	if (!necp_client_lookup_route_target(flow, &route_info)) {
+		return;
+	}
+
+	/* Initialize the timer callout counter for this flow and trigger ARP/ND resolution only if link-layer address is not present */
+	if (SDL(route_info.target_rt->rt_gateway)->sdl_alen != ETHER_ADDR_LEN) {
+		/* Initialize the timer callout counter for this flow and trigger ARP/ND resolution for the first time */
+		flow->arp_nd_timer_callout_count = 1;
+
+		/* Trigger ARP/ND resolution */
+		necp_client_trigger_arp_nd_resolution(ifp, route_info.target_sa, route_info.target_rt, route_info.is_onlink);
+
+		/* Schedule global timer to check for resolution progress */
+		necp_client_schedule_global_arp_nd_timer();
+	} else {
+		NECPLOG0(LOG_DEBUG, "necp_client_setup_offload_ethernet_flow_route_monitoring: MAC address already resolved");
+	}
+
+	/* Clean up route references */
+	necp_client_cleanup_route_target(&route_info);
+}
+
 #endif /* !SKYWALK */
 
 static void
@@ -1898,6 +2150,20 @@ necp_destroy_client_flow_registration(struct necp_client *client,
 		}
 
 		necp_aop_offload_stats_destroy(search_flow);
+
+		// Clean up route monitoring for this flow
+		if (search_flow->route_eh_tag != NULL) {
+			if (search_flow->route_eh != NULL) {
+				necp_flow_route_monitor_unregister(search_flow->route_eh, search_flow->route_eh_tag);
+				rtfree(search_flow->route_eh); /* Release route reference held for monitoring */
+				search_flow->route_eh = NULL;
+				search_flow->route_eh_tag = NULL;
+				NECPLOG0(LOG_DEBUG, "Route monitor cleaned up during flow destruction");
+			} else {
+				NECPLOG0(LOG_WARNING, "Flow has route monitor tag but no route entry during flow destruction");
+				search_flow->route_eh_tag = NULL;
+			}
+		}
 
 		kfree_type(struct necp_client_flow, search_flow);
 	}
@@ -3530,6 +3796,63 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t * __sized_by(p
 	return error;
 }
 
+static void
+necp_client_route_monitor_callback(struct eventhandler_entry_arg ee_arg,
+    __unused struct sockaddr *dst, __unused int route_ev,
+    __unused struct sockaddr *gw_addr_orig, __unused int flags)
+{
+	/* Extract client and flow registration IDs from event argument */
+	uuid_t client_id;
+	uuid_copy(client_id, ee_arg.ee_fm_uuid);
+
+	uuid_t flow_registration_id;
+	uuid_copy(flow_registration_id, ee_arg.ee_fr_uuid);
+
+	struct necp_fd_data *client_fd = NULL;
+	struct necp_client *client = NULL;
+	bool found_client = false;
+
+	NECP_FD_LIST_LOCK_SHARED();
+
+	/* Search for the client across all file descriptors */
+	LIST_FOREACH(client_fd, &necp_fd_list, chain) {
+		NECP_FD_LOCK(client_fd);
+
+		client = necp_client_fd_find_client_and_lock(client_fd, client_id);
+		if (client != NULL) {
+			found_client = true;
+
+			/* Find the specific flow registration and mark for update */
+			struct necp_client_flow_registration *flow_registration =
+			    necp_client_find_flow(client, flow_registration_id);
+			if (flow_registration != NULL) {
+				/* Mark flow results as unread to trigger client update */
+				flow_registration->flow_result_read = false;
+
+				/* Notify the client about the route change */
+				necp_fd_notify(client_fd, true);
+			} else {
+				NECPLOG0(LOG_DEBUG, "necp_client_route_monitor_callback: "
+				    "flow registration not found");
+			}
+
+			NECP_CLIENT_UNLOCK(client);
+		}
+
+		NECP_FD_UNLOCK(client_fd);
+
+		if (found_client) {
+			break;
+		}
+	}
+
+	NECP_FD_LIST_UNLOCK();
+
+	if (!found_client) {
+		NECPLOG0(LOG_DEBUG, "necp_client_route_monitor_callback: client not found");
+	}
+}
+
 static int
 necp_client_parse_result(u_int8_t * __indexable result,
     u_int32_t result_size,
@@ -3562,6 +3885,11 @@ necp_client_parse_result(u_int8_t * __indexable result,
 						struct necp_client_endpoint *endpoint = (struct necp_client_endpoint *)(void *)value;
 						if (necp_client_address_is_valid(&endpoint->u.sa)) {
 							flow->remote_addr.sin6 = endpoint->u.sin6;
+
+							/* Pre-populate MAC addresses for offload flows */
+							if (flow->aop_offload) {
+								necp_client_flow_populate_mac_addresses(flow);
+							}
 						}
 					}
 					break;
@@ -3582,6 +3910,7 @@ necp_client_parse_result(u_int8_t * __indexable result,
 						flow->flow_tag = *(uint32_t *)(void *)value;
 						break;
 					}
+					break;
 				}
 #endif /* SKYWALK */
 				default: {
@@ -4292,6 +4621,28 @@ necp_update_flow_protoctl_event(uuid_t netagent_uuid, uuid_t client_id,
 		error = EINVAL;
 	}
 	return error;
+}
+
+static eventhandler_tag
+necp_client_route_monitor_register(struct rtentry *rt, struct necp_client* client, struct necp_client_flow_registration *flow_registration)
+{
+	struct eventhandler_entry_arg ee_arg;
+	bzero(&ee_arg, sizeof(ee_arg));
+
+	uuid_copy(ee_arg.ee_fm_uuid, client->client_id);
+	uuid_copy(ee_arg.ee_fr_uuid, flow_registration->registration_id);
+
+	eventhandler_tag tag =
+	    EVENTHANDLER_REGISTER(&rt->rt_evhdlr_ctxt, route_event,
+	    &necp_client_route_monitor_callback, ee_arg, EVENTHANDLER_PRI_ANY);
+
+	return tag;
+}
+
+static void
+necp_flow_route_monitor_unregister(struct rtentry *rt, eventhandler_tag tag)
+{
+	EVENTHANDLER_DEREGISTER(&rt->rt_evhdlr_ctxt, route_event, tag);
 }
 
 static bool
@@ -6317,7 +6668,7 @@ necp_copy_inp_domain_info(struct inpcb *inp, struct socket *so, nstat_domain_inf
 }
 
 void
-necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx))
+necp_with_inp_domain_name_locked(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx))
 {
 	struct inpcb *inp = NULL;
 
@@ -6333,6 +6684,18 @@ necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *
 	necp_lock_socket_attributes();
 	with_func(inp->inp_necp_attributes.inp_domain, ctx);
 	necp_unlock_socket_attributes();
+}
+
+void
+necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx))
+{
+	if (so == NULL || with_func == NULL) {
+		return;
+	}
+
+	socket_lock(so, 1);
+	necp_with_inp_domain_name_locked(so, ctx, with_func);
+	socket_unlock(so, 1);
 }
 
 static size_t
@@ -8095,6 +8458,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 	// Prime the client result
 	NECP_CLIENT_LOCK(client);
 	(void)necp_update_client_result(current_proc(), fd_data, client, NULL);
+	NECP_CLIENT_RESULT_LOG(client, "Updated client result");
 	necp_client_retain_locked(client);
 	NECP_CLIENT_UNLOCK(client);
 	NECP_FD_UNLOCK(fd_data);
@@ -8479,7 +8843,7 @@ necp_client_calculate_flow_tlv_size(struct necp_client_flow_registration *flow_r
 }
 
 static errno_t
-necp_client_destination_mac_address(struct sockaddr *remote, uint32_t index,
+necp_client_remote_mac_address(struct sockaddr *remote, uint32_t index,
     struct ether_addr *remote_mac)
 {
 	struct rtentry *rt = NULL;
@@ -8533,74 +8897,157 @@ done:
 	return err;
 }
 
+static errno_t
+necp_client_flow_populate_mac_addresses(struct necp_client_flow *flow)
+{
+	if (flow == NULL) {
+		return EINVAL;
+	}
+
+	/* Check if both MAC addresses are already populated */
+	if (flow->local_ether_valid && flow->remote_ether_valid) {
+		return 0;
+	}
+
+	/* Determine what we need to populate */
+	bool need_local_mac = !flow->local_ether_valid;
+	bool need_remote_mac = !flow->remote_ether_valid;
+
+	/* Get and validate interface only if we need local MAC or remote MAC lookup */
+	ifnet_t ifp = NULL;
+	if (need_local_mac || need_remote_mac) {
+		ifnet_head_lock_shared();
+		if (flow->interface_index != IFSCOPE_NONE && flow->interface_index <= if_index) {
+			ifp = ifindex2ifnet[flow->interface_index];
+			if (ifp != NULL) {
+				ifnet_reference(ifp);
+			}
+		}
+		ifnet_head_done();
+
+		if (ifp == NULL) {
+			NECPLOG0(LOG_ERR, "necp_client_flow_populate_mac_addresses: invalid interface");
+			return ENOENT;
+		}
+
+		/* Only support Ethernet interfaces */
+		if (!IFNET_IS_ETHERNET(ifp)) {
+			ifnet_release(ifp);
+			return ENOTSUP;
+		}
+	}
+
+	/* Get local MAC address if needed */
+	if (need_local_mac && ifp != NULL) {
+		if (ifnet_lladdr_copy_bytes(ifp, flow->local_ether.octet, ETHER_ADDR_LEN) == 0) {
+			flow->local_ether_valid = 1;
+		} else {
+			NECPLOG0(LOG_ERR, "necp_client_flow_populate_mac_addresses: failed to get local MAC address");
+		}
+	}
+
+	/* Release interface reference if we acquired it */
+	if (ifp != NULL) {
+		ifnet_release(ifp);
+	}
+
+	/* Get remote MAC address if needed */
+	if (need_remote_mac) {
+		errno_t remote_result = necp_client_remote_mac_address(SA(&flow->remote_addr),
+		    flow->interface_index, &flow->remote_ether);
+		if (remote_result == 0) {
+			flow->remote_ether_valid = 1;
+			/* Reset timer callout counter since remote MAC is now available */
+			flow->arp_nd_timer_callout_count = 0;
+		}
+	}
+
+	/* Return success if we have at least one MAC address */
+	if (flow->local_ether_valid || flow->remote_ether_valid) {
+		return 0;
+	}
+
+	return ENOENT;
+}
+
+static uint8_t *
+__sized_by(*buflen)
+necp_client_flow_build_mac_address_buffer(struct necp_client_flow *flow, size_t *buflen)
+{
+	if (flow == NULL || buflen == NULL) {
+		return NULL;
+	}
+
+	*buflen = 0;
+
+	/* Calculate required buffer size */
+	size_t required_size = 0;
+	if (flow->local_ether_valid) {
+		required_size += sizeof(struct necp_tlv_header) + sizeof(struct ether_addr);
+	}
+	if (flow->remote_ether_valid) {
+		required_size += sizeof(struct necp_tlv_header) + sizeof(struct ether_addr);
+	}
+
+	if (required_size == 0) {
+		NECPLOG0(LOG_ERR, "necp_client_flow_build_mac_address_buffer: no MAC addresses available");
+		return NULL;
+	}
+
+	/* Allocate buffer */
+	uint8_t *buffer = kalloc_data(required_size, Z_WAITOK | Z_ZERO);
+	if (buffer == NULL) {
+		NECPLOG0(LOG_ERR, "necp_client_flow_build_mac_address_buffer: buffer allocation failed");
+		return NULL;
+	}
+
+	/* Write TLV data */
+	uint8_t *cursor = buffer;
+
+	if (flow->local_ether_valid) {
+		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_LOCAL_ETHER_ADDR,
+		    sizeof(struct ether_addr), (uint8_t *)&flow->local_ether,
+		    buffer, required_size);
+		if (cursor == NULL) {
+			NECPLOG0(LOG_ERR, "necp_client_flow_build_mac_address_buffer: failed to write local MAC TLV");
+			kfree_data_counted_by(buffer, required_size);
+			return NULL;
+		}
+	}
+
+	if (flow->remote_ether_valid) {
+		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_REMOTE_ETHER_ADDR,
+		    sizeof(struct ether_addr), (uint8_t *)&flow->remote_ether,
+		    buffer, required_size);
+		if (cursor == NULL) {
+			NECPLOG0(LOG_ERR, "necp_client_flow_build_mac_address_buffer: failed to write remote MAC TLV");
+			kfree_data_counted_by(buffer, required_size);
+			return NULL;
+		}
+	}
+
+	*buflen = required_size;
+	return buffer;
+}
+
 static uint8_t *
 __sized_by(*buflen)
 necp_client_flow_mac_and_gateway(struct necp_client_flow *flow, size_t *buflen)
 {
-	u_int8_t * __indexable buffer = NULL;
-	u_int8_t * __indexable cursor = NULL;
-	size_t valsize = 0;
-
-	ASSERT(flow != NULL);
-	ASSERT(buflen != NULL);
-
-	*buflen = 0;
-
-	ifnet_t ifp = NULL;
-	ifnet_head_lock_shared();
-	if (flow->interface_index != IFSCOPE_NONE && flow->interface_index <= if_index) {
-		ifp = ifindex2ifnet[flow->interface_index];
-	}
-	ifnet_head_done();
-
-	if (ifp == NULL) {
-		NECPLOG0(LOG_ERR, "necp_client_flow_mac_and_gateway: ifp is NULL");
+	if (flow == NULL || buflen == NULL) {
 		return NULL;
 	}
 
-	if (!IFNET_IS_ETHERNET(ifp)) {
+	/* Populate MAC addresses in the flow structure */
+	errno_t populate_result = necp_client_flow_populate_mac_addresses(flow);
+	if (populate_result != 0) {
+		NECPLOG(LOG_ERR, "necp_client_flow_mac_and_gateway: failed to populate MAC addresses (%d)", populate_result);
+		*buflen = 0;
 		return NULL;
 	}
 
-	/* local MAC */
-	struct ether_addr local_ether = {};
-	bool local_ether_set = false;
-	if (ifnet_lladdr_copy_bytes(ifp, local_ether.octet, ETHER_ADDR_LEN) == 0) {
-		local_ether_set = true;
-		valsize += sizeof(struct necp_tlv_header) + sizeof(struct ether_addr);
-	}
-
-	/*remote MAC */
-	struct ether_addr remote_ether = {};
-	bool remote_ether_set = false;
-	if (necp_client_destination_mac_address(SA(&flow->remote_addr),
-	    flow->interface_index, &remote_ether) == 0) {
-		remote_ether_set = true;
-		valsize += sizeof(struct necp_tlv_header) + sizeof(struct ether_addr);
-	}
-
-	if (valsize == 0) {
-		return NULL;
-	}
-
-	buffer = kalloc_data(valsize, Z_WAITOK | Z_ZERO);
-	if (buffer == NULL) {
-		return NULL;
-	}
-
-	cursor = buffer;
-	if (local_ether_set) {
-		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_LOCAL_ETHER_ADDR,
-		    sizeof(struct ether_addr), (uint8_t *)(struct ether_addr * __bidi_indexable)&local_ether,
-		    buffer, valsize);
-	}
-	if (remote_ether_set) {
-		cursor = necp_buffer_write_tlv(cursor, NECP_CLIENT_RESULT_REMOTE_ETHER_ADDR,
-		    sizeof(struct ether_addr), (uint8_t *)(struct ether_addr * __bidi_indexable)&remote_ether,
-		    buffer, valsize);
-	}
-	*buflen = valsize;
-	return buffer;
+	/* Build and return the MAC address buffer */
+	return necp_client_flow_build_mac_address_buffer(flow, buflen);
 }
 
 static int
@@ -9319,6 +9766,184 @@ done:
 	return error;
 }
 
+static bool
+necp_client_lookup_route_target(struct necp_client_flow *flow, necp_route_resolution_info_t *info)
+{
+	bool success = false;
+
+	if (flow == NULL || info == NULL) {
+		return false;
+	}
+
+	/* Initialize the info structure */
+	bzero(info, sizeof(*info));
+
+	/* Look up the route for the remote address */
+	info->rt = rtalloc1_scoped(SA(&flow->remote_addr), 1, 0, flow->interface_index);
+	if (info->rt == NULL || info->rt->rt_gateway == NULL) {
+		NECPLOG0(LOG_DEBUG, "necp_client_lookup_route_target: invalid route for ARP/ND resolution");
+	} else {
+		/* Determine target for ARP/ND resolution - destination or gateway */
+		if (IS_DIRECT_HOSTROUTE(info->rt)) {
+			info->target_sa = SA(&flow->remote_addr);
+			info->target_rt = info->rt;
+			info->is_onlink = true;
+			success = true;
+		} else {
+			/* Look up gateway route using route_to_gwroute */
+			errno_t err = route_to_gwroute(SA(&flow->remote_addr), info->rt, &info->gwrt);
+			if (err == 0 && info->gwrt != NULL &&
+			    info->gwrt->rt_gateway->sa_family == AF_LINK &&
+			    SDL(info->gwrt->rt_gateway)->sdl_type == IFT_ETHER) {
+				/* Unlock the gateway route returned by route_to_gwroute */
+				RT_UNLOCK(info->gwrt);
+
+				info->target_sa = info->rt->rt_gateway;  /* Gateway address from original route */
+				info->target_rt = info->gwrt;            /* Gateway route entry */
+				info->is_onlink = false;
+				success = true;
+			} else {
+				NECPLOG0(LOG_NOTICE, "necp_client_lookup_route_target: unsuitable gateway route");
+			}
+		}
+	}
+
+	if (!success) {
+		/* Clean up on failure */
+		necp_client_cleanup_route_target(info);
+	}
+
+	return success;
+}
+
+static void
+necp_client_cleanup_route_target(necp_route_resolution_info_t *info)
+{
+	if (info == NULL) {
+		return;
+	}
+
+	/* Clean up route references */
+	if (info->gwrt != NULL) {
+		rtfree(info->gwrt);
+		info->gwrt = NULL;
+	}
+	if (info->rt != NULL) {
+		rtfree(info->rt);
+		info->rt = NULL;
+	}
+}
+
+static void
+necp_client_trigger_arp_nd_resolution(ifnet_t ifp, struct sockaddr *target_sa, struct rtentry *target_rt,
+    __unused bool is_onlink)
+{
+	/* Variable declarations */
+	int err = 0;
+	struct sockaddr_dl sdl;
+	struct sockaddr_in *sin = NULL;
+	struct llinfo_nd6 *__single ln = NULL;
+	struct nd_ifinfo *ndi = NULL;
+
+	/* Need to resolve - trigger ARP/ND based on target address family */
+	switch (target_sa->sa_family) {
+	case AF_INET: {
+		sin = SIN(target_sa);
+		SOCKADDR_ZERO(&sdl, sizeof(sdl));
+		err = arp_lookup_ip(ifp, sin, &sdl, sizeof(sdl), NULL, NULL);
+		if (err != 0 && err != EJUSTRETURN) {
+			NECPLOG(LOG_NOTICE, "necp_client_trigger_arp_nd_resolution: ARP failed (err %d)", err);
+		}
+		break;
+	}
+
+	case AF_INET6: {
+		/* Lock the target route for safe access to rt_llinfo and ND structures */
+		RT_LOCK(target_rt);
+		ln = target_rt->rt_llinfo;
+		/* Check if route is valid for ND */
+		if ((target_rt->rt_flags & (RTF_UP | RTF_LLINFO)) != (RTF_UP | RTF_LLINFO) || ln == NULL) {
+			NECPLOG0(LOG_NOTICE, "necp_client_trigger_arp_nd_resolution: route unavailable for ND");
+			RT_UNLOCK(target_rt);
+			break;
+		}
+		/* If it's a permanent entry and resolved, we're done */
+		if (ln->ln_expire == 0 && ln->ln_state == ND6_LLINFO_REACHABLE) {
+			if (SDL(target_rt->rt_gateway)->sdl_alen == ETHER_ADDR_LEN) {
+				RT_UNLOCK(target_rt);
+				break;
+			}
+		}
+		/* Trigger ND resolution if needed */
+		if (ln->ln_state == ND6_LLINFO_NOSTATE) {
+			ND6_CACHE_STATE_TRANSITION(ln, ND6_LLINFO_INCOMPLETE);
+		}
+		if (ln->ln_state == ND6_LLINFO_INCOMPLETE && !ln->ln_asked) {
+			ndi = ND_IFINFO(target_rt->rt_ifp);
+			VERIFY(ndi != NULL && ndi->initialized);
+			ln->ln_asked++;
+			ln_setexpire(ln, net_uptime() + ndi->retrans / 1000);
+			RT_UNLOCK(target_rt);
+			nd6_ns_output(target_rt->rt_ifp, NULL, &SIN6(rt_key(target_rt))->sin6_addr, NULL, NULL, 0);
+			lck_mtx_lock(rnh_lock);
+			nd6_sched_timeout(NULL, NULL);
+			lck_mtx_unlock(rnh_lock);
+		} else {
+			RT_UNLOCK(target_rt);
+		}
+		break;
+	}
+
+	default:
+		NECPLOG(LOG_NOTICE, "necp_client_trigger_arp_nd_resolution: unsupported address family %d",
+		    target_sa->sa_family);
+		break;
+	}
+}
+
+static int
+necp_client_setup_route_monitor(struct necp_client *client, struct necp_client_flow *flow, struct necp_client_flow_registration *flow_registration)
+{
+	int error = 0;
+	necp_route_resolution_info_t route_info;
+
+	if (client == NULL || flow == NULL || flow_registration == NULL) {
+		return EINVAL;
+	}
+
+	NECP_CLIENT_ASSERT_LOCKED(client);
+
+	/* Only install one route event monitor per flow */
+	if (flow->route_eh_tag != NULL) {
+		return 0;
+	}
+
+	/* Only monitor flows that are assigned */
+	if (!flow->assigned) {
+		return ENOTSUP;
+	}
+
+	/* Use shared helper function to look up route target */
+	if (necp_client_lookup_route_target(flow, &route_info)) {
+		eventhandler_tag tag = necp_client_route_monitor_register(route_info.rt, client, flow_registration);
+		if (tag != NULL) {
+			flow->route_eh_tag = tag;
+			flow->route_eh = route_info.rt;
+			RT_ADDREF(route_info.rt);
+			error = 0;
+		} else {
+			error = EBUSY;
+		}
+
+		/* Clean up route references using shared helper */
+		necp_client_cleanup_route_target(&route_info);
+	} else {
+		error = EHOSTUNREACH;
+	}
+
+	return error;
+}
+
 static NECP_CLIENT_ACTION_FUNCTION int
 necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_args *uap, int *retval)
 {
@@ -9473,6 +10098,15 @@ necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_arg
 		pid = parameters.epid;
 	}
 
+#if NECP_FLOW_QUALIFICATION
+	// If this flow is subject to content filtering, mark this flow not-ready initially.
+	// When all filters have qualified the flow, then clear not-ready flag and let traffic pass.
+	if (cfil_check_filter_control_unit(client->filter_control_unit, 0, NULL)) {
+		NECP_CLIENT_FLOW_LOG(client, new_registration, "Mark flow disabled");
+		parameters.disabled = true;
+	}
+#endif
+
 #if SKYWALK
 	if (add_request->flags & NECP_CLIENT_FLOW_FLAGS_ALLOW_NEXUS) {
 		size_t assigned_results_length = 0;
@@ -9507,6 +10141,15 @@ necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_arg
 			// All flow divert flows must be using sockets.
 			error = EPERM;
 			NECPLOG(LOG_ERR, "<pid %d> Disallow flow add with flow divert result", client->proc_pid);
+		} else if (interface_index != IFSCOPE_NONE &&
+		    ((client->policy_result == NECP_KERNEL_POLICY_RESULT_IP_TUNNEL &&
+		    interface_index != client->policy_result_parameter.tunnel_interface_index) ||
+		    (client->policy_result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED &&
+		    interface_index != client->policy_result_parameter.scoped_interface_index))) {
+			// If policy result indicates scope or tunnel and the requested interface
+			// doesn't match the allowed interface, disallow flow add.
+			error = EPERM;
+			NECPLOG(LOG_ERR, "<pid %d> Disallow flow add, requested nexus mismatched with NECP result - requested ifindex %d policy <result %d ifindex %d>", client->proc_pid, interface_index, client->policy_result, client->policy_result_parameter.tunnel_interface_index);
 		} else {
 			necp_client_add_nexus_flow_if_needed(new_registration, add_request->agent_uuid, interface_index, parameters.use_aop_offload);
 
@@ -9575,6 +10218,11 @@ necp_client_add_flow(struct necp_fd_data *fd_data, struct necp_client_action_arg
 	if (error == 0 && parameters.use_aop_offload) {
 		error = necp_aop_offload_stats_initialize(
 			new_registration, add_request->agent_uuid);
+
+		/* Set up route monitoring for offload flows */
+		if (error == 0) {
+			necp_client_setup_offload_ethernet_flow_route_monitoring(client, new_registration);
+		}
 	}
 #endif /* !SKYWALK */
 
@@ -12514,6 +13162,87 @@ necp_mppcb_dispose(struct mppcb *mpp)
 	}
 }
 
+int
+necp_client_qualify_flow(uuid_t *flow_uuid, int flow_protocol, union sockaddr_in_4_6 *flow_local, union sockaddr_in_4_6 *flow_remote, u_int32_t filter_control_unit)
+{
+	int error = ENOENT;
+	struct necp_client_flow_registration * __single flow = NULL;
+	struct necp_client *client = NULL;
+	struct necp_client_nexus_parameters parameters = { 0 };
+	struct necp_client_nexus_parameters * __single update_parameters = &parameters;
+	struct necp_client_flow * __single search_flow = NULL;
+	bool found = false;
+
+	if (flow_uuid == NULL || uuid_is_null(*flow_uuid) || flow_local == NULL || flow_remote == NULL) {
+		return EINVAL;
+	}
+
+	NECP_CLIENT_TREE_LOCK_SHARED();
+
+	client = necp_find_flow_locked(*flow_uuid, &flow);
+	if (client == NULL || flow == NULL) {
+		if (client) {
+			NECP_CLIENT_UNLOCK(client);
+		}
+		NECP_CLIENT_TREE_UNLOCK();
+		return ENOENT;
+	}
+
+	// This is not a nexus flow, no op, return success
+	if (!(flow->flags & NECP_CLIENT_FLOW_FLAGS_ALLOW_NEXUS)) {
+		NECP_CLIENT_UNLOCK(client);
+		NECP_CLIENT_TREE_UNLOCK();
+		return 0;
+	}
+
+	if (client->filter_control_unit && client->ip_protocol == flow_protocol) {
+		struct necp_client_flow *temp_flow = NULL;
+
+		LIST_FOREACH_SAFE(search_flow, &flow->flow_list, flow_chain, temp_flow) {
+			if (!flow->defunct && search_flow->nexus && !uuid_is_null(search_flow->u.nexus_agent) &&
+			    (memcmp(flow_local, &search_flow->local_addr, sizeof(union necp_sockaddr_union)) == 0) &&
+			    (memcmp(flow_remote, &search_flow->remote_addr, sizeof(union necp_sockaddr_union)) == 0)) {
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (found && search_flow != NULL) {
+		error = 0;
+		flow->aggregate_filter_control_unit |= filter_control_unit;
+		NECP_CLIENT_FLOW_LOG(client, flow, "necp_client_qualify_flow: received qualification");
+
+		// Check if we have received qualifications from all filters.
+		// Clear the not-ready flag to allow the flow to pass traffic.
+		bool recevied_all = false;
+		if (cfil_check_filter_control_unit(client->filter_control_unit, flow->aggregate_filter_control_unit, &recevied_all) && recevied_all) {
+			// Fill the parameters and clear disabled flag
+			necp_client_copy_parameters_locked(client, update_parameters);
+			update_parameters->disabled = false;
+
+			size_t dummy_length = 0;
+			void * __sized_by(dummy_length) dummy_results = NULL;
+			error = netagent_client_message_with_params(search_flow->u.nexus_agent,
+			    ((flow->flags & NECP_CLIENT_FLOW_FLAGS_USE_CLIENT_ID) ? client->client_id : flow->registration_id),
+			    client->proc_pid, client->agent_handle,
+			    NETAGENT_MESSAGE_TYPE_UPDATE_NEXUS,
+			    (struct necp_client_agent_parameters *)update_parameters,
+			    &dummy_results, &dummy_length);
+			if (error != 0) {
+				NECP_CLIENT_FLOW_ERR(client, flow, error, "necp_client_qualify_flow: failed to update flow - nexus update failed");
+			} else {
+				NECP_CLIENT_FLOW_LOG(client, flow, "necp_client_qualify_flow: enabled flow");
+			}
+		}
+	}
+
+	NECP_CLIENT_UNLOCK(client);
+	NECP_CLIENT_TREE_UNLOCK();
+
+	return error;
+}
+
 /// Module init
 
 void
@@ -12522,6 +13251,12 @@ necp_client_init(void)
 	necp_client_update_tcall = thread_call_allocate_with_options(necp_update_all_clients_callout, NULL,
 	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 	VERIFY(necp_client_update_tcall != NULL);
+
+	/* Initialize global ARP/ND resolution timer */
+	necp_client_arp_nd_tcall = thread_call_allocate_with_options(necp_client_arp_nd_global_timer_callout, NULL,
+	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	VERIFY(necp_client_arp_nd_tcall != NULL);
+
 #if SKYWALK
 
 	necp_client_collect_stats_tcall = thread_call_allocate_with_options(necp_collect_stats_client_callout, NULL,

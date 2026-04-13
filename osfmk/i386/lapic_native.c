@@ -713,8 +713,8 @@ lapic_configure(bool for_wake)
 	}
 #endif
 
-	if (((cpu_number() == master_cpu) && lapic_errors_masked == FALSE) ||
-	    (cpu_number() != master_cpu)) {
+	if (((cpu_number() == boot_cpu_id) && lapic_errors_masked == FALSE) ||
+	    (cpu_number() != boot_cpu_id)) {
 		lapic_esr_clear();
 		LAPIC_WRITE(LVT_ERROR, LAPIC_VECTOR(ERROR));
 	}
@@ -956,11 +956,11 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 		lapic_dump();
 
 		if ((debug_boot_arg && (lapic_dont_panic == FALSE)) ||
-		    cpu_number() != master_cpu) {
+		    cpu_number() != boot_cpu_id) {
 			panic("Local APIC error, ESR: %d", esr);
 		}
 
-		if (cpu_number() == master_cpu) {
+		if (cpu_number() == boot_cpu_id) {
 			uint64_t abstime = mach_absolute_time();
 			if ((abstime - lapic_last_master_error) < lapic_error_time_threshold) {
 				if (lapic_master_error_count++ > lapic_error_count_threshold) {

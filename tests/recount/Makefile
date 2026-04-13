@@ -1,3 +1,5 @@
+INCLUDED_TEST_SOURCE_DIRS += recount
+
 RECOUNT_UTILS = recount/recount_test_utils.c
 WARNING_CFLAGS = -Wno-declaration-after-statement -Wno-bad-function-cast
 EXCLUDED_SOURCES += $(RECOUNT_UTILS)

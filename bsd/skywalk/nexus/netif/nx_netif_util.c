@@ -395,8 +395,13 @@ nx_netif_pkt_to_filter_pkt(struct nexus_netif_adapter *nifna,
 		nif->nif_pkt_copy_from_mbuf(type, fph, off, m, 0,
 		    plen, FALSE, 0);
 	} else {
-		nif->nif_pkt_copy_from_pkt(type, fph, off, ph,
+		err = nif->nif_pkt_copy_from_pkt(type, fph, off, ph,
 		    pkt->pkt_headroom, plen, FALSE, 0, 0, FALSE);
+		/*
+		 * Can currently only fail with NR_TX and copysum == TRUE which does
+		 * extra validation of params which could be from userland.
+		 */
+		ASSERT(err == 0);
 	}
 	ASSERT((fpkt->pkt_pflags & PKT_F_PKT_DATA) == 0);
 	ASSERT((fpkt->pkt_pflags & PKT_F_MBUF_DATA) == 0);
@@ -537,8 +542,14 @@ nx_netif_pkt_to_mbuf(struct nexus_netif_adapter *nifna,
 	m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
 	ph = SK_PTR_ENCODE(pkt, METADATA_TYPE(pkt), METADATA_SUBTYPE(pkt));
 
-	nif->nif_pkt_copy_to_mbuf(type, ph, pkt->pkt_headroom,
+	err = nif->nif_pkt_copy_to_mbuf(type, ph, pkt->pkt_headroom,
 	    m, 0, (uint32_t)len, FALSE, 0);
+	/*
+	 * Can currently only fail with NR_TX and copysum == TRUE which does
+	 * extra validation of params which could be from userland.
+	 */
+	ASSERT(err == 0);
+
 	m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
 	m->m_pkthdr.pkt_flowid = pkt->pkt_flow_token;
 	m->m_pkthdr.necp_mtag.necp_policy_id = pkt->pkt_policy_id;
@@ -655,8 +666,13 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 		nif->nif_pkt_copy_from_mbuf(type, dph, off, m, 0,
 		    len, FALSE, 0);
 	} else {
-		nif->nif_pkt_copy_from_pkt(type, dph, off, ph,
+		err = nif->nif_pkt_copy_from_pkt(type, dph, off, ph,
 		    pkt->pkt_headroom, len, FALSE, 0, 0, FALSE);
+		/*
+		 * Can currently only fail with NR_TX and copysum == TRUE which does
+		 * extra validation of params which could be from userland.
+		 */
+		ASSERT(err == 0);
 	}
 
 	if (type == NR_TX) {

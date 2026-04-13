@@ -710,7 +710,7 @@ proc_info_caller(int proc_info_opts, void ** ret_structs, int * ret_child_pid)
 		    ((uint64_t)preginfo_path->prp_vip.vip_vi.vi_fsid.val[1] << 32),
 		    (user_addr_t)preginfo_path,
 		    (uint32_t)sizeof(struct proc_regionwithpathinfo));
-		T_ASSERT_EQ_INT(retval, (int)sizeof(struct proc_regionwithpathinfo), "__proc_info call for PROC_PIDREGIONPATHWITHINFO3");
+		T_ASSERT_EQ_INT(retval, (int)sizeof(struct proc_regionwithpathinfo), "__proc_info call for PROC_PIDREGIONPATHINFO3");
 		ret_structs[0] = (void *)preginfo_path;
 		ret_structs[1] = (void *)map_tmp;
 		ret_structs[2] = (void *)(uintptr_t)map_tmp_sz;
@@ -2079,7 +2079,7 @@ retry:
 	return kqids;
 }
 
-T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_META_ALL_VALID_ARCHS(true))
 {
 	int nkqids;
 	bool found = false;
@@ -2103,7 +2103,7 @@ T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_
 	free(kqids);
 }
 
-T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic kqueue info", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic kqueue info", T_META_ALL_VALID_ARCHS(true))
 {
 	struct kqueue_info kqinfo;
 	int ret;
@@ -2118,7 +2118,7 @@ T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic 
 	T_EXPECT_EQ(kqinfo.kq_stat.vst_ino, EXPECTED_ID, "inode field should be the kqueue's ID");
 }
 
-T_DECL(dynamic_kqueue_extended_info, "the kernel should report valid extended dynamic kqueue info", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
+T_DECL(dynamic_kqueue_extended_info, "the kernel should report valid extended dynamic kqueue info", T_META_ALL_VALID_ARCHS(true))
 {
 	struct kevent_extinfo kqextinfo[1];
 	int ret;

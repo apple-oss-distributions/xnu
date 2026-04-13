@@ -36,7 +36,7 @@
 
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*!
  * @file <ipc/ipc_policy.h>
@@ -91,6 +91,24 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 #define IPC_KMSG_MAX_OOL_PORT_COUNT  16383
 
 /*!
+ * @const IPC_KMSG_INLINE_PORT_DESCRIPTOR_SOFT_LIMIT
+ * A 'soft' threshold for inline port descriptors in a message.
+ * Messages exceeding this threshold won't be blocked, but we'll emit
+ * CoreAnalytics telemetry about the event.
+ * The threshold here was chosen at-desk after some light poking around.
+ */
+#define IPC_KMSG_INLINE_PORT_DESCRIPTOR_SOFT_LIMIT      128
+
+/*!
+ * @const IPC_VOUCHER_RECIPE_SIZE_SOFT_LIMIT
+ * A 'soft' threshold for Mach voucher recipe size.
+ * Voucher recipes exceeding this threshold won't be blocked, but we'll emit
+ * CoreAnalytics telemetry about the event.
+ * The threshold here was chosen at-desk after some light poking around.
+ */
+#define IPC_MACH_VOUCHER_RECIPE_SIZE_SOFT_LIMIT 64
+
+/*!
  * @const IPC_POLICY_ENHANCED_V0
  * This policy represents platform binaries, hardened-runtime and
  * everything below it.
@@ -112,9 +130,19 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 #define IPC_POLICY_ENHANCED_V2 \
 	(IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V2)
 
+/*!
+ * @const IPC_POLICY_ENHANCED_V3
+ * This policy represents ES features exposed to 3P in FY2026 release.
+ */
+#define IPC_POLICY_ENHANCED_V3 \
+	(IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V3)
+
+/* Highest level, automatically applied to platform binaries */
+#define IPC_POLICY_ENHANCED_VMAX (IPC_POLICY_ENHANCED_V3)
+
 #pragma mark policy tunables
 
-__options_decl(ipc_control_port_options_t, uint32_t, {
+__options_decl(ipc_control_port_options_t, uint8_t, {
 	ICP_OPTIONS_NONE                = 0x00,
 
 	/* policy for IPC_SPACE_POLICY_{PLATFORM,HARDENED} */
@@ -134,19 +162,6 @@ __options_decl(ipc_control_port_options_t, uint32_t, {
  */
 extern ipc_control_port_options_t ipc_control_port_options;
 
-/*!
- * @brief
- * Whether service port defense in depth is enabled.
- */
-extern bool service_port_defense_enabled;
-
-/*!
- * @brief
- * Whether out-of-line port array descriptor
- * restrictions are enabled.
- */
-extern bool ool_port_array_enforced;
-
 #pragma mark policy utils
 
 /*!
@@ -165,6 +180,14 @@ extern bool ool_port_array_enforced;
  */
 #define ipc_release_assert(expr)        release_assert(expr)
 
+#if XNU_TARGET_OS_OSX && CONFIG_CSR
+/*!
+ * @brief
+ * Check if SIP is enabled in the system. It affects certain
+ * policy decisions in OSX
+ */
+extern bool SIP_is_enabled(void);
+#endif /* XNU_TARGET_OS_OSX && CONFIG_CSR */
 
 #pragma mark policy options
 
@@ -343,6 +366,11 @@ typedef const struct ipc_object_policy {
 	 * notification on this receive right
 	 */
 	unsigned long           pol_notif_dead_name     : 1;
+	/**
+	 * allow using this port to receive notifications
+	 * (as a notify_port in `mach_port_request_notification`)
+	 */
+	unsigned long           pol_can_receive_notifications : 1;
 
 
 	/** whether the port requires incoming messages to use an IOT_REPLY_PORT properly */
@@ -407,7 +435,7 @@ ipc_policy(ipc_port_t port)
 }
 
 
-#pragma mark ipc policy telemetry [temporary]
+#pragma mark ipc policy telemetry
 
 /* The bootarg to disable ALL ipc policy violation telemetry */
 extern bool ipcpv_telemetry_enabled;
@@ -415,96 +443,24 @@ extern bool ipcpv_telemetry_enabled;
 /* Enables reply port/voucher/persona debugging code */
 extern bool enforce_strict_reply;
 
-extern bool bootstrap_port_telemetry_enabled;
-
-/*!
- * @brief
- * Identifier of the type of ipc policy violation in a CA telemetry event
- *
- * Currently we only send reply port related violations to CA. This enum can
- * be extended to report more violations in the future.
- */
-__enum_closed_decl(ipc_policy_violation_id_t, uint8_t, {
-	IPCPV_VIOLATION_NONE, /* 0, denote no violations */
-
-	/* Kobject Reply Port and Move Reply Port violators Start */
-	IPCPV_REPLY_PORT_SEMANTICS, /* 1, normal reply port semantics violator */
-	/* [2-5] were previously used; should be avoided to avoid telemetry confusion */
-	__UNUSED2, /* previously used, should be avoided */
-	__UNUSED3, /* previously used, should be avoided */
-	__UNUSED4, /* previously used, should be avoided */
-	__UNUSED5, /* previously used, should be avoided */
-	/* services opted out of reply port semantics previously should have fixed their violations */
-	IPCPV_REPLY_PORT_SEMANTICS_OPTOUT, /* 6 */
-	/* Kobject Reply Port and Move Reply Port Violators End */
-
-	/* Service Port Defense Violators Start */
-	__UNUSED10, /* 7 */
-	IPCPV_SERVICE_PORT_PD_NOTIFICATION, /* 8, for future telemetry */
-	/* Service Port Defense Violators End */
-
-	/*
-	 * [9-12] were previously used for OOL port array restrictions;
-	 * these should be avoided to avoid telemetry confusion
-	 */
-	__UNUSED6, /* 9 previously used, should be avoided */
-	__UNUSED7, /* 10 previously used, should be avoided */
-	__UNUSED8, /* 11 previously used, should be avoided */
-	__UNUSED9, /* 12 previously used, should be avoided */
-	/* OOL ports array violators End */
-
-	/* Bootstrap port reply port semantics violators Start */
-	IPCPV_BOOTSTRAP_PORT, /* 13 */
-	/* Bootstrap port reply port semantics violators End */
-
-	_IPCPV_VIOLATION_COUNT,
-});
-
-/*!
- * @brief
- * Record ipc policy violations into a buffer for sending to CA at a later time.
- *
- * @discussion
- * The ipc telemetry lock is not locked.
- *
- * @param violation_id      type of ipc policy violation
- * @param service_port      service port involved in violation, if any
- * @param aux_data          additional data to include in the CA event:
- *                          violator msgh_id for reply port defense
- */
-extern void ipc_stash_policy_violations_telemetry(
-	ipc_policy_violation_id_t   violation_id,
-	ipc_port_t                  service_port,
-	int                         aux_data);
-
-#if DEBUG || DEVELOPMENT
-/*!
- * @brief
- * Helper function to record the total number of ipcpv violation occured.
- * Telemetry count should be 0 in presub testing as we shouldn't emit any
- * telemetry for known issue.
- */
-extern void ipc_inc_telemetry_count(void);
-#endif /* DEBUG || DEVELOPMENT */
-
 /*!
  * @brief
  * Check if the ipc space has emitted a certain type of telemetry.
+ *
+ * @discussion
+ * If this telemetry type has not been reported for the space, this function
+ * will also immediately mark the telemetry type as emitted.
  *
  * @param is      ipc space in question
  * @param type    ipc policy violation type
  */
 __attribute__((always_inline))
 static inline bool
-ipc_space_has_telemetry_type(ipc_space_t is, uint8_t type)
+ipc_space_test_or_set_telemetry_type(ipc_space_t is, is_telemetry_t type)
 {
 	if (!ipcpv_telemetry_enabled) {
 		return true;
 	}
-
-#if DEBUG || DEVELOPMENT
-	ipc_inc_telemetry_count();
-#endif
 
 	return (os_atomic_or_orig(&is->is_telemetry, type, relaxed) & type) != 0;
 }
@@ -642,6 +598,27 @@ extern bool ipc_should_mark_immovable_send(
 extern bool ipc_can_stash_naked_send(
 	ipc_port_t port);
 
+/*!
+ * @brief
+ * Query if the given port requires enforcement
+ * of reply port semantics.
+ *
+ * This could be due one of the following reasons:
+ *     - the port type policy declares it.
+ *     - the MPO_ENFORCE_REPLY_PORT_SEMANTICS flag
+ *       was used on port construction, explicitly
+ *       asking for that enforcement.
+ *
+ * @param port      The port to query.
+ *
+ * @returns
+ *  - true          The port requires reply port semantic enforcement.
+ *  - false         The port does not require reply port semantic enforcement.
+ */
+extern bool
+ip_has_reply_port_semantics(
+	ipc_port_t port);
+
 
 #pragma mark entry init
 
@@ -740,20 +717,23 @@ extern void mach_port_guard_exception_pinned(
 	mach_port_name_t        name,
 	uint64_t                payload);
 
-#pragma mark exception port policy
+#pragma mark notification policies
 
 /*!
  * @brief
- * Check whether the port can be a valid exception port for a given task.
+ * Check if a notification port is a proper IOT_NOTIFICATION_PORT and emit
+ * telemetry for contained processes that register notifications with non-notification ports.
  *
- * @param task          The task registering an exception port.
- * @param port          The port being registered as exception port.
+ * @discussion
+ * Nothing should be locked.
+ * Emits telemetry once per space for contained processes.
+ *
+ * @param space         the ipc space requesting the notification
+ * @param notify_port   the port to receive the notification
  */
-extern bool ipc_is_valid_exception_port(
-	task_t task,
-	ipc_port_t port);
-
-#pragma mark notification policies
+extern bool ipc_port_can_receive_notifications(
+	ipc_space_t             space,
+	ipc_port_t              notify_port);
 
 /*!
  * @brief
@@ -776,7 +756,248 @@ extern kern_return_t ipc_allow_register_pd_notification(
 	ipc_port_t              pd_port,
 	ipc_port_t              notify_port);
 
-#pragma GCC visibility pop
+#pragma mark voucher restrictions
+
+/*!
+ * @brief
+ * We're gradually restricting voucher commands available to userspace.
+ * This callout represents whether userspace should be allowed to use a given `command`.
+ *
+ * @returns
+ * - true       The command should be permitted for use by userspace
+ * - false      The command should not be permitted for use by userspace
+ */
+extern bool ipc_pol_is_user_voucher_command_permitted(
+	mach_voucher_attr_recipe_command_t command);
+
+#pragma mark progressive policy / telemetry
+
+/*!
+ * @brief
+ * Represents the mechanisms by which we support
+ * emitting telemetry for IPC security policy violations.
+ */
+__enum_decl(ipc_telemetry_mechanism_t, uint8_t, {
+	/*
+	 * Indicates that this enum is irrelevant in the usage context.
+	 * Note that this variant is the zero-init default, so zero-initialized
+	 * fields will do the least surprising thing.
+	 */
+	IPC_TELEMETRY_MECHANISM_NONE = 0,
+	/* Medium overhead, requires post-processing */
+	IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE = 1,
+	/* Highest overhead, only use when we expect few reports */
+	IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT = 2,
+});
+
+/*!
+ * @brief
+ * Represents the current mode for a given security policy.
+ */
+__enum_decl(ipc_sec_policy_enforcement_mode_t, uint8_t, {
+	/* Zero-init default so we can detect when users forget to set the mode field */
+	IPC_SEC_POLICY_MODE_NONE,
+	IPC_SEC_POLICY_MODE_DISABLED,
+	IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+	IPC_SEC_POLICY_MODE_ENFORCEMENT,
+});
+
+/*!
+ * @brief
+ * An escape hatch that allows an individual security policy
+ * to have final say on whether it's currently relevant.
+ */
+typedef bool (*ipc_sec_policy_config_should_apply_cb_t)(void);
+
+/*!
+ * @brief
+ * Represents the policy for how much telemetry a given
+ * IPC security policy in telemetry mode should emit.
+ */
+__enum_decl(ipc_sec_policy_telemetry_rate_limit_mode_t, uint8_t, {
+	/* Note that this is the zero-init default to help prevent misconfigurations:
+	 * If the user doesn't change this but specifies `IS_FUSE_NONE` elsewhere, the
+	 * misconfiguration detector will fire. Both fields must be configured away from
+	 * their default values to enable rate limiting.
+	 */
+	IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE = 0,
+	IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_NONE = 1,
+});
+
+/*!
+ * @brief
+ * Central configuration definition for IPC security policies.
+ */
+typedef struct ipc_sec_policy_config {
+	ipc_sec_policy_enforcement_mode_t               enforcement_mode;
+	ipc_telemetry_mechanism_t                       telemetry_reporting_style;
+	ipc_sec_policy_telemetry_rate_limit_mode_t      telemetry_rate_limit_mode;
+	is_telemetry_t                                  associated_ipc_space_telemetry_flag;
+	enum mach_port_guard_exception_codes            associated_guard_exc_code;
+	ipc_sec_policy_config_should_apply_cb_t         maybe_should_apply_cb;
+} ipc_sec_policy_config_t;
+
+/*!
+ * @brief
+ * After triaging a policy violation, this enum represents the outcome for whether
+ * the rest of the IPC subsystem should continue to allow the detected operation.
+ * For example, a violation for a security policy in telemetry mode might allow the operation
+ * to continue, whereas an enforced policy might cause the operation to be denied.
+ */
+__enum_decl(ipc_sec_policy_violation_action_t, uint8_t, {
+	IPC_SEC_POLICY_VIOLATION_ACTION_CONTINUE,
+	IPC_SEC_POLICY_VIOLATION_ACTION_DENY,
+});
+
+/*!
+ * @brief
+ * This enumeration is the top-level definition of progressively enforced IPC security policies.
+ *
+ * Each of the policies enumerated here has a corresponding `ipc_sec_policy_config_t` describing
+ * how policy violations should be reported and enforced (in `ipc_policy.c`).
+ *
+ * Each policy configuration also relates each policy to its associated flags for other pieces of
+ * plumbing; for example, the policy configuration ties each policy to the associated kEXC_GUARD
+ * vector used when we decide to crash an actor in response to a policy violation.
+ */
+__enum_decl(ipc_sec_policy_t, uint32_t, {
+	/* Keep first (default value in storage) */
+	IPC_SEC_POLICY_NONE, /* 0 */
+	IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_KOBJECT, /* 1 */
+	IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_BOOTSTRAP_PORT, /* 2 */
+	IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_SERVICE_PORT, /* 3 */
+	IPC_SEC_POLICY_DISALLOW_CONSTRUCT_WEAK_REPLY_PORT_WITHOUT_ENTITLEMENT, /* 4 */
+	IPC_SEC_POLICY_RESTRICT_MOVE_WEAK_REPLY_PORT, /* 5 */
+	IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT, /* 6 */
+	IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS, /* 7 */
+	IPC_SEC_POLICY_RESTRICT_INLINE_PORT_DESCRIPTORS, /* 8 */
+	IPC_SEC_POLICY_RESTRICT_VOUCHER_RECIPE_SIZE, /* 9 */
+	IPC_SEC_POLICY_RESTRICT_VOUCHER_OPERATIONS, /* 10 */
+	IPC_SEC_POLICY_RESTRICT_MOVE_IOT_PORT, /* 11 */
+	IPC_SEC_POLICY_RESTRICT_SERVICE_PORT_FOR_EXCEPTION, /* 12 */
+	IPC_SEC_POLICY_RESTRICT_CONTAINED_EXCEPTION_PORT, /* 13 */
+	IPC_SEC_POLICY_RESTRICT_REGISTER_NON_NOTIFICATION_PORT, /* 14 */
+	IPC_SEC_POLICY_RESTRICT_MACH_EXC_THREAD_SET_STATE, /* 15 */
+	IPC_SEC_POLICY_RESTRICT_EXCEPTION_PORT_NOT_IN_SPACE, /* 16 */
+	IPC_SEC_POLICY_DISALLOW_BOOTSTRAP_PORT_FOR_NOTIFICATION, /* 17 */
+	IPC_SEC_POLICY_RESTRICT_MESSAGE_QUEUE_SIZE, /* 18 */
+	IPC_SEC_POLICY_RESTRICT_PER_PROCESS_MESSAGE_LIMIT, /* 19 */
+	IPC_SEC_POLICY_RESTRICT_IMMOVABLE_SEND_RIGHT_CREATION, /* 20 */
+	IPC_SEC_POLICY_DISALLOW_REPLY_PORT_WITH_MUTIPLE_SO, /* 21 */
+	/* Keep last (used for determing policy count) */
+	IPC_SEC_POLICY_UNKNOWN,
+});
+
+#define IPC_SEC_POLICY_COUNT (IPC_SEC_POLICY_UNKNOWN)
+
+/*!
+ * @const CA_MACH_SERVICE_PORT_NAME_LEN
+ * Capped version of a service port's string name,
+ * for use in policy violation telemetry.
+ */
+#define CA_MACH_SERVICE_PORT_NAME_LEN         86
+
+/*!
+ * @brief
+ * Represents an in-flight IPC security policy violation that will later be processed by an AST.
+ *
+ * When processed, this might cause us to emit either CA telemetry, a simulated crash report,
+ * or a fatal EXC_GUARD, depending on the policy configuration.
+ */
+typedef struct ipc_sec_policy_in_flight_violation_info {
+	/* Heap-allocated so we don't pay a static cost for every instance of this struct. */
+	char*                   affected_service_name;
+	ipc_sec_policy_t        violated_policy_type;
+	int                     ca_aux_data;
+} ipc_sec_policy_in_flight_violation_info_t;
+xnu_static_assert_struct_size(ipc_sec_policy_in_flight_violation_info_t, 16);
+
+/*!
+ * @brief
+ * Retrieves the IPC security policy configuration for a given policy type.
+ *
+ * @discussion
+ * Note that the configuration returned by this function has a static lifetime.
+ * This getter can only succeed: if an invalid policy vector is passed, the system will panic.
+ */
+ipc_sec_policy_config_t* ipc_sec_policy_config_get(ipc_sec_policy_t p);
+
+/*!
+ * @brief
+ * Inquire whether a given IPC security policy violation is in enforcement mode.
+ *
+ * @discussion
+ * This getter can only succeed: if an invalid policy vector is passed, the system will panic.
+ */
+bool ipc_sec_is_policy_enforced(ipc_sec_policy_t p);
+
+/*
+ * @brief
+ * Top-level handler for IPC security policy violations.
+ *
+ * @description
+ * This function will query the system configuration and the configuration of the
+ * violated IPC security policy, will stage further work (ex. setting up an
+ * AST to emit telemetry or crash the process), and will inform the parent call site
+ * what action is appropriate to take next (either allow the operation to continue, or fail).
+ *
+ * @discussion
+ * Nothing should be locked.
+ *
+ * `target` and `payload` have consumer-defined semantics as with mach_port_guard_exception()
+ */
+extern ipc_sec_policy_violation_action_t ipc_triage_policy_violation(
+	ipc_sec_policy_t        policy,
+	ipc_space_t             maybe_space,
+	/* Arguments to pipe through to an EXC_GUARD payload */
+	uint32_t                maybe_exc_target,
+	uint64_t                maybe_exc_payload,
+	/* Arguments to pipe through to a CA payload */
+	ipc_port_t              maybe_ca_violating_port,
+	int                     maybe_ca_aux_data
+	);
+
+/*!
+ * @brief
+ * Identical to `ipc_triage_policy_violation`, but enforces that we CONTINUE.
+ *
+ * @discussion
+ * If `ipc_triage_policy_violation` did not return `CONTINUE`, the system will panic.
+ * This helps support code paths for which we only currently know how to
+ * emit telemetry and move on, and do not have handling for a denial.
+ */
+extern void ipc_triage_policy_violation_and_expect_continue(
+	ipc_sec_policy_t        policy,
+	ipc_space_t             maybe_space,
+	/* Arguments to pipe through to an EXC_GUARD payload */
+	uint32_t                maybe_exc_target,
+	uint64_t                maybe_exc_payload,
+	/* Arguments to pipe through to a CA payload */
+	ipc_port_t              maybe_ca_violating_port,
+	int                     maybe_ca_aux_data
+	);
+
+/*!
+ * @brief
+ * Identical to `ipc_triage_policy_violation`, but enforces that we DENY.
+ *
+ * @discussion
+ * If `ipc_triage_policy_violation` did not return `DENY`, the system will panic.
+ * This helps support code paths for which we only currently know how to
+ * deny the operation and move on, and do not expect to continue after a violation ever.
+ */
+extern void ipc_triage_policy_violation_and_expect_deny(
+	ipc_sec_policy_t        policy,
+	ipc_space_t             maybe_space,
+	/* Arguments to pipe through to an EXC_GUARD payload */
+	uint32_t                maybe_exc_target,
+	uint64_t                maybe_exc_payload,
+	/* Arguments to pipe through to a CA payload */
+	ipc_port_t              maybe_ca_violating_port,
+	int                     maybe_ca_aux_data
+	);
+
+__exported_pop
 __ASSUME_PTR_ABI_SINGLE_END __END_DECLS
 
 #endif  /* _IPC_IPC_POLICY_H_ */

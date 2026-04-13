@@ -62,6 +62,7 @@
 #include <sys/reboot.h>
 #include <sys/codesign.h>
 #include <vm/vm_iokit.h>
+#include <mach_debug/mach_debug_types.h>
 #include "IOKitKernelInternal.h"
 #include "IOServicePMPrivate.h"
 
@@ -89,10 +90,17 @@
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+enum{
+	kIOUserServerCheckInTimeoutMSecs = 120000ULL,
+	kIOUserServerCheckInMaxRetry     = 3,
+};
+
 TUNABLE(SInt64, gIODKDebug, "dk", kIODKEnable);
 
 #if DEBUG || DEVELOPMENT
+uint64_t driverkit_checkin_timed_out = 0;
 TUNABLE(bool, disable_dext_crash_reboot, "disable_dext_crash_reboot", 0);
+extern "C" kern_return_t kern_register_userspace_coredump(task_t task, const char * name, boolean_t emergency);
 #endif /* DEBUG || DEVELOPMENT */
 
 extern bool restore_boot;
@@ -2303,6 +2311,21 @@ IOUserServer::Create_Impl(
 }
 
 kern_return_t
+IOUserServer::Panic_Impl(const char * reason)
+{
+	if (isPlatformDriver()) {
+		if (strnlen(reason, kIOUserServrMaxPanicReasonLength) == kIOUserServrMaxPanicReasonLength) {
+			// Invalid panic message, panic anyways
+			panic("%s: dext requested panic", getName());
+		} else {
+			panic("%s: dext requested panic: \"%s\"", getName(), reason);
+		}
+		return kIOReturnSuccess;
+	}
+	return kIOReturnNotPermitted;
+}
+
+kern_return_t
 IOUserServer::RegisterService_Impl()
 {
 	kern_return_t ret = IOService::RegisterService_Impl();
@@ -2727,6 +2750,21 @@ IOUserServer::kill(const char * reason)
 		ret = kIOReturnSuccess;
 	}
 	return ret;
+}
+
+void
+IOUserServer::emergencyPanicCoreDumpEnable()
+{
+#if DEVELOPMENT || DEBUG
+	if (isPlatformDriver()) {
+		// Enable coredump for the first party dext that is causing an imminent panic
+		// This is enabled on non-release without requiring an entitlement,
+		// so this coredump has only a generic name
+		char core_name[MACH_CORE_FILEHEADER_NAMELEN];
+		snprintf(core_name, sizeof(core_name), "dext-%d", pid_from_task(fOwningTask));
+		kern_register_userspace_coredump(fOwningTask, core_name, TRUE);
+	}
+#endif /* DEVELOPMENT || DEBUG */
 }
 
 OSObjectUserVars *
@@ -4292,7 +4330,9 @@ IOUserServer::clientClose(void)
 #endif /* DEVELOPMENT || DEBUG */
 
 		if (policy == kOSDextCrashPolicyReboot && allowPanic) {
-			panic("Driver %s has crashed too many times\n", getName());
+			emergencyPanicCoreDumpEnable();
+			panic("Driver %s has crashed too many times (reason %u:%llu)\n",
+			    getName(), fTaskCrashReason->osr_namespace, fTaskCrashReason->osr_code);
 		}
 
 		IOPMrootDomain *rootDomain = IOService::getPMRootDomain();
@@ -4908,18 +4948,6 @@ IOUserServer::serviceJoinPMTree(IOService * service)
 				fSystemOffPhase2Allow |= (NULL != props->getObject(kIOPMSystemOffPhase2AllowKey));
 			}
 			OSSafeReleaseNULL(props);
-		}
-		if (fAOTAllow) {
-			IOService * dtparent = service;
-			while (dtparent && !dtparent->inPlane(gIODTPlane)) {
-				dtparent = dtparent->getProvider();
-			}
-			if (dtparent) {
-				uint32_t one = 1;
-				OSData * data = OSData::withBytes(&one, sizeof(one));
-				dtparent->setProperty(kIOPMAOTPowerKey, data);
-				OSSafeReleaseNULL(data);
-			}
 		}
 		service->PMinit();
 		ret = service->registerPowerDriver(this, sPowerStates, sizeof(sPowerStates) / sizeof(sPowerStates[0]));
@@ -5613,6 +5641,28 @@ IOUserServer::serverAck(void)
 	IOServicePH::serverAck(this);
 }
 
+OSArray *
+IOUserServer::servicesWithPowerState(bool state)
+{
+	OSArray * result = OSArray::withCapacity(1);
+	if (!result) {
+		return NULL;
+	}
+	IOLockLock(fLock);
+	fServices->iterateObjects(^(OSObject * object) {
+		IOService * service = OSDynamicCast(IOService, object);
+		if (service && service->reserved->uvars->powerState == state) {
+		        result->setObject(service);
+		}
+		return false;
+	});
+	IOLockUnlock(fLock);
+	if (!result->getCount()) {
+		OSSafeReleaseNULL(result);
+	}
+	return result;
+}
+
 void
 IOUserServer::systemSuspend()
 {
@@ -5822,9 +5872,15 @@ IOUserServer::systemHalt(int howto)
 			if (!root) {
 			        return false;
 			}
-			terminateOptions = kIOServiceRequired | kIOServiceTerminateNeedWillTerminate;
-			if (!nextService->terminate(terminateOptions)) {
-			        IOLog("failed to terminate service %s-0x%llx\n", nextService->getName(), nextService->getRegistryEntryID());
+			if (nextService->reserved && nextService->reserved->uvars) {
+			        if (nextService->reserved->uvars->started) {
+			                terminateOptions = kIOServiceRequired | kIOServiceTerminateNeedWillTerminate;
+			                if (!nextService->terminate(terminateOptions)) {
+			                        IOLog("failed to terminate service %s-0x%llx\n", nextService->getName(), nextService->getRegistryEntryID());
+					}
+				} else {
+			                IOLog("service %s-0x%llx not started, skipped termination\n", nextService->getName(), nextService->getRegistryEntryID());
+				}
 			}
 			return false;
 		});
@@ -6594,6 +6650,26 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+/*
+ * IOUserServerCheckInToken state machine
+ *
+ *         token
+ *        creation
+ *            |
+ *            |
+ *            v            dext
+ *      +-----------+    check-in    +-----------+
+ *      |  Pending  +--------------->| Complete  |
+ *      +-----+-----+                +-----+-----+
+ *            |                            |
+ * dext crash |                            |  dext crash
+ *   before   |                            | before server
+ *  check-in  |                            | registration
+ *            |      +-----------+         |
+ *            +----->| Canceled  |<--------+
+ *                   +-----------+
+ */
+
 extern IORecursiveLock               * gDriverKitLaunchLock;
 extern OSSet                         * gDriverKitLaunches;
 
@@ -6636,8 +6712,12 @@ IOUserServerCheckInToken::cancel()
 {
 	IORecursiveLockLock(gDriverKitLaunchLock);
 
-	if (fState == kIOUserServerCheckInPending) {
+	if (fState != kIOUserServerCheckInCanceled) {
+		// Move the state to canceled even if the token has completed
+		// This is to cover the gap between dext check-in and the registration of user server
+		// Cancellation listeners must be informed of a crash in between
 		fState = kIOUserServerCheckInCanceled;
+
 		if (gDriverKitLaunches != NULL) {
 			// Remove pending launch from list, if we have not shut down yet.
 			gDriverKitLaunches->removeObject(this);
@@ -6675,8 +6755,7 @@ IOUserServerCheckInToken::complete()
 			gDriverKitLaunches->removeObject(this);
 		}
 
-		// No need to hold on to the cancellation handlers
-		fHandlers->flushCollection();
+		// Do not flush the cancellation handlers, as we might still trigger them
 	}
 
 	IORecursiveLockUnlock(gDriverKitLaunchLock);
@@ -6800,8 +6879,57 @@ IOUserServerCheckInToken::copyServerTag() const
 	return fServerTag;
 }
 
+/*
+ * Wait for a IOUserServer to check in
+ */
+
+static
+__attribute__((noinline, not_tail_called))
 IOUserServer *
-IOUserServer::launchUserServer(IOService * provider, OSString * bundleID, const OSSymbol * serverName, OSNumber * serverTag, bool reuseIfExists, IOUserServerCheckInToken ** resultToken, OSData *serverDUI)
+__WAITING_FOR_USER_SERVER__(IOUserServerCheckInToken * token, uint64_t * timeoutMS)
+{
+	IOUserServer * result = NULL;
+	IOService * server = NULL;
+	const OSSymbol * serverName = token->copyServerName();
+	OSNumber       * serverTag = token->copyServerTag();
+	OSDictionary   * matching = IOService::serviceMatching(gIOUserServerClassKey);
+	uint64_t         startTime = 0, endTime = 0;
+
+	if (!matching || !serverName || !serverTag) {
+		goto finish;
+	}
+	IOService::propertyMatching(gIOUserServerNameKey, serverName, matching);
+	if (!(kIODKDisableDextTag & gIODKDebug)) {
+		IOService::propertyMatching(gIOUserServerTagKey, serverTag, matching);
+	}
+
+	absolutetime_to_nanoseconds(mach_absolute_time(), &startTime);
+	startTime /= NSEC_PER_MSEC;
+	server = IOService::waitForMatchingServiceWithToken(matching, (*timeoutMS) * NSEC_PER_MSEC, token);
+	result = OSDynamicCast(IOUserServer, server);
+	if (!result) {
+		// Calculate the remaining timeout if the server isn't registered
+		OSSafeReleaseNULL(server);
+		token->cancel();
+		absolutetime_to_nanoseconds(mach_absolute_time(), &endTime);
+		endTime /= NSEC_PER_MSEC;
+		if (endTime > startTime) {
+			if (os_sub_overflow(*timeoutMS, endTime - startTime, timeoutMS)) {
+				*timeoutMS = 0;
+			}
+		}
+	}
+
+finish:
+	OSSafeReleaseNULL(matching);
+	OSSafeReleaseNULL(serverName);
+	OSSafeReleaseNULL(serverTag);
+
+	return result;
+}
+
+IOUserServer *
+IOUserServer::launchUserServer(IOService * provider, IOService * service, OSString * bundleID, const OSSymbol * serverName, OSNumber * serverTag, bool reuseIfExists, OSData *serverDUI)
 {
 	IOUserServer *me = NULL, *providerServer = NULL;
 	IOUserServerCheckInToken * token = NULL;
@@ -6809,6 +6937,8 @@ IOUserServer::launchUserServer(IOService * provider, OSString * bundleID, const 
 	OSKext * driverKext = NULL; // must release
 	OSDextStatistics * driverStatistics = NULL; // must release
 	bool reslide = false;
+	uint32_t retries = kIOUserServerCheckInMaxRetry;
+	uint64_t timeRemainingMS = kIOUserServerCheckInTimeoutMSecs;
 
 	/* TODO: Check we are looking for same dextID
 	 * and if it is not the same
@@ -6824,15 +6954,7 @@ IOUserServer::launchUserServer(IOService * provider, OSString * bundleID, const 
 		reslide = driverStatistics->getCrashCount() > 0;
 	} else {
 		DKLOG("Could not find OSKext for %s\n", bundleID->getCStringNoCopy());
-		*resultToken = NULL;
 		return NULL;
-	}
-
-	IORecursiveLockLock(gDriverKitLaunchLock);
-
-	if (gDriverKitLaunches == NULL) {
-		// About to shut down, don't launch anything
-		goto finish;
 	}
 
 	if (reuseIfExists) {
@@ -6849,83 +6971,136 @@ IOUserServer::launchUserServer(IOService * provider, OSString * bundleID, const 
 		}
 	}
 
-	// Find existing server
 	if (reuseIfExists) {
-		token = IOUserServerCheckInToken::findExistingToken(serverName);
-		if (token) {
-			// Launch in progress, return token
-			goto finish;
-		} else {
-			// Check if launch completed
+		// Check provider's user server, if exists
+		if (provider->reserved && provider->reserved->uvars && (providerServer = provider->reserved->uvars->userServer) != NULL) {
+			OSString * providerServerName = OSDynamicCast(OSString, providerServer->getProperty(gIOUserServerNameKey));
+			if (providerServerName && providerServerName->isEqualTo(serverName)) {
+				// Reuse is required
 
-			// Check provider's user server, if exists
-			if (provider->reserved && provider->reserved->uvars && (providerServer = provider->reserved->uvars->userServer) != NULL) {
-				OSString * providerServerName = OSDynamicCast(OSString, providerServer->getProperty(gIOUserServerNameKey));
-				if (providerServerName && providerServerName->isEqualTo(serverName)) {
-					DKLOG("using existing server " DKS " from provider " DKS "\n", DKN(providerServer), DKN(provider));
+				DKLOG("using existing server " DKS " from provider " DKS "\n", DKN(providerServer), DKN(provider));
 
-					// If provider has the user server that we are supposed to reuse, and it has become inactive
-					// start of this service should simply fail
-					// If the user server become inactive after this check, start should fail at a later stage
-					if (!providerServer->isInactive()) {
-						providerServer->retain();
-						me = providerServer;
-					}
-					goto finish;
+				// If provider has the user server that we are supposed to reuse, and it has become inactive
+				// start of this service should simply fail
+				// If the user server become inactive after this check, start should fail at a later stage
+				if (!providerServer->isInactive()) {
+					providerServer->retain();
+					me = providerServer;
+				} else {
+					DKLOG(DKS " cannot reuse inactive server\n", DKN(service));
+					// Must not create a token as reuse is required
 				}
-			}
-
-			matching = IOService::serviceMatching(gIOUserServerClassKey);
-			if (!matching) {
 				goto finish;
-			}
-			IOService::propertyMatching(gIOUserServerNameKey, serverName, matching);
-			IOService * service = IOService::copyMatchingService(matching);
-			IOUserServer * userServer = OSDynamicCast(IOUserServer, service);
-			if (userServer) {
-				// found existing user server
-				me = userServer;
-				goto finish;
-			} else {
-				OSSafeReleaseNULL(service);
 			}
 		}
 	}
 
-	// No existing server, request launch
-	token = new IOUserServerCheckInToken;
-	if (!token) {
-		goto finish;
-	}
+	do {
+		const OSSymbol * tokenServerName;
+		OSNumber * tokenServerTag;
 
-	/*
-	 * TODO: If the init fails because the personalities are not up to date
-	 * restart the whole matching process.
-	 */
-	if (token && !token->init(serverName, serverTag, driverKext, serverDUI)) {
-		IOLog("Could not initialize token\n");
+		IORecursiveLockLock(gDriverKitLaunchLock);
+
+		if (gDriverKitLaunches == NULL) {
+			// About to shut down, don't launch anything
+			IORecursiveLockUnlock(gDriverKitLaunchLock);
+			goto finish;
+		}
+
+		// Find existing server
+		if (reuseIfExists) {
+			token = IOUserServerCheckInToken::findExistingToken(serverName);
+			if (!token) {
+				// Check if launch completed
+
+				matching = IOService::serviceMatching(gIOUserServerClassKey);
+				if (!matching) {
+					IORecursiveLockUnlock(gDriverKitLaunchLock);
+					goto finish;
+				}
+				IOService::propertyMatching(gIOUserServerNameKey, serverName, matching);
+				IOService * service = IOService::copyMatchingService(matching);
+				IOUserServer * userServer = OSDynamicCast(IOUserServer, service);
+				if (userServer) {
+					// found existing user server
+					me = userServer;
+					IORecursiveLockUnlock(gDriverKitLaunchLock);
+					goto finish;
+				} else {
+					OSSafeReleaseNULL(service);
+				}
+			}
+		}
+
+		if (!token) {
+			// No existing server, request launch
+			token = new IOUserServerCheckInToken;
+			if (!token) {
+				IORecursiveLockUnlock(gDriverKitLaunchLock);
+				goto finish;
+			}
+
+			/*
+			 * TODO: If the init fails because the personalities are not up to date
+			 * restart the whole matching process.
+			 */
+			if (token && !token->init(serverName, serverTag, driverKext, serverDUI)) {
+				DKLOG(DKS " could not initialize token\n", DKN(service));
+				IORecursiveLockUnlock(gDriverKitLaunchLock);
+				OSSafeReleaseNULL(token);
+				goto finish;
+			}
+
+			/*
+			 * If the launch fails at any point terminate() will
+			 * be called on this IOUserServer.
+			 */
+			gDriverKitLaunches->setObject(token);
+			OSKext::requestDaemonLaunch(bundleID, (OSString *)serverName, serverTag, reslide ? kOSBooleanTrue : kOSBooleanFalse, token, serverDUI);
+		}
+
+		IORecursiveLockUnlock(gDriverKitLaunchLock);
+
+		tokenServerName = token->copyServerName();
+		tokenServerTag = token->copyServerTag();
+		assert(tokenServerName && tokenServerTag);
+		DKLOG(DKS " waiting for server %s-%llx\n", DKN(service), tokenServerName->getCStringNoCopy(), tokenServerTag->unsigned64BitValue());
+
+		me = __WAITING_FOR_USER_SERVER__(token, &timeRemainingMS);
+		if (me) {
+			OSSafeReleaseNULL(tokenServerName);
+			OSSafeReleaseNULL(tokenServerTag);
+			break;
+		}
+		DKLOG(DKS " failed to find server %s-%llx, remaining %llums, retries %u\n", DKN(service),
+		    tokenServerName->getCStringNoCopy(), tokenServerTag->unsigned64BitValue(), timeRemainingMS, retries - 1);
+		OSSafeReleaseNULL(tokenServerName);
+		OSSafeReleaseNULL(tokenServerTag);
 		OSSafeReleaseNULL(token);
-		goto finish;
-	}
+		// If the loop continues it means the dext has been killed
+		// We don't record a crash since start never happened. No client code has run
+	} while (--retries && timeRemainingMS && !gInUserspaceReboot);
 
-	/*
-	 * If the launch fails at any point terminate() will
-	 * be called on this IOUserServer.
-	 */
-	gDriverKitLaunches->setObject(token);
-	OSKext::requestDaemonLaunch(bundleID, (OSString *)serverName, serverTag, reslide ? kOSBooleanTrue : kOSBooleanFalse, token, serverDUI);
+	if (me) {
+		DKLOG(DKS " server launched, validating\n", DKN(service));
+		if (token && !(kIODKDisableCheckInTokenVerification & gIODKDebug)) {
+			if (!me->serviceMatchesCheckInToken(token)) {
+				DKLOG(DKS " server does not match token\n", DKN(service));
+				me->exit("Check In Token verification failed");
+				OSSafeReleaseNULL(me);
+			}
+		}
+	} else {
+#if DEVELOPMENT || DEBUG
+		driverkit_checkin_timed_out = mach_absolute_time();
+#endif
+	}
 
 finish:
-	IORecursiveLockUnlock(gDriverKitLaunchLock);
 	OSSafeReleaseNULL(matching);
 	OSSafeReleaseNULL(driverStatistics);
 	OSSafeReleaseNULL(driverKext);
-
-	if (resultToken) {
-		*resultToken = token;
-	} else {
-		OSSafeReleaseNULL(token);
-	}
+	OSSafeReleaseNULL(token);
 
 	return me;
 }

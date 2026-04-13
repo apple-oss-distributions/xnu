@@ -1071,8 +1071,8 @@ sktu_create_interface(sktu_if_type_t type, sktu_if_flag_t flags)
 	int error;
 	int tunsock;
 	const char *CONTROL_NAME;
-	int OPT_ENABLE_NETIF, OPT_ATTACH_FSW, OPT_ENABLE_CHANNEL;
-	int enable_netif, attach_fsw, enable_channel;
+	int OPT_ENABLE_NETIF, OPT_ATTACH_FSW, OPT_ENABLE_CHANNEL, OPT_ENABLE_UPP;
+	int enable_netif, attach_fsw, enable_channel, enable_upp;
 	int scratch;
 
 	assert(type == SKTU_IFT_UTUN || type == SKTU_IFT_IPSEC);
@@ -1081,16 +1081,19 @@ sktu_create_interface(sktu_if_type_t type, sktu_if_flag_t flags)
 		OPT_ENABLE_NETIF = UTUN_OPT_ENABLE_NETIF;
 		OPT_ATTACH_FSW = UTUN_OPT_ATTACH_FLOWSWITCH;
 		OPT_ENABLE_CHANNEL = UTUN_OPT_ENABLE_CHANNEL;
+		OPT_ENABLE_UPP = UTUN_OPT_USER_PACKET_POOL;
 	} else {
 		CONTROL_NAME = IPSEC_CONTROL_NAME;
 		OPT_ENABLE_NETIF = IPSEC_OPT_ENABLE_NETIF;
 		OPT_ATTACH_FSW = 0;
 		OPT_ENABLE_CHANNEL = IPSEC_OPT_ENABLE_CHANNEL;
+		OPT_ENABLE_UPP = 0;
 	}
 
 	enable_netif = ((flags & SKTU_IFF_ENABLE_NETIF) != 0) ? 1 : 0;
 	attach_fsw = ((flags & SKTU_IFF_NO_ATTACH_FSW) != 0) ? 0 : 1;
 	enable_channel = ((flags & SKTU_IFF_ENABLE_CHANNEL) != 0) ? 1 : 0;
+	enable_upp = ((flags & SKTU_IFF_ENABLE_UPP) != 0) ? 1 : 0;
 
 	/* XXX Remove this retry nonsense when this is fixed:
 	 * <rdar://problem/37340313> creating an interface without specifying specific interface name should not return EBUSY
@@ -1152,6 +1155,8 @@ sktu_create_interface(sktu_if_type_t type, sktu_if_flag_t flags)
 		if (type == SKTU_IFT_UTUN) {
 			error = setsockopt(tunsock, SYSPROTO_CONTROL, OPT_ATTACH_FSW, &attach_fsw, sizeof(attach_fsw));
 			SKTC_ASSERT_ERR(!error);
+			error = setsockopt(tunsock, SYSPROTO_CONTROL, OPT_ENABLE_UPP, &enable_upp, sizeof(enable_upp));
+			SKTC_ASSERT_ERR(!error);
 		}
 
 		error = connect(tunsock, (struct sockaddr *)&kernctl_addr, sizeof(kernctl_addr));
@@ -1181,7 +1186,7 @@ sktu_create_interface(sktu_if_type_t type, sktu_if_flag_t flags)
 }
 
 channel_t
-sktu_create_interface_channel(sktu_if_type_t type, int tunsock)
+sktu_create_interface_channel(sktu_if_type_t type, int tunsock, bool enable_upp)
 {
 	uuid_t uuid;
 	channel_attr_t attr;
@@ -1206,7 +1211,7 @@ sktu_create_interface_channel(sktu_if_type_t type, int tunsock)
 	channel = sktu_channel_create_extended(uuid,
 	    NEXUS_PORT_KERNEL_PIPE_CLIENT,
 	    CHANNEL_DIR_TX_RX, CHANNEL_RING_ID_ANY, attr,
-	    -1, -1, -1, -1, -1, -1, 1, -1, -1);
+	    -1, -1, -1, -1, -1, enable_upp ? 1 : -1, 1, -1, -1);
 	assert(channel);
 
 	return channel;

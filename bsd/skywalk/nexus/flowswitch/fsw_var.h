@@ -37,6 +37,7 @@
 #include <net/network_agent.h>
 #include <net/necp.h>
 #include <net/pktap.h>
+#include <net/kpi_interface.h>
 
 #define FSW_VP_DEV               0               /* device port */
 #define FSW_VP_HOST              1               /* host port (MS) */
@@ -154,6 +155,8 @@ extern void fsw_linger_insert(struct flow_entry *fsw);
 extern void fsw_linger_purge(struct nx_flowswitch *fsw);
 extern void fsw_rxstrc_insert(struct flow_entry *fsw);
 extern void fsw_rxstrc_purge(struct nx_flowswitch *fsw);
+extern int fsw_get_rx_steering_rules(struct nx_flowswitch *fsw,
+    struct ifnet_rx_steering_rule *__counted_by(buffer_count) rules_buffer, uint32_t buffer_count, uint32_t *count_out);
 extern void fsw_reap_sched(struct nx_flowswitch *fsw);
 
 extern int fsw_dev_input_netem_dequeue(void *handle,

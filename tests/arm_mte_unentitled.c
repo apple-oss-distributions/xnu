@@ -42,9 +42,13 @@
 #include "arm_mte_utilities.h"
 #include "test_utils.h"
 
+T_GLOBAL_META(
+	XNU_T_META_SOC_SPECIFIC
+	);
+
 T_DECL(mte_alloc_from_unentitled,
     "Attempt to allocate tagged memory from MTE-disabled process",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	vm_address_t address = 0;
@@ -63,7 +67,7 @@ T_DECL(mte_alloc_from_unentitled,
 /* Here, "debugger" means an MTE-disabled process with access to tagged memory */
 T_DECL(mte_debugger_untagged_copyio,
     "Test that debugger processes can do copyio operations without tag checks",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     /* Allow ourselves to act as a debugger */
     T_META_BOOTARGS_SET("amfi_unrestrict_task_for_pid=1"),

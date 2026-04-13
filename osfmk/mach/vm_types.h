@@ -34,11 +34,17 @@
 
 #include <mach/port.h>
 #include <mach/machine/vm_types.h>
+#include <mach/error.h>
 
 #include <stdint.h>
 #include <sys/cdefs.h>
 
 __BEGIN_DECLS
+
+/* (err_vm | err_sub(0)) reserved: vm_sanitize */
+#define err_vm_reclaim(e) (err_vm | err_sub(1) | e)
+/* (err_vm | err_sub(2)) reserved: vm_map_lock */
+
 
 typedef vm_offset_t             pointer_t __kernel_ptr_semantics;
 typedef vm_offset_t             vm_address_t __kernel_ptr_semantics;
@@ -81,12 +87,10 @@ typedef uint32_t ppnum_t __kernel_ptr_semantics; /* Physical page number */
 
 __options_decl(vm_map_create_options_t, uint32_t, {
 	VM_MAP_CREATE_DEFAULT          = 0x00000000,
-	VM_MAP_CREATE_PAGEABLE         = 0x00000001,
-	VM_MAP_CREATE_CORPSE_FOOTPRINT = 0x00000002,
-	VM_MAP_CREATE_DISABLE_HOLELIST = 0x00000004,
-	VM_MAP_CREATE_NEVER_FAULTS     = 0x00000008,
+	VM_MAP_CREATE_CORPSE_FOOTPRINT = 0x00000001,
+	VM_MAP_CREATE_NEVER_FAULTS     = 0x00000002,
 	/* Denote that we're creating this map as part of a fork() */
-	VM_MAP_CREATE_VIA_FORK             = 0x00000010,
+	VM_MAP_CREATE_VIA_FORK         = 0x00000004,
 });
 
 /*

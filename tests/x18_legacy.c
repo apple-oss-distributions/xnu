@@ -33,6 +33,8 @@
 #include <stdbool.h>
 #include <unistd.h>
 
+#include <os/x18.h>
+
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.arm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -49,6 +51,8 @@ T_DECL(x18_legacy,
 #else
 	bool did_csw = false;
 	uint64_t x18_val;
+
+	T_ASSERT_TRUE(os_custom_x18_abi_get(), "custom x18 ABI should be enabled for legacy compatibility");
 
 	for (uint64_t i = 0xFEEDB0B000000000ULL; i < 0xFEEDB0B000000000ULL + 10000; ++i) {
 		asm volatile ("mov x18, %0" : : "r"(i));

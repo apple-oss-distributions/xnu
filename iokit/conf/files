@@ -111,6 +111,8 @@ iokit/Tests/TestServices/TestIODeviceMemoryRosetta.cpp optional iokitcpp
 iokit/Tests/TestServices/TestIOUserClient2022Entitlements.cpp optional iokitcpp
 iokit/Tests/TestServices/TestIOServiceUserNotification.cpp optional iokitcpp
 iokit/Tests/TestServices/TestIODataQueues.cpp optional iokitcpp
+./Tests/TestServices/TestDextRematch.iig.cpp optional iokitcpp
+iokit/Tests/TestServices/TestDextRematchKernel.cpp optional iokitcpp
 
 iokit/Kernel/IOStatistics.cpp				optional iokitcpp
 iokit/Kernel/IOInterruptAccounting.cpp			optional iokitcpp

@@ -487,7 +487,7 @@ struct kcdata_type_definition {
  * in STACKSHOT_KCTYPE_* types.
  */
 #define STACKSHOT_KCTYPE_IOSTATS                     0x901u /* io_stats_snapshot */
-#define STACKSHOT_KCTYPE_GLOBAL_MEM_STATS            0x902u /* struct mem_and_io_snapshot */
+#define STACKSHOT_KCTYPE_GLOBAL_MEM_STATS            0x902u /* struct mem_and_io_snapshot_v2 */
 #define STACKSHOT_KCCONTAINER_TASK                   0x903u
 #define STACKSHOT_KCCONTAINER_THREAD                 0x904u
 #define STACKSHOT_KCTYPE_TASK_SNAPSHOT               0x905u /* task_snapshot_v2, task_snapshot_v3 */
@@ -571,6 +571,8 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_TASK_MEMORYSTATUS           0x958u /* struct task_memorystatus_snapshot */
 #define STACKSHOT_KCTYPE_MTEINFO_CELL                0x959u /* struct mteinfo_cell */
 #define STACKSHOT_KCTYPE_LATENCY_INFO_BUFFER         0x95au /* struct stackshot_latency_buffer */
+#define STACKSHOT_KCTYPE_VMRL_BLOCKING_RELS          0x95bu /* struct stackshot_vmrl_blocking_relationship */
+#define STACKSHOT_KCTYPE_LOCK_STATE                  0x95cu /* struct stackshot_device_lock_state */
 
 struct stack_snapshot_frame32 {
 	uint32_t lr;
@@ -793,6 +795,28 @@ struct mem_and_io_snapshot {
 	uint32_t        pages_wanted;
 	uint32_t        pages_reclaimed;
 	uint8_t         pages_wanted_reclaimed_valid; // did mach_vm_pressure_monitor succeed?
+} __attribute__((packed));
+
+struct mem_and_io_snapshot_v2 {
+	uint32_t        snapshot_magic;
+	uint32_t        free_pages;
+	uint32_t        active_pages;
+	uint32_t        inactive_pages;
+	uint32_t        purgeable_pages;
+	uint32_t        wired_pages;
+	uint32_t        speculative_pages;
+	uint32_t        throttled_pages;
+	uint32_t        filebacked_pages;
+	uint32_t        compressions;
+	uint32_t        decompressions;
+	uint32_t        compressor_size;
+	int32_t         busy_buffer_count;
+	uint32_t        pages_wanted;
+	uint32_t        pages_reclaimed;
+	uint8_t         pages_wanted_reclaimed_valid; // did mach_vm_pressure_monitor succeed?
+	uint32_t        shared_region_pages;
+	uint32_t        compressed_pages;
+	uint32_t        swapped_pages;
 } __attribute__((packed));
 
 /* SS_TH_* macros are for ths_state */
@@ -1112,8 +1136,26 @@ typedef struct stackshot_thread_waitinfo_v2 {
 	int16_t portlabel_id;   /* matches to a stackshot_portlabel, or NONE or MISSING */
 	uint32_t wait_flags;    /* info about the wait */
 #define STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY 0x1  /* We're waiting on a special reply port */
+#define STACKSHOT_WAITINFO_FLAGS_BOOTSTRAP 0x2  /* We're waiting on a bootstrap port */
 } __attribute__((packed)) thread_waitinfo_v2_t;
 
+
+typedef struct stackshot_vmrl_blocking_relationship {
+	uint64_t waiter_tid;
+	uint64_t blocker_tid;
+	uint64_t entry_hash;
+	uint32_t flags;
+} __attribute__((packed)) vmrl_blocking_relationship_t;
+
+#define STACKSHOT_WAITER_VMRL_SHARED                    0x01
+#define STACKSHOT_BLOCKER_VMRL_SHARED                   0x02
+#define STACKSHOT_WAITER_VMRL_EXCLUSIVE                 0x04
+#define STACKSHOT_BLOCKER_VMRL_EXCLUSIVE                0x08
+
+#define STACKSHOT_WAITER_VMRL_STREAMING                 0x10
+#define STACKSHOT_BLOCKER_VMRL_STREAMING                0x20
+#define STACKSHOT_WAITER_VMRL_ATOMIC                    0x40
+#define STACKSHOT_BLOCKER_VMRL_ATOMIC                   0x80
 
 typedef struct stackshot_thread_turnstileinfo {
 	uint64_t waiter;        /* The thread that's waiting on the object */
@@ -1263,6 +1305,12 @@ struct stackshot_suspension_source {
 	char tss_procname[65]; /* name of suspending task */
 } __attribute__((packed));
 
+struct stackshot_device_lock_state {
+	uint8_t flags;           /* interpret as a stackshot_device_lock_flags_t */
+	uint8_t passcode_status; /* interpret as a passcode_status_t */
+	uint8_t lock_state;      /* interpret as a device_lock_state_t */
+} __attribute__((packed));
+
 /**************** definitions for exclaves *********************/
 
 enum thread_exclaves_flags : uint32_t {
@@ -1388,9 +1436,15 @@ struct crashinfo_task_security_config {
 	uint32_t task_security_config; /* struct task_security_config */
 } __attribute__((packed));
 
+struct crashinfo_voucher {
+	uint64_t thread_id;
+	uint32_t originator_pid;
+	uint32_t proximate_pid;
+} __attribute__((packed));
 
 #define MAX_CRASHINFO_SIGNING_ID_LEN 64
 #define MAX_CRASHINFO_TEAM_ID_LEN 32
+#define MAX_CRASHINFO_SANDBOX_PROFILE_LEN 32
 
 #define TASK_CRASHINFO_BEGIN                KCDATA_BUFFER_BEGIN_CRASHINFO
 #define TASK_CRASHINFO_STRING_DESC          KCDATA_TYPE_STRING_DESC
@@ -1470,7 +1524,8 @@ struct crashinfo_task_security_config {
 #define TASK_CRASHINFO_RLIM_CORE                                0x843 /* rlim_t */
 #define TASK_CRASHINFO_CORE_ALLOWED                             0x844 /* uint8_t */
 #define TASK_CRASHINFO_TASK_SECURITY_CONFIG                     0x845 /* struct task_security_config */
-
+#define TASK_CRASHINFO_VOUCHER_INFO                             0x846 /* struct crashinfo_voucher */
+#define TASK_CRASHINFO_SANDBOX_PROFILE                          0x847 /* string of len MAX_CRASHINFO_SANDBOX_PROFILE_LEN */
 
 #define TASK_CRASHINFO_END                  KCDATA_TYPE_BUFFER_END
 

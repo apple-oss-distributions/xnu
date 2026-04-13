@@ -51,8 +51,22 @@ struct ipc_service_port_label {
 
 typedef struct ipc_service_port_label *ipc_service_port_label_t;
 
+struct ipc_bootstrap_port_label {
+	/* points to the Sandbox's message filtering data structure */
+	struct ipc_conn_port_label *XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("ipc_service_port_label.ispl_sblabel") ispl_sblabel;
+#if CONFIG_SERVICE_PORT_INFO
+	char                   *ispl_service_name;       /* string name used to identify the service port */
+#endif /* CONFIG_SERVICE_PORT_INFO */
+};
+
+typedef struct ipc_bootstrap_port_label *ipc_bootstrap_port_label_t;
+
 /* Function declarations */
 extern kern_return_t ipc_service_port_label_alloc(
+	mach_service_port_info_t sp_info,
+	ipc_object_label_t     *label);
+
+extern kern_return_t ipc_bootstrap_port_label_alloc(
 	mach_service_port_info_t sp_info,
 	ipc_object_label_t     *label);
 
@@ -62,10 +76,13 @@ extern void ipc_connection_port_label_dealloc(
 extern void ipc_service_port_label_dealloc(
 	ipc_object_label_t      label);
 
+extern void ipc_bootstrap_port_label_dealloc(
+	ipc_object_label_t      label);
+
 extern kern_return_t ipc_service_port_derive_sblabel(
 	mach_port_name_t        service_port_name,
-	bool                    force,
-	ipc_object_label_t     *label);
+	ipc_object_label_t     *label,
+	mpo_flags_t             flags);
 
 extern void ipc_service_port_label_set_attr(
 	ipc_service_port_label_t port_splabel,
@@ -77,6 +94,13 @@ extern void ipc_service_port_label_set_attr(
 extern void ipc_service_port_label_get_info(
 	ipc_service_port_label_t port_splabel,
 	mach_service_port_info_t info);
+
+extern void ipc_bootstrap_port_label_get_info(
+	ipc_bootstrap_port_label_t port_bplabel,
+	mach_service_port_info_t info);
+
+extern bool ip_is_report_crash_service_port_locked(
+	ipc_object_label_t port_label);
 
 #endif /* CONFIG_SERVICE_PORT_INFO */
 #endif /* MACH_KERNEL_PRIVATE */

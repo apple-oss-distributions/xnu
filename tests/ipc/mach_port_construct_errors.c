@@ -5,6 +5,7 @@
 #include <sys/code_signing.h>
 #include <sys/sysctl.h>
 #include <darwintest.h>
+#include "ipc_utils.h"
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
@@ -13,55 +14,6 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("IPC"),
 	T_META_TAG_VM_PREFERRED);
 
-#define countof(x) (sizeof(x) / sizeof(x[0]))
-
-static void
-expect_sigkill(
-	void (^fn)(void),
-	const char *description)
-{
-	pid_t pid = fork();
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(pid, "fork");
-
-	if (pid == 0) {
-		fn();
-		T_ASSERT_FAIL("%s: did not receive SIGKILL", description);
-	} else {
-		int status = 0;
-		T_QUIET; T_ASSERT_POSIX_SUCCESS(waitpid(pid, &status, 0), "waitpid");
-		T_EXPECT_EQ(WTERMSIG(status), SIGKILL,
-		    "%s exited with %d, expect SIGKILL", description, WTERMSIG(status));
-	}
-}
-
-T_DECL(mach_port_construct_at_most_one,
-    "mach_port_construct at most one flag policy")
-{
-	/* verify our at most one flag rule is enforced */
-	const uint32_t at_most_one_flags[] = {
-		MPO_REPLY_PORT,
-		MPO_CONNECTION_PORT,
-		MPO_SERVICE_PORT,
-		MPO_PROVISIONAL_REPLY_PORT,
-		MPO_EXCEPTION_PORT,
-		MPO_CONNECTION_PORT_WITH_PORT_ARRAY
-	};
-
-
-	for (uint32_t i = 0; i < countof(at_most_one_flags) - 1; ++i) {
-		for (uint32_t j = i + 1; j < countof(at_most_one_flags); ++j) {
-			mach_port_t port;
-
-			mach_port_options_t opts = {
-				.flags = at_most_one_flags[i] | at_most_one_flags[j]
-			};
-
-			kern_return_t kr = mach_port_construct(mach_task_self(), &opts, 0x0, &port);
-			T_ASSERT_MACH_ERROR(kr,
-			    KERN_INVALID_ARGUMENT, "mach_port_construct failed for at most one flags");
-		}
-	}
-}
 
 T_DECL(mach_port_construct_invalid_arguments_and_values,
     "mach_port_construct invalid arguments and values")

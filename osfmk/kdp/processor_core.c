@@ -27,7 +27,7 @@
  */
 
 #include <kdp/kdp_core.h>
-#include <kdp/processor_core.h>
+#include <kdp/processor_core_internal.h>
 #include <kdp/core_notes.h>
 #include <kern/assert.h>
 #include <kern/monotonic.h>
@@ -61,45 +61,6 @@ static uint32_t bin_spec_map[NUM_COREDUMP_TYPES] = {
 };
 
 /*
- * The processor_core_context structure describes the current
- * corefile that's being generated. It also includes a pointer
- * to the core_outvars which is used by the KDP code for context
- * about the specific output mechanism being used.
- *
- * We include *remaining variables to catch inconsistencies / bugs
- * in the co-processor coredump callbacks.
- */
-typedef struct {
-	struct kdp_core_out_vars * core_outvars;     /* Output procedure info (see kdp_out_stage.h) */
-	kern_coredump_callback_config *core_config;  /* Information about core currently being dumped */
-	void *core_refcon;                           /* Reference constant associated with the coredump helper */
-	boolean_t core_should_be_skipped;            /* Indicates whether this specific core should not be dumped */
-	boolean_t core_is64bit;                      /* Bitness of CPU */
-	kern_coredump_type_t core_type;              /* Indicates type of this core*/
-	uint32_t core_mh_magic;                      /* Magic for mach header */
-	cpu_type_t core_cpu_type;                    /* CPU type for mach header */
-	cpu_subtype_t core_cpu_subtype;              /* CPU subtype for mach header */
-	uint64_t core_file_length;                   /* Overall corefile length including any zero padding */
-	uint64_t core_file_length_compressed;        /* File length after compression */
-	uint64_t core_segment_count;                 /* Number of LC_SEGMENTs in the core currently being dumped */
-	uint64_t core_segments_remaining;            /* Number of LC_SEGMENTs that have not been added to the header */
-	uint64_t core_segment_byte_total;            /* Sum of all the data from the LC_SEGMENTS in the core */
-	uint64_t core_segment_bytes_remaining;       /* Quantity of data remaining from LC_SEGMENTs that have yet to be added */
-	uint64_t core_thread_count;                  /* Number of LC_THREADs to be included */
-	uint64_t core_threads_remaining;             /* Number of LC_THREADs that have yet to be included */
-	uint64_t core_thread_state_size;             /* Size of each LC_THREAD */
-	uint64_t core_note_count;                    /* Number of LC_NOTEs to be included */
-	uint64_t core_notes_remaining;               /* Number of LC_NOTEs that have not been added to the header */
-	uint64_t core_note_bytes_total;              /* Sum of all data from the LC_NOTE segments in the core */
-	uint64_t core_note_bytes_remaining;          /* Quantity of data remaining from LC_NOTEs that have yet to be added */
-	uint64_t core_cur_hoffset;                   /* Current offset in this core's header */
-	uint64_t core_cur_foffset;                   /* Current offset in this core's overall file */
-	uint64_t core_header_size;                   /* Size of this core's header */
-	uint64_t core_total_bytes;                   /* Total amount of data to be included in this core (excluding zero fill) */
-	const char *core_name;                       /* Name of corefile being produced */
-} processor_core_context;
-
-/*
  * The kern_coredump_core structure describes a core that has been
  * registered for use by the coredump mechanism.
  */
@@ -126,7 +87,7 @@ uint32_t coredump_registered_count = 0;
 struct kern_coredump_core *kernel_helper = NULL;
 struct kern_coredump_core *sk_helper = NULL;
 
-static struct kern_coredump_core *
+__static_testable struct kern_coredump_core *
 kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern_coredump_callback_config *kc_callbacks,
     void *refcon, const char *core_description, kern_coredump_type_t type, boolean_t is64bit,
     uint32_t mh_magic, cpu_type_t cpu_type, cpu_subtype_t cpu_subtype)
@@ -187,7 +148,17 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 	}
 #endif
 
-	core_helper = zalloc_permanent_type(struct kern_coredump_core);
+	if (type == USERSPACE_COREDUMP) {
+		/* Userspace coredump can be unregistered */
+		struct kern_userspace_coredump_context * uccontext = (struct kern_userspace_coredump_context *)refcon;
+		core_helper = kalloc_type(struct kern_coredump_core, (zalloc_flags_t)(Z_ZERO | (uccontext->emergency_dump ? Z_NOWAIT : Z_WAITOK)));
+		if (!core_helper) {
+			kprintf("skip registering coredump handler for %s\n", core_description);
+			return NULL;
+		}
+	} else {
+		core_helper = zalloc_permanent_type(struct kern_coredump_core);
+	}
 	core_helper->kcc_next = NULL;
 	core_helper->kcc_refcon = refcon;
 	if (type == XNU_COREDUMP || type == USERSPACE_COREDUMP || type == SECURE_COREDUMP) {
@@ -300,11 +271,13 @@ process_cpu_subtype(void * bsd_info);
 extern char     *proc_name_address(void *p);
 
 kern_return_t
-kern_register_userspace_coredump(task_t task, const char * name)
+kern_register_userspace_coredump(task_t task, const char * name, boolean_t emergency)
 {
 	kern_return_t result;
 	struct kern_userspace_coredump_context * context = NULL;
+	struct kern_coredump_core * current_core = NULL;
 	boolean_t is64bit;
+	boolean_t redundant = FALSE;
 	uint32_t mh_magic;
 	uint32_t mh_cputype;
 	uint32_t mh_cpusubtype;
@@ -315,9 +288,36 @@ kern_register_userspace_coredump(task_t task, const char * name)
 	mh_cputype = process_cpu_type(get_bsdtask_info(task));
 	mh_cpusubtype = process_cpu_subtype(get_bsdtask_info(task));
 
+	/* Check for redundant coredump registration */
+	/* This isn't atomic as we will drop the lock after the check, but it's also not required with the current usage */
+	lck_mtx_lock(&kern_userspace_coredump_core_list_lock);
+	current_core = kern_userspace_coredump_core_list;
+	while (current_core) {
+		struct kern_userspace_coredump_context * _context = (struct kern_userspace_coredump_context *)current_core->kcc_refcon;
+		assert(_context != NULL);
+		if (_context->task == task) {
+			/* Mark emergency to the existing context */
+			_context->emergency_dump = emergency;
+			redundant = TRUE;
+			break;
+		}
+		current_core = current_core->kcc_next;
+	}
+	lck_mtx_unlock(&kern_userspace_coredump_core_list_lock);
 
-	context = kalloc_type(struct kern_userspace_coredump_context, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
+	if (redundant) {
+		result = KERN_ALREADY_IN_SET;
+		goto finish;
+	}
+
+	context = kalloc_type(struct kern_userspace_coredump_context, (zalloc_flags_t)(Z_ZERO | (emergency ? 0 : Z_WAITOK)));
+	if (!context) {
+		result = KERN_RESOURCE_SHORTAGE;
+		goto finish;
+	}
+
 	context->task = task;
+	context->emergency_dump = emergency;
 
 	userkc_callbacks.kcc_coredump_init = user_dump_init;
 	userkc_callbacks.kcc_coredump_get_summary = user_dump_save_summary;
@@ -372,6 +372,7 @@ kern_unregister_userspace_coredump(task_t task)
 
 	if (current_core) {
 		kfree_type(struct kern_userspace_coredump_context, current_core->kcc_refcon);
+		kfree_type(struct kern_coredump_core, current_core);
 		OSAddAtomic(-1, &coredump_registered_count);
 		return KERN_SUCCESS;
 	}
@@ -836,7 +837,7 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	*core_file_length = 0;
 
 #if CONFIG_CPU_COUNTERS
-	start_cycles = mt_cur_cpu_cycles();
+	start_cycles = cpc_cycles();
 #endif // CONFIG_CPU_COUNTERS
 
 	/* Setup the coredump context */
@@ -1020,7 +1021,7 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	    (context.core_thread_count * context.core_thread_state_size), context.core_file_length);
 
 #if CONFIG_CPU_COUNTERS
-	end_cycles = mt_cur_cpu_cycles();
+	end_cycles = cpc_cycles();
 	kern_coredump_log(&context, "\nCore dump took %llu cycles\n", end_cycles - start_cycles);
 #endif // CONFIG_CPU_COUNTERS
 
@@ -1144,19 +1145,23 @@ kern_do_coredump(void *core_outvars, kern_coredump_flags_t flags, uint64_t first
 	}
 
 	// Collect coprocessor coredumps first, in case userspace coredumps fail
-	ret = kern_do_auxiliary_coredump(core_outvars, kern_coredump_core_list, last_file_offset, details_flags, &abort_dump);
-	if (ret != KERN_SUCCESS) {
-		kern_coredump_log(NULL, "Failed to dump coprocessor cores\n");
-		return ret;
+	cur_ret = kern_do_auxiliary_coredump(core_outvars, kern_coredump_core_list, last_file_offset, details_flags, &abort_dump);
+	if (cur_ret != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "Failed to dump coprocessor cores with error: %d\n", cur_ret);
+		if (abort_dump) {
+			return cur_ret;
+		} else {
+			ret = cur_ret;
+		}
 	}
 
-	ret = kern_do_auxiliary_coredump(core_outvars, kern_userspace_coredump_core_list, last_file_offset, details_flags, &abort_dump);
-	if (ret != KERN_SUCCESS) {
+	cur_ret = kern_do_auxiliary_coredump(core_outvars, kern_userspace_coredump_core_list, last_file_offset, details_flags, &abort_dump);
+	if (cur_ret != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "Failed to dump userspace process cores\n");
-		return ret;
+		return cur_ret;
 	}
 
-	return KERN_SUCCESS;
+	return ret;
 }
 #else /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
 
@@ -1176,10 +1181,11 @@ kern_register_sk_coredump_helper(__unused kern_coredump_callback_config *sk_call
 }
 
 kern_return_t
-kern_register_userspace_coredump(task_t task, const char * name)
+kern_register_userspace_coredump(task_t task, const char * name, boolean_t emergency)
 {
 	(void)task;
 	(void)name;
+	(void)emergency;
 	return KERN_NOT_SUPPORTED;
 }
 

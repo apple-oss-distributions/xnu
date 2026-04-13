@@ -94,6 +94,15 @@
 
 #include <IOKit/IOBSD.h>
 
+#ifndef ROUNDUP64
+#define ROUNDUP64(x) P2ROUNDUP((x), sizeof (u_int64_t))
+#endif
+
+#ifndef ADVANCE64
+#define ADVANCE64(p, n) (void*)((char *)(p) + ROUNDUP64(n))
+#endif
+
+extern extern lck_mtx_t raw_mtx;
 extern struct rtstat_64 rtstat;
 extern struct domain routedomain_s;
 static struct domain *routedomain = NULL;
@@ -107,6 +116,8 @@ struct route_cb {
 	u_int32_t       ip6_count;      /* attached w/ AF_INET6 */
 	u_int32_t       any_count;      /* total attached */
 };
+
+static uint64_t route_cb_gencnt;
 
 static struct route_cb route_cb;
 
@@ -154,6 +165,12 @@ SYSCTL_NODE(_net, PF_ROUTE, routetable, CTLFLAG_RD | CTLFLAG_LOCKED,
     sysctl_rtsock, "");
 
 SYSCTL_NODE(_net, OID_AUTO, route, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "routing");
+
+static int route_pcblist SYSCTL_HANDLER_ARGS;
+
+SYSCTL_PROC(_net_route, OID_AUTO, pcblist,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+    route_pcblist, "S,xsocket_n", "");
 
 /* Align x to 1024 (only power of 2) assuming x is positive */
 #define ALIGN_BYTES(x) do {                                             \
@@ -211,6 +228,9 @@ rts_attach(struct socket *so, int proto, struct proc *p)
 	}
 	rp->rcb_faddr = &route_src;
 	os_atomic_inc(&route_cb.any_count, relaxed);
+
+	rp->rcb_gencnt = ++route_cb_gencnt;
+
 	/* the socket is already locked when we enter rts_attach */
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
@@ -248,6 +268,9 @@ rts_detach(struct socket *so)
 		break;
 	}
 	os_atomic_dec(&route_cb.any_count, relaxed);
+
+	rp->rcb_gencnt = ++route_cb_gencnt;
+
 	return raw_usrreqs.pru_detach(so);
 }
 
@@ -459,8 +482,12 @@ route_output(struct mbuf *m, struct socket *so)
 		struct radix_node *t;
 		struct sockaddr *genmask = SA(info.rti_info[RTAX_GENMASK]);
 		void *genmask_bytes = __SA_UTILS_CONV_TO_BYTES(genmask);
+		struct sockaddr *keysa;
+
 		t = rn_addmask(genmask_bytes, 0, 1);
-		if (t != NULL && SOCKADDR_CMP(genmask, rn_get_key(t), genmask->sa_len) == 0) {
+		keysa = SA(rn_get_key(t));
+		if ((t != NULL && genmask->sa_len <= keysa->sa_len &&
+		    SOCKADDR_CMP(genmask, keysa, genmask->sa_len) == 0)) {
 			info.rti_info[RTAX_GENMASK] = SA(rn_get_key(t));
 		} else {
 			senderr(ENOBUFS);
@@ -1531,7 +1558,12 @@ rt_missmsg(u_char type, struct rt_addrinfo *rtinfo, int flags, int error)
 	rtmh->rtm_flags = RTF_DONE | flags;
 	rtmh->rtm_errno = error;
 	rtmh->rtm_addrs = rtinfo->rti_addrs;
-	route_proto.sp_family = sa ? sa->sa_family : 0;
+
+	/*
+	 * It can be confusing but for routing sockets the protocol is the family
+	 * of the destination address
+	 */
+	route_proto.sp_protocol = sa ? sa->sa_family : 0;
 	raw_input(m, &route_proto, &route_src, &route_dst);
 }
 
@@ -2509,4 +2541,124 @@ route_dinit(struct domain *dp)
 	}
 
 	route_init();
+}
+
+
+static
+int route_pcblist SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int error = 0;
+	uint64_t n;
+	struct xrtsockgen xsg;
+	void *buf = NULL;
+	size_t item_size = ROUNDUP64(sizeof(struct xrtsockpcb)) +
+	    ROUNDUP64(sizeof(struct xsocket_n)) +
+	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
+	    ROUNDUP64(sizeof(struct xsockstat_n));
+	struct rawcb *rp;
+
+	buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
+
+	n = route_cb.any_count;
+
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = 2 * sizeof(struct xrtsockgen) + (size_t) ((n + n / 8) * item_size);
+		goto done;
+	}
+	if (req->newptr != USER_ADDR_NULL) {
+		error = EPERM;
+		goto done;
+	}
+	bzero(&xsg, sizeof(xsg));
+	xsg.xg_len = sizeof(xsg);
+	xsg.xg_count = n;
+	xsg.xg_gencnt = route_cb_gencnt;
+	xsg.xg_sogen = so_gencnt;
+	error = SYSCTL_OUT(req, &xsg, sizeof(xsg));
+	if (error != 0) {
+		os_log(OS_LOG_DEFAULT, "route_pcblist SYSCTL_OUT xsg error %d", error);
+		goto done;
+	}
+	/*
+	 * We are done if there is no pcb
+	 */
+	if (n == 0) {
+		goto done;
+	}
+	lck_mtx_lock(&raw_mtx);
+	LIST_FOREACH(rp, &rawcb_list, list) {
+		struct xrtsockpcb *xrp = (struct xrtsockpcb *)buf;
+		struct xsocket_n *xso = (struct xsocket_n *)
+		    ADVANCE64(xrp, sizeof(*xrp));
+		struct xsockbuf_n *xsbrcv = (struct xsockbuf_n *)
+		    ADVANCE64(xso, sizeof(*xso));
+		struct xsockbuf_n *xsbsnd = (struct xsockbuf_n *)
+		    ADVANCE64(xsbrcv, sizeof(*xsbrcv));
+		struct xsockstat_n *xsostats = (struct xsockstat_n *)
+		    ADVANCE64(xsbsnd, sizeof(*xsbsnd));
+
+		if (rp->rcb_proto.sp_family != PF_ROUTE) {
+			continue;
+		}
+
+		/* Skip newer sockets  */
+		if (rp->rcb_gencnt > xsg.xg_gencnt) {
+			continue;
+		}
+
+		xrp->xrp_len = sizeof(struct xrtsockpcb);
+		xrp->xrp_kind = XSO_ROUTEPCB;
+		xrp->xrp_family = PF_ROUTE;
+		xrp->xrp_protocol = rp->rcb_proto.sp_protocol;
+		xrp->xrp_gencnt = rp->rcb_gencnt;
+		if (rp->rcb_faddr) {
+			struct sockaddr *dst __single = &xrp->xrp_faddr;
+			SOCKADDR_COPY(rp->rcb_faddr, dst,
+			    rp->rcb_faddr->sa_len);
+		}
+		if (rp->rcb_laddr) {
+			struct sockaddr *dst __single = &xrp->xrp_laddr;
+			SOCKADDR_COPY(rp->rcb_laddr, dst,
+			    rp->rcb_laddr->sa_len);
+		}
+		sotoxsocket_n(rp->rcb_socket, xso);
+		sbtoxsockbuf_n(rp->rcb_socket != NULL ?
+		    &rp->rcb_socket->so_rcv : NULL, xsbrcv);
+		sbtoxsockbuf_n(rp->rcb_socket != NULL ?
+		    &rp->rcb_socket->so_snd : NULL, xsbsnd);
+		sbtoxsockstat_n(rp->rcb_socket, xsostats);
+
+		error = SYSCTL_OUT(req, buf, item_size);
+		if (error != 0) {
+			os_log(OS_LOG_DEFAULT, "route_pcblist SYSCTL_OUT buf error %d", error);
+			break;
+		}
+	}
+
+	if (error == 0) {
+		/*
+		 * Give the user an updated idea of our state.
+		 * If the generation differs from what we told
+		 * her before, she knows that something happened
+		 * while we were processing this request, and it
+		 * might be necessary to retry.
+		 */
+		bzero(&xsg, sizeof(xsg));
+		xsg.xg_len = sizeof(xsg);
+		xsg.xg_count = n;
+		xsg.xg_gencnt = route_cb_gencnt;
+		xsg.xg_sogen = so_gencnt;
+		error = SYSCTL_OUT(req, &xsg, sizeof(xsg));
+		if (error) {
+			os_log(OS_LOG_DEFAULT, "route_pcblist SYSCTL_OUT xsg update error %d", error);
+			goto done;
+		}
+	}
+
+	lck_mtx_unlock(&raw_mtx);
+
+done:
+	kfree_data_sized_by(buf, item_size);
+	return error;
 }

@@ -199,9 +199,12 @@ the subsequent SME trap.
 
 ### Execution priority
 
-xnu does not currently have an API for changing SME execution priority.
-Accordingly xnu resets `SMPRI_EL1` to `0` during CPU initialization, and
-otherwise does not modify it at runtime.
+There are generally more processing cores than there are physical matrix
+engines, and so those cores must time-share the matrix engine. In order to
+facilitate efficient timesharing, a per-core hint can be provided to the matrix
+engine in the form of an integer priority given by the value programmed into
+`SMPRI_EL1`. The scheduler priority parameters are used to confer an SME
+priority.
 
 ### Power management
 
@@ -241,11 +244,12 @@ Unfortunately since xnu has to disable streaming SVE mode to handle traps, it's
 still forced to spill `Z` and `P` state to memory anytime the guest traps to EL2
 with `PSTATE.SM` set.
 
+#### Virtualization execution priority
+The hypervisor sets all values in `SMPRIMAP_EL2` to the equivalent `SMPRI_EL1`
+value of the vCPU thread. This means the priority of a guest thread--no matter
+the value the guest programs into `SMPRI_EL1`--will be the priority of the
+controlling vCPU.
 
-Since xnu doesn't currently support SME prioritization, it sets `HCRX_EL2.SMPME`
-and populates all `SMPRIMAP_EL2` entries with a value of `0`.  Guest OSes are
-still allowed to write to `SMPRI_EL1`, but currently this has no effect on
-the actual hardware priority.
 
 
 Appendix: Mach thread-state APIs
@@ -261,7 +265,7 @@ xnu splits the SVE and SME thread state into several flavors:
 | Flavor                                       | C thread-state type   | Description               |
 |----------------------------------------------|-----------------------|---------------------------|
 | `ARM_SME_STATE`                              | `arm_sme_state_t`     | SVCR, TPIDR2_EL0, and SVL |
-| `ARM_SVE_Z_STATE1`, `ARM_SME_Z_STATE2`       | `arm_sve_z_state_t`   | Z register file           |
+| `ARM_SVE_Z_STATE1`, `ARM_SVE_Z_STATE2`       | `arm_sve_z_state_t`   | Z register file           |
 | `ARM_SVE_P_STATE`                            | `arm_sve_p_state_t`   | P register file           |
 | `ARM_SME_ZA_STATE1` ... `ARM_SME_ZA_STATE16` | `arm_sme_za_state_t`  | ZA register file          |
 | `ARM_SME2_STATE`                             | `arm_sme2_state_t`    | ZT0 register file         |
@@ -276,7 +280,7 @@ upper bits of each `z`, `p`, and `za` field with zeroes.  Likewise,
 `Z` can architecturally be up to 8 kilobytes in size.  Since this is too large
 to fit in a single Mach message, xnu's Mach thread-state APIs divide the `Z`
 register space into two different thread-state flavors.  Thread-state flavor
-`ARM_SME_ZA_STATE1` accesses Z0-Z15, and thread-state flavor `ARM_SME_ZA_STATE2`
+`ARM_SVE_Z_STATE1` accesses Z0-Z15, and thread-state flavor `ARM_SVE_Z_STATE2`
 accesses Z16-Z31.
 
 xnu likewise divides `ZA` into 4-kilobyte windows.  Thread-state flavor

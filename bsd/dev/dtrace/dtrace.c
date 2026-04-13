@@ -101,11 +101,7 @@
 #include <libkern/sysctl.h>
 #include <sys/kdebug.h>
 #include <sys/sdt_impl.h>
-
-#if CONFIG_PERVASIVE_CPI
-#include <kern/monotonic.h>
-#include <machine/monotonic.h>
-#endif /* CONFIG_PERVASIVE_CPI */
+#include <kern/cpc.h>
 
 #include "dtrace_xoroshiro128_plus.h"
 
@@ -3633,13 +3629,18 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		return ((uint64_t)(uintptr_t)zname);
 	}
 
-#if CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS
+#if CONFIG_CPU_COUNTERS
 	case DIF_VAR_CPUINSTRS:
-		return mt_cur_cpu_instrs();
-
+		return cpc_instrs();
 	case DIF_VAR_CPUCYCLES:
-		return mt_cur_cpu_cycles();
+		return cpc_cycles();
+#else /* CONFIG_CPU_COUNTERS */
+    case DIF_VAR_CPUINSTRS:
+    case DIF_VAR_CPUCYCLES:
+        return 0;
+#endif /* CONFIG_CPU_COUNTERS */
 
+#if CONFIG_PERVASIVE_CPI
 	case DIF_VAR_VINSTRS: {
 		struct recount_usage usage = { 0 };
 		recount_current_thread_usage(&usage);
@@ -3651,14 +3652,11 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
         recount_current_thread_usage(&usage);
 		return recount_usage_cycles(&usage);
     }
-
-#else /* CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS */
-	case DIF_VAR_CPUINSTRS:
-	case DIF_VAR_CPUCYCLES:
+#else /* CONFIG_PERVASIVE_CPI */
 	case DIF_VAR_VINSTRS:
 	case DIF_VAR_VCYCLES:
 		return 0;
-#endif /* !CONFIG_PERVASIVE_CPI || !CONFIG_CPU_COUNTERS */
+#endif /* !CONFIG_PERVASIVE_CPI */
 
 	case DIF_VAR_UID:
 		if (!dtrace_priv_proc_relaxed(state))

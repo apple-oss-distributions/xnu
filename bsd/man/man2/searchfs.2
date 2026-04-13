@@ -324,6 +324,23 @@ will return all the file system objects that do not match the search criteria.
 .Pp
 Introduced with Darwin 7.0 (Mac OS X version 10.3).
 .
+.It SRCHFS_NOFOLLOW
+If this bit is set,
+.Fn searchfs
+will not follow a symlink if it occurs as
+the last component of
+.Fa path .
+.
+.It SRCHFS_NOFOLLOW_ANY
+If this bit is set,
+.Fn searchfs
+will not follow a symlink if it occurs as
+the last component of
+.Fa path .
+In addition an error is returned if a symlink
+is encountered before the last component of
+.Fa path .
+.
 .El
 .Pp
 .

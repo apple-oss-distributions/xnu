@@ -46,6 +46,25 @@ __BEGIN_DECLS
 bool
 pmap_cs_enabled(void);
 
+/**
+ * Allocate the entitlements acceleration buffer when we're already under the PPL
+ * context. This function is called by CEEnvironmentAllocate when we attempt to accelerate
+ * entitlements from within the PPL.
+ */
+uint8_t*
+pmap_ce_allocate_acceleration_buffer(
+	size_t size);
+
+/**
+ * Free the entitlements acceleration buffer when we're already under the PPL context.
+ * This function is called by CEEnvironmentFree when we attempt to decelerate the
+ * entitlements context from within the PPL.
+ */
+void
+pmap_ce_free_acceleration_buffer(
+	uint8_t *data,
+	size_t size);
+
 #if XNU_KERNEL_PRIVATE
 /*
  * Any declarations for types or functions which don't need to be exported to kernel
@@ -99,7 +118,7 @@ extern TrustCacheRuntime_t ppl_trust_cache_rt;
 extern TrustCacheMutableRuntime_t ppl_trust_cache_mut_rt;
 
 /* Lock for the trust cache runtime */
-extern lck_rw_t ppl_trust_cache_rt_lock;
+extern lck_rw_new_t ppl_trust_cache_rt_lock;
 
 typedef struct _pmap_img4_payload {
 	/* The trust cache data structure which wraps the payload */
@@ -186,13 +205,9 @@ pmap_toggle_developer_mode(
 
 #if PMAP_CS_INCLUDE_CODE_SIGNING
 
-#ifndef CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
-#define CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
-#endif
-
-#include <CoreEntitlements/CoreEntitlementsPriv.h>
 #include <kern/cs_blobs.h>
 #include <libkern/tree.h>
+#include <libkern/amfi/amfi.h>
 #include <libkern/crypto/sha1.h>
 #include <libkern/crypto/sha2.h>
 #include <libkern/coretrust/coretrust.h>
@@ -208,8 +223,8 @@ typedef struct _pmap_cs_profile {
 	void *original_payload;
 
 	/* A CoreEntitlements context for querying the profile */
-	der_vm_context_t profile_ctx_storage;
-	const der_vm_context_t *profile_ctx;
+	CEContext_t profile_ctx_storage;
+	const CEContext_t *profile_ctx;
 
 	/*
 	 * Critical information regarding the profile. If a profile has not been verified,
@@ -230,8 +245,8 @@ typedef struct _pmap_cs_profile {
 	 * If this list allows the debuggee entitlements, then this profile is considered
 	 * a development profile.
 	 */
-	struct CEQueryContext entitlements_ctx_storage;
-	struct CEQueryContext *entitlements_ctx;
+	CEContext_t entitlements_ctx_storage;
+	const CEContext_t *entitlements_ctx;
 
 	/* Red-black tree linkage */
 	RB_ENTRY(_pmap_cs_profile) link;
@@ -394,8 +409,8 @@ typedef struct pmap_cs_code_directory {
 			 * The DER entitlements blob and CoreEntitlements context for querying this code
 			 * signature for entitlements.
 			 */
-			struct CEQueryContext core_entitlements_ctx;
-			struct CEQueryContext *ce_ctx;
+			CEContext_t core_entitlements_ctx;
+			CEContext_t *ce_ctx;
 			const CS_GenericBlob *der_entitlements;
 			uint32_t der_entitlements_size;
 
@@ -419,7 +434,7 @@ typedef struct pmap_cs_code_directory {
 			unsigned int hash_type;
 
 			/* Lock on this code directory */
-			decl_lck_rw_data(, rwlock);
+			lck_rw_new_t rwlock;
 
 			/*
 			 * The PPL may transform the code directory (e.g. for multilevel hashing),

@@ -204,7 +204,7 @@ allocate_loop:
 			kfree_type(ipc_object_t, pptrsize, port_pointers);
 		}
 		kr = kmem_alloc(ipc_kernel_map, &table_addr, table_size_needed,
-		    KMA_DATA, VM_KERN_MEMORY_IPC);
+		    KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -453,6 +453,7 @@ mach_port_kobject_type(ipc_port_t port)
 		MAKE_CASE(THREAD_CONTROL);
 		MAKE_CASE(THREAD_READ);
 		MAKE_CASE(THREAD_INSPECT);
+		MAKE_CASE(THREAD_RESUME);
 
 		/* task ports */
 		MAKE_CASE(TASK_CONTROL);
@@ -598,6 +599,16 @@ mach_port_kobject_description(
 		{
 			vm_named_entry_t named_entry = (vm_named_entry_t)ipc_kobject_get_stable(port, IKOT_NAMED_ENTRY);
 			mach_memory_entry_describe(named_entry, desc);
+			break;
+		}
+		case IKOT_THREAD_RESUME:
+		{
+			task_t task = TASK_NULL;
+			thread_t thread = ipc_kobject_get_locked(port, IKOT_THREAD_RESUME);
+			if (thread) {
+				task = get_threadtask(thread);
+				snprintf(desc, KOBJECT_DESCRIPTION_LENGTH, "%d", task_pid(task));
+			}
 			break;
 		}
 		default:

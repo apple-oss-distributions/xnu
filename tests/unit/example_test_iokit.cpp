@@ -27,15 +27,35 @@
  */
 
 #include <darwintest.h>
+#include "mocks/mock_dynamic.h"
 #include "IOKit/IOUserClient.h"
 
 #define UT_MODULE iokit
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.example_test_iokit"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("misc"),
 	T_META_OWNER("s_shalom"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RUN_CONCURRENTLY(true)
 	);
+
+__BEGIN_DECLS
+PMOCKS_START
+
+// this function is mocked both here and in libmocks. This one should win
+// because it appears later in OTHER_LDFLAGS in the makefile
+T_MOCK_PRIVATE(int, kernel_func11, (int a, char b), (a, b), {
+	return 4;
+});
+
+PMOCKS_END
+__END_DECLS
+
+T_DECL(test_private_mocks_work_cpp, "test the the PMOCKS mechanism works")
+{
+	int r = kernel_func11(1, 2);
+	T_ASSERT_EQ(r, 4, "value should come from private mock");
+}
 
 T_DECL(xnu_example_test_iokit, "an IOKit example") {
 	IOUserClient::clientHasPrivilege(NULL, "foo");

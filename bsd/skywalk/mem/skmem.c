@@ -657,7 +657,7 @@ skmem_dump(struct skmem_region *skr)
 	    vm_page_free_count, vm_page_speculative_count,
 	    vm_page_active_count, vm_page_inactive_count,
 	    vm_page_wire_count, vm_page_throttled_count, vm_lopage_free_count,
-	    vm_page_purgeable_count, vm_page_purged_count);
+	    counter_load(&vm_page_purgeable_count), vm_page_purged_count);
 	SKMEM_WDT_DUMP_BUF_CHK();
 
 done:

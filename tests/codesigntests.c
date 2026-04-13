@@ -166,3 +166,45 @@ T_DECL(TESTNAME, "CS OP, code sign operations test")
 		T_ASSERT_POSIX_ERROR(rcent, 1, "Geting CS OPS blob");
 	}
 }
+
+T_DECL(cs_clearinstaller_privcheck, "CS_OPS_CLEARINSTALLER privilege check (rdar://128685712)",
+    T_META_ASROOT(true))
+{
+	int rcent;
+	pid_t installer_pid, self_pid;
+	uint32_t status;
+	FILE *fp;
+
+	/* Find applekeystored PID - it has CS_INSTALLER due to com.apple.rootless.install entitlement */
+	fp = popen("pgrep -x applekeystored", "r");
+	T_ASSERT_NOTNULL(fp, "popen to find applekeystored");
+
+	rcent = fscanf(fp, "%d", &installer_pid);
+	pclose(fp);
+	T_ASSERT_EQ_INT(rcent, 1, "Found applekeystored PID");
+	T_LOG("Found applekeystored at PID %d", installer_pid);
+
+	/* Verify applekeystored has CS_INSTALLER */
+	rcent = csops(installer_pid, CS_OPS_STATUS, &status, sizeof(status));
+	T_ASSERT_POSIX_ZERO(rcent, "Get CS_OPS_STATUS for applekeystored");
+	T_ASSERT_BITS_SET(status, CS_INSTALLER, "applekeystored has CS_INSTALLER flag");
+
+	/* Test: Without CS_INSTALLER, we should NOT be able to clear another process's CS_INSTALLER */
+	rcent = csops(installer_pid, CS_OPS_CLEARINSTALLER, NULL, 0);
+	T_ASSERT_EQ_INT(rcent, -1, "Non-CS_INSTALLER process cannot clear another's CS_INSTALLER");
+	T_ASSERT_EQ_INT(errno, EPERM, "Should fail with EPERM");
+
+	/* Verify applekeystored still has CS_INSTALLER after failed attempt */
+	rcent = csops(installer_pid, CS_OPS_STATUS, &status, sizeof(status));
+	T_ASSERT_POSIX_ZERO(rcent, "Get CS_OPS_STATUS for applekeystored");
+	T_ASSERT_BITS_SET(status, CS_INSTALLER, "applekeystored still has CS_INSTALLER flag");
+
+	T_LOG("Successfully prevented non-CS_INSTALLER process from clearing another's CS_INSTALLER");
+
+	/* Test: Process can always clear its own CS_INSTALLER flag (even if it doesn't have it) */
+	self_pid = getpid();
+	rcent = csops(self_pid, CS_OPS_CLEARINSTALLER, NULL, 0);
+	T_ASSERT_POSIX_ZERO(rcent, "Process can clear its own CS_INSTALLER flag");
+
+	T_LOG("Successfully verified process can clear its own CS_INSTALLER flag");
+}

@@ -84,7 +84,7 @@
 
 __BEGIN_DECLS
 
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 #ifdef MACH_KERNEL_PRIVATE
 
@@ -393,7 +393,7 @@ extern void     hw_unlock_bit_nopreempt(
 
 __END_DECLS
 
-#pragma GCC visibility pop
+__exported_pop
 
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /*!_KERN_SIMPLE_LOCK_H_*/

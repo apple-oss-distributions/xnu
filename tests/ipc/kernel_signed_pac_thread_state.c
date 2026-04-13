@@ -344,7 +344,7 @@ create_exception_port(exception_mask_t exception_mask)
 static void *
 exc_server_thread(void *arg)
 {
-	mach_port_t exc_port = (mach_port_t)arg;
+	mach_port_t exc_port = (mach_port_t)(uintptr_t)arg;
 	kern_return_t kr;
 
 	/**

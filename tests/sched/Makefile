@@ -1,5 +1,7 @@
 # Copyright (c) 2024 Apple Inc.  All rights reserved.
 
+INCLUDED_TEST_SOURCE_DIRS += sched
+
 SCHED_UTILS = sched/sched_test_utils.c
 SCHED_UTILS_FLAGS = -ldarwintest_utils -Wno-format-nonliteral -Wno-cast-qual -Wno-c++98-compat -Wno-format-security
 EXCLUDED_SOURCES += $(SCHED_UTILS)
@@ -38,12 +40,9 @@ sched/overloaded_runqueue: $(SCHED_UTILS)
 SCHED_TARGETS += sched/overloaded_runqueue
 
 sched/thread_group_fairness: CODE_SIGN_ENTITLEMENTS = sched/thread_group_fairness.entitlements
-sched/thread_group_fairness: OTHER_CFLAGS += -DENTITLED=1
+sched/thread_group_fairness: OTHER_CFLAGS += -DENTITLED=1 -std=c23
 sched/thread_group_fairness: OTHER_LDFLAGS += -framework perfdata $(SCHED_UTILS_FLAGS)
 sched/thread_group_fairness: $(SCHED_UTILS)
-sched/thread_group_fairness: sched/thread_group_fairness_workload_config.h
-sched/thread_group_fairness_workload_config.h: sched/thread_group_fairness_workload_config.plist
-	xxd -i $< > $@
 SCHED_TARGETS += sched/thread_group_fairness
 
 sched/thread_group_flags: CODE_SIGN_ENTITLEMENTS = sched/thread_group_flags.entitlements

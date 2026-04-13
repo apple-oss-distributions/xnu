@@ -32,6 +32,7 @@
 #include <libkern/libkern.h>
 #include <libkern/section_keywords.h>
 #include <libkern/coretrust/coretrust.h>
+#include <libkern/amfi/amfi.h>
 #include <pexpert/pexpert.h>
 #include <sys/vm.h>
 #include <sys/proc.h>
@@ -539,7 +540,7 @@ ppl_resolve_kernel_entitlements(
 kern_return_t
 ppl_accelerate_entitlements(
 	void *sig_obj,
-	CEQueryContext_t *ce_ctx)
+	const CEContext_t **ce_ctx)
 {
 	pmap_cs_code_directory_t *cd_entry = sig_obj;
 	kern_return_t ret = KERN_DENIED;
@@ -556,11 +557,9 @@ ppl_accelerate_entitlements(
 		ret = KERN_SUCCESS;
 	}
 
-	/* Return the accelerated context to the caller */
 	if ((ret == KERN_SUCCESS) && (ce_ctx != NULL)) {
 		*ce_ctx = cd_entry->ce_ctx;
 	}
-
 	return ret;
 }
 

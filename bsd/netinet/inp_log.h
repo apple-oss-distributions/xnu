@@ -31,13 +31,41 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 
+#include <sys/sysctl.h>
+
 #include <netinet/in_pcb.h>
+
+#include <os/log.h>
+
+#define ADDRESS_STR_LEN (MAX_IPv6_STR_LEN + 6)
+
+extern int sysctl_inp_log_port SYSCTL_HANDLER_ARGS;
 
 extern int inp_log_privacy;
 
-void inp_log_addresses(struct inpcb *inp, char *__sized_by(lbuflen) lbuf,
+extern os_log_t inp_log_handle;
+extern os_log_t tcp_log_handle;
+extern os_log_t udp_log_handle;
+
+extern void inp_log_init(void);
+
+extern void inp_log_addresses(struct inpcb *inp, char *__sized_by(lbuflen) lbuf,
     socklen_t lbuflen, char *__sized_by(fbuflen) fbuf,
     socklen_t fbuflen);
+
+extern void inp_log_message(const char *func_name, int line_no,
+    struct inpcb *inp, struct sockaddr *from, struct sockaddr *to,
+    const char *format, ...) __printflike(6, 7);
+
+void inp_log_pair_message(const char *func_name, int line_no,
+    struct inpcb *inp1, struct sockaddr *from, struct sockaddr *to,
+    struct inpcb *inp2, const char *format, ...) __printflike(7, 8);
+
+#define INP_LOG(inp, from, to, format, ...) \
+    inp_log_message(__func__, __LINE__, (inp), (from), (to), format, ## __VA_ARGS__)
+
+#define INP_LOG_PAIR(inp1, from, to, inp2, format, ...) \
+    inp_log_pair_message(__func__, __LINE__, (inp1), (from), (to), (inp2), format, ## __VA_ARGS__)
 
 #endif /* BSD_KERNEL_PRIVATE */
 

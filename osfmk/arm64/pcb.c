@@ -47,6 +47,7 @@
 #include <machine/atomic.h>
 #include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
+#include <arm64/x86_64_compat.h>
 #include <arm/cpu_data_internal.h>
 #include <arm/machdep_call.h>
 #include <arm/misc_protos.h>
@@ -58,6 +59,9 @@
 
 #include <sys/kdebug.h>
 
+#if HYPERVISOR
+#include <arm64/hv/hv.h>
+#endif
 
 #include <san/kcov_stksz.h>
 
@@ -159,11 +163,92 @@ machine_save_sme_context(thread_t old, arm_sme_saved_state_t *old_sme_ss, const 
 }
 
 static void
+machine_apply_sme_priority(uint64_t wanted_smpri_el1)
+{
+#if USE_SME_PRIORITY
+	const uint64_t active_smpri_el1 = __builtin_arm_rsr64("SMPRI_EL1");
+	if (__improbable(active_smpri_el1 != wanted_smpri_el1)) {
+		__builtin_arm_wsr64("SMPRI_EL1", wanted_smpri_el1);
+		arm_context_switch_requires_sync();
+	}
+#else
+#pragma unused(wanted_smpri_el1)
+#endif /* USE_SME_PRIORITY */
+}
+
+/*
+ * Map the thread's scheduler priority parameters to an SME priority.
+ *
+ * For the set of clutch buckets {BG, UT, DF, etc...}, the partial order of a
+ * "has higher priority than" relation over this set is mapped onto the SME
+ * hardware. Threads are mapped to the lowest priority within each of their
+ * corresponding buckets.
+ *
+ * +----------------------------------------------------------------+
+ * | res |  BG  |  UT  |  DF  |  IN  |  FG  | FIX-TS | FIX-RT | res |
+ * +----------------------------------------------------------------+
+ *    0  | 1  2 | 3  4 | 5  6 | 7  8 | 9 10 |  11 12 |  13 14 |  15
+ */
+__pure2 static uint64_t
+machine_thread_compute_sme_priority_internal(sched_mode_t mode, sched_bucket_t bucket)
+{
+	uint64_t out = SMPRI_EL1_DEFAULT;
+	switch (bucket) {
+	case TH_BUCKET_FIXPRI: {
+		/* Prefer REALTIME mode threads above TIMESHARE. */
+		const uint8_t offset = mode == TH_MODE_REALTIME ? 13 : 11;
+		out = SMPRI_EL1_MIN + offset;
+		break;
+	}
+	case TH_BUCKET_SHARE_FG:
+		out = SMPRI_EL1_MIN + 9;
+		break;
+#if CONFIG_SCHED_CLUTCH
+	case TH_BUCKET_SHARE_IN:
+		out = SMPRI_EL1_MIN + 7;
+		break;
+#endif /* CONFIG_SCHED_CLUTCH */
+	case TH_BUCKET_SHARE_DF:
+		out = SMPRI_EL1_MIN + 5;
+		break;
+	case TH_BUCKET_SHARE_UT:
+		out = SMPRI_EL1_MIN + 3;
+		break;
+	case TH_BUCKET_SHARE_BG:
+		out = SMPRI_EL1_MIN + 1;
+		break;
+	default:
+		MACH_ASSERT_DO(panic("Unexpected scheduler bucket: %d", bucket));
+	}
+	return out;
+}
+
+uint64_t
+machine_thread_get_sme_priority(thread_t thread)
+{
+	return machine_thread_compute_sme_priority_internal(
+		thread->sched_mode, thread->th_sched_bucket);
+}
+
+void
+machine_thread_update_sme_priority(thread_t thread)
+{
+	if (machine_thread_get_sme_state(thread) && (thread == current_thread_volatile())) {
+		machine_apply_sme_priority(machine_thread_get_sme_priority(thread));
+	}
+	/*
+	 * If thread has SME state but isn't on core, it will be synched the next
+	 * time that happens.
+	 */
+}
+
+static void
 machine_restore_sme_context(thread_t new, const arm_sme_saved_state_t *new_sme_ss, const struct arm_matrix_cpu_state *cpu_state)
 {
 	__builtin_arm_wsr64("TPIDR2_EL0", new->machine.tpidr2_el0);
 
 	if (new_sme_ss) {
+		machine_apply_sme_priority(machine_thread_get_sme_priority(new));
 		if (machine_thread_has_valid_za(new_sme_ss)) {
 			if (!cpu_state->za_is_enabled) {
 				asm volatile ("smstart za");
@@ -244,6 +329,7 @@ machine_switch_matrix_context(thread_t old, thread_t new)
 
 
 
+
 static inline void
 machine_thread_switch_cpu_data(thread_t old, thread_t new)
 {
@@ -261,6 +347,78 @@ machine_thread_switch_cpu_data(thread_t old, thread_t new)
 
 	new->machine.CpuDatap = datap;
 	new->machine.pcpu_data_base_and_cpu_number = base;
+}
+
+/**
+ * routine: machine_switch_cpu_data
+ *
+ * Helper function used by pmap_and_extended_context to switch CPU data,
+ * and handle setting a proper value for TPIDR_EL0.
+ *
+ */
+
+static inline void
+machine_switch_cpu_data(thread_t old, thread_t new)
+{
+#if !__ARM_KERNEL_PROTECT__
+	/*
+	 * If the old thread was entitled for x18 preservation, save away
+	 * the TPIDR_EL0 bit that tells us whether x18 should actually be
+	 * preserved.
+	 *
+	 * The arm_machine_flags bit saving the TPIDR_EL0 bit is only
+	 * honored when the thread is entitled, so we do not care to save
+	 * it when it is not.
+	 */
+	uint32_t const old_flags = old->machine.arm_machine_flags;
+
+	if (get_threadtask(old)->preserve_x18_entitled) {
+		uint64_t tpidr = __builtin_arm_rsr64("TPIDR_EL0");
+
+		if ((bool)(old_flags & ARM_MACHINE_THREAD_PRESERVE_X18_SAVE) !=
+		    (bool)(tpidr & MACHDEP_TPIDR_FLAG_PRESERVE_X18)) {
+			// Toggle the thread flag if the TPIDR flag changed.
+			old->machine.arm_machine_flags ^= ARM_MACHINE_THREAD_PRESERVE_X18_SAVE;
+		}
+	}
+
+	/*
+	 * If the new thread's proper arm_machine_flag indicates it is
+	 * entitled for x18 preservation, *and* the arm_machine_flag that
+	 * saved away the TPIDR_EL0 flag that indicated whether the thread
+	 * actually wants x18 to be preserved, restore that
+	 * arm_machine_flag back into TPIDR_EL0. Restoring x18 is then
+	 * done in locore.s, when all other GPRs are restored as well.
+	 *
+	 * Otherwise (not entitled, or don't want to preserve), we have to
+	 * clear the TPIDR_EL0 bit, to prevent the context switch path
+	 * from restoring x18.
+	 */
+	uint64_t new_tpidr;
+
+	if (new->machine.arm_machine_flags & ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL) {
+		new_tpidr = MACHDEP_TPIDR_FLAG_PRESERVE_X18;
+
+		new->machine.arm_machine_flags &= ~ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL;
+	} else if (new->machine.arm_machine_flags & (ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL)) {
+		new_tpidr = MACHDEP_TPIDR_FLAG_PRESERVE_X18;
+	} else {
+		new_tpidr = 0;
+	}
+
+#else /* !__ARM_KERNEL_PROTECT__ */
+
+	uint64_t new_tpidr = 0;
+
+#endif /* !__ARM_KERNEL_PROTECT__ */
+
+	machine_thread_switch_cpu_data(old, new);
+
+	/*
+	 * Restore the CPU-specific parts of TPIDR_EL0 (i.e. cluster and CPU ID).
+	 */
+	new_tpidr |= new->machine.CpuDatap->cpu_tpidr_el0 & MACHDEP_TPIDR_CPU_DATA_MASK;
+	__builtin_arm_wsr64("TPIDR_EL0", new_tpidr);
 }
 
 /**
@@ -283,6 +441,8 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 #if HAVE_MACHINE_THREAD_MATRIX_STATE
 	machine_switch_matrix_context(old, new);
 #endif
+
+
 
 
 
@@ -324,7 +484,7 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 	}
 
 
-	machine_thread_switch_cpu_data(old, new);
+	machine_switch_cpu_data(old, new);
 }
 
 /*
@@ -517,8 +677,26 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 	 * thread state, as if the signature could actually change from an
 	 * actual signature to another.
 	 */
+
+	/*
+	 * Force the machine flag to save x18 if the new thread has the
+	 * entitlement that "always" preserves x18 (as opposed to the one
+	 * that allows the thread to toggle the bit).
+	 *
+	 * In reality, there is no difference between these two
+	 * entitlements after initial setup. The only real difference is
+	 * that threads with the "always" entitlement start with the
+	 * preserve-x18 bit set, while threads carrying the newer "toggle"
+	 * entitlement start with it cleared.
+	 *
+	 * A thread with the "always" entitlement may, in theory, still
+	 * opt to toggle x18 preservation off during runtime, as it was
+	 * not worth implementing a separate context switch path that
+	 * forces x18 preservation. If you don't want to turn it off, just
+	 * don't use the new API to do so!
+	 */
 #if !__ARM_KERNEL_PROTECT__
-	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_PRESERVE_X18);
+	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL);
 #endif /* !__ARM_KERNEL_PROTECT__ */
 	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE);
 
@@ -532,12 +710,12 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 			/* Note that for x86_64 translation specifically, the
 			 * context switch path implicitly switches x18 regardless
 			 * of this flag. */
-			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL;
 		}
 #endif /* CONFIG_ROSETTA */
 
-		if (task->preserve_x18) {
-			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+		if (task->preserve_x18_always) {
+			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL;
 		}
 #endif /* !__ARM_KERNEL_PROTECT__ */
 
@@ -552,7 +730,7 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 		 * __ARM_KERNEL_PROTECT__, which make real destructive use of
 		 * x18.)
 		 */
-		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
+		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18_SAVE;
 #endif /* !__ARM_KERNEL_PROTECT__ */
 		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE;
 	}
@@ -587,6 +765,12 @@ machine_thread_destroy(thread_t thread)
 			thread->machine.umatrix_hdr = NULL;
 		}
 #endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
+#if HYPERVISOR
+		if (thread->hv_thread_target) {
+			hv_callback_thread_destroy(thread->hv_thread_target);
+			thread->hv_thread_target = NULL;
+		}
+#endif /* HYPERVISOR */
 
 		zfree(user_ss_zone, thread_user_ss);
 	}
@@ -596,9 +780,9 @@ machine_thread_destroy(thread_t thread)
 			arm_debug_set(NULL);
 		}
 
-		if (os_ref_release(&thread->machine.DebugData->ref) == 0) {
-			zfree(ads_zone, thread->machine.DebugData);
-		}
+		arm_debug_state_t *pTmp = thread->machine.DebugData;
+		thread->machine.DebugData = NULL;
+		free_debug_state(pTmp);
 	}
 }
 
@@ -631,9 +815,8 @@ machine_thread_sme_state_alloc(thread_t thread)
 	arm_sme_trap_at_el0(false);
 	__builtin_arm_isb(ISB_SY);
 	thread->machine.usme = sme_ss;
-
+	machine_thread_update_sme_priority(thread);
 	enable_preemption();
-
 	return KERN_SUCCESS;
 }
 
@@ -933,9 +1116,7 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 
 	/* Release previous debug state. */
 	if (cpu_debug != NULL) {
-		if (os_ref_release(&cpu_debug->ref) == 0) {
-			zfree(ads_zone, cpu_debug);
-		}
+		free_debug_state(cpu_debug);
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {
@@ -1142,9 +1323,7 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 
 	/* Release previous debug state. */
 	if (cpu_debug != NULL) {
-		if (os_ref_release(&cpu_debug->ref) == 0) {
-			zfree(ads_zone, cpu_debug);
-		}
+		free_debug_state(cpu_debug);
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {

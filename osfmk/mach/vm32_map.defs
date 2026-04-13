@@ -288,6 +288,17 @@ routine PREFIX(vm_purgable_control)(
 routine PREFIX(vm_map_exec_lockdown)(
 		target_task : vm_map_t);
 
+skip; /* was vm_remap_new */
+
+routine PREFIX(vm_reallocate) (
+			target_task		: vm_map_t;
+			src				: vm32_address_t;
+			src_size		: vm32_size_t;
+	inout	dst				: vm32_address_t;
+  			dst_size 		: vm32_size_t;
+			align_mask		: vm32_offset_t;
+			options		    : int;
+			flags			: int);
 
 #endif /* VM32_SUPPORT */
 

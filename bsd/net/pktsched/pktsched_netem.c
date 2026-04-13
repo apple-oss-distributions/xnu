@@ -1477,6 +1477,13 @@ netem_check_params(const struct if_netem_params *p)
 		return EINVAL;
 	}
 
+	if (p->ifnetem_reordering_ms > 1000) {
+		NETEM_LOG(LOG_ERR,
+		    "| error: reordering delay %dms too big (> 1 sec)",
+		    p->ifnetem_reordering_ms);
+		return EINVAL;
+	}
+
 	if (p->ifnetem_output_ival_ms > 1000) {
 		NETEM_LOG(LOG_ERR,
 		    "| error: output interval %dms too big",
@@ -1539,6 +1546,7 @@ netem_set_params(struct netem *ne, __unused struct ifnet *ifp,
 
 	struct reordering *r = &ne->netem_reordering_model;
 	r->reordering_p = p->ifnetem_reordering_p;
+	r->reordering_ms = p->ifnetem_reordering_ms;
 
 	if (p->ifnetem_output_ival_ms != 0) {
 		ne->netem_output_ival_ms = p->ifnetem_output_ival_ms;
@@ -1612,6 +1620,7 @@ netem_get_params(struct netem *ne, struct if_netem_params *p)
 
 	struct reordering *r = &ne->netem_reordering_model;
 	p->ifnetem_reordering_p = r->reordering_p;
+	p->ifnetem_reordering_ms = r->reordering_ms;
 
 	NETEM_MTX_UNLOCK(ne);
 }

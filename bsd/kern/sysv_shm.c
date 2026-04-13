@@ -301,7 +301,7 @@ shm_delete_mapping(__unused struct proc *p, struct shmmap_state *shmmap_s,
 	size = vm_map_round_page(shmseg->u.shm_segsz,
 	    vm_map_page_mask(current_map())); /* XXX done for us? */
 	if (deallocate) {
-		result = mach_vm_deallocate(current_map(), shmmap_s->va, size);
+		result = mach_vm_deallocate_kernel(current_map(), shmmap_s->va, size);
 		if (result != KERN_SUCCESS) {
 			return EINVAL;
 		}
@@ -551,7 +551,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	goto shmat_out;
 out:
 	if (mapped_size > 0) {
-		(void) mach_vm_deallocate(current_map(),
+		(void) mach_vm_deallocate_kernel(current_map(),
 		    shmmap_s->va,
 		    mapped_size);
 	}

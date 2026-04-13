@@ -12,6 +12,11 @@
 
 #define ROUNDUP32(n) (((n) + sizeof(uint32_t) - 1) & ~(sizeof(uint32_t) - 1))
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"));
+
 T_DECL(route_output_stack_oflow_56033075, "Stack overflow via ma_copy through route_output")
 {
 	int s;

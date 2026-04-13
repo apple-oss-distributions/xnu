@@ -45,7 +45,7 @@ def main():
     open(tests_json, "w").write(xnu_j_mod)
     print(f"saved {tests_json}")
 
-    if os.path.exists(root_json):
+    if os.path.lexists(root_json):
         print(f"removing old link {root_json}")
         os.unlink(root_json)
     os.symlink(tests_json, root_json)

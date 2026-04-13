@@ -172,14 +172,11 @@ static_assert(VM_TAG_SIZECLASSES >= MAX_K_ZONE(kt_zone_cfg));
 const char * const kalloc_heap_names[] = {
 	[KHEAP_ID_NONE]          = "",
 	[KHEAP_ID_EARLY]         = "early.",
-	[KHEAP_ID_DATA_BUFFERS]  = "data.",
+	[KHEAP_ID_DATA_PRIVATE]  = "data.",
 	[KHEAP_ID_DATA_SHARED]   = "data_shared.",
 	[KHEAP_ID_KT_VAR]        = "",
 };
 
-/*
- * Early heap configuration
- */
 SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_EARLY[1] = {
 	{
 		.kh_name     = "early.kalloc",
@@ -188,14 +185,19 @@ SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_EARLY[1] = {
 	}
 };
 
-/*
- * Bag of bytes heap configuration
- */
-SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_DATA_BUFFERS[1] = {
+SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_DATA_PRIVATE[1] = {
 	{
 		.kh_name     = "data.kalloc",
-		.kh_heap_id  = KHEAP_ID_DATA_BUFFERS,
+		.kh_heap_id  = KHEAP_ID_DATA_PRIVATE,
 		.kh_tag      = VM_KERN_MEMORY_KALLOC_DATA,
+	}
+};
+
+SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_DATA_SHARED[1] = {
+	{
+		.kh_name     = "data_shared.kalloc",
+		.kh_heap_id  = KHEAP_ID_DATA_SHARED,
+		.kh_tag      = VM_KERN_MEMORY_KALLOC_SHARED,
 	}
 };
 
@@ -209,17 +211,6 @@ SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_KT_VAR[1] = {
 		.kh_name     = "kalloc.type.var",
 		.kh_heap_id  = KHEAP_ID_KT_VAR,
 		.kh_tag      = VM_KERN_MEMORY_KALLOC_TYPE
-	}
-};
-
-/*
- * Share heap configuration
- */
-SECURITY_READ_ONLY_LATE(struct kalloc_heap) KHEAP_DATA_SHARED[1] = {
-	{
-		.kh_name     = "data_shared.kalloc",
-		.kh_heap_id  = KHEAP_ID_DATA_SHARED,
-		.kh_tag      = VM_KERN_MEMORY_KALLOC_SHARED,
 	}
 };
 
@@ -390,7 +381,7 @@ kalloc_zone_init(
 	zone_id_t            *kheap_zstart,
 	zone_create_flags_t   zc_flags)
 {
-	if (kheap_id == KHEAP_ID_DATA_BUFFERS) {
+	if (kheap_id == KHEAP_ID_DATA_PRIVATE) {
 		zc_flags |= ZC_DATA;
 	}
 
@@ -474,20 +465,6 @@ TUNABLE(uint16_t, kt_fixed_zones, "kt_fixed_zones",
 TUNABLE(uint16_t, kt_var_ptr_heaps, "kt_var_ptr_heaps", 2);
 static TUNABLE(bool, kt_shared_fixed, "-kt-shared", true);
 
-
-/**
- * @const kexts_enroll_data_shared
- *
- * @brief
- * We have two heaps for data allocations:
- *     - KHEAP_DATA_BUFFERS, which is for allocations that never shared.
- *     - KHEAP_DATA_SHARED, which is for allocations that need to be shared.
- *
- * This is a control that indicates which heap we expose to kexts via the
- * exported allocations functions.
- */
-STATIC_IF_KEY_DEFINE_TRUE(kexts_enroll_data_shared);
-
 /**
  * @const restricted_data_mode
  *
@@ -496,10 +473,7 @@ STATIC_IF_KEY_DEFINE_TRUE(kexts_enroll_data_shared);
  * enforcement on data allocations:
  *     - none: the state before the change (no telemetry, no enforcement).
  *     - telemetry: do not enforce, do emit telemetry
- *     - enforce: type the KHEAP_DATA_BUFFERS pages as restricted mappings.
- *
- * Combined with kexts_enroll_data_shared, we can create the modes we need
- * for none/telemetry/enforcement on core kernel/kexts.
+ *     - enforce: type the KHEAP_DATA_PRIVATE pages as restricted mappings.
  *
  * restricted_data_mode_t is an enum used to specify the mode being used.
  */
@@ -517,7 +491,7 @@ TUNABLE(restricted_data_mode_t,
     RESTRICTED_DATA_MODE_NONE
 #else
     RESTRICTED_DATA_MODE_TELEMETRY
-#endif /* __x86_64__ */
+#endif
     );
 
 inline bool
@@ -530,22 +504,6 @@ inline bool
 kalloc_is_restricted_data_mode_enforced(void)
 {
 	return restricted_data_mode == RESTRICTED_DATA_MODE_ENFORCE;
-}
-
-inline bool
-kmem_needs_data_share_range(void)
-{
-	/*
-	 * The dedicated range is required only for
-	 * telemetry reporting, when we need to distinguish
-	 * between the two kind of data via kmem ranges.
-	 *
-	 * Even though this is strictly like checking telemetry
-	 * mode, it's better to have well-defined abstraction layer
-	 * for that adopted in all the call-sites, to be flexible
-	 * w.r.t future changes / unrolling.
-	 */
-	return kalloc_is_restricted_data_mode_telemetry();
 }
 
 /*
@@ -864,7 +822,7 @@ static void
 kalloc_type_handle_data_view_fixed(vm_offset_t addr)
 {
 	kalloc_type_view_t cur_data_view = (kalloc_type_view_t) addr;
-	zone_t z = kalloc_zone_for_size(KHEAP_DATA_BUFFERS->kh_zstart,
+	zone_t z = kalloc_zone_for_size(KHEAP_DATA_PRIVATE->kh_zstart,
 	    cur_data_view->kt_size);
 	kalloc_type_assign_zone_fixed(&cur_data_view, &cur_data_view + 1, z, NULL,
 	    NULL);
@@ -2097,17 +2055,12 @@ kalloc_init(void)
 	static_assert(KHEAP_MAX_SIZE >= KALLOC_SAFE_ALLOC_SIZE);
 	kalloc_zsize_compute();
 
-	/* Initialize kalloc data buffers heap */
-	kalloc_heap_init(KHEAP_DATA_BUFFERS);
-
-	/* Initialize kalloc shared data buffers heap */
+	kalloc_heap_init(KHEAP_DATA_PRIVATE);
 	kalloc_heap_init(KHEAP_DATA_SHARED);
-
-	/* Initialize kalloc shared buffers heap */
 	kalloc_heap_init(KHEAP_EARLY);
 
 	kmem_alloc(kernel_map, (vm_offset_t *)&kt_buffer, kt_scratch_size,
-	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_SPRAYQTN, VM_KERN_MEMORY_KALLOC);
+	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT, VM_KERN_MEMORY_KALLOC);
 
 	/*
 	 * Handle fixed size views
@@ -2140,15 +2093,13 @@ STARTUP(ZALLOC, STARTUP_RANK_THIRD, kalloc_init);
 static void
 KALLOC_ZINFO_SALLOC(vm_size_t bytes)
 {
-	thread_t thr = current_thread();
-	ledger_debit_thread(thr, thr->t_ledger, task_ledgers.tkm_shared, bytes);
+	ledger_debit(current_thread()->t_ledger, task_ledgers.tkm_shared, bytes);
 }
 
 static void
 KALLOC_ZINFO_SFREE(vm_size_t bytes)
 {
-	thread_t thr = current_thread();
-	ledger_credit_thread(thr, thr->t_ledger, task_ledgers.tkm_shared, bytes);
+	ledger_credit(current_thread()->t_ledger, task_ledgers.tkm_shared, bytes);
 }
 
 static kmem_guard_t
@@ -2205,7 +2156,7 @@ static_assert(8 + 1 + 1 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
 
 SECURITY_READ_ONLY_LATE(uint32_t) kalloc_array_type_shift = KALLOC_ARRAY_TYPE_SHIFT;
 
-__attribute__((always_inline))
+__always_inline_testable __mockable
 struct kalloc_result
 __kalloc_array_decode(vm_address_t ptr)
 {
@@ -2227,13 +2178,15 @@ __kalloc_array_decode(vm_address_t ptr)
 	return kr;
 }
 
-static inline void *
+__static_testable __inline_testable __mockable
+void *
 __kalloc_array_encode_zone(zone_t z, void *ptr, vm_size_t size __unused)
 {
 	return (void *)((vm_address_t)ptr | z->z_array_size_class);
 }
 
-static inline vm_address_t
+__static_testable __inline_testable __mockable
+vm_address_t
 __kalloc_array_encode_vm(vm_address_t addr, vm_size_t size)
 {
 	addr &= ~(0x1ull << KALLOC_ARRAY_TYPE_SHIFT);
@@ -2256,7 +2209,7 @@ SECURITY_READ_ONLY_LATE(uint32_t) kalloc_array_type_shift = 0;
 static_assert(KALLOC_ARRAY_TYPE_BIT > VM_KERNEL_POINTER_SIGNIFICANT_BITS + 1);
 static_assert(__builtin_clzll(KHEAP_MAX_SIZE) > KALLOC_ARRAY_TYPE_BIT);
 
-__attribute__((always_inline))
+__always_inline_testable __mockable
 struct kalloc_result
 __kalloc_array_decode(vm_address_t ptr)
 {
@@ -2273,7 +2226,8 @@ __kalloc_array_decode(vm_address_t ptr)
 	return kr;
 }
 
-static inline void *
+__static_testable __inline_testable __mockable
+void *
 __kalloc_array_encode_zone(zone_t z __unused, void *ptr, vm_size_t size)
 {
 	vm_address_t addr = (vm_address_t)ptr;
@@ -2284,7 +2238,8 @@ __kalloc_array_encode_zone(zone_t z __unused, void *ptr, vm_size_t size)
 	return (void *)addr;
 }
 
-static inline vm_address_t
+__static_testable __inline_testable __mockable
+vm_address_t
 __kalloc_array_encode_vm(vm_address_t addr, vm_size_t size)
 {
 	addr &= (2ull << KALLOC_ARRAY_TYPE_BIT) - 1; /* keep bit */
@@ -2334,12 +2289,7 @@ kalloc_type_get_heap(kalloc_type_flags_t kt_flags)
 	 * Redirect data-only views
 	 */
 	if (kalloc_type_is_data(kt_flags)) {
-		/*
-		 * There are kexts that allocate arrays of data types (uint8_t etc.)
-		 * and use krealloc_data / kfree_data to free it; therefore,
-		 * until adoption will land, we need to use shared heap for now.
-		 */
-		return GET_KEXT_KHEAP_DATA();
+		return KHEAP_DATA_PRIVATE;
 	}
 
 	if (kt_flags & KT_PROCESSED) {
@@ -2349,6 +2299,39 @@ kalloc_type_get_heap(kalloc_type_flags_t kt_flags)
 	return KHEAP_DEFAULT;
 }
 
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+/* Establish tagging rules */
+static void
+kalloc_enforce_large_tagging_policy(kma_flags_t *kma_flags, __unused kalloc_heap_t kheap)
+{
+	kma_flags_t kflags = *kma_flags;
+	kma_flags_t check_flags = 0;
+
+#if HAS_MTE
+	if (!mte_kern_enabled()) {
+		/* Do not tag on systems where MTE is disabled. */
+		return;
+	}
+#endif /* HAS_MTE */
+
+	/* Default policy is to track every large allocation... */
+	kflags |= KMA_TAG;
+
+#if HAS_MTE && !KASAN
+	/*
+	 *  ...except DATA allocations, regardless of SHARED or PRIVATE
+	 * in production (still track them on KASAN).
+	 */
+	check_flags = KMA_DATA;
+#endif /* HAS_MTE && !KASAN */
+
+	if (kflags & check_flags) {
+		kflags &= ~KMA_TAG;
+	}
+
+	*kma_flags = kflags;
+}
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 __attribute__((noinline))
 static struct kalloc_result
@@ -2395,7 +2378,7 @@ kalloc_large(
 		kma_flags |= KMA_KOBJECT;
 #endif
 	} else {
-		assert(kheap == KHEAP_DATA_BUFFERS || kheap == KHEAP_DATA_SHARED);
+		assert(kheap == KHEAP_DATA_PRIVATE || kheap == KHEAP_DATA_SHARED);
 	}
 	if (flags & Z_NOPAGEWAIT) {
 		kma_flags |= KMA_NOPAGEWAIT;
@@ -2403,17 +2386,18 @@ kalloc_large(
 	if (flags & Z_ZERO) {
 		kma_flags |= KMA_ZERO;
 	}
-	if (kheap == KHEAP_DATA_BUFFERS) {
+	if (kheap == KHEAP_DATA_PRIVATE) {
 		kma_flags |= KMA_DATA;
 	} else if (kheap == KHEAP_DATA_SHARED) {
 		kma_flags |= KMA_DATA_SHARED;
-	} else if (flags & (Z_KALLOC_ARRAY | Z_SPRAYQTN)) {
-		kma_flags |= KMA_SPRAYQTN;
 	}
 	if (flags & Z_NOSOFTLIMIT) {
 		kma_flags |= KMA_NOSOFTLIMIT;
 	}
 
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	kalloc_enforce_large_tagging_policy(&kma_flags, kheap);
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 	tag = zalloc_flags_get_tag(flags);
 	if (flags & Z_VM_TAG_BT_BIT) {
@@ -2513,7 +2497,7 @@ kalloc_use_early_heap(
 		zone_stats_t zstats_cpu = zpercpu_get(zstats);
 
 		if (os_atomic_load(&zstats_cpu->zs_alloc_not_early, relaxed) == 0) {
-			*flags |= Z_SET_NOTEARLY;
+			*flags |= Z_SET_NOT_EARLY;
 			return KHEAP_EARLY->kh_zstart;
 		}
 	}
@@ -2543,7 +2527,7 @@ kalloc_ext(
 		/*
 		 * Use stats from view if present, else use stats from kheap.
 		 * KHEAP_KT_VAR accumulates stats for all allocations going to
-		 * kalloc.type.var zones, while KHEAP_DEFAULT and KHEAP_DATA_BUFFERS
+		 * kalloc.type.var zones, while KHEAP_DEFAULT and KHEAP_DATA_PRIVATE
 		 * use stats from the respective zones.
 		 */
 		zstats  = kt_view->kt_stats;
@@ -2586,7 +2570,7 @@ void *
 kalloc_data_external(vm_size_t size, zalloc_flags_t flags)
 {
 	flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC_DATA);
-	return kheap_alloc(GET_KEXT_KHEAP_DATA(), size, flags);
+	return kheap_alloc(KHEAP_DATA_PRIVATE, size, flags);
 }
 
 void *
@@ -2635,7 +2619,7 @@ kalloc_non_data_require_panic(void *addr, vm_size_t size)
 
 		switch (zsflags.z_kheap_id) {
 		case KHEAP_ID_NONE:
-		case KHEAP_ID_DATA_BUFFERS:
+		case KHEAP_ID_DATA_PRIVATE:
 		case KHEAP_ID_DATA_SHARED:
 		case KHEAP_ID_KT_VAR:
 			panic("kalloc_non_data_require failed: address %p in [%s%s]",
@@ -2666,11 +2650,10 @@ kalloc_data_require(void *addr, vm_size_t size)
 		    size <= zone_elem_inner_size(z)) {
 			return;
 		}
-	} else if (kmem_range_id_contains(KMEM_RANGE_ID_DATA,
+	} else if (kmem_range_id_contains(KMEM_RANGE_ID_DATA_PRIVATE,
 	    (vm_address_t)addr, size)) {
 		return;
-	} else if (kmem_needs_data_share_range() &&
-	    kmem_range_id_contains(KMEM_RANGE_ID_DATA_SHARED,
+	} else if (kmem_range_id_contains(KMEM_RANGE_ID_DATA_SHARED,
 	    (vm_address_t)addr, size)) {
 		return;
 	}
@@ -2700,11 +2683,10 @@ kalloc_non_data_require(void *addr, vm_size_t size)
 		default:
 			break;
 		}
-	} else if (!kmem_range_id_contains(KMEM_RANGE_ID_DATA,
+	} else if (!kmem_range_id_contains(KMEM_RANGE_ID_DATA_PRIVATE,
 	    (vm_address_t)addr, size)) {
 		return;
-	} else if (kmem_needs_data_share_range() &&
-	    !kmem_range_id_contains(KMEM_RANGE_ID_DATA_SHARED,
+	} else if (!kmem_range_id_contains(KMEM_RANGE_ID_DATA_SHARED,
 	    (vm_address_t)addr, size)) {
 		return;
 	}
@@ -2713,20 +2695,9 @@ kalloc_non_data_require(void *addr, vm_size_t size)
 }
 
 bool
-kalloc_is_data_buffers(void *addr, vm_size_t size)
+kalloc_is_data_private(void *addr, vm_size_t size)
 {
 	zone_id_t zid = zone_id_for_element(addr, size);
-
-	/*
-	 * If we do not use dedicated data share range,
-	 * there is no way to fully distinguish between
-	 * shared and buffers heaps.
-	 *
-	 * When kmem_needs_data_share_range() == true, the
-	 * KMEM_RANGE_ID_DATA range is strictly for DATA_BUFFERS,
-	 * and KMEM_RANGE_ID_DATA_SHARED is strictly for DATA_SHARED.
-	 */
-	assert(kmem_needs_data_share_range());
 
 	if (zid != ZONE_ID_INVALID) {
 		zone_t z = &zone_array[zid];
@@ -2735,7 +2706,7 @@ kalloc_is_data_buffers(void *addr, vm_size_t size)
 		    size <= zone_elem_inner_size(z)) {
 			return true;
 		}
-	} else if (kmem_range_id_contains(KMEM_RANGE_ID_DATA,
+	} else if (kmem_range_id_contains(KMEM_RANGE_ID_DATA_PRIVATE,
 	    (vm_address_t)addr, size)) {
 		return true;
 	}
@@ -2909,7 +2880,7 @@ kfree_zone(
 	}
 
 	zsflags = zone_security_config(z);
-	if (kheap == KHEAP_DATA_BUFFERS || kheap == KHEAP_DATA_SHARED) {
+	if (kheap == KHEAP_DATA_PRIVATE || kheap == KHEAP_DATA_SHARED) {
 		if (kheap->kh_heap_id != zsflags.z_kheap_id) {
 			kfree_heap_confusion_panic(kheap, data, size, z);
 		}
@@ -3010,13 +2981,13 @@ kalloc_type_impl_internal(kalloc_type_view_t kt_view, zalloc_flags_t flags)
 	zone_t       z  = kt_view->kt_zv.zv_zone;
 	zone_stats_t zs_cpu = zpercpu_get(zs);
 
-	if ((flags & Z_SET_NOTEARLY) ||
+	if ((flags & Z_SET_NOT_EARLY) ||
 	    os_atomic_load(&zs_cpu->zs_alloc_not_early, relaxed)) {
 		return zalloc_ext(z, zs, flags).addr;
 	}
 
 	assert(!zone_is_data_kheap(zone_security_config(z).z_kheap_id));
-	return zalloc_ext(kt_view->kt_zearly, zs, flags | Z_SET_NOTEARLY).addr;
+	return zalloc_ext(kt_view->kt_zearly, zs, flags | Z_SET_NOT_EARLY).addr;
 }
 
 void
@@ -3059,7 +3030,7 @@ kfree_data_external(void *ptr, vm_size_t size);
 void
 kfree_data_external(void *ptr, vm_size_t size)
 {
-	return kheap_free(GET_KEXT_KHEAP_DATA(), ptr, size);
+	return kheap_free(KHEAP_DATA_PRIVATE, ptr, size);
 }
 
 void
@@ -3067,7 +3038,7 @@ kfree_data_addr_external(void *ptr);
 void
 kfree_data_addr_external(void *ptr)
 {
-	return kheap_free_addr(GET_KEXT_KHEAP_DATA(), ptr);
+	return kheap_free_addr(KHEAP_DATA_PRIVATE, ptr);
 }
 
 void
@@ -3095,6 +3066,40 @@ krealloc_size_invalid_panic(void *data, size_t size)
 	panic("krealloc: addr %p trying to free with nonsensical size %zd",
 	    data, size);
 }
+
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+/* Establish tagging rules */
+static void
+krealloc_enforce_large_tagging_policy(kmr_flags_t *kmr_flags, __unused kalloc_heap_t kheap)
+{
+	kmr_flags_t kflags = *kmr_flags;
+	kmr_flags_t check_flags = 0;
+
+#if HAS_MTE
+	if (!mte_kern_enabled()) {
+		/* Do not tag on systems where MTE is disabled. */
+		return;
+	}
+#endif /* HAS_MTE */
+
+	/* Default policy is to track every large reallocation... */
+	kflags |= KMR_TAG;
+
+#if HAS_MTE
+	/*
+	 * ...except generic DATA allocations, regardless of SHARED or PRIVATE
+	 * in production.
+	 */
+	check_flags = KMR_DATA;
+#endif /* HAS_MTE */
+
+	if (kflags & check_flags) {
+		kflags &= ~KMR_TAG;
+	}
+
+	*kmr_flags = kflags;
+}
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 
 __attribute__((noinline))
@@ -3143,7 +3148,7 @@ krealloc_large(
 		kmr_flags |= KMR_KOBJECT;
 #endif
 	} else {
-		assert(kheap == KHEAP_DATA_BUFFERS || kheap == KHEAP_DATA_SHARED);
+		assert(kheap == KHEAP_DATA_PRIVATE || kheap == KHEAP_DATA_SHARED);
 	}
 	if (flags & Z_NOPAGEWAIT) {
 		kmr_flags |= KMR_NOPAGEWAIT;
@@ -3151,12 +3156,10 @@ krealloc_large(
 	if (flags & Z_ZERO) {
 		kmr_flags |= KMR_ZERO;
 	}
-	if (kheap == KHEAP_DATA_BUFFERS) {
+	if (kheap == KHEAP_DATA_PRIVATE) {
 		kmr_flags |= KMR_DATA;
 	} else if (kheap == KHEAP_DATA_SHARED) {
 		kmr_flags |= KMR_DATA_SHARED;
-	} else if (flags & (Z_KALLOC_ARRAY | Z_SPRAYQTN)) {
-		kmr_flags |= KMR_SPRAYQTN;
 	}
 	if (flags & Z_REALLOCF) {
 		kmr_flags |= KMR_REALLOCF;
@@ -3414,7 +3417,7 @@ krealloc_data_external(
 	zalloc_flags_t      flags)
 {
 	flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC_DATA);
-	return krealloc_ext(GET_KEXT_KHEAP_DATA(), ptr, old_size, new_size, flags, NULL).addr;
+	return krealloc_ext(KHEAP_DATA_PRIVATE, ptr, old_size, new_size, flags, NULL).addr;
 }
 
 void *
@@ -3431,7 +3434,7 @@ krealloc_shared_data_external(
 	zalloc_flags_t      flags)
 {
 	flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC_SHARED);
-	return krealloc_ext(GET_KEXT_KHEAP_DATA(), ptr, old_size, new_size, flags, NULL).addr;
+	return krealloc_ext(KHEAP_DATA_SHARED, ptr, old_size, new_size, flags, NULL).addr;
 }
 
 __startup_func
@@ -3449,9 +3452,9 @@ __startup_func
 static void
 kheap_init_data(kalloc_heap_t kheap)
 {
-	kheap_init(KHEAP_DATA_BUFFERS, kheap);
-	kheap->kh_views               = KHEAP_DATA_BUFFERS->kh_views;
-	KHEAP_DATA_BUFFERS->kh_views  = kheap;
+	kheap_init(KHEAP_DATA_PRIVATE, kheap);
+	kheap->kh_views               = KHEAP_DATA_PRIVATE->kh_views;
+	KHEAP_DATA_PRIVATE->kh_views  = kheap;
 }
 
 __startup_func
@@ -3486,7 +3489,7 @@ void
 kheap_startup_init(kalloc_heap_t kheap)
 {
 	switch (kheap->kh_heap_id) {
-	case KHEAP_ID_DATA_BUFFERS:
+	case KHEAP_ID_DATA_PRIVATE:
 		kheap_init_data(kheap);
 		break;
 	case KHEAP_ID_DATA_SHARED:
@@ -3892,6 +3895,45 @@ run_kalloc_test_kheap(kalloc_heap_t kheap)
 	krealloc_ext(kheap, data_ptr, KHEAP_MAX_SIZE * 4,
 	    0, Z_REALLOCF | Z_WAITOK, &data_ptr);
 
+#if HAS_MTE
+	/*
+	 * Verify that DATA allocations are properly tagged.
+	 */
+	alloc_size = 256;
+	data_ptr = kalloc_ext(kheap, alloc_size, Z_WAITOK | Z_NOFAIL,
+	    NULL).addr;
+
+	if (!data_ptr) {
+		printf("%s: kalloc 0 returned null\n", __func__);
+		return 1;
+	}
+
+	if (kheap == KHEAP_DATA_SHARED) {
+		if ((vm_map_address_t)data_ptr != vm_memtag_canonicalize_kernel((vm_map_address_t)data_ptr)) {
+			printf("%s: SHARED KHEAP meant to be untagged, instead returned pointer is %p\n", __func__, data_ptr);
+			kheap_free(kheap, data_ptr, alloc_size);
+			return 1;
+		}
+	}
+
+	if (kheap == KHEAP_DATA_PRIVATE) {
+		if (mte_kern_data_enabled()) {
+			if ((vm_map_address_t)data_ptr == vm_memtag_canonicalize_kernel((vm_map_address_t)data_ptr)) {
+				printf("%s: PRIVATE KHEAP meant to be tagged, instead returned pointer is %p\n", __func__, data_ptr);
+				kheap_free(kheap, data_ptr, alloc_size);
+				return 1;
+			}
+		} else {
+			if ((vm_map_address_t)data_ptr != vm_memtag_canonicalize_kernel((vm_map_address_t)data_ptr)) {
+				printf("%s PRIVATE KHEAP meant to be untagged, instead returned pointer is %p\n", __func__, data_ptr);
+				kheap_free(kheap, data_ptr, alloc_size);
+				return 1;
+			}
+		}
+	}
+	kheap_free(kheap, data_ptr, alloc_size);
+#endif /* HAS_MTE */
+
 	printf("%s: test passed\n", __func__);
 	return 0;
 }
@@ -3901,7 +3943,7 @@ run_kalloc_test(int64_t in __unused, int64_t *out)
 {
 	*out = 1;
 
-	if (run_kalloc_test_kheap(KHEAP_DATA_BUFFERS) != 0 ||
+	if (run_kalloc_test_kheap(KHEAP_DATA_PRIVATE) != 0 ||
 	    run_kalloc_test_kheap(KHEAP_DATA_SHARED) != 0) {
 		*out = 0;
 	}

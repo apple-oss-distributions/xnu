@@ -202,6 +202,15 @@ devfs_mount(struct mount *mp, __unused vnode_t devvp, __unused user_addr_t data,
 	mp->mnt_vfsstat.f_fsid.val[1] = vfs_typenum(mp);
 	mp->mnt_flag |= MNT_LOCAL;
 
+	/*
+	 * If mount is requested by non-root user, silently drop the
+	 * MNT_IGNORE_OWNERSHIP flag to prevent bypassing permission checks during
+	 * the revoke call.
+	 */
+	if (vfs_context_suser(ctx)) {
+		mp->mnt_flag &= ~MNT_IGNORE_OWNERSHIP;
+	}
+
 	DEVFS_LOCK();
 	error = dev_dup_plane(devfs_mp_p);
 	DEVFS_UNLOCK();

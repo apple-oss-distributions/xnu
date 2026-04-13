@@ -606,8 +606,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 				 */
 				ip6err->ip6_src = q6->ip6q_src;
 				ip6err->ip6_dst = q6->ip6q_dst;
-				ip6_output_setdstifscope(m, q6->ip6q_dst_ifscope, NULL);
-				ip6_output_setsrcifscope(m, q6->ip6q_src_ifscope, NULL);
+				ip6_output_setdstifscope(merr, q6->ip6q_dst_ifscope, NULL);
+				ip6_output_setsrcifscope(merr, q6->ip6q_src_ifscope, NULL);
 				frag6_save_context(merr,
 				    erroff - sizeof(struct ip6_frag) +
 				    offsetof(struct ip6_frag, ip6f_offlg));

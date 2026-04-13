@@ -51,17 +51,19 @@
 #include <kern/percpu.h>
 #include <kern/mpsc_ring.h>
 #include <kern/kern_stackshot.h>
+#include <vm/vm_shared_region_xnu.h>
 
 #include <pexpert/pexpert.h>
 
-#include <string.h>
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_shared_region.h>
+#include <vm/vm_protos_internal.h>
 
 #include <kperf/callstack.h>
 #include <kern/backtrace.h>
 #include <kern/monotonic.h>
 
+#include <sys/codesign.h>
 #include <security/mac_mach_internal.h>
 
 #include <sys/errno.h>
@@ -69,6 +71,8 @@
 #include <uuid/uuid.h>
 #include <kdp/kdp_dyld.h>
 
+#include <os/base.h>
+#include <string.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/coreanalytics/coreanalytics.h>
 #include <kern/thread_call.h>
@@ -82,6 +86,9 @@ extern uint64_t proc_was_throttled(void *p);
 extern uint64_t proc_did_throttle(void *p);
 extern boolean_t task_did_exec(task_t task);
 extern boolean_t task_is_exec_copy(task_t task);
+
+extern void proc_getexecutableuuid(proc_t p, unsigned char *uuidbuf, unsigned long size);
+extern task_t proc_get_task_raw(proc_t proc);
 
 #if CONFIG_CPU_COUNTERS
 #define HAS_PMI_MICROSTACKSHOTS 1
@@ -107,7 +114,7 @@ static void telemetry_take_sample(thread_t thread, enum micro_snapshot_flags fla
 
 #if HAS_PMI_MICROSTACKSHOTS
 static void _telemetry_take_sample_kernel(thread_t thread, enum micro_snapshot_flags flags);
-static void _telemetry_mark_curthread(bool interrupted_userspace);
+static void _telemetry_set_ast_pmi(bool interrupted_user);
 #endif /* HAS_PMI_MICROSTACKSHOTS */
 
 #if CONFIG_MACF
@@ -137,15 +144,32 @@ static int telemetry_buffer_gather(
 	bool mark,
 	struct micro_snapshot_buffer *current_buffer);
 
-#define TELEMETRY_DEFAULT_BUFFER_SIZE (16 * 1024)
-#define TELEMETRY_MAX_BUFFER_SIZE (64 * 1024)
+// The default size of the buffer used for microstackshots (16KiB).
+#define TELEMETRY_DEFAULT_BUFFER_SIZE   (16 << 10)
+// The maximum size of the buffer used for microstackshots (10MiB).
+#define TELEMETRY_MAX_BUFFER_SIZE       (10 << 20)
+// User space gets some leeway to collect data after notification (4KiB).
+#define TELEMETRY_DEFAULT_NOTIFY_LEEWAY (4 << 10)
+// Maximum non-shared cache UUIDs to include for symbolication.
+#define TELEMETRY_MAX_UUID_COUNT        (128)
 
-#define TELEMETRY_DEFAULT_NOTIFY_LEEWAY (4*1024) // Userland gets 4k of leeway to collect data after notification
-#define TELEMETRY_MAX_UUID_COUNT (128) // Max of 128 non-shared-cache UUIDs to log for symbolication
+uint64_t microstackshot_pmi_period = 0;
+cpc_slot_t microstackshot_pmi_counter = 0;
 
 bool telemetry_sample_pmis = false;
 
-uint32_t telemetry_timestamp = 0;
+/**
+ * @abstract the trigger of microstackshot samples
+ */
+__enum_closed_decl(telemetry_source_t, uint8_t, {
+	TMSRC_NONE = 0,
+	TMSRC_UNKNOWN,
+	TMSRC_TIME,
+	TMSRC_INSTRUCTIONS,
+	TMSRC_CYCLES,
+	TMSRC_VM_FAULTS,
+	TMSRC_PAGE_GRABS,
+});
 
 struct telemetry_metadata {
 	/*
@@ -164,13 +188,7 @@ struct telemetry_metadata {
 	/*
 	 * What's triggering the microstackshot samples.
 	 */
-	enum telemetry_source {
-		TMSRC_NONE = 0,
-		TMSRC_UNKNOWN,
-		TMSRC_TIME,
-		TMSRC_INSTRUCTIONS,
-		TMSRC_CYCLES,
-	} tm_source;
+	telemetry_source_t tm_source;
 	/*
 	 * The interval used for periodic sampling.
 	 */
@@ -229,6 +247,8 @@ LCK_SPIN_DECLARE(telemetry_metadata_lck, &telemetry_lck_grp);
 struct telemetry_metadata telemetry_metadata = { 0 };
 
 #if HAS_PMI_MICROSTACKSHOTS
+#define TELEMETRY_MIN_PMI_PERIOD (10 * 1000 * 1000)
+
 static __security_const_late thread_call_t _telemetry_kernel_notify_thread;
 _Atomic bool _telemetry_kernel_notified = false;
 static struct mpsc_ring _telemetry_kernel_ring;
@@ -297,30 +317,43 @@ _telemetry_notify_user(telemetry_notice_t flags)
 	ipc_port_release_send(user_port);
 }
 
-#if HAS_PMI_MICROSTACKSHOTS
+#if CONFIG_CPU_COUNTERS
+cpc_cyclic_t microstackshot_cpc_cyclic = NULL;
 
 static void
-telemetry_pmi_handler(bool user_mode, __unused void *ctx)
+_telemetry_cyclic_handler(
+	struct cpc_cyclic_info * __unused info,
+	uint64_t __unused count,
+	uint64_t __unused extra_count,
+	uintptr_t __unused pc,
+	cpc_call_source_t source,
+	cpc_call_flags_t __unused flags)
 {
 	thread_t thread = current_thread();
 	if (get_threadtask(thread) == kernel_task) {
 		_telemetry_take_sample_kernel(thread, kPMIRecord);
 	} else {
-		_telemetry_mark_curthread(user_mode);
+		_telemetry_set_ast_pmi(source == CPC_CS_USER);
 	}
 }
 
 #endif /* HAS_PMI_MICROSTACKSHOTS */
 
 int
-telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
+telemetry_pmi_setup(telemetry_pmi_t pmi_ctr, uint64_t period)
 {
 #if HAS_PMI_MICROSTACKSHOTS
-	enum telemetry_source source = TMSRC_NONE;
+	telemetry_source_t source = TMSRC_NONE;
 	int error = 0;
 	const char *name = "?";
 
-	unsigned int ctr = 0;
+	if (!cpc_cpmu_supported) {
+		return ENOTSUP;
+	}
+
+	if (pmi_ctr != TELEMETRY_PMI_NONE && (period < TELEMETRY_MIN_PMI_PERIOD || period > cpc_hw_max_period(CPC_HW_CPMU))) {
+		return EINVAL;
+	}
 
 	TELEMETRY_PMI_LOCK();
 
@@ -332,26 +365,28 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 		}
 
 		telemetry_sample_pmis = false;
-		error = mt_microstackshot_stop();
-		if (!error) {
-			printf("telemetry: disabling ustackshot on PMI\n");
-			int intrs_en = ml_set_interrupts_enabled(FALSE);
-			lck_spin_lock(&telemetry_metadata_lck);
-			telemetry_metadata.tm_period = 0;
-			telemetry_metadata.tm_source = TMSRC_NONE;
-			lck_spin_unlock(&telemetry_metadata_lck);
-			ml_set_interrupts_enabled(intrs_en);
-		}
+		printf("telemetry: disabling ustackshot on PMI\n");
+		cpc_cyclic_cancel(microstackshot_cpc_cyclic);
+		microstackshot_pmi_counter = 0;
+		microstackshot_pmi_period = 0;
+		cpc_cyclic_destroy(microstackshot_cpc_cyclic);
+		microstackshot_cpc_cyclic = NULL;
+		int intrs_en = ml_set_interrupts_enabled(FALSE);
+		lck_spin_lock(&telemetry_metadata_lck);
+		telemetry_metadata.tm_period = 0;
+		telemetry_metadata.tm_source = TMSRC_NONE;
+		lck_spin_unlock(&telemetry_metadata_lck);
+		ml_set_interrupts_enabled(intrs_en);
 		goto out;
 
 	case TELEMETRY_PMI_INSTRS:
-		ctr = MT_CORE_INSTRS;
+		microstackshot_pmi_counter = cpc_fixed_event_slot(CPC_HW_CPMU, CPC_FEVT_INSTRUCTIONS);
 		name = "instructions";
 		source = TMSRC_INSTRUCTIONS;
 		break;
 
 	case TELEMETRY_PMI_CYCLES:
-		ctr = MT_CORE_CYCLES;
+		microstackshot_pmi_counter = cpc_fixed_event_slot(CPC_HW_CPMU, CPC_FEVT_CYCLES);
 		name = "cycles";
 		source = TMSRC_CYCLES;
 		break;
@@ -361,20 +396,34 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 		goto out;
 	}
 
+	if (microstackshot_cpc_cyclic) {
+		cpc_cyclic_cancel(microstackshot_cpc_cyclic);
+		cpc_cyclic_destroy(microstackshot_cpc_cyclic);
+		microstackshot_cpc_cyclic = NULL;
+	}
+
 	telemetry_sample_pmis = true;
 
-	error = mt_microstackshot_start(ctr, period, telemetry_pmi_handler, NULL);
-	if (!error) {
-		printf("telemetry: ustackshot every %llu %s\n", period, name);
-
-		int intrs_en = ml_set_interrupts_enabled(FALSE);
-		lck_spin_lock(&telemetry_metadata_lck);
-		telemetry_metadata.tm_period = period;
-		telemetry_metadata.tm_source = source;
-		telemetry_metadata.tm_generation += 1;
-		lck_spin_unlock(&telemetry_metadata_lck);
-		ml_set_interrupts_enabled(intrs_en);
+	microstackshot_pmi_period = period;
+	struct cpc_cyclic_info info = {
+		.cci_func = _telemetry_cyclic_handler,
+		.cci_slot = microstackshot_pmi_counter,
+		.cci_period = microstackshot_pmi_period,
+	};
+	microstackshot_cpc_cyclic = cpc_cyclic_alloc(CPC_HW_CPMU, &info);
+	if (!microstackshot_cpc_cyclic) {
+		panic("telemetry: failed to allocate microstackshot PMI cyclic");
 	}
+	cpc_cyclic_activate(microstackshot_cpc_cyclic);
+	printf("telemetry: microstackshot every %llu %s\n", microstackshot_pmi_period,
+	    name);
+	int intrs_en = ml_set_interrupts_enabled(FALSE);
+	lck_spin_lock(&telemetry_metadata_lck);
+	telemetry_metadata.tm_period = period;
+	telemetry_metadata.tm_source = source;
+	telemetry_metadata.tm_generation += 1;
+	lck_spin_unlock(&telemetry_metadata_lck);
+	ml_set_interrupts_enabled(intrs_en);
 
 out:
 	TELEMETRY_PMI_UNLOCK();
@@ -392,9 +441,9 @@ out:
  * telemetry record, to be sampled at the next AST boundary.
  */
 static void
-_telemetry_mark_curthread(bool interrupted_userspace)
+_telemetry_set_ast_pmi(bool interrupted_userspace)
 {
-	uint32_t ast_bits = AST_TELEMETRY_PMI;
+	telemetry_ast_t reason = TELEMETRY_AST_PMI;
 	thread_t thread = current_thread();
 
 	/*
@@ -406,9 +455,8 @@ _telemetry_mark_curthread(bool interrupted_userspace)
 		return;
 	}
 
-	ast_bits |= (interrupted_userspace ? AST_TELEMETRY_USER : AST_TELEMETRY_KERNEL);
-	thread_ast_set(thread, ast_bits);
-	ast_propagate(thread);
+	reason |= (interrupted_userspace ? TELEMETRY_AST_USER : TELEMETRY_AST_KERNEL);
+	act_set_telemetry_ast(thread, reason);
 }
 
 static void
@@ -420,32 +468,36 @@ _telemetry_kernel_notify(void * __unused p1, void * __unused p2)
 #endif /* HAS_PMI_MICROSTACKSHOTS */
 
 void
-telemetry_ast(thread_t thread, ast_t reasons)
+telemetry_handle_ast(thread_t thread, telemetry_ast_t reasons)
 {
-	assert((reasons & AST_TELEMETRY_ALL) != 0);
+	assert(reasons != 0);
 
-	uint8_t record_type = 0;
-	if (reasons & AST_TELEMETRY_IO) {
+	uint32_t record_type = 0;
+	if (reasons & TELEMETRY_AST_IO) {
 		record_type |= kIORecord;
 	}
-	if (reasons & (AST_TELEMETRY_USER | AST_TELEMETRY_KERNEL)) {
-		record_type |= (reasons & AST_TELEMETRY_PMI) ? kPMIRecord :
-		    kInterruptRecord;
+	if (reasons & TELEMETRY_AST_VM_FAULT) {
+		record_type |= kVMFaultRecord;
+	}
+	if (reasons & TELEMETRY_AST_PAGE_GRAB) {
+		record_type |= kPageGrabRecord;
+	}
+	if (reasons & (TELEMETRY_AST_USER | TELEMETRY_AST_KERNEL)) {
+		record_type |= (reasons & TELEMETRY_AST_PMI) ? kPMIRecord : kInterruptRecord;
 	}
 
-	if ((reasons & AST_TELEMETRY_MACF) != 0) {
+	if ((reasons & TELEMETRY_AST_MACF) != 0) {
 		record_type |= kMACFRecord;
 	}
 
-	enum micro_snapshot_flags user_telemetry = (reasons & AST_TELEMETRY_USER) ? kUserMode : 0;
+	enum micro_snapshot_flags user_telemetry = (reasons & TELEMETRY_AST_USER) ? kUserMode : 0;
 	enum micro_snapshot_flags microsnapshot_flags = record_type | user_telemetry;
 
-	if ((reasons & AST_TELEMETRY_MACF) != 0) {
+	if ((reasons & TELEMETRY_AST_MACF) != 0) {
 		telemetry_macf_take_sample(thread, microsnapshot_flags);
 	}
 
-	if ((reasons & (AST_TELEMETRY_IO | AST_TELEMETRY_KERNEL | AST_TELEMETRY_PMI
-	    | AST_TELEMETRY_USER)) != 0) {
+	if ((reasons & (TELEMETRY_AST_PMI | TELEMETRY_AST_IO | TELEMETRY_AST_VM_FAULT | TELEMETRY_AST_PAGE_GRAB)) != 0) {
 		telemetry_take_sample(thread, microsnapshot_flags);
 	}
 }
@@ -477,10 +529,9 @@ struct _telemetry_kernel_sample {
 	uint64_t tks_telemetry_period;
 
 	uint64_t tks_system_time_in_terminated_threads;
-	uint64_t tks_task_size;
-	uint64_t tks_pageins;
-	uint64_t tks_faults;
-	uint64_t tks_cow_faults;
+	uint64_t tks_pagein_count;
+	uint64_t tks_fault_count;
+	uint64_t tks_cow_fault_count;
 
 	uint64_t tks_thread_id;
 	uint64_t tks_system_time;
@@ -526,6 +577,7 @@ static void
 _telemetry_take_sample_kernel(thread_t thread, enum micro_snapshot_flags __unused flags)
 {
 	assert(ml_at_interrupt_context());
+	uint8_t cpu = (uint8_t)cpu_number();
 	struct _telemetry_scratch *scratch = PERCPU_GET(_telemetry_pcpu);
 
 	/*
@@ -554,7 +606,6 @@ _telemetry_take_sample_kernel(thread_t thread, enum micro_snapshot_flags __unuse
 	clock_sec_t secs = 0;
 	clock_usec_t usecs = 0;
 	clock_get_calendar_microtime(&secs, &usecs);
-	uint8_t cpu = (uint8_t)cpu_number();
 	scratch->ts_sample = (struct _telemetry_kernel_sample){
 		.tks_magic = TKS_MAGIC,
 		.tks_serial_number = serial_number,
@@ -566,9 +617,9 @@ _telemetry_take_sample_kernel(thread_t thread, enum micro_snapshot_flags __unuse
 		.tks_time_secs = secs,
 		.tks_time_usecs = usecs,
 		.tks_thread_id = thread_tid(thread),
-		.tks_pageins = counter_load(&kernel_task->pageins),
-		.tks_faults = counter_load(&kernel_task->faults),
-		.tks_cow_faults = counter_load(&kernel_task->cow_faults),
+		.tks_pagein_count = counter_load(&kernel_task->pageins),
+		.tks_fault_count = counter_load(&kernel_task->faults),
+		.tks_cow_fault_count = counter_load(&kernel_task->cow_faults),
 		.tks_system_time_in_terminated_threads = term_times.rtm_system,
 		.tks_system_time = thread_times.rtm_system,
 		.tks_thread_state = thread->state,
@@ -608,8 +659,8 @@ _telemetry_take_sample_kernel(thread_t thread, enum micro_snapshot_flags __unuse
  */
 struct _telemetry_kernel_snapshots {
 	struct micro_snapshot tkse_micro_snap;
-	struct task_snapshot tkse_task_snap;
-	struct thread_snapshot tkse_thread_snap;
+	struct microstackshot_task tkse_task_snap;
+	struct microstackshot_thread tkse_thread_snap;
 };
 
 /*
@@ -627,48 +678,52 @@ _telemetry_kernel_snapshot(
 		.ms_time = sample->tks_time_secs,
 		.ms_time_microsecs = sample->tks_time_usecs,
 	};
-	snaps->tkse_task_snap = (struct task_snapshot){
-		.snapshot_magic = STACKSHOT_TASK_SNAPSHOT_MAGIC,
-		.ss_flags = kKernel64_p,
-		.pid = 0,
-		.uniqueid = 0,
-		.system_time_in_terminated_threads =
-	    sample->tks_system_time_in_terminated_threads,
-		.task_size = sample->tks_task_size,
-		.faults = sample->tks_faults,
-		.pageins = sample->tks_pageins,
-		.cow_faults = sample->tks_cow_faults,
-		.p_comm = "kernel_task",
-		.was_throttled = 0,
-		.did_throttle = 0,
-		.p_start_sec = coalition_id(kernel_task->coalition[COALITION_TYPE_RESOURCE]),
-		/* Set the on-behalf-of pids to -1. */
-		.p_start_usec = UINT64_MAX,
-		.latency_qos = LATENCY_QOS_TIER_UNSPECIFIED,
-		.io_priority_size = {
-			[0] = ((uint64_t)sample->tks_telemetry_source << 32) | sample->tks_telemetry_generation,
-			[1] = sample->tks_telemetry_period,
-			[2] = sample->tks_serial_number,
-			[3] = sample->tks_telemetry_skipped,
+	snaps->tkse_task_snap = (struct microstackshot_task){
+		.mst_magic = STACKSHOT_TASK_SNAPSHOT_MAGIC,
+		.mst_stackshot_flags_trunc = kKernel64_p,
+		.mst_stackshot_flags = kKernel64_p,
+		.mst_pid = 0,
+		.mst_task_uniqueid = 0,
+		.mst_system_term_mach_time = sample->tks_system_time_in_terminated_threads,
+		/*
+		 * This cannot be queried in the ledger while running in interrupt context.
+		 */
+		.mst_page_count = get_task_phys_footprint(kernel_task) / PAGE_SIZE,
+		.mst_fault_count = sample->tks_fault_count,
+		.mst_pagein_count = sample->tks_pagein_count,
+		.mst_cow_fault_count = sample->tks_cow_fault_count,
+		.mst_proc_comm_name = "kernel_task",
+		.mst_was_throttled = 0,
+		.mst_did_throttle = 0,
+		.mst_resource_coal_id = coalition_id(kernel_task->coalition[COALITION_TYPE_RESOURCE]),
+		.mst_on_behalf_origin_pid = -1,
+		.mst_on_behalf_proximate_pid = -1,
+		.mst_latency_qos = LATENCY_QOS_TIER_UNSPECIFIED,
+		.mst_metadata = {
+			.mstm_telemetry_source = sample->tks_telemetry_source,
+			.mstm_telemetry_generation = sample->tks_telemetry_generation,
+			.mstm_telemetry_period = sample->tks_telemetry_period,
+			.mstm_serial_number = sample->tks_serial_number,
+			.mstm_telemetry_skipped = sample->tks_telemetry_skipped,
 		},
 	};
-	snaps->tkse_thread_snap = (struct thread_snapshot){
-		.snapshot_magic = STACKSHOT_THREAD_SNAPSHOT_MAGIC,
-		.ss_flags = kKernel64_p,
-		.nkern_frames = sample->tks_call_stack_size / sizeof(uintptr_t),
-		.wait_event = 0,
-		.continuation = 0,
-		.thread_id = sample->tks_thread_id,
-		.system_time = sample->tks_system_time,
-		.state = sample->tks_thread_state,
-		.priority = sample->tks_base_pri,
-		.sched_pri = sample->tks_sched_pri,
-		.io_tier = sample->tks_io_tier,
+	snaps->tkse_thread_snap = (struct microstackshot_thread){
+		.msth_magic = STACKSHOT_THREAD_SNAPSHOT_MAGIC,
+		.msth_stackshot_flags = kKernel64_p,
+		.msth_kern_frame_count = sample->tks_call_stack_size / sizeof(uintptr_t),
+		.msth_wait_event = 0,
+		.msth_continuation = 0,
+		.msth_thread_id = sample->tks_thread_id,
+		.msth_system_mach_time = sample->tks_system_time,
+		.msth_state = sample->tks_thread_state,
+		.msth_base_priority = sample->tks_base_pri,
+		.msth_sched_priority = sample->tks_sched_pri,
+		.msth_io_tier = sample->tks_io_tier,
 	};
-	memset(snaps->tkse_thread_snap.pth_name, 0, sizeof(snaps->tkse_thread_snap.pth_name));
-	strlcpy(snaps->tkse_thread_snap.pth_name,
+	memset(snaps->tkse_thread_snap.msth_name, 0, sizeof(snaps->tkse_thread_snap.msth_name));
+	strlcpy(snaps->tkse_thread_snap.msth_name,
 	    sample->tks_thread_name,
-	    sizeof(snaps->tkse_thread_snap.pth_name));
+	    sizeof(snaps->tkse_thread_snap.msth_name));
 }
 
 #endif /* HAS_PMI_MICROSTACKSHOTS */
@@ -867,7 +922,7 @@ _telemetry_take_sample_user(thread_t thread, enum micro_snapshot_flags flags)
 		.frames_count = btcount,
 		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
 		.microsnapshot_flags = flags,
-		.include_metadata = flags & kPMIRecord,
+		.include_metadata = flags & (kPMIRecord | kVMFaultRecord | kPageGrabRecord),
 		.buffer = &telemetry_buffer,
 		.buffer_mtx = &telemetry_mtx,
 		.async_start_index = async_start_index,
@@ -1037,112 +1092,155 @@ out:
 
 static void
 _write_task_snapshot(
-	struct task_snapshot *tsnap,
+	struct microstackshot_task *tsnap,
 	const struct telemetry_target *target)
 {
 	struct task *task = get_threadtask(target->thread);
 	struct proc *p = get_bsdtask_info(task);
 
-	tsnap->snapshot_magic = STACKSHOT_TASK_SNAPSHOT_MAGIC;
-	tsnap->pid = proc_pid(p);
-	tsnap->uniqueid = proc_uniqueid(p);
+	tsnap->mst_magic = STACKSHOT_TASK_SNAPSHOT_MAGIC;
+	tsnap->mst_pid = proc_pid(p);
+	tsnap->mst_task_uniqueid = proc_uniqueid(p);
 	struct recount_times_mach times = recount_task_terminated_times(task);
-	tsnap->user_time_in_terminated_threads = times.rtm_user;
-	tsnap->system_time_in_terminated_threads = times.rtm_system;
-	tsnap->suspend_count = task->suspend_count;
-	tsnap->task_size = (typeof(tsnap->task_size))(get_task_phys_footprint(task) / PAGE_SIZE);
-	tsnap->faults = counter_load(&task->faults);
-	tsnap->pageins = counter_load(&task->pageins);
-	tsnap->cow_faults = counter_load(&task->cow_faults);
+	tsnap->mst_user_term_mach_time = times.rtm_user;
+	tsnap->mst_system_term_mach_time = times.rtm_system;
+	tsnap->mst_suspend_count = task->suspend_count;
+	tsnap->mst_page_count = (typeof(tsnap->mst_page_count))(get_task_phys_footprint(task) / PAGE_SIZE);
+	tsnap->mst_fault_count = counter_load(&task->faults);
+	tsnap->mst_pagein_count = counter_load(&task->pageins);
+	tsnap->mst_cow_fault_count = counter_load(&task->cow_faults);
 	/*
 	 * The throttling counters are maintained as 64-bit counters in the proc
-	 * structure. However, we reserve 32-bits (each) for them in the task_snapshot
-	 * struct to save space and since we do not expect them to overflow 32-bits. If we
-	 * find these values overflowing in the future, the fix would be to simply
-	 * upgrade these counters to 64-bit in the task_snapshot struct
+	 * structure. However, we reserve 32-bits (each) for them in
+	 * `struct microstackshot_task` struct to save space and since we do not
+	 * expect them to overflow 32-bits.
 	 */
-	tsnap->was_throttled = (uint32_t) proc_was_throttled(p);
-	tsnap->did_throttle = (uint32_t) proc_did_throttle(p);
+	tsnap->mst_was_throttled = (uint32_t)proc_was_throttled(p);
+	tsnap->mst_did_throttle = (uint32_t)proc_did_throttle(p);
 
 #if CONFIG_COALITIONS
-	/*
-	 * These fields are overloaded to represent the resource coalition ID of
-	 * this task...
-	 */
 	coalition_t rsrc_coal = task->coalition[COALITION_TYPE_RESOURCE];
-	tsnap->p_start_sec = rsrc_coal ? coalition_id(rsrc_coal) : 0;
-	/*
-	 * ... and the processes this thread is doing work on behalf of.
-	 */
+	tsnap->mst_resource_coal_id = rsrc_coal ? coalition_id(rsrc_coal) : 0;
+
 	pid_t origin_pid = -1, proximate_pid = -1;
 	(void)thread_get_voucher_origin_proximate_pid(target->thread, &origin_pid, &proximate_pid);
-	tsnap->p_start_usec = ((uint64_t)proximate_pid << 32) | (uint32_t)origin_pid;
+	tsnap->mst_on_behalf_proximate_pid = proximate_pid;
+	tsnap->mst_on_behalf_origin_pid = origin_pid;
 #endif /* CONFIG_COALITIONS */
 
 	uint64_t ss_flags = kcdata_get_task_ss_flags(task, false);
+	tsnap->mst_stackshot_flags = ss_flags;
+	tsnap->mst_stackshot_flags_trunc = (uint32_t)ss_flags;
+	tsnap->mst_energy_nj = recount_task_energy_nj(task);
 
-	/*
-	 * sadly the original ss_flags field is not big enough, replicate the
-	 * full flags in the unused disk_reads_count field
-	 */
-	tsnap->ss_flags = (uint32_t)ss_flags;
-	tsnap->disk_reads_count = ss_flags;
+	int64_t pages_grabbed = 0;
+	ledger_get_balance(task->ledger, task_ledgers.pages_grabbed, 0, &pages_grabbed);
+	tsnap->mst_page_grab_count = pages_grabbed;
 
-	tsnap->latency_qos = task_grab_latency_qos(task);
+	int64_t pages_grabbed_iopl = 0;
+	ledger_get_balance(task->ledger, task_ledgers.pages_grabbed_iopl, 0, &pages_grabbed_iopl);
+	int64_t pages_grabbed_upl = 0;
+	ledger_get_balance(task->ledger, task_ledgers.pages_grabbed_upl, 0, &pages_grabbed_upl);
+	tsnap->mst_iopl_upl_page_grab_count = pages_grabbed_iopl + pages_grabbed_upl;
 
-	strlcpy(tsnap->p_comm, proc_name_address(p), sizeof(tsnap->p_comm));
+	tsnap->mst_latency_qos = task_grab_latency_qos(task);
+
+	strlcpy(tsnap->mst_proc_comm_name, proc_name_address(p), sizeof(tsnap->mst_proc_comm_name));
 	const char *longname = proc_longname_address(p);
 	if (longname[0] != '\0') {
-		/*
-		 * XXX Stash the rest of the process's name in some unused fields.
-		 */
-		strlcpy((char *)tsnap->io_priority_count, &longname[16], sizeof(tsnap->io_priority_count));
+		strlcpy((char *)tsnap->mst_proc_name_extra, &longname[16], sizeof(tsnap->mst_proc_name_extra));
 	}
 	if (target->include_metadata) {
-		tsnap->io_priority_size[0] = ((uint64_t)telemetry_metadata.tm_source << 32) | telemetry_metadata.tm_generation;
-		tsnap->io_priority_size[1] = telemetry_metadata.tm_period;
-		tsnap->io_priority_size[2] = os_atomic_inc(&telemetry_metadata.tm_samples_recorded, relaxed);
-		tsnap->io_priority_size[3] = telemetry_metadata.tm_samples_skipped;
+		enum micro_snapshot_flags mss_flags = target->microsnapshot_flags;
+
+		telemetry_source_t source = TMSRC_UNKNOWN;
+		if (mss_flags & kPMIRecord) {
+			source = telemetry_metadata.tm_source;
+#if CONFIG_MEMORY_MICROSTACKSHOT
+		} else if (mss_flags & kVMFaultRecord) {
+			source = TMSRC_VM_FAULTS;
+		} else if (mss_flags & kPageGrabRecord) {
+			source = TMSRC_PAGE_GRABS;
+#endif /* CONFIG_MEMORY_MICROSTACKSHOT */
+		}
+
+		uint64_t period = 0;
+		switch (source) {
+#if CONFIG_MEMORY_MICROSTACKSHOT
+		case TMSRC_VM_FAULTS:
+			period = telemetry_vm_fault_period;
+			break;
+		case TMSRC_PAGE_GRABS:
+			period = telemetry_page_grab_period;
+			break;
+#endif /* CONFIG_MEMORY_MICROSTACKSHOT */
+		default:
+			period = telemetry_metadata.tm_period;
+			break;
+		}
+
+		tsnap->mst_metadata.mstm_telemetry_source = source;
+		tsnap->mst_metadata.mstm_telemetry_generation = telemetry_metadata.tm_generation;
+		tsnap->mst_metadata.mstm_telemetry_period = period;
+		tsnap->mst_metadata.mstm_serial_number = os_atomic_inc(&telemetry_metadata.tm_samples_recorded, relaxed);
+		tsnap->mst_metadata.mstm_telemetry_skipped = telemetry_metadata.tm_samples_skipped;
 	}
 	if (task->task_shared_region_slide != -1) {
-		tsnap->shared_cache_slide = task->task_shared_region_slide;
-		bcopy(task->task_shared_region_uuid, tsnap->shared_cache_identifier,
+		tsnap->mst_shared_cache_slide = task->task_shared_region_slide;
+		bcopy(task->task_shared_region_uuid, tsnap->mst_shared_cache_identifier,
 		    sizeof(task->task_shared_region_uuid));
 	}
 }
 
 static void
-_write_thread_snapshot(struct thread_snapshot *thsnap, const struct telemetry_target *target)
+_write_thread_snapshot(struct microstackshot_thread *thsnap, const struct telemetry_target *target)
 {
 	struct thread *thread = target->thread;
 
-	thsnap->snapshot_magic = STACKSHOT_THREAD_SNAPSHOT_MAGIC;
-	thsnap->thread_id = thread_tid(thread);
-	thsnap->state = thread->state;
-	thsnap->priority = thread->base_pri;
-	thsnap->sched_pri = thread->sched_pri;
-	thsnap->sched_flags = thread->sched_flags;
-	thsnap->ss_flags |= kStacksPCOnly;
-	thsnap->ts_qos = thread->effective_policy.thep_qos;
-	thsnap->ts_rqos = thread->requested_policy.thrp_qos;
-	thsnap->ts_rqos_override = MAX(thread->requested_policy.thrp_qos_override,
+	thsnap->msth_magic = STACKSHOT_THREAD_SNAPSHOT_MAGIC;
+	thsnap->msth_thread_id = thread_tid(thread);
+	thsnap->msth_state = thread->state;
+	thsnap->msth_base_priority = thread->base_pri;
+	thsnap->msth_sched_priority = thread->sched_pri;
+	thsnap->msth_sched_flags = thread->sched_flags;
+	thsnap->msth_effective_qos = thread->effective_policy.thep_qos;
+	thsnap->msth_requested_qos = thread->requested_policy.thrp_qos;
+	thsnap->msth_requested_qos_override = MAX(thread->requested_policy.thrp_qos_override,
 	    thread->requested_policy.thrp_qos_workq_override);
-	thsnap->nuser_frames = target->frames_count;
-	memcpy(thsnap->_reserved + 1, &target->async_start_index,
-	    sizeof(target->async_start_index));
+	thsnap->msth_user_frame_count = target->frames_count;
+	static_assert(MAXTHREADNAMESIZE <= STACKSHOT_MAX_THREAD_NAME_SIZE);
+	thread_get_thread_name(thread, thsnap->msth_name);
+	thsnap->msth_async_index = target->async_start_index;
 
+#if CONFIG_MEMORY_MICROSTACKSHOT
+	if (target->microsnapshot_flags & kVMFaultRecord) {
+		thsnap->msth_fault_va = thread->t_vm_fault_info.tvfi_va;
+		thsnap->msth_fault_type = thread->t_vm_fault_info.tvfi_type;
+		thsnap->msth_fault_flags = thread->t_vm_fault_info.tvfi_flags;
+		memset(&thread->t_vm_fault_info, 0, sizeof(thread->t_vm_fault_info));
+	}
+
+	if (target->microsnapshot_flags & kPageGrabRecord) {
+		thsnap->msth_grab_vm_tag = thread->t_page_grab_info.tpgi_tag;
+		thsnap->msth_grab_iopl_count = thread->t_page_grab_info.tpgi_iopl_count;
+		thsnap->msth_grab_upl_count = thread->t_page_grab_info.tpgi_upl_count;
+		memset(&thread->t_page_grab_info, 0, sizeof(thread->t_page_grab_info));
+	}
+#endif /* CONFIG_MEMORY_MICROSTACKSHOT */
+
+	thsnap->msth_stackshot_flags |= kStacksPCOnly;
 	if (proc_get_effective_thread_policy(thread, TASK_POLICY_DARWIN_BG)) {
-		thsnap->ss_flags |= kThreadDarwinBG;
+		thsnap->msth_stackshot_flags |= kThreadDarwinBG;
 	}
 	if (target->user64_regs) {
-		thsnap->ss_flags |= kUser64_p;
+		thsnap->msth_stackshot_flags |= kUser64_p;
 	}
 
 	boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
 	struct recount_times_mach times = recount_current_thread_times();
 	ml_set_interrupts_enabled(interrupt_state);
-	thsnap->user_time = times.rtm_user;
-	thsnap->system_time = times.rtm_system;
+	thsnap->msth_user_mach_time = times.rtm_user;
+	thsnap->msth_system_mach_time = times.rtm_system;
 }
 
 struct _telemetry_uuids {
@@ -1156,24 +1254,24 @@ struct _telemetry_uuids {
  * Retrieve the array of UUIDs for binaries used by this task.
  */
 static struct _telemetry_uuids
-_telemetry_sample_uuids(task_t task)
+_telemetry_sample_uuids(task_t task, unsigned int extra_elements)
 {
 	bool const user64_va = task_has_64Bit_addr(task);
-	uint32_t uuid_info_count = 0;
+	uint32_t uuid_info_count_unsafe = 0;
 	mach_vm_address_t uuid_info_addr = 0;
 	uint32_t uuid_info_size = 0;
 	if (user64_va) {
 		uuid_info_size = sizeof(struct user64_dyld_uuid_info);
 		struct user64_dyld_all_image_infos task_image_infos;
 		if (copyin(task->all_image_info_addr, &task_image_infos, sizeof(task_image_infos)) == 0) {
-			uuid_info_count = (uint32_t)task_image_infos.uuidArrayCount;
+			uuid_info_count_unsafe = (uint32_t)task_image_infos.uuidArrayCount;
 			uuid_info_addr = task_image_infos.uuidArray;
 		}
 	} else {
 		uuid_info_size = sizeof(struct user32_dyld_uuid_info);
 		struct user32_dyld_all_image_infos task_image_infos;
 		if (copyin(task->all_image_info_addr, &task_image_infos, sizeof(task_image_infos)) == 0) {
-			uuid_info_count = task_image_infos.uuidArrayCount;
+			uuid_info_count_unsafe = task_image_infos.uuidArrayCount;
 			uuid_info_addr = task_image_infos.uuidArray;
 		}
 	}
@@ -1189,9 +1287,13 @@ _telemetry_sample_uuids(task_t task)
 	/*
 	 * The main binary and interesting non-shared-cache libraries should be in the first few images.
 	 */
-	uuid_info_count = MIN(uuid_info_count, TELEMETRY_MAX_UUID_COUNT);
-	uint32_t uuid_info_array_size = uuid_info_count * uuid_info_size;
-	char *uuid_info_array = kalloc_data(uuid_info_array_size, Z_WAITOK);
+	unsigned int uuid_info_count = MIN(uuid_info_count_unsafe, TELEMETRY_MAX_UUID_COUNT);
+	if (uuid_info_count == 0) {
+		return (struct _telemetry_uuids){};
+	}
+	uint32_t copyin_size = uuid_info_count * uuid_info_size;
+	uint32_t alloc_size = (uuid_info_count + extra_elements) * uuid_info_size;
+	char *uuid_info_array = kalloc_data(alloc_size, Z_WAITOK);
 	if (uuid_info_array == NULL) {
 		return (struct _telemetry_uuids){
 			       .error = ENOMEM,
@@ -1199,18 +1301,21 @@ _telemetry_sample_uuids(task_t task)
 	}
 
 	/*
-	 * Copy in the UUID info array.  Ignore any failures to copyin.
+	 * Copy in the UUID info array.
 	 */
-	if (copyin(uuid_info_addr, uuid_info_array, uuid_info_array_size) != 0) {
-		kfree_data(uuid_info_array, uuid_info_array_size);
-		uuid_info_array = NULL;
-		uuid_info_array_size = 0;
+	if (copyin(uuid_info_addr, uuid_info_array, copyin_size) != 0) {
+		/*
+		 * Don't report this as an error with the sample to avoid transient
+		 * dyld operations from impacting sample collection.
+		 */
+		kfree_data(uuid_info_array, alloc_size);
+		return (struct _telemetry_uuids){};
 	}
 
 	return (struct _telemetry_uuids){
 		       .uuid_info = uuid_info_array,
 		       .uuid_info_count = uuid_info_count,
-		       .uuid_info_size = uuid_info_array_size,
+		       .uuid_info_size = alloc_size,
 	};
 }
 
@@ -1239,9 +1344,9 @@ static void *
 _telemetry_buffer_alloc(struct micro_snapshot_buffer *buf, size_t size)
 {
 	void *alloc = (void *)(uintptr_t)(buf->buffer + buf->current_position);
-	memset(alloc, 0, size);
 	buf->current_position += size;
 	assert3u(buf->current_position, <=, buf->size);
+	memset(alloc, 0, size);
 	return alloc;
 }
 
@@ -1267,7 +1372,7 @@ telemetry_process_sample(const struct telemetry_target *target,
 
 	task_t const task = get_threadtask(thread);
 
-	struct _telemetry_uuids uuids = _telemetry_sample_uuids(task);
+	struct _telemetry_uuids uuids = _telemetry_sample_uuids(task, 0);
 
 	/*
 	 * Look for a dispatch queue serial number, and copy it in from userland if present.
@@ -1283,7 +1388,7 @@ telemetry_process_sample(const struct telemetry_target *target,
 
 	/*
 	 * We do the bulk of the operation under the telemetry lock, on assumption that
-	 * any page faults during execution will not cause another AST_TELEMETRY_ALL
+	 * any page faults during execution will not cause another AST_TELEMETRY
 	 * to deadlock; they will just block until we finish. This makes it easier
 	 * to copy into the buffer directly. As soon as we unlock, userspace can copy
 	 * out of our buffer.
@@ -1328,20 +1433,20 @@ telemetry_process_sample(const struct telemetry_target *target,
 			.ms_time_microsecs = usecs,
 		};
 
-		struct task_snapshot *tsnap = _telemetry_buffer_alloc(current_buffer, sizeof(*tsnap));
+		struct microstackshot_task *tsnap = _telemetry_buffer_alloc(current_buffer, sizeof(*tsnap));
 		_write_task_snapshot(tsnap, target);
 
 		if (uuids.uuid_info_size > 0) {
 			void *uuid_info_buf = _telemetry_buffer_alloc(current_buffer, uuids.uuid_info_size);
 			memcpy(uuid_info_buf, uuids.uuid_info, uuids.uuid_info_size);
-			tsnap->nloadinfos = uuids.uuid_info_count;
+			tsnap->mst_loadinfo_count = uuids.uuid_info_count;
 		}
 
-		struct thread_snapshot *thsnap = _telemetry_buffer_alloc(current_buffer, sizeof(*thsnap));
+		struct microstackshot_thread *thsnap = _telemetry_buffer_alloc(current_buffer, sizeof(*thsnap));
 		_write_thread_snapshot(thsnap, target);
 
 		if (dqserial_valid) {
-			thsnap->ss_flags |= kHasDispatchSerial;
+			thsnap->msth_stackshot_flags |= kHasDispatchSerial;
 			uint64_t *dqserial_buf = _telemetry_buffer_alloc(current_buffer, sizeof(*dqserial_buf));
 			memcpy(dqserial_buf, &dqserial, sizeof(dqserial));
 		}
@@ -1546,10 +1651,346 @@ telemetry_macf_mark_curthread(void)
 	}
 	TELEMETRY_MACF_UNLOCK();
 
-	act_set_macf_telemetry_ast(thread);
+	act_set_telemetry_ast(thread, TELEMETRY_AST_MACF);
 	return 0;
 }
 #endif /* CONFIG_MACF */
+
+#pragma mark - Page-in Telemetry
+
+#if CONFIG_THREAD_GROUPS
+
+/*
+ * Global data used by the page-in telemetry subsystem.
+ */
+struct _telemetry_pagein_globals {
+	/*
+	 * The size of the buffer to create to hold page-in telemetry.
+	 *
+	 * Clamped to `TELEMETRY_PAGEIN_BUFFER_SIZE_MAX`.
+	 */
+	size_t tp_buffer_size;
+	/*
+	 * Any flags that affect collection.
+	 */
+	telemetry_pagein_flags_t tp_flags;
+	/*
+	 * The ID of the thread group that is currently collecting page-in
+	 * telemetry.
+	 *
+	 * Any threads with their home thread group as this ID are eligible.
+	 */
+	uint64_t tp_thread_group_id;
+
+	/*
+	 * Once page-in telemetry has started, the buffer that holds the page-in
+	 * data.
+	 */
+	struct telemetry_pagein *tp_buffer;
+	/*
+	 * The allocated buffer size.
+	 */
+	size_t tp_buffer_allocated_size;
+	/*
+	 * The number of page-in telemetry elements requested to be counted.
+	 *
+	 * This can be larger than the capacity.
+	 */
+	unsigned int _Atomic     tp_count;
+	/*
+	 * The number of entries the buffer can hold.
+	 */
+	unsigned int             tp_capacity;
+	/*
+	 * The `mach_continuous_time()` when page-in telemetry started.
+	 */
+	uint64_t                 tp_start_mct;
+};
+
+/*
+ * A mutex to protect access to page-in telemetry globals.
+ */
+LCK_MTX_DECLARE(_telemetry_pagein_mtx, &telemetry_lck_grp);
+/*
+ * The globals protected by the `_telemetry_pagein_mtx` lock.
+ */
+struct _telemetry_pagein_globals _pagein_globals = { 0 };
+
+#define TELEMETRY_PAGEIN_BUFFER_MAX_SIZE (5 << 20)
+
+int
+telemetry_pagein_setup(
+	uint64_t buffer_size,
+	telemetry_pagein_flags_t flags)
+{
+	if (buffer_size > TELEMETRY_PAGEIN_BUFFER_MAX_SIZE) {
+		buffer_size = TELEMETRY_PAGEIN_BUFFER_MAX_SIZE;
+	}
+	if (buffer_size > 0 && buffer_size < sizeof(struct telemetry_pagein)) {
+		return EINVAL;
+	}
+
+	lck_mtx_lock(&_telemetry_pagein_mtx);
+	/*
+	 * Consider making this a once-only configuration on release kernels?
+	 */
+	_pagein_globals.tp_buffer_size = buffer_size;
+	_pagein_globals.tp_flags = flags;
+	lck_mtx_unlock(&_telemetry_pagein_mtx);
+	return 0;
+}
+
+void
+telemetry_pagein_start(void *coal)
+{
+	if (coal == COALITION_NULL) {
+		return;
+	}
+	struct thread_group *tg = coalition_get_thread_group(coal);
+	if (!tg) {
+		return;
+	}
+	uint64_t tgid = thread_group_get_id(tg);
+
+	lck_mtx_lock(&_telemetry_pagein_mtx);
+	uint64_t buffer_size = _pagein_globals.tp_buffer_size;
+	lck_mtx_unlock(&_telemetry_pagein_mtx);
+
+	if (buffer_size == 0) {
+		return;
+	}
+
+	struct telemetry_pagein *buf = kalloc_data_tag(
+		buffer_size,
+		Z_WAITOK | Z_ZERO,
+		VM_KERN_MEMORY_DIAG);
+	if (!buf) {
+		printf("telemetry: failed to allocate %lld byte buffer for page-ins", buffer_size);
+		return;
+	}
+
+	bool assigned = false;
+
+	lck_mtx_lock(&_telemetry_pagein_mtx);
+	if (_pagein_globals.tp_buffer == NULL) {
+		os_atomic_store(&_pagein_globals.tp_count, 0, relaxed);
+		_pagein_globals.tp_buffer = buf;
+		assigned = true;
+		_pagein_globals.tp_buffer_allocated_size = buffer_size;
+		_pagein_globals.tp_capacity = _pagein_globals.tp_buffer_size / sizeof(struct telemetry_pagein);
+		_pagein_globals.tp_start_mct = mach_continuous_time();
+		os_atomic_store(&_pagein_globals.tp_thread_group_id, tgid, release);
+	}
+	lck_mtx_unlock(&_telemetry_pagein_mtx);
+
+	if (!assigned) {
+		kfree_data(buf, buffer_size);
+	}
+}
+
+static bool
+_pagein_telemetry_active(uint64_t *trace_tgid_out)
+{
+	uint64_t tgid = _pagein_globals.tp_thread_group_id;
+	if (__probable(tgid == 0)) {
+		return false;
+	}
+	thread_t curth = current_thread();
+	struct thread_group *curtg = thread_group_get_home_group(curth);
+	*trace_tgid_out = tgid;
+	return curtg && thread_group_get_id(curtg) == tgid;
+}
+
+static bool
+_pagein_get_emit_index(unsigned int *index_out, uint64_t *trace_tgid_out)
+{
+	if (__probable(!_pagein_telemetry_active(trace_tgid_out))) {
+		return false;
+	}
+	unsigned int reserved_index = os_atomic_inc_orig(&_pagein_globals.tp_count, relaxed);
+	/*
+	 * Best effort to avoid expense, this is double-checked under the lock later.
+	 */
+	if (reserved_index >= _pagein_globals.tp_capacity) {
+		return false;
+	}
+	*index_out = reserved_index;
+	return true;
+}
+
+static void
+_pagein_emit_internal(
+	unsigned int index,
+	uint64_t tgid,
+	struct vnode *vp,
+	off_t file_offset)
+{
+	extern int vnode_get_ids(struct vnode *vp, uint64_t *fsid_out, uint64_t *fsobj_id_out);
+	uint64_t fsid, fsobj_id;
+	int error = vnode_get_ids(vp, &fsid, &fsobj_id);
+	if (error != 0) {
+		return;
+	}
+
+	lck_mtx_lock(&_telemetry_pagein_mtx);
+	bool const correct_tgid = tgid == _pagein_globals.tp_thread_group_id;
+	bool const has_space = _pagein_globals.tp_capacity > index;
+	if (correct_tgid && has_space) {
+		_pagein_globals.tp_buffer[index] = (struct telemetry_pagein){
+			.tp_fsid = fsid,
+			.tp_fsobj_id = fsobj_id,
+			.tp_file_offset = file_offset,
+		};
+	}
+	lck_mtx_unlock(&_telemetry_pagein_mtx);
+}
+
+void
+telemetry_pagein_emit(
+	void *objectv,
+	mach_vm_offset_t mem_offset)
+{
+	vm_object_t const object = objectv;
+	memory_object_t pager = object->pager;
+	if (memory_object_is_vnode_pager(pager)) {
+		struct vnode *vp = vnode_pager_lookup_vnode(pager);
+		if (vp != NULL) {
+			unsigned int emit_index = 0;
+			uint64_t tgid = 0;
+			if (_pagein_get_emit_index(&emit_index, &tgid)) {
+				off_t file_offset = object->paging_offset + mem_offset;
+				_pagein_emit_internal(emit_index, tgid, vp, file_offset);
+			}
+		}
+	}
+}
+
+int
+telemetry_pagein_read(
+	unsigned int *size_out,
+	user_addr_t destination,
+	size_t destination_size)
+{
+	if (destination == USER_ADDR_NULL || destination_size == 0) {
+		/*
+		 * Handle user space requesting the size to allocate; more events
+		 * could come in by the time this is called again.
+		 */
+		uint64_t count = os_atomic_load(&_pagein_globals.tp_count, relaxed);
+		*size_out = sizeof(struct telemetry_pagein_header) + sizeof(struct telemetry_pagein) * count;
+		return 0;
+	}
+
+	struct telemetry_pagein_header hdr = {
+		.tph_magic = TELEMETRY_PAGEIN_MAGIC,
+		.tph_version = 1,
+	};
+
+	if (destination_size < sizeof(hdr)) {
+		return ENOSPC;
+	}
+
+	struct telemetry_pagein *buf = NULL;
+	uint64_t count = 0;
+	uint64_t capacity = 0;
+	size_t buffer_size = 0;
+
+	lck_mtx_lock(&_telemetry_pagein_mtx);
+	_pagein_globals.tp_thread_group_id = 0;
+
+	buf = _pagein_globals.tp_buffer;
+	_pagein_globals.tp_buffer = NULL;
+
+	count = os_atomic_load(&_pagein_globals.tp_count, relaxed);
+	os_atomic_store(&_pagein_globals.tp_count, 0, relaxed);
+
+	capacity = _pagein_globals.tp_capacity;
+	_pagein_globals.tp_capacity = 0;
+
+	buffer_size = _pagein_globals.tp_buffer_allocated_size;
+	_pagein_globals.tp_buffer_allocated_size = 0;
+
+	hdr.tph_duration_mct = mach_continuous_time() - _pagein_globals.tp_start_mct;
+	_pagein_globals.tp_start_mct = 0;
+
+	hdr.tph_pagein_count = count;
+	hdr.tph_flags = _pagein_globals.tp_flags;
+	lck_mtx_unlock(&_telemetry_pagein_mtx);
+
+	int error = copyout(&hdr, destination, sizeof(hdr));
+	if (error) {
+		goto out;
+	}
+	destination += sizeof(hdr);
+	destination_size -= sizeof(hdr);
+
+	unsigned int copyout_count = MIN(count, capacity);
+	size_t pageins_size = MIN(destination_size, copyout_count * sizeof(struct telemetry_pagein));
+	*size_out = sizeof(hdr) + pageins_size;
+	if (pageins_size > 0) {
+		error = copyout(buf, destination, pageins_size);
+	}
+
+out:
+	kfree_data(buf, buffer_size);
+	return error;
+}
+
+#else /* CONFIG_THREAD_GROUPS */
+
+int
+telemetry_pagein_setup(
+	__unused uint64_t buffer_size,
+	__unused telemetry_pagein_flags_t flags)
+{
+	return ENOTSUP;
+}
+
+void
+telemetry_pagein_start(__unused void *coal)
+{
+}
+
+void
+telemetry_pagein_emit(
+	__unused void *vp,
+	__unused mach_vm_offset_t file_offset)
+{
+}
+
+int
+telemetry_pagein_read(
+	__unused unsigned int *count_out,
+	__unused user_addr_t destination,
+	__unused size_t destination_size)
+{
+	return ENOTSUP;
+}
+
+#endif /* !CONFIG_THREAD_GROUPS */
+
+#if CONFIG_MEMORY_MICROSTACKSHOT
+struct telemetry_memory_usage_cpu PERCPU_DATA(telemetry_memory_usage_percpu);
+
+TUNABLE_WRITEABLE(uint64_t, telemetry_vm_fault_period, "telemetry_mss_fault_period", 0);
+TUNABLE_WRITEABLE(uint64_t, telemetry_page_grab_period, "telemetry_mss_grab_period", 0);
+
+int
+telemetry_memory_usage_setup(uint64_t page_grab_period, uint64_t vm_fault_period)
+{
+	telemetry_page_grab_period = page_grab_period;
+	telemetry_vm_fault_period = vm_fault_period;
+	return 0;
+}
+#else /* CONFIG_MEMORY_MICROSTACKSHOT */
+int
+telemetry_memory_usage_setup(uint64_t __unused page_grab_period, uint64_t __unused vm_fault_period)
+{
+	return ENOTSUP;
+}
+#endif /* !CONFIG_MEMORY_MICROSTACKSHOT */
+
+#pragma mark - Trap Telemetry Utilities
 
 static int
 telemetry_backtrace_add_kernel(
@@ -1608,4 +2049,301 @@ telemetry_backtrace_to_string(
 	}
 	l += telemetry_backtrace_add_kernel(buf + l, buflen - l);
 	telemetry_backtrace_add_kexts(buf + l, buflen - l, frames, tot);
+}
+
+
+CA_EVENT(os_fault_with_ustack,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name,
+    CA_STATIC_STRING(CA_SIGNINGID_MAX_LEN), signing_id,
+    CA_INT, namespace,
+    CA_INT, reason_code,
+    CA_STATIC_STRING(CA_UUID_LEN), shared_cache_uuid,
+    CA_STATIC_STRING(CA_UUID_LEN), main_exec_uuid,
+    CA_STATIC_STRING(CA_UUID_LEN), frame1UUID,
+    CA_INT, frame1offset,
+    CA_STATIC_STRING(CA_UUID_LEN), frame2UUID,
+    CA_INT, frame2offset,
+    CA_STATIC_STRING(CA_UUID_LEN), frame3UUID,
+    CA_INT, frame3offset,
+    CA_STATIC_STRING(CA_UUID_LEN), frame4UUID,
+    CA_INT, frame4offset);
+
+
+
+static int
+compare_uuids32(const void *a, const void *b)
+{
+	uint32_t addr_a = ((const struct user32_dyld_uuid_info*)a)->imageLoadAddress;
+	uint32_t addr_b = ((const struct user32_dyld_uuid_info*)b)->imageLoadAddress;
+	if (addr_a < addr_b) {
+		return -1;
+	} else if (addr_a == addr_b) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+static int
+compare_uuids64(const void *a, const void *b)
+{
+	uint64_t addr_a = ((const struct user64_dyld_uuid_info*)a)->imageLoadAddress;
+	uint64_t addr_b = ((const struct user64_dyld_uuid_info*)b)->imageLoadAddress;
+	if (addr_a < addr_b) {
+		return -1;
+	} else if (addr_a == addr_b) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+#define OS_FAULT_NUMFRAMES (4)
+
+static uint64_t
+sr_virt_base(struct vm_shared_region *sr)
+{
+	return sr == NULL ? 0 : sr->sr_base_address + sr->sr_first_mapping;
+}
+
+static size_t
+_normalize_offset32(struct _telemetry_uuids uuids, uintptr_t addr, uuid_string_t uuid_out, struct vm_shared_region *sr)
+{
+	struct user32_dyld_uuid_info * elms = (struct user32_dyld_uuid_info*)uuids.uuid_info;
+	struct user32_dyld_uuid_info *image = &elms[0];
+	for (int img_i = 1; img_i < uuids.uuid_info_count; ++img_i) {
+		if (elms[img_i].imageLoadAddress > addr) {
+			break;
+		}
+		image = &elms[img_i];
+	}
+	if (addr < image->imageLoadAddress) {
+		/* basic check if addr is not in the image
+		 * it also covers cases when PC addr == 0
+		 */
+		return 0;
+	}
+	size_t res = addr - image->imageLoadAddress;
+	if (sr && sr_virt_base(sr) == image->imageLoadAddress &&
+	    res > sr->sr_size) {
+		/* if shared cache and outside of range - return 0 */
+		res = 0;
+	} else {
+		/* if shared cache - must be within range */
+		uuid_unparse_upper(image->imageUUID, uuid_out);
+	}
+	return res;
+}
+
+static size_t
+_normalize_offset64(struct _telemetry_uuids uuids, uintptr_t addr, uuid_string_t uuid_out, struct vm_shared_region *sr)
+{
+	struct user64_dyld_uuid_info * elms = (struct user64_dyld_uuid_info*)uuids.uuid_info;
+	struct user64_dyld_uuid_info *image = &elms[0];
+	for (int img_i = 1; img_i < uuids.uuid_info_count; ++img_i) {
+		if (elms[img_i].imageLoadAddress > addr) {
+			break;
+		}
+		image = &elms[img_i];
+	}
+	if (addr < image->imageLoadAddress) {
+		/* basic check if addr is not in the image
+		 * it also covers cases when PC addr == 0
+		 */
+		return 0;
+	}
+	size_t res = addr - image->imageLoadAddress;
+	if (sr && sr_virt_base(sr) == image->imageLoadAddress &&
+	    res > sr->sr_size) {
+		/* if shared cache and outside of range - return 0 */
+		res = 0;
+	} else {
+		/* if shared cache - must be within range */
+		uuid_unparse_upper(image->imageUUID, uuid_out);
+	}
+	return res;
+}
+
+static inline void
+_extend_uuids_with_shared_cache(
+	struct _telemetry_uuids *uuids,
+	bool is_64bit,
+	struct vm_shared_region *shared_region)
+{
+	if (!shared_region) {
+		return;
+	}
+	/* create an entry for shared cache in the images array, bc dyld doesn't keep it there */
+	if (is_64bit) {
+		struct user64_dyld_uuid_info * elms = (struct user64_dyld_uuid_info*)uuids->uuid_info;
+		elms[uuids->uuid_info_count].imageLoadAddress = sr_virt_base(shared_region);
+		memcpy(elms[uuids->uuid_info_count].imageUUID, shared_region->sr_uuid, sizeof(uuid_t));
+	} else {
+		struct user32_dyld_uuid_info * elms = (struct user32_dyld_uuid_info*)uuids->uuid_info;
+		elms[uuids->uuid_info_count].imageLoadAddress = (uint32_t)sr_virt_base(shared_region);
+		memcpy(elms[uuids->uuid_info_count].imageUUID, shared_region->sr_uuid, sizeof(uuid_t));
+	}
+	++uuids->uuid_info_count;
+}
+
+
+static struct _telemetry_uuids
+_alloc_uuid_only_for_sc(task_t task)
+{
+	bool const user64_va = task_has_64Bit_addr(task);
+	uint32_t uuid_info_size = 0;
+	if (user64_va) {
+		uuid_info_size = sizeof(struct user64_dyld_uuid_info);
+	} else {
+		uuid_info_size = sizeof(struct user32_dyld_uuid_info);
+	}
+
+	char *uuid_info_array = kalloc_data(uuid_info_size, Z_WAITOK);
+	if (uuid_info_array == NULL) {
+		return (struct _telemetry_uuids){
+			       .error = ENOMEM,
+		};
+	}
+
+	/* allocate space for shared cache but do not fill it up yet
+	 * hence uuid_info_count == 0
+	 */
+	return (struct _telemetry_uuids){
+		       .uuid_info = uuid_info_array,
+		       .uuid_info_count = 0,
+		       .uuid_info_size = uuid_info_size,
+	};
+}
+
+extern const char *cs_identity_get(proc_t);
+
+void
+os_user_fault_send_ca_event(uint32_t reason_namespace, uint64_t reason_code)
+{
+	proc_t proc = current_proc();
+	task_t task = current_task();
+	bool platform_binary = csproc_get_platform_binary(current_proc()) != 0;
+	ca_event_t ca_event = CA_EVENT_ALLOCATE_FLAGS(os_fault_with_ustack, Z_WAITOK | Z_ZERO);
+	if (ca_event == NULL) {
+		goto out;
+	}
+
+	CA_EVENT_TYPE(os_fault_with_ustack) * event = ca_event->data;
+	struct _telemetry_uuids uuids = { };
+	uuid_t uuid_parsed;
+	struct vm_shared_region *shared_region = NULL;
+	if (task->shared_region != NULL) {
+		shared_region = task->shared_region;
+		uuid_unparse_upper(shared_region->sr_uuid, event->shared_cache_uuid);
+	}
+	proc_getexecutableuuid(proc, uuid_parsed, sizeof(uuid_parsed));
+	uuid_unparse_upper(uuid_parsed, event->main_exec_uuid);
+
+	const char* signing_id =  platform_binary? cs_identity_get(current_proc()) : NULL;
+	if (signing_id != NULL) {
+		strlcpy(event->signing_id, signing_id, sizeof(event->signing_id));
+	}
+	event->namespace = reason_namespace;
+	event->reason_code = reason_code;
+
+	const char* proc_name = proc_name_address(proc);
+	strlcpy(event->proc_name, proc_name, sizeof(event->proc_name));
+
+
+	if (platform_binary) {
+		/* sample uuids via dyld image info only for platform binaries */
+		uuids = _telemetry_sample_uuids(task, 1);
+	}
+
+	if (uuids.uuid_info == NULL || uuids.uuid_info_count == 0) {
+		uuids = _alloc_uuid_only_for_sc(task);
+	}
+
+	if (uuids.error != 0) {
+		/* ignore telemetry */
+		return;
+	}
+
+	assert(uuids.uuid_info != NULL);
+	assert(uuids.uuid_info_size > 0);
+
+	_extend_uuids_with_shared_cache(&uuids, task_has_64Bit_addr(task), shared_region);
+	/* need to sort before we can start searching */
+	size_t elm_size = task_has_64Bit_addr(task) ? sizeof(struct user64_dyld_uuid_info) : sizeof(struct user32_dyld_uuid_info);
+	cmpfunc_t comparator = task_has_64Bit_addr(task) ? compare_uuids64 : compare_uuids32;
+	qsort(uuids.uuid_info, uuids.uuid_info_count, elm_size, comparator);
+
+	/* walk top 4 frames in the backtrace and find corresponding UUID of the image */
+	uintptr_t user_frames[OS_FAULT_NUMFRAMES] = {};
+	struct backtrace_user_info btinfo = BTUINFO_INIT;
+	unsigned int frame_count = backtrace_user(user_frames, OS_FAULT_NUMFRAMES, NULL, &btinfo);
+	assert(frame_count <= OS_FAULT_NUMFRAMES);
+	if (btinfo.btui_error != 0) {
+		goto out;
+	}
+
+	if (frame_count > 0) {
+		event->frame1offset = task_has_64Bit_addr(task) ?
+		    _normalize_offset64(uuids, user_frames[0], event->frame1UUID, shared_region):
+		    _normalize_offset32(uuids, user_frames[0], event->frame1UUID, shared_region);
+	} else {
+#if __arm64__
+		/* [arm64 only] fault path: if we failed to collect the backtrace - try to symbolicate PC at least */
+		struct arm_saved_state *sstate = find_user_regs(current_thread());
+
+		if (is_saved_state64(sstate)) {
+			struct arm_saved_state64 *state = saved_state64(sstate);
+			assert(task_has_64Bit_addr(task));
+			event->frame1offset = _normalize_offset64(uuids, state->pc, event->frame1UUID, shared_region);
+		} else {
+			struct arm_saved_state32 *state = saved_state32(sstate);
+			event->frame1offset = _normalize_offset32(uuids, state->pc, event->frame1UUID, shared_region);
+		}
+#endif /* #if __arm64__ */
+	}
+
+	if (frame_count > 1) {
+		event->frame2offset = task_has_64Bit_addr(task) ?
+		    _normalize_offset64(uuids, user_frames[1], event->frame2UUID, shared_region):
+		    _normalize_offset32(uuids, user_frames[1], event->frame2UUID, shared_region);
+	} else {
+#if __arm64__
+		/* [arm64 only] fault path: if we failed to collect the backtrace - try to symbolicate LR at least */
+		struct arm_saved_state *sstate = find_user_regs(current_thread());
+
+		if (is_saved_state64(sstate)) {
+			struct arm_saved_state64 *state = saved_state64(sstate);
+			assert(task_has_64Bit_addr(task));
+			event->frame2offset = _normalize_offset64(uuids, state->lr, event->frame2UUID, shared_region);
+		} else {
+			struct arm_saved_state32 *state = saved_state32(sstate);
+			event->frame2offset = _normalize_offset32(uuids, state->lr, event->frame2UUID, shared_region);
+		}
+#endif /* #if __arm64__ */
+	}
+
+	if (frame_count > 2) {
+		event->frame3offset = task_has_64Bit_addr(task) ?
+		    _normalize_offset64(uuids, user_frames[2], event->frame3UUID, shared_region):
+		    _normalize_offset32(uuids, user_frames[2], event->frame3UUID, shared_region);
+	}
+	if (frame_count > 3) {
+		event->frame4offset = task_has_64Bit_addr(task) ?
+		    _normalize_offset64(uuids, user_frames[3], event->frame4UUID, shared_region):
+		    _normalize_offset32(uuids, user_frames[3], event->frame4UUID, shared_region);
+	}
+
+	if (ca_event) {
+		CA_EVENT_SEND(ca_event);
+		ca_event = NULL; /* is consumed by send above */
+	}
+
+out:
+	if (uuids.uuid_info != NULL) {
+		kfree_data(uuids.uuid_info, uuids.uuid_info_size);
+	}
+
+	if (ca_event != NULL) {
+		CA_EVENT_DEALLOCATE(ca_event);
+	}
 }

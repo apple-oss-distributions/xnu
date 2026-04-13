@@ -255,11 +255,11 @@ SYSCTL_INT(_net_link_generic_system, OID_AUTO, if_verbose,
     CTLFLAG_RW | CTLFLAG_LOCKED, &if_verbose, 0, "");
 
 #if (DEBUG || DEVELOPMENT)
-static uint32_t default_tcp_kao_max = 0;
+static uint32_t default_tcp_kao_max = 4;
 SYSCTL_INT(_net_link_generic_system, OID_AUTO, default_tcp_kao_max,
     CTLFLAG_RW | CTLFLAG_LOCKED, &default_tcp_kao_max, 0, "");
 #else
-static const uint32_t default_tcp_kao_max = 0;
+static const uint32_t default_tcp_kao_max = 4;
 #endif /* (DEBUG || DEVELOPMENT) */
 
 u_int32_t companion_link_sock_buffer_limit = 0;
@@ -6303,6 +6303,7 @@ if_data_internal_to_if_data64(struct ifnet *ifp,
 	if_data64->ifi_lastchange.tv_sec += (uint32_t)boottime_sec();
 
 #undef COPYFIELD64
+#undef COPYFIELD64_ATOMIC
 }
 
 __private_extern__ void
@@ -6441,6 +6442,7 @@ if_copy_link_heuristics_stats(struct ifnet *ifp, struct if_linkheuristics *if_li
 	if_linkheuristics->iflh_udp_##fld = os_atomic_load(&ifp->if_udp_stat->fld, relaxed); \
 } while (0)
 
+	bzero(if_linkheuristics, sizeof(*if_linkheuristics));
 	COPY_IF_LH_FIELD64_ATOMIC(link_heuristics_cnt);
 	COPY_IF_LH_FIELD64_ATOMIC(link_heuristics_time);
 	COPY_IF_LH_FIELD64_ATOMIC(congested_link_cnt);
@@ -6493,6 +6495,22 @@ if_copy_link_heuristics_stats(struct ifnet *ifp, struct if_linkheuristics *if_li
 			break;
 		}
 	}
+}
+
+extern void
+if_copy_lpw_stats(struct ifnet *ifp, struct if_lpw_stats *if_lpw_stats)
+{
+#define COPY_IF_LPW_FIELD64_ATOMIC(fld) do {                    \
+	if_lpw_stats->iflpw_##fld = os_atomic_load(&ifp->if_data.ifi_lpw_##fld, relaxed); \
+} while (0)
+
+	bzero(if_lpw_stats, sizeof(*if_lpw_stats));
+	COPY_IF_LPW_FIELD64_ATOMIC(ipackets);
+	COPY_IF_LPW_FIELD64_ATOMIC(opackets);
+	COPY_IF_LPW_FIELD64_ATOMIC(magic_pkt_checked);
+	COPY_IF_LPW_FIELD64_ATOMIC(magic_pkt_found);
+
+#undef COPY_IF_LPW_FIELD64_ATOMIC
 }
 
 void
@@ -6965,6 +6983,7 @@ if_get_tcp_kao_max(struct ifnet *ifp)
 			ifp->if_tcp_kao_max = ifr.ifr_tcp_kao_max;
 		} else if (error == EOPNOTSUPP) {
 			ifp->if_tcp_kao_max = default_tcp_kao_max;
+			error = 0;
 		}
 		ifnet_lock_done(ifp);
 	}

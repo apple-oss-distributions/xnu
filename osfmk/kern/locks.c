@@ -55,10 +55,6 @@
  */
 
 #define LOCK_PRIVATE 1
-
-#include <mach_ldebug.h>
-#include <debug.h>
-
 #include <mach/kern_return.h>
 
 #include <kern/locks_internal.h>
@@ -81,6 +77,7 @@
 #include <vm/pmap.h>
 
 #include <sys/kdebug.h>
+#include <os/hash.h>
 
 #define LCK_MTX_SLEEP_CODE              0
 #define LCK_MTX_SLEEP_DEADLINE_CODE     1
@@ -130,7 +127,7 @@ MACHINE_TIMEOUT(dtrace_spin_threshold, "dtrace-spin-threshold",
 #endif
 #endif
 
-struct lck_mcs PERCPU_DATA(lck_mcs);
+union lck_mcs lck_mcs_array[MAX_CPUS << LCK_MCS_ID_CPU_SHIFT];
 
 __kdebug_only
 uintptr_t
@@ -159,6 +156,20 @@ __lck_require_preemption_disabled(void *lock, thread_t self __unused)
 
 #pragma mark - HW Spin policies
 
+static_assert(sizeof(hw_spin_timeout_t) <= sizeof(uint64_t));
+
+__attribute__((always_inline))
+bool
+hw_spin_in_ppl(hw_spin_timeout_t to)
+{
+#if XNU_MONITOR && SCHED_HYGIENE_DEBUG
+	return to.hwst_in_ppl;
+#else
+	(void)to;
+	return false;
+#endif
+}
+
 /*
  * Input and output timeouts are expressed in absolute_time for arm and TSC for Intel
  */
@@ -168,19 +179,21 @@ hw_spin_compute_timeout(hw_spin_policy_t pol)
 {
 	hw_spin_timeout_t ret = {
 		.hwst_timeout = os_atomic_load(pol->hwsp_timeout, relaxed),
+#if SCHED_HYGIENE_DEBUG && XNU_MONITOR
+		.hwst_in_ppl  = pmap_in_ppl(),
+#endif /* XNU_MONITOR && XNU_MONITOR */
 	};
 
 	ret.hwst_timeout <<= pol->hwsp_timeout_shift;
-#if SCHED_HYGIENE_DEBUG
-	ret.hwst_in_ppl = pmap_in_ppl();
+#if SCHED_HYGIENE_DEBUG || __x86_64__
 	/* Note we can't check if we are interruptible if in ppl */
-	ret.hwst_interruptible = !ret.hwst_in_ppl && ml_get_interrupts_enabled();
-#endif /* SCHED_HYGIENE_DEBUG */
+	ret.hwst_interruptible = !hw_spin_in_ppl(ret) && ml_get_interrupts_enabled();
+#endif /* SCHED_HYGIENE_DEBUG || __x86_64__ */
 
 #if SCHED_HYGIENE_DEBUG
 #ifndef KASAN
 	if (ret.hwst_timeout > 0 &&
-	    !ret.hwst_in_ppl &&
+	    !hw_spin_in_ppl(ret) &&
 	    !ret.hwst_interruptible &&
 	    interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
 		uint64_t int_timeout = os_atomic_load(&interrupt_masked_timeout, relaxed);
@@ -198,18 +211,7 @@ hw_spin_compute_timeout(hw_spin_policy_t pol)
 	return ret;
 }
 
-__attribute__((always_inline))
-bool
-hw_spin_in_ppl(hw_spin_timeout_t to)
-{
-#if SCHED_HYGIENE_DEBUG
-	return to.hwst_in_ppl;
-#else
-	(void)to;
-	return pmap_in_ppl();
-#endif
-}
-
+__attribute__((noinline))
 bool
 hw_spin_should_keep_spinning(
 	void                   *lock,
@@ -223,11 +225,17 @@ hw_spin_should_keep_spinning(
 #endif
 	uint64_t now;
 
+#if __x86_64__
+	if (!to.hwst_interruptible) {
+		handle_pending_TLB_flushes();
+	}
+#endif /* __x86_64__ */
+
 	if (__improbable(to.hwst_timeout == 0)) {
 		return true;
 	}
 
-	now = ml_get_timebase();
+	now = lock_get_timebase();
 	if (__probable(now < state->hwss_deadline)) {
 		/* keep spinning */
 		return true;
@@ -328,6 +336,350 @@ lck_spinlock_timeout_hit(void *lck, uintptr_t owner)
 out:
 	return lsti;
 }
+
+
+#pragma mark - MCS waiting queue
+
+/*
+ * This subsystem implements a MCS queues that can either be used as a top level
+ * MCS lock, but more often in order to implement what the "Fairer and More
+ * Scalable Reader-Writer Locks by Optimizing Queue Management" paper calls
+ * an "LSM" (Leader-spinning-on-Mutex) queue.
+ */
+
+/*!
+ * @abstract
+ * Learn the topology of the system and initialize each per-CPU data structure
+ * with its configuration.
+ */
+__startup_func
+static void
+lck_mcs_configure(void)
+{
+	for (uint16_t cpu = 0; cpu <= ml_early_cpu_max_number(); cpu++) {
+		lck_mcs_head_for_cpu(cpu)->lmh_free_node =
+		    lck_mcs_node(lck_mcs_id_make(cpu, LCK_MCS_SLOT_SPINNING_0));
+	}
+}
+STARTUP(PERCPU, STARTUP_RANK_MIDDLE, lck_mcs_configure);
+
+/*!
+ * @abstract
+ * Signals the next node that it is the head of the queue
+ *
+ * @param node          A pointer to the MCS node that has been dequeued.
+ */
+__attribute__((always_inline))
+static void
+lck_mcs_wakeup_next(lck_mcs_node_t node)
+{
+	lck_mcs_node_t nnode;
+
+	nnode = os_atomic_load(&node->lmn_next, relaxed);
+	if (__improbable(nnode == NULL)) {
+		nnode = hw_wait_while_equals_long(&node->lmn_next, NULL);
+	}
+	os_atomic_store(&nnode->lmn_status, LCK_MCS_NODE_READY, release);
+}
+
+/*!
+ * @abstract
+ * Frees a node after it's no longer used.
+ *
+ * @param node          A pointer to the MCS node that has been dequeued.
+ * @param mode          The MCS queue waiting mode.
+ */
+__attribute__((always_inline))
+static void
+lck_mcs_node_free(lck_mcs_node_t node, lck_mcs_mode_t mode)
+{
+	__builtin_bzero(node, offsetof(struct lck_mcs_node, __lmn_unused1));
+
+	if (mode & LCK_MCS_SPINNING) {
+		lck_mcs_head_t head = lck_mcs_head_for_node(node);
+
+		assert(head->lmh_free_node == node + 1);
+		os_atomic_store(&head->lmh_free_node, node, compiler_acq_rel);
+	}
+}
+
+/*!
+ * @abstract
+ * Wait in line in an MCS queue in non abortable way.
+ *
+ * @discussion
+ * Note that whether the queue is abortable is an intrinsic property
+ * of the queue, and mixing abortable and non-abortable waits will
+ * lead to corruption of the queues and most likely kernel panics.
+ *
+ * @param node          A pointer to the MCS node.
+ * @param lock          An opaque value for the higher level synchronization
+ *                      primitive that owns this MCS queue.
+ * @param pol           A pointer to the wait policy for the synchronization
+ *                      primitive.
+ *
+ * @returns             @c node, to allow callers to tail-call into it.
+ */
+__attribute__((noinline))
+static lck_mcs_node_t
+lck_mcs_wait(lck_mcs_node_t node, void *lock, hw_spin_policy_t pol)
+{
+	hw_spin_timeout_t to = hw_spin_compute_timeout(pol);
+	hw_spin_state_t   ss = { };
+	lck_mcs_status_t  status;
+
+	while (!hw_spin_wait_until_n(LOCK_SNOOP_SPINS_MCS,
+	    &node->lmn_status, status,
+	    status == LCK_MCS_NODE_READY)) {
+		hw_spin_should_keep_spinning(lock, pol, to, &ss);
+	}
+
+	os_atomic_thread_fence(acquire);
+	return node;
+}
+
+/*!
+ * @abstract
+ * Computes the abort slot corresponding with a given MCS queue.
+ *
+ * @discussion
+ * In order to notify the MCS queue head that aborts need to be processed,
+ * a hashed counter is incremented when a node wishes to abort. This function
+ * returns the slot that will hold this counter for a given MCS queue.
+ *
+ * Collisions are OK, they only cause minor performance issues
+ * as it means MCS queue heads might scan for aborting nodes
+ * and not find any.
+ *
+ * @param link          A pointer to the MCS queue.
+ * @returns             A pointer to the hash table slot holding the abort
+ *                      counter for this MCS queue.
+ */
+__pure2
+static lck_abort_slot_t *
+lck_mcs_abort_slot(const lck_mcs_id_t *link)
+{
+	uint32_t hash = os_hash_kernel_pointer(link);
+	uint32_t top, idx;
+
+	idx = hash % LCK_MCS_HASH_ABORT_SIZE;
+	top = (hash / LCK_MCS_HASH_ABORT_SIZE) % LCK_MCS_HASH_TOP_SIZE;
+
+	return &lck_mcs_head_for_cpu(top)->lmh_abort_hash[idx];
+}
+
+/*!
+ * @abstract
+ * Wait in line in an MCS queue in an abortable way.
+ *
+ * @discussion
+ * Note that whether the queue is abortable is an intrinsic property
+ * of the queue, and mixing abortable and non-abortable waits will
+ * lead to corruption of the queues and most likely kernel panics.
+ *
+ * @param link          A pointer to the MCS queue.
+ * @param mode          The MCS queue waiting mode.
+ * @param node          A pointer to the MCS node.
+ * @param lock          An opaque value for the higher level synchronization
+ *                      primitive that owns this MCS queue.
+ * @param pol           A pointer to the wait policy for the synchronization
+ *                      primitive.
+ *
+ * @returns             @c node if the wait was successful,
+ *                      NULL otherwise (in which case the node is freed).
+ */
+__attribute__((noinline))
+static lck_mcs_node_t
+lck_mcs_wait_abortable(
+	lck_mcs_id_t           *link,
+	lck_mcs_node_t          node,
+	lck_mcs_mode_t          mode,
+	void                   *lock,
+	hw_spin_policy_t        pol)
+{
+	ast_t      *const astp = ast_pending();
+	lck_abort_slot_t *slot = NULL;
+	lck_mcs_status_t  status;
+	hw_spin_timeout_t to   = hw_spin_compute_timeout(pol);
+	hw_spin_state_t   ss   = { };
+
+	while (!hw_spin_wait_until_n(LOCK_SNOOP_SPINS_MCS,
+	    &node->lmn_status, status,
+	    status == LCK_MCS_NODE_READY ||
+	    (os_atomic_load(astp, relaxed) & AST_URGENT))) {
+		hw_spin_should_keep_spinning(lock, pol, to, &ss);
+	}
+
+	if (__probable(status == LCK_MCS_NODE_READY)) {
+		os_atomic_thread_fence(acquire);
+		return node;
+	}
+
+	/*
+	 * When aborting:
+	 * - mark the node as requesting aborts,
+	 *
+	 * - increment our hash slot in order to denote that there's a new node
+	 *   aborting in this MCS queue,
+	 *
+	 * - (on arm) perform a SEV in order to break the head spinner out of
+	 *   its WFE and make it process our abort faster.
+	 */
+	slot = lck_mcs_abort_slot(link);
+	node->lmn_aborting = true;
+	os_atomic_inc(slot, release);
+	lock_send_event();
+
+	while (!hw_spin_wait_until(&node->lmn_status, status,
+	    status != LCK_MCS_NODE_WAITING)) {
+		hw_spin_should_keep_spinning(lock, pol, to, &ss);
+	}
+
+	if (__probable(status == LCK_MCS_NODE_READY)) {
+		os_atomic_thread_fence(acquire);
+		os_atomic_dec(slot, relaxed);
+		return node;
+	}
+
+	assert(status == LCK_MCS_NODE_ABORTED);
+	lck_mcs_node_free(node, mode);
+	return NULL;
+}
+
+__always_inline_testable __mockable
+lck_mcs_node_t
+lck_mcs_enqueue(
+	lck_mcs_id_t           *link,
+	lck_mcs_mode_t          mode,
+	void                   *lock,
+	hw_spin_policy_t        pol)
+{
+	lck_mcs_node_t node = NULL;
+	int            cpu  = cpu_number();
+	lck_mcs_id_t   pidx;
+
+	if (mode & LCK_MCS_SPINNING) {
+		lck_mcs_head_t head = lck_mcs_head_for_cpu(cpu);
+
+		node = head->lmh_free_node;
+		os_atomic_store(&head->lmh_free_node, node + 1, compiler_acq_rel);
+	} else {
+		node = lck_mcs_node(cpu, LCK_MCS_SLOT_SLEEPABLE);
+	}
+
+	node->lmn_link = link;
+	node->lmn_mode = mode;
+
+	pidx = os_atomic_xchg(link, lck_mcs_node_id(node), release);
+	if (__probable(pidx == LCK_MCS_ID_NULL)) {
+		return node;
+	}
+
+	os_atomic_store(&lck_mcs_node(pidx)->lmn_next, node, relaxed);
+
+	if (mode & LCK_MCS_ABORTABLE) {
+		return lck_mcs_wait_abortable(link, node, mode, lock, pol);
+	} else {
+		return lck_mcs_wait(node, lock, pol);
+	}
+}
+
+__always_inline_testable __mockable
+void
+lck_mcs_dequeue(lck_mcs_node_t node, lck_mcs_id_t *link, lck_mcs_mode_t mode)
+{
+	lck_mcs_node_t nnode = node->lmn_next;
+	lck_mcs_id_t   idx   = lck_mcs_node_id(node);
+
+	if (nnode || !lock_cmpxchg(link, idx, LCK_MCS_ID_NULL, relaxed)) {
+		lck_mcs_wakeup_next(node);
+	}
+
+	lck_mcs_node_free(node, mode);
+}
+
+__attribute__((always_inline))
+void
+lck_mcs_cleanup(lck_mcs_node_t node, lck_mcs_mode_t mode, bool wakeup_next)
+{
+	if (wakeup_next) {
+		lck_mcs_wakeup_next(node);
+	}
+
+	lck_mcs_node_free(node, mode);
+}
+
+
+/*!
+ * @abstract
+ * Scan the MCS queue for nodes that are aborting, and kick them off the queue.
+ *
+ * @param head          The head of the MCS queue (the node driving the aborts).
+ * @param link          A pointer to the MCS queue.
+ * @param slot          A pointer to the hash table slot holding the abort
+ *                      counter for this MCS queue.
+ */
+__attribute__((noinline))
+static void
+lck_mcs_handle_aborts(
+	lck_mcs_node_t          head,
+	lck_mcs_id_t           *link,
+	lck_abort_slot_t       *slot)
+{
+	lck_mcs_node_t prev = head;
+	lck_mcs_node_t node = head->lmn_next;
+
+	while (node) {
+		lck_mcs_id_t   pidx = lck_mcs_node_id(prev);
+		lck_mcs_id_t   idx  = lck_mcs_node_id(node);
+		lck_mcs_node_t next = node->lmn_next;
+
+		if (!node->lmn_aborting) {
+			prev = node;
+			node = next;
+			continue;
+		}
+
+		if (next) {
+			os_atomic_store(&prev->lmn_next, next, relaxed);
+		} else if (lock_cmpxchg(link, idx, pidx, relaxed)) {
+			os_atomic_cmpxchg(&prev->lmn_next, node, NULL, relaxed);
+		} else {
+			/*
+			 * an enqueue is happening, let's not spin,
+			 * we'll deal with that abort later.
+			 */
+			break;
+		}
+
+		os_atomic_store(&node->lmn_status, LCK_MCS_NODE_ABORTED, relaxed);
+		os_atomic_dec(slot, relaxed);
+
+		node = next;
+	}
+}
+
+__attribute__((always_inline))
+void
+lck_mcs_spin_step(
+	lck_mcs_node_t          node,
+	lck_mcs_id_t           *link,
+	lck_mcs_mode_t          mode,
+	lck_abort_slot_t      **slotp)
+{
+	if (mode & LCK_MCS_ABORTABLE) {
+		lck_abort_slot_t *slot = *slotp;
+
+		if (slot == NULL) {
+			*slotp = slot = lck_mcs_abort_slot(link);
+		}
+
+		if (os_atomic_load(slot, acquire)) {
+			lck_mcs_handle_aborts(node, link, slot);
+		}
+	}
+}
+
 
 #pragma mark - HW locks
 
@@ -635,6 +987,7 @@ static const struct hw_spin_policy hw_wait_while_equals64_policy = {
 	.hwsp_op_timeout        = hw_wait_while_equals64_panic,
 };
 
+__attribute__((noinline))
 uint32_t
 hw_wait_while_equals32(uint32_t *address, uint32_t current)
 {
@@ -650,6 +1003,7 @@ hw_wait_while_equals32(uint32_t *address, uint32_t current)
 	return v;
 }
 
+__attribute__((noinline))
 uint64_t
 hw_wait_while_equals64(uint64_t *address, uint64_t current)
 {
@@ -1590,9 +1944,55 @@ lck_mtx_sleep_with_inheritor(
  * sleep_with_inheritor functions with lck_rw_t as locking primitive.
  */
 
+__lck_rw_old_func
 wait_result_t
 lck_rw_sleep_with_inheritor(
-	lck_rw_t               *lock,
+	lck_rw_old_t           *lock,
+	lck_sleep_action_t      lck_sleep_action,
+	event_t                 event,
+	thread_t                inheritor,
+	wait_interrupt_t        interruptible,
+	uint64_t                deadline)
+{
+	__block lck_rw_type_t lck_rw_type = LCK_RW_TYPE_EXCLUSIVE;
+
+	LCK_RW_ASSERT(lock, LCK_RW_ASSERT_HELD);
+
+	if (lck_sleep_action & LCK_SLEEP_UNLOCK) {
+		return sleep_with_inheritor_and_turnstile(event,
+		           inheritor,
+		           interruptible,
+		           deadline,
+		           ^{;},
+		           ^{lck_rw_type = lck_rw_done(lock);});
+	} else if (!(lck_sleep_action & (LCK_SLEEP_SHARED | LCK_SLEEP_EXCLUSIVE))) {
+		return sleep_with_inheritor_and_turnstile(event,
+		           inheritor,
+		           interruptible,
+		           deadline,
+		           ^{lck_rw_lock(lock, lck_rw_type);},
+		           ^{lck_rw_type = lck_rw_done(lock);});
+	} else if (lck_sleep_action & LCK_SLEEP_EXCLUSIVE) {
+		return sleep_with_inheritor_and_turnstile(event,
+		           inheritor,
+		           interruptible,
+		           deadline,
+		           ^{lck_rw_lock_exclusive(lock);},
+		           ^{lck_rw_type = lck_rw_done(lock);});
+	} else {
+		return sleep_with_inheritor_and_turnstile(event,
+		           inheritor,
+		           interruptible,
+		           deadline,
+		           ^{lck_rw_lock_shared(lock);},
+		           ^{lck_rw_type = lck_rw_done(lock);});
+	}
+}
+
+__lck_rw_new_func
+wait_result_t
+lck_rw_sleep_with_inheritor(
+	lck_rw_new_t           *lock,
 	lck_sleep_action_t      lck_sleep_action,
 	event_t                 event,
 	thread_t                inheritor,
@@ -3290,7 +3690,7 @@ lck_mtx_gate_assert(__assert_only lck_mtx_t *lock, gate_t *gate, gate_assert_fla
 	gate_assert(gate, flags);
 }
 
-#pragma mark - LCK_*_DECLARE support
+#pragma mark - LCK_*_DEFINE support
 
 __startup_func
 void
@@ -3315,6 +3715,20 @@ lck_rw_startup_init(struct lck_rw_startup_spec *sp)
 
 __startup_func
 void
+lck_rw_old_startup_init(struct lck_rw_old_startup_spec *sp)
+{
+	lck_rw_init(sp->lck, sp->lck_grp, sp->lck_attr);
+}
+
+__startup_func
+void
+lck_rw_new_startup_init(struct lck_rw_new_startup_spec *sp)
+{
+	lck_rw_init(sp->lck, sp->lck_grp, sp->lck_attr);
+}
+
+__startup_func
+void
 usimple_lock_startup_init(struct usimple_lock_startup_spec *sp)
 {
 	simple_lock_init(sp->lck, sp->lck_init_arg);
@@ -3326,3 +3740,616 @@ lck_ticket_startup_init(struct lck_ticket_startup_spec *sp)
 {
 	lck_ticket_init(sp->lck, sp->lck_grp);
 }
+
+#pragma mark - tests
+#if DEVELOPMENT || DEBUG
+#include <sys/_types/_errno_t.h>
+#include <sys/errno.h>
+#include <sys/random.h>
+
+#define LCK_BENCH_ARRAY_SIZE        64
+
+
+/* keep in sync with tests/locks_througput.c */
+
+__enum_closed_decl(lck_bench_type_t, uint16_t, {
+	LCK_BENCH_TYPE_NONE,
+	LCK_BENCH_TYPE_BIT,
+	LCK_BENCH_TYPE_SPIN,
+	LCK_BENCH_TYPE_TICKET,
+	LCK_BENCH_TYPE_MTX,
+	LCK_BENCH_TYPE_RW,
+	LCK_BENCH_TYPE_RW_LEGACY,
+});
+
+__enum_closed_decl(lck_op_type_t, uint16_t, {
+	LCK_STRESS_SHARED,
+	LCK_STRESS_UPGRADE,
+	LCK_STRESS_EXCLUSIVE,
+	LCK_STRESS_DOWNGRADE,
+
+	LCK_STRESS_COUNT,
+});
+
+typedef struct lck_bench_spec {
+	lck_bench_type_t        lock_type;
+	bool                    false_sharing;
+	uint16_t                duration_ms;
+	uint16_t                num_threads;
+	uint32_t                write_ratio;
+	uint32_t                iterations_read;
+	uint32_t                iterations_write;
+	uint32_t                iterations_unlocked;
+} *lck_bench_spec_t;
+
+typedef union {
+	hw_lock_bit_t           bit;
+	lck_spin_t              spin;
+	lck_ticket_t            ticket;
+	lck_mtx_t               mtx;
+	lck_rw_new_t            rw_new;
+	lck_rw_old_t            rw_old;
+} lck_bench_lock_t;
+
+typedef struct lck_bench_ctx {
+	__attribute__((aligned(128)))
+	lck_bench_lock_t        lock;
+	uint32_t                shared_array_close[LCK_BENCH_ARRAY_SIZE];
+
+	__attribute__((aligned(128)))
+	uint32_t                shared_array_far[LCK_BENCH_ARRAY_SIZE];
+
+	uint64_t     *__zpercpu rng_ctx;
+	thread_t                runner;
+	void                  (*lock_read)(lck_bench_lock_t *lck);
+	void                  (*unlock_read)(lck_bench_lock_t *lck);
+	void                  (*lock_write)(lck_bench_lock_t *lck);
+	void                  (*unlock_write)(lck_bench_lock_t *lck);
+	bool                  (*upgrade)(lck_bench_lock_t *lck);
+	void                  (*downgrade)(lck_bench_lock_t *lck);
+
+	uint32_t                starting;
+	uint32_t                finishing;
+	uint64_t                deadline;
+	uint64_t                result;
+
+	struct lck_bench_spec   spec;
+} *lck_bench_ctx_t;
+
+static LCK_GRP_DECLARE(lck_bench_grp, "lck_bench");
+static LCK_MTX_DECLARE(lck_bench_lock, &lck_bench_grp);
+static struct lck_bench_ctx lck_bench_ctx;
+
+#pragma mark hw_lock_bit_t
+
+static void
+lck_bench_bit_lock(lck_bench_lock_t *lock)
+{
+	hw_lock_bit(&lock->bit, 1, &lck_bench_grp);
+}
+
+static void
+lck_bench_bit_unlock(lck_bench_lock_t *lock)
+{
+	hw_unlock_bit(&lock->bit, 1);
+}
+
+static void
+lck_bench_bit_init(lck_bench_ctx_t ctx)
+{
+	ctx->lock.bit     = 0;
+	ctx->lock_read    = lck_bench_bit_lock;
+	ctx->unlock_read  = lck_bench_bit_unlock;
+	ctx->lock_write   = lck_bench_bit_lock;
+	ctx->unlock_write = lck_bench_bit_unlock;
+}
+
+static void
+lck_bench_bit_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	ctx->lock.bit     = 0;
+}
+
+
+#pragma mark lck_spin_t
+
+static void
+lck_bench_spin_lock(lck_bench_lock_t *lock)
+{
+	lck_spin_lock(&lock->spin);
+}
+
+static void
+lck_bench_spin_unlock(lck_bench_lock_t *lock)
+{
+	lck_spin_unlock(&lock->spin);
+}
+
+static void
+lck_bench_spin_init(lck_bench_ctx_t ctx)
+{
+	lck_spin_init(&ctx->lock.spin, &lck_bench_grp, NULL);
+	ctx->lock_read    = lck_bench_spin_lock;
+	ctx->unlock_read  = lck_bench_spin_unlock;
+	ctx->lock_write   = lck_bench_spin_lock;
+	ctx->unlock_write = lck_bench_spin_unlock;
+}
+
+static void
+lck_bench_spin_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	lck_spin_destroy(&ctx->lock.spin, &lck_bench_grp);
+}
+
+
+#pragma mark lck_ticket_t
+
+static void
+lck_bench_ticket_lock(lck_bench_lock_t *lock)
+{
+	lck_ticket_lock(&lock->ticket, &lck_bench_grp);
+}
+
+static void
+lck_bench_ticket_unlock(lck_bench_lock_t *lock)
+{
+	lck_ticket_unlock(&lock->ticket);
+}
+
+static void
+lck_bench_ticket_init(lck_bench_ctx_t ctx)
+{
+	lck_ticket_init(&ctx->lock.ticket, &lck_bench_grp);
+	ctx->lock_read    = lck_bench_ticket_lock;
+	ctx->unlock_read  = lck_bench_ticket_unlock;
+	ctx->lock_write   = lck_bench_ticket_lock;
+	ctx->unlock_write = lck_bench_ticket_unlock;
+}
+
+static void
+lck_bench_ticket_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	lck_ticket_destroy(&ctx->lock.ticket, &lck_bench_grp);
+}
+
+
+#pragma mark lck_mtx_t
+
+static void
+lck_bench_mtx_lock(lck_bench_lock_t *lock)
+{
+	lck_mtx_lock(&lock->mtx);
+}
+
+static void
+lck_bench_mtx_unlock(lck_bench_lock_t *lock)
+{
+	lck_mtx_unlock(&lock->mtx);
+}
+
+static void
+lck_bench_mtx_init(lck_bench_ctx_t ctx)
+{
+	lck_mtx_init(&ctx->lock.mtx, &lck_bench_grp, NULL);
+	ctx->lock_read    = lck_bench_mtx_lock;
+	ctx->unlock_read  = lck_bench_mtx_unlock;
+	ctx->lock_write   = lck_bench_mtx_lock;
+	ctx->unlock_write = lck_bench_mtx_unlock;
+}
+
+static void
+lck_bench_mtx_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	lck_mtx_destroy(&ctx->lock.mtx, &lck_bench_grp);
+}
+
+
+#pragma mark lck_rw_t
+
+static void
+lck_bench_rw_lock_read(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_shared(&lock->rw_new);
+}
+
+static void
+lck_bench_rw_unlock_read(lck_bench_lock_t *lock)
+{
+	lck_rw_unlock_shared(&lock->rw_new);
+}
+
+static void
+lck_bench_rw_lock_write(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_exclusive(&lock->rw_new);
+}
+
+static void
+lck_bench_rw_unlock_write(lck_bench_lock_t *lock)
+{
+	lck_rw_unlock_exclusive(&lock->rw_new);
+}
+
+static bool
+lck_bench_rw_upgrade(lck_bench_lock_t *lock)
+{
+	return lck_rw_lock_shared_to_exclusive(&lock->rw_new);
+}
+
+static void
+lck_bench_rw_downgrade(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_exclusive_to_shared(&lock->rw_new);
+}
+
+static void
+lck_bench_rw_init(lck_bench_ctx_t ctx)
+{
+	lck_rw_init(&ctx->lock.rw_new, &lck_bench_grp, NULL);
+	ctx->lock_read    = lck_bench_rw_lock_read;
+	ctx->unlock_read  = lck_bench_rw_unlock_read;
+	ctx->lock_write   = lck_bench_rw_lock_write;
+	ctx->unlock_write = lck_bench_rw_unlock_write;
+	ctx->upgrade      = lck_bench_rw_upgrade;
+	ctx->downgrade    = lck_bench_rw_downgrade;
+}
+
+static void
+lck_bench_rw_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	ctx->upgrade      = NULL;
+	ctx->downgrade    = NULL;
+	lck_rw_destroy(&ctx->lock.rw_new, &lck_bench_grp);
+}
+
+
+#pragma mark lck_rw_old_t
+
+static void
+lck_bench_rw_old_lock_read(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_shared(&lock->rw_old);
+}
+
+static void
+lck_bench_rw_old_unlock_read(lck_bench_lock_t *lock)
+{
+	lck_rw_unlock_shared(&lock->rw_old);
+}
+
+static void
+lck_bench_rw_old_lock_write(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_exclusive(&lock->rw_old);
+}
+
+static void
+lck_bench_rw_old_unlock_write(lck_bench_lock_t *lock)
+{
+	lck_rw_unlock_exclusive(&lock->rw_old);
+}
+
+static bool
+lck_bench_rw_old_upgrade(lck_bench_lock_t *lock)
+{
+	return lck_rw_lock_shared_to_exclusive(&lock->rw_old);
+}
+
+static void
+lck_bench_rw_old_downgrade(lck_bench_lock_t *lock)
+{
+	lck_rw_lock_exclusive_to_shared(&lock->rw_old);
+}
+
+static void
+lck_bench_rw_old_init(lck_bench_ctx_t ctx)
+{
+	lck_rw_init(&ctx->lock.rw_old, &lck_bench_grp, NULL);
+	ctx->lock_read    = lck_bench_rw_old_lock_read;
+	ctx->unlock_read  = lck_bench_rw_old_unlock_read;
+	ctx->lock_write   = lck_bench_rw_old_lock_write;
+	ctx->unlock_write = lck_bench_rw_old_unlock_write;
+	ctx->upgrade      = lck_bench_rw_old_upgrade;
+	ctx->downgrade    = lck_bench_rw_old_downgrade;
+}
+
+static void
+lck_bench_rw_old_destroy(lck_bench_ctx_t ctx)
+{
+	ctx->lock_read    = NULL;
+	ctx->unlock_read  = NULL;
+	ctx->lock_write   = NULL;
+	ctx->unlock_write = NULL;
+	ctx->upgrade      = NULL;
+	ctx->downgrade    = NULL;
+	lck_rw_destroy(&ctx->lock.rw_old, &lck_bench_grp);
+}
+
+
+#pragma mark lock test loop
+
+static void(*const lck_bench_init[])(lck_bench_ctx_t) = {
+	[LCK_BENCH_TYPE_BIT]       = lck_bench_bit_init,
+	[LCK_BENCH_TYPE_SPIN]      = lck_bench_spin_init,
+	[LCK_BENCH_TYPE_TICKET]    = lck_bench_ticket_init,
+	[LCK_BENCH_TYPE_MTX]       = lck_bench_mtx_init,
+	[LCK_BENCH_TYPE_RW]        = lck_bench_rw_init,
+	[LCK_BENCH_TYPE_RW_LEGACY] = lck_bench_rw_old_init,
+};
+
+static void(*const lck_bench_destroy[])(lck_bench_ctx_t) = {
+	[LCK_BENCH_TYPE_BIT]       = lck_bench_bit_destroy,
+	[LCK_BENCH_TYPE_SPIN]      = lck_bench_spin_destroy,
+	[LCK_BENCH_TYPE_TICKET]    = lck_bench_ticket_destroy,
+	[LCK_BENCH_TYPE_MTX]       = lck_bench_mtx_destroy,
+	[LCK_BENCH_TYPE_RW]        = lck_bench_rw_destroy,
+	[LCK_BENCH_TYPE_RW_LEGACY] = lck_bench_rw_old_destroy,
+};
+
+static uint32_t
+lck_bench_random(void)
+{
+	uint64_t *seed;
+	uint32_t  value;
+
+	disable_preemption();
+	seed  = zpercpu_get(lck_bench_ctx.rng_ctx);
+	value = (uint32_t)(1664525 * *seed + 1013904223);
+	*seed = value;
+	enable_preemption();
+
+	return value;
+}
+
+static void
+lck_bench_do_work(uint32_t loops, uint32_t array[static LCK_BENCH_ARRAY_SIZE])
+{
+	for (uint32_t i = 0; i < loops; i++) {
+		uint32_t pos = lck_bench_random() % LCK_BENCH_ARRAY_SIZE;
+
+		array[pos] = array[pos] + 1;
+	}
+}
+
+static int
+lck_bench_main(int64_t in, int64_t *out, thread_continue_t func)
+{
+	lck_bench_ctx_t  ctx  = &lck_bench_ctx;
+	lck_bench_spec_t spec = &ctx->spec;
+	errno_t          err;
+	thread_t         th;
+	kern_return_t    kr;
+
+	lck_mtx_lock(&lck_bench_lock);
+
+	err = copyin((user_addr_t)in, spec, sizeof(*spec));
+	if (err) {
+		goto out;
+	}
+	if (spec->num_threads == 0 || spec->num_threads > MAX_CPUS * 10) {
+		err = ERANGE;
+		goto out;
+	}
+	if (spec->duration_ms < 100 || spec->duration_ms > 60 * 1000) {
+		err = ERANGE;
+		goto out;
+	}
+
+	if (spec->lock_type > ARRAY_COUNT(lck_bench_init) ||
+	    lck_bench_init[spec->lock_type] == NULL) {
+		err = ERANGE;
+		goto out;
+	}
+
+	if (ctx->rng_ctx == NULL) {
+		ctx->rng_ctx = zalloc_percpu(percpu_u64_zone, Z_WAITOK_ZERO_NOFAIL);
+		zpercpu_foreach(rng_ctx, ctx->rng_ctx) {
+			read_random(rng_ctx, sizeof(uint64_t));
+		}
+	}
+	lck_bench_init[spec->lock_type](ctx);
+
+
+	ctx->deadline = 0;
+	ctx->result   = 0;
+	ctx->starting = ctx->finishing = spec->num_threads;
+	ctx->runner   = current_thread();
+	lck_bench_init[spec->lock_type](ctx);
+
+	for (uint32_t i = 1; i < spec->num_threads; i++) {
+		kr = kernel_thread_start_priority(func, ctx,
+		    current_thread()->base_pri, &th);
+		assert(kr == KERN_SUCCESS);
+		thread_deallocate(th);
+	}
+
+	func(NULL, THREAD_AWAKENED);
+
+	while (os_atomic_load(&ctx->finishing, acquire)) {
+		mutex_pause(2);
+	}
+	lck_bench_destroy[spec->lock_type](ctx);
+
+	ctx->runner = NULL;
+	*out = ctx->result;
+
+out:
+	lck_mtx_unlock(&lck_bench_lock);
+
+	return err;
+}
+
+
+#pragma mark lock bencher
+
+static void
+lck_bench_worker(void *arg __unused, wait_result_t wr __unused)
+{
+	lck_bench_ctx_t  ctx   = &lck_bench_ctx;
+	lck_bench_spec_t spec  = &ctx->spec;
+
+	uint64_t         loops = 0;
+	uint32_t         local[LCK_BENCH_ARRAY_SIZE];
+	uint32_t        *shared;
+
+	if (spec->false_sharing) {
+		shared = ctx->shared_array_close;
+	} else {
+		shared = ctx->shared_array_far;
+	}
+
+	if (os_atomic_dec(&ctx->starting, relaxed) == 0) {
+		uint64_t deadline;
+		clock_interval_to_deadline(spec->duration_ms, NSEC_PER_MSEC,
+		    &deadline);
+		os_atomic_store(&ctx->deadline, deadline, relaxed);
+	}
+
+	while (!os_atomic_load(&ctx->deadline, relaxed)) {
+		mutex_pause(2);
+	}
+
+	do {
+		if (lck_bench_random() < spec->write_ratio) {
+			ctx->lock_write(&ctx->lock);
+			lck_bench_do_work(spec->iterations_write, shared);
+			ctx->unlock_write(&ctx->lock);
+		} else {
+			ctx->lock_read(&ctx->lock);
+			lck_bench_do_work(spec->iterations_read, shared);
+			ctx->unlock_read(&ctx->lock);
+		}
+
+		lck_bench_do_work(spec->iterations_unlocked, local);
+		loops++;
+	} while (loops % 16 || mach_absolute_time() <= ctx->deadline);
+
+	os_atomic_add(&ctx->result, loops, relaxed);
+	os_atomic_dec(&ctx->finishing, release);
+
+	if (ctx->runner != current_thread()) {
+		thread_terminate_self();
+		__builtin_unreachable();
+	}
+}
+
+static int
+lck_bench_run(int64_t in, int64_t *out)
+{
+	return lck_bench_main(in, out, lck_bench_worker);
+}
+SYSCTL_TEST_REGISTER(lck_bench, lck_bench_run);
+
+
+#pragma mark race tests
+
+static void
+lck_stress_worker(void *arg __unused, wait_result_t wr __unused)
+{
+	lck_bench_ctx_t  ctx   = &lck_bench_ctx;
+	lck_bench_spec_t spec  = &ctx->spec;
+
+	uint64_t         loops = 0;
+	uint32_t         local[LCK_BENCH_ARRAY_SIZE];
+	uint32_t        *shared;
+
+	if (spec->false_sharing) {
+		shared = ctx->shared_array_close;
+	} else {
+		shared = ctx->shared_array_far;
+	}
+
+	if (os_atomic_dec(&ctx->starting, relaxed) == 0) {
+		uint64_t deadline;
+		clock_interval_to_deadline(spec->duration_ms, NSEC_PER_MSEC,
+		    &deadline);
+		os_atomic_store(&ctx->deadline, deadline, relaxed);
+	}
+
+	while (!os_atomic_load(&ctx->deadline, relaxed)) {
+		mutex_pause(2);
+	}
+
+	do {
+		bool xlocked = false;
+		bool slocked = false;
+		lck_op_type_t op;
+		uint32_t rnd;
+
+		rnd = lck_bench_random();
+		if (rnd < spec->write_ratio) {
+			op = (rnd & 1) ? LCK_STRESS_EXCLUSIVE : LCK_STRESS_DOWNGRADE;
+		} else {
+			op = (rnd & 1) ? LCK_STRESS_SHARED : LCK_STRESS_UPGRADE;
+		}
+
+		if (op == LCK_STRESS_SHARED || op == LCK_STRESS_UPGRADE) {
+			ctx->lock_read(&ctx->lock);
+			if (op == LCK_STRESS_UPGRADE && ctx->upgrade) {
+				xlocked = ctx->upgrade(&ctx->lock);
+			} else {
+				slocked = true;
+			}
+		}
+
+		if (op == LCK_STRESS_EXCLUSIVE || op == LCK_STRESS_DOWNGRADE) {
+			ctx->lock_write(&ctx->lock);
+			if (op == LCK_STRESS_DOWNGRADE && ctx->downgrade) {
+				ctx->downgrade(&ctx->lock);
+				slocked = true;
+			} else {
+				xlocked = true;
+			}
+		}
+
+		if (xlocked) {
+			lck_bench_do_work(spec->iterations_write, shared);
+			ctx->unlock_write(&ctx->lock);
+		}
+		if (slocked) {
+			lck_bench_do_work(spec->iterations_read, shared);
+			ctx->unlock_read(&ctx->lock);
+		}
+
+		lck_bench_do_work(spec->iterations_unlocked, local);
+
+		loops++;
+	} while (loops % 16 || mach_absolute_time() <= ctx->deadline);
+
+	os_atomic_add(&ctx->result, loops, relaxed);
+	os_atomic_dec(&ctx->finishing, release);
+
+	if (ctx->runner != current_thread()) {
+		thread_terminate_self();
+		__builtin_unreachable();
+	}
+}
+
+static int
+lck_stress_run(int64_t in, int64_t *out)
+{
+	return lck_bench_main(in, out, lck_stress_worker);
+}
+SYSCTL_TEST_REGISTER(lck_stress, lck_stress_run);
+
+#endif /* DEVELOPMENT || DEBUG */

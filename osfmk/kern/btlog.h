@@ -87,6 +87,15 @@ typedef struct btlog *btlog_t;
  * @brief
  * A backtrace ref is a compact pointer referencing a unique backtrace
  * in the centralized backtrace pool.
+ *
+ * @const BTREF_GET_PERMANENT
+ * Do not refcount this backtrace, leak it forever
+ *
+ * @const BTREF_GET_NOWAIT
+ * Fail rather than wait to allocate more memory in the uniquing hash table.
+ *
+ * @const BTREF_GET_NEW_ONLY
+ * Only return a btref if it is new and doesn't already exist in the hash table.
  */
 typedef uint32_t btref_t;
 #define BTREF_NULL              ((btref_t)0)
@@ -94,6 +103,7 @@ typedef uint32_t btref_t;
 __options_decl(btref_get_flags_t, uint32_t, {
 	BTREF_GET_PERMANENT = 0x0001,
 	BTREF_GET_NOWAIT    = 0x0002,
+	BTREF_GET_NEW_ONLY  = 0x0004,
 });
 
 /*!

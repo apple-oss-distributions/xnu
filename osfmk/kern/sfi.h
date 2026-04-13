@@ -45,7 +45,7 @@
 
 #if XNU_KERNEL_PRIVATE
 extern void sfi_init(void);
-extern sfi_class_id_t sfi_get_ledger_alias_for_class(sfi_class_id_t class_id);
+extern const char *sfi_class_ledger_name(sfi_class_id_t class_id);
 
 kern_return_t sfi_set_window(uint64_t window_usecs);
 kern_return_t sfi_window_cancel(void);
@@ -71,7 +71,9 @@ void sfi_ast(thread_t thread);
 void sfi_reevaluate(thread_t thread);
 kern_return_t sfi_defer(uint64_t);
 
-extern int sfi_ledger_entry_add(ledger_template_t template, sfi_class_id_t class_id);
+#define SFI_LEDGER_ENTRY(name) \
+	LEDGER_ENTRY("SFI_CLASS_" # name, "sfi", "MATUs", LFEAT_NONE)
+
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* XNU_KERNEL_PRIVATE */
 

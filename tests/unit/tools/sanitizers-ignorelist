@@ -12,19 +12,21 @@ fun:sleh_panic_lockdown_should_initiate_el1_sp0_sync
 # src:*tests/unit/*.c
 src:*tests/unit/mocks/*.h
 src:*tests/unit/mocks/*.c
-src:*tests/unit/mocks/fibers/*.c
-src:*tests/unit/mocks/fibers/*.h
+src:*tests/unit/mocks/osfmk/fibers/*.c
+src:*tests/unit/mocks/osfmk/fibers/*.h
 # for libmocks.dylib compilation
 src:mocks/*.c
 src:mocks/*.h
-src:mocks/fibers/*.c
-src:mocks/fibers/*.h
+src:mocks/osfmk/fibers/*.c
+src:mocks/osfmk/fibers/*.h
 
 # disable ctx switches in printf-like functions
 src:*bsd/kern/subr_prf.c
 src:*osfmk/kern/printf.c
 src:*osfmk/console/serial_general.c
 src:*osfmk/console/serial_console.c
+src:*bsd/kern/subr_log.c
+src:*libkern/os/log.c
 
 # blacklist str* function, but maybe we want to context switch in there?
 src:*osfmk/device/subrs.c

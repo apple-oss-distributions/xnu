@@ -762,6 +762,10 @@ proc_pidbsdinfo(proc_t p, struct proc_bsdinfo * pbsd, int zombie)
 			pbsd->pbi_flags |= PROC_FLAG_HARDENED_HEAP_ENABLED;
 		}
 
+		if (task_has_script_restrictions(task)) {
+			pbsd->pbi_flags |= PROC_FLAG_SCRIPT_RESTRICTIONS_ENABLED;
+		}
+
 		if (task_has_tpro(task)) {
 			pbsd->pbi_flags |= PROC_FLAG_TPRO_ENABLED;
 		}
@@ -881,6 +885,10 @@ proc_pidshortbsdinfo(proc_t p, struct proc_bsdshortinfo * pbsd_shortp, int zombi
 	if (task) {
 		if (task_has_hardened_heap(task)) {
 			pbsd_shortp->pbsi_flags |= PROC_FLAG_HARDENED_HEAP_ENABLED;
+		}
+
+		if (task_has_script_restrictions(task)) {
+			pbsd_shortp->pbsi_flags |= PROC_FLAG_SCRIPT_RESTRICTIONS_ENABLED;
 		}
 
 		if (task_has_tpro(task)) {

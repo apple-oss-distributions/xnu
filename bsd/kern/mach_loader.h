@@ -89,7 +89,8 @@ typedef struct _load_result {
 	    is_64bit_data           : 1,
 	    custom_stack            : 1,
 	    is_rosetta              : 1,
-	    hardened_heap           : 1;
+	    hardened_heap           : 1,
+	    is_ipc_containment_vessel   : 1;
 	// 0 if not entitled, non-zero otherwise
 	uint8_t hardened_process_version;
 	unsigned int            csflags;

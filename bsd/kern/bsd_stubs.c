@@ -353,7 +353,7 @@ devsw_lock(dev_t dev, int mode)
 	assert(0 <= major(dev) && major(dev) < nchrdev);
 	assert(mode == S_IFCHR || mode == S_IFBLK);
 
-	newlock = kalloc_type(struct devsw_lock, Z_WAITOK | Z_ZERO);
+	newlock = kalloc_type(struct devsw_lock, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	newlock->dl_dev = dev;
 	newlock->dl_thread = current_thread();
 	newlock->dl_mode = mode;

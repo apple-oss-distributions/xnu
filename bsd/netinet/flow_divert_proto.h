@@ -43,6 +43,7 @@
 #define FLOW_DIVERT_PKT_APP_MAP_CREATE          9
 #define FLOW_DIVERT_PKT_FLOW_STATES_REQUEST     10
 #define FLOW_DIVERT_PKT_FLOW_STATES             11
+#define FLOW_DIVERT_PKT_CFIL_VERDICT            12
 
 #define FLOW_DIVERT_TLV_NIL                     0
 #define FLOW_DIVERT_TLV_ERROR_CODE              5
@@ -79,6 +80,9 @@
 #define FLOW_DIVERT_TLV_DATAGRAM_SIZE           37
 #define FLOW_DIVERT_TLV_ORDER                   38
 #define FLOW_DIVERT_TLV_FLOW_STATE              39
+#define FLOW_DIVERT_TLV_GUARD_PROXY_CTL_UNIT    40
+#define FLOW_DIVERT_TLV_CFIL_VERDICT            41
+
 
 #define FLOW_DIVERT_FLOW_TYPE_TCP               1
 #define FLOW_DIVERT_FLOW_TYPE_UDP               3

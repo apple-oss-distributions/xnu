@@ -22,6 +22,7 @@
 #include <kern/thread.h>
 #include <mach/arm/thread_status.h>
 #include <arm64/proc_reg.h>
+#include <sys/reason.h>
 
 #include <kern/assert.h>
 #include <kern/ast.h>
@@ -41,7 +42,7 @@ extern kern_return_t thread_setstatus(thread_t thread, int flavor,
 extern kern_return_t thread_setstatus_from_user(thread_t thread, int flavor,
     thread_state_t tstate, mach_msg_type_number_t count,
     thread_state_t old_tstate, mach_msg_type_number_t old_count,
-    thread_set_status_flags_t flags);
+    thread_set_status_flags_t flags, audit_token_t *audit);
 extern task_t current_task(void);
 extern bool task_needs_user_signed_thread_state(task_t);
 /* XXX Put these someplace smarter... */
@@ -313,6 +314,7 @@ sendsig(
 
 	th_act = current_thread();
 	ut = get_bsdthread_info(th_act);
+	assert(p == current_proc());
 
 	bzero(&ts, sizeof(ts));
 	bzero(&user_frame, sizeof(user_frame));
@@ -655,13 +657,25 @@ bad2:
 	assert(ut->uu_pending_sigreturn > 0);
 	ut->uu_pending_sigreturn--;
 	proc_set_sigact(p, SIGILL, SIG_DFL);
-	sig = sigmask(SIGILL);
-	p->p_sigignore &= ~sig;
-	p->p_sigcatch &= ~sig;
-	ut->uu_sigmask &= ~sig;
+	int sigill_mask = sigmask(SIGILL);
+	p->p_sigignore &= ~sigill_mask;
+	p->p_sigcatch &= ~sigill_mask;
+	ut->uu_sigmask &= ~sigill_mask;
 	/* sendsig is called with signal lock held */
 	proc_unlock(p);
-	psignal_locked(p, SIGILL);
+
+	/*
+	 * Something went wrong when delivering the signal to the thread (e.g copyout failed).
+	 * Where possible, attribute the failure to the specific thread, otherwise we'll pick
+	 * a different one and generate a misleading crash report:
+	 * rdar://149082274 (Misattributed thread in crash logs for failed signal delivery)
+	 *
+	 * Note that such a crash report will list both SIGILL and the original signal that
+	 * we failed to deliver (as the termination reason).
+	 */
+	os_reason_t exit_reason = os_reason_create(OS_REASON_SIGNAL, sig);
+	psignal_try_thread_with_reason_locked(p, current_thread(), SIGILL, exit_reason /* possibly NULL */);
+
 	proc_lock(p);
 }
 
@@ -707,6 +721,7 @@ static int
 sigreturn_set_state32(thread_t th_act, mcontext32_t *mctx)
 {
 	assert(!proc_is64bit_data(current_proc()));
+	audit_token_t *audit = NULL;
 
 	/* validate the thread state, set/reset appropriate mode bits in cpsr */
 #if defined(__arm64__)
@@ -716,11 +731,11 @@ sigreturn_set_state32(thread_t th_act, mcontext32_t *mctx)
 #endif
 
 	if (thread_setstatus_from_user(th_act, ARM_THREAD_STATE, (void *)&mctx->ss,
-	    ARM_THREAD_STATE_COUNT, NULL, 0, TSSF_FLAGS_NONE) != KERN_SUCCESS) {
+	    ARM_THREAD_STATE_COUNT, NULL, 0, TSSF_FLAGS_NONE, audit) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 	if (thread_setstatus_from_user(th_act, ARM_VFP_STATE, (void *)&mctx->fs,
-	    ARM_VFP_STATE_COUNT, NULL, 0, TSSF_FLAGS_NONE) != KERN_SUCCESS) {
+	    ARM_VFP_STATE_COUNT, NULL, 0, TSSF_FLAGS_NONE, audit) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 
@@ -761,16 +776,18 @@ static int
 sigreturn_set_state64(thread_t th_act, mcontext64_t *mctx, thread_set_status_flags_t tssf_flags)
 {
 	assert(proc_is64bit_data(current_proc()));
+	audit_token_t *audit = NULL;
+
 
 	/* validate the thread state, set/reset appropriate mode bits in cpsr */
 	mctx->ss.cpsr = (mctx->ss.cpsr & ~PSR64_MODE_MASK) | PSR64_USER64_DEFAULT;
 
 	if (thread_setstatus_from_user(th_act, ARM_THREAD_STATE64, (void *)&mctx->ss,
-	    ARM_THREAD_STATE64_COUNT, NULL, 0, tssf_flags) != KERN_SUCCESS) {
+	    ARM_THREAD_STATE64_COUNT, NULL, 0, tssf_flags, audit) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 	if (thread_setstatus_from_user(th_act, ARM_NEON_STATE64, (void *)&mctx->ns,
-	    ARM_NEON_STATE64_COUNT, NULL, 0, TSSF_FLAGS_NONE) != KERN_SUCCESS) {
+	    ARM_NEON_STATE64_COUNT, NULL, 0, TSSF_FLAGS_NONE, audit) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 

@@ -52,6 +52,10 @@
 #ifdef __APPLE_API_UNSTABLE
 #define FSOPT_UTIMES_NULL        0x00000400
 
+/* Additional FSOPT values in attr.h */
+
+#define FSOPT_AUTOFIRMLINKPATH   0x00004000
+
 /* Volume supports kqueue notifications for remote events */
 #define VOL_CAP_INT_REMOTE_EVENT                0x00008000
 

@@ -353,7 +353,7 @@ extern vm_offset_t vm_kernel_addrhash(
 	vm_offset_t             addr);
 
 #else /* XNU_KERNEL_PRIVATE */
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*!
  * @brief
@@ -410,7 +410,7 @@ vm_kernel_addrhash(vm_offset_t addr)
 	return vm_kernel_addrhash_internal(addr, vm_kernel_addrhash_salt);
 }
 
-#pragma GCC visibility pop
+__exported_pop
 #endif /* XNU_KERNEL_PRIVATE */
 #ifdef KERNEL_PRIVATE
 

@@ -6,6 +6,9 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
+INSTINC_SUBDIRS_ARM64 = pmap
+EXPINC_SUBDIRS_ARM64 = pmap
+
 # Ensure these files don't get auto-included into Kernel.framework.
 INSTALL_KF_MD_LIST = $(EMPTY)
 INSTALL_KF_MD_LCL_LIST = $(EMPTY)
@@ -17,3 +20,6 @@ EXPORT_MD_DIR = arm64/sptm
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)
+
+INSTINC_SUBDIRS_ARM64 = pmap
+EXPINC_SUBDIRS_ARM64 += pmap

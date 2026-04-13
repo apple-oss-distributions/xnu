@@ -845,7 +845,7 @@ ipc_kmsg_alloc(
 	if (kmsg_type == IKM_TYPE_ALL_OOL || kmsg_type == IKM_TYPE_KDATA_OOL) {
 		if (kmsg_type == IKM_TYPE_ALL_OOL) {
 			msg_kdata = kalloc_type(mach_msg_base_t, mach_msg_kdescriptor_t,
-			    desc_count, alloc_flags | Z_SPRAYQTN);
+			    desc_count, alloc_flags);
 		} else {
 			msg_kdata = ikm_alloc_kdata_ool(max_kdata_size, alloc_flags);
 		}
@@ -2176,6 +2176,12 @@ ipc_kmsg_inflate_port_descriptor(
 	mach_msg_port_descriptor_t *kdesc;
 
 	ikm_udsc_get(&udesc, udesc_addr);
+
+	/* Update counters for both inline port descriptors, and total port descriptors */
+	if (os_add_overflow(send_uctx->send_dsc_inline_port_count, 1,
+	    &send_uctx->send_dsc_inline_port_count)) {
+		return MACH_SEND_TOO_LARGE;
+	}
 	if (os_add_overflow(send_uctx->send_dsc_port_count, 1,
 	    &send_uctx->send_dsc_port_count)) {
 		return MACH_SEND_TOO_LARGE;
@@ -2417,21 +2423,25 @@ ipc_kmsg_copyin_ool_ports_descriptor(
 
 	/*
 	 * For enhanced v2 binaries, we restrict sending OOL
-	 * port array with any disposition besdies COPY_SEND.
+	 * port array with any disposition besides COPY_SEND.
 	 */
 	current_policy = ipc_convert_msg_options_to_space(options);
-	if (ool_port_array_enforced &&
+	if (ipc_sec_is_policy_enforced(IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS) &&
 	    ipc_should_apply_policy(current_policy, IPC_POLICY_ENHANCED_V2) &&
 	    (user_disp != MACH_MSG_TYPE_COPY_SEND)) {
-		mach_port_guard_exception(current_policy,
-		    MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_DISP, user_disp),
-		    kGUARD_EXC_DESCRIPTOR_VIOLATION);
-
+		ipc_triage_policy_violation_and_expect_deny(
+			IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS,
+			space,
+			current_policy,
+			MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_DISP, user_disp),
+			IPC_PORT_NULL,
+			0
+			);
 		return MACH_SEND_INVALID_OPTIONS;
 	}
 
 	if (count) {
-		array = mach_port_array_alloc(count, Z_WAITOK | Z_SPRAYQTN);
+		array = mach_port_array_alloc(count, Z_WAITOK);
 		if (array == NULL) {
 			return MACH_SEND_NO_BUFFER;
 		}
@@ -2446,7 +2456,7 @@ ipc_kmsg_copyin_ool_ports_descriptor(
 	}
 
 	if (dsc->deallocate) {
-		(void)mach_vm_deallocate(map, dsc->u_address, names_size);
+		(void)mach_vm_deallocate_kernel(map, dsc->u_address, names_size);
 	}
 
 	for (mach_msg_size_t i = 0; i < count; i++) {
@@ -3390,8 +3400,9 @@ handle_reply_again:
 			}
 
 			ip_label_put(reply, &label);
+			/* A reply port could be immovable-send, so mark it as such */
 			ipc_right_copyout_any_send(space, reply, reply_type,
-			    IPC_OBJECT_COPYOUT_FLAGS_NONE, reply_name, entry);
+			    IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND, reply_name, entry);
 			kr = KERN_SUCCESS;
 			/* reply port is unlocked */
 		} else {
@@ -3647,8 +3658,9 @@ ipc_kmsg_copyout_port(
 		return MACH_MSG_SUCCESS;
 	}
 
+	/* We're aware we might be copying out an immovable send right */
 	kr = ipc_object_copyout(space, port, msgt_name,
-	    IPC_OBJECT_COPYOUT_FLAGS_NONE, gdesc, namep);
+	    IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND, gdesc, namep);
 	if (kr != KERN_SUCCESS) {
 		if (kr == KERN_INVALID_CAPABILITY) {
 			*namep = MACH_PORT_DEAD;

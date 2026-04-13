@@ -461,6 +461,7 @@ _panic_with_data
  _ext_paniclog_yield_buffer
  _ext_paniclog_set_used_len
  _ext_paniclog_claim_buffer
+_file_vnode_ext
 _fp_get_pipe_id
 _garbage_collect_provisioning_profiles
 _generate_file_permissions_guard_exception
@@ -536,6 +537,7 @@ _ifnet_set_rx_flow_steering
 _ifnet_get_rx_flow_steering
 _ifnet_notify_tcp_keepalive_offload_timeout
 _ifnet_enable_cellular_thread_group
+_ifnet_get_rx_steering_rules
 _in6_localaddr
 _in6addr_any
 _in6addr_local
@@ -801,7 +803,7 @@ _mach_msg_filter_register_callback
 _kernel_mach_msg_send_with_builder
 _mach_vm_allocate:_mach_vm_allocate_external
 _mach_vm_behavior_set
-_mach_vm_deallocate
+_mach_vm_deallocate:_mach_vm_deallocate_external
 _mach_vm_protect
 _mach_vm_wire_level_monitor
 _mbuf_add_drvaux
@@ -861,6 +863,7 @@ _net_add_proto:_net_add_proto_old
 _net_del_domain:_net_del_domain_old
 _net_del_proto:_net_del_proto_old
 _net_domain_contains_hostname
+_necp_with_inp_domain_name
 _netboot_root
 _nfs_register_hooks
 _nfs_unregister_hooks
@@ -907,6 +910,8 @@ _kernel_image4_copy_object
 _kernel_image4_set_release_type
 _kernel_image4_set_bnch_shadow
 _kernel_image4_get_monitor_exports
+_pmap_ce_allocate_acceleration_buffer
+_pmap_ce_free_acceleration_buffer
 _pmap_claim_reserved_ppl_page
 _pmap_free_reserved_ppl_page
 _pmap_in_ppl
@@ -937,6 +942,7 @@ _proc_isabortedsignal
 _proc_issetugid
 _proc_parent
 _proc_parent_audit_token
+_proc_persona_get
 _proc_pidbackgrounded
 _proc_pidoriginatorpid_uuid
 _proc_pidversion
@@ -944,6 +950,7 @@ _proc_orig_ppidversion
 _proc_platform
 _proc_set_responsible_pid
 _proc_set_filter_message_flag
+_proc_set_sandbox_info_callbacks
 _proc_set_syscall_filter_callbacks
 _proc_set_syscall_filter_index
 _proc_set_syscall_filter_mask
@@ -1032,6 +1039,8 @@ _soreceive
 _soreserve
 _sorwakeup
 _sosend
+_stackshot_update_lock_state
+_stackshot_update_passcode_status
 _static_trust_cache_capabilities
 _strnstr
 _sysdiagnose_notify_user
@@ -1251,6 +1260,7 @@ _vnode_parent
 _vnode_getparent_and_name
 _vnode_isautocandidate
 _vnode_isfastdevicecandidate
+_vnode_isshadow
 _vnode_putname_printable
 _vnode_setautocandidate
 _vnode_setdirty
@@ -1450,3 +1460,4 @@ __ZN8OSNumber10withDoubleEd
 __ZNK8OSNumber11doubleValueEv
 
 __Z34IOInterruptDispatchSourceInterruptP8OSObjectPvP9IOServicei
+__ZN18IOMemoryDescriptor9withVNodeEP5vnodeyyj

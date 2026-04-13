@@ -371,7 +371,11 @@ extern kern_return_t debug_control_port_for_pid(
 
 extern mach_error_t mach_vm_reclaim_update_kernel_accounting_trap(
 	mach_port_name_t target_tport,
-	uint64_t *bytes_reclaimed);
+	uint64_t *bytes_reclaimed,
+	uint64_t *next_deadline);
+
+extern kern_return_t thread_set_x86_64_compat(
+	uint32_t enable);
 
 #else   /* KERNEL */
 
@@ -641,8 +645,8 @@ struct exclaves_ctl_trap_args {
 	PAD_ARG_(uint64_t, identifier);
 	PAD_ARG_(mach_vm_address_t, buffer);
 	PAD_ARG_(mach_vm_size_t, size);
-	PAD_ARG_(mach_vm_size_t, size2);
-	PAD_ARG_(mach_vm_size_t, offset);
+	PAD_ARG_(uint64_t, param1);
+	PAD_ARG_(uint64_t, param2);
 	PAD_ARG_(mach_vm_address_t, status);
 };
 extern kern_return_t _exclaves_ctl_trap(
@@ -926,10 +930,17 @@ kern_return_t iokit_user_client_trap(
 struct mach_vm_reclaim_update_kernel_accounting_trap_args {
 	PAD_ARG_(mach_port_name_t, target_task);
 	PAD_ARG_(user_addr_t, bytes_reclaimed_out);
+	PAD_ARG_(user_addr_t, next_deadline_out);
 };
 extern mach_error_t mach_vm_reclaim_update_kernel_accounting_trap(
 	struct mach_vm_reclaim_update_kernel_accounting_trap_args *args);
 #endif /* __LP64__ */
+
+struct thread_set_x86_64_compat_trap_args {
+	PAD_ARG_(uint32_t, enable);
+};
+extern kern_return_t thread_set_x86_64_compat_trap(
+	struct thread_set_x86_64_compat_trap_args *args);
 
 #undef PAD_
 #undef PADL_

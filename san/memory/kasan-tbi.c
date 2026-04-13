@@ -44,6 +44,10 @@
 #include <mach/machine/vm_param.h>
 #include <machine/atomic.h>
 
+#if HAS_MTE
+#include <arm64/mte_xnu.h>
+#endif /* HAS_MTE */
+
 #include "kasan.h"
 #include "kasan_internal.h"
 #include "memintrinsics.h"
@@ -81,6 +85,14 @@ KERNEL_BRK_DESCRIPTOR_DEFINE(kasan_desc,
     .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = kasan_handle_brk_failure);
 
+/*
+ * KASAN-TBI has a lightweight mode called KASAN_LIGHT designed for memory constrained
+ * systems. This is currently used on watchOS.
+ *
+ * In this mode, only allocations coming from the zone allocator are given a full tag.
+ * All other kernel allocations get the default tag 0xff, which reduces the amount of
+ * shadow memory required.
+ */
 #if KASAN_LIGHT
 extern bool kasan_zone_maps_owned(vm_address_t, vm_size_t);
 #endif /* KASAN_LIGHT */
@@ -113,6 +125,23 @@ kasan_impl_fill_valid_range(uintptr_t page, size_t size)
 void
 kasan_impl_init(void)
 {
+#if CONFIG_SPTM && HAS_MTE
+	/**
+	 * MTE and KASAN-TBI are mutually exclusive (they both use top bits in pointers).
+	 * Simply avoiding tagged pages in XNU is not enough, because we'll immediately
+	 * take a tag check fault when dereferencing a pointer tagged by KASAN-TBI.
+	 * Therefore we request SPTM to disable tag checking entirely.
+	 * Note that this requires a DEVELOPMENT build of SPTM.
+	 *
+	 * This should be removed as part of rdar://110888786 (Move KASAN engine to use
+	 * MTE rather than KASAN_TBI on Hidra+)
+	 */
+	if (mte_kern_enabled()) {
+		panic("KASAN-TBI doesn't support booting with an MTE-enabled kernel");
+	}
+	sptm_disable_mte();
+#endif /* CONFIG_SPTM && HAS_MTE */
+
 	kasan_tbi_lfsr = (uint32_t)ml_get_speculative_timebase();
 
 	/*
@@ -448,10 +477,9 @@ vm_memtag_store_tag(caddr_t address, vm_size_t size)
 caddr_t
 vm_memtag_generate_and_store_tag(caddr_t address, vm_size_t size)
 {
-	caddr_t tagged_address = (caddr_t)vm_memtag_insert_tag((long)address, kasan_tbi_full_tag());
-	vm_memtag_store_tag(tagged_address, size);
-
-	return tagged_address;
+	/* Note: KASAN_LIGHT may override our choice of tag and use the default. */
+	uint8_t tag = kasan_tbi_full_tag();
+	return (caddr_t)kasan_tbi_tag_range((vm_address_t)address, kasan_granule_round(size), tag);
 }
 
 void
@@ -477,12 +505,3 @@ vm_memtag_enable_checking()
 {
 	/* Nothing to do with KASAN-TBI */
 }
-
-#if HAS_MTE && KASAN
-/* We can't use SYSCTL_TEST_REGISTER here as we're targeting KASAN rather than DEVELOPMENT,
- * but semantically that's more appropriate.
- */
-extern int is_mte_enabled;
-SYSCTL_INT(_kern, OID_AUTO, is_mte_enabled,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &is_mte_enabled, 0, "Return whether MTE is enabled");
-#endif /* HAS_MTE && KASAN */

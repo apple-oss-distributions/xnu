@@ -207,7 +207,6 @@ extern void hibernate_create_paddr_map(void);
 
 extern void vm_set_restrictions(unsigned int num_cpus);
 
-extern int vm_compressor_mode;
 extern kern_return_t vm_pageout_compress_page(void **, char *, vm_page_t);
 extern kern_return_t vm_pageout_anonymous_pages(void);
 extern void vm_pageout_disconnect_all_pages(void);
@@ -220,27 +219,17 @@ struct  vm_config {
 	boolean_t       swap_is_present;                /* swap is initialized and can be used by the freezer, the sweep or the pager */
 	boolean_t       swap_is_active;                 /* pager can actively swap out compressed segments... 'swap_is_present' must be set */
 	boolean_t       freezer_swap_is_active;         /* freezer can swap out frozen tasks... "compressor_is_present + swap_is_present" must be set */
+	boolean_t       scavenger_swap_is_active;       /* scavenger can swap out ripe segments... "compressor_is_present + swap_is_present" must be set */
 };
 
 extern  struct vm_config        vm_config;
-
-
-#define VM_PAGER_NOT_CONFIGURED                         0x0     /* no compresser or swap configured */
-#define VM_PAGER_DEFAULT                                0x1     /* Use default pager... DEPRECATED */
-#define VM_PAGER_COMPRESSOR_NO_SWAP                     0x2     /* Active in-core compressor only. */
-#define VM_PAGER_COMPRESSOR_WITH_SWAP                   0x4     /* Active in-core compressor + swap backend. */
-#define VM_PAGER_FREEZER_DEFAULT                        0x8     /* Freezer backed by default pager... DEPRECATED */
-#define VM_PAGER_FREEZER_COMPRESSOR_NO_SWAP             0x10    /* Freezer backed by in-core compressor only i.e. frozen data remain in-core compressed.*/
-#define VM_PAGER_COMPRESSOR_NO_SWAP_PLUS_FREEZER_COMPRESSOR_WITH_SWAP   0x20    /* Active in-core compressor + Freezer backed by in-core compressor with swap support too.*/
-
-#define VM_PAGER_MAX_MODES                              6       /* Total number of vm compressor modes supported */
-
 
 #define VM_CONFIG_COMPRESSOR_IS_PRESENT         (vm_config.compressor_is_present == TRUE)
 #define VM_CONFIG_COMPRESSOR_IS_ACTIVE          (vm_config.compressor_is_active == TRUE)
 #define VM_CONFIG_SWAP_IS_PRESENT               (vm_config.swap_is_present == TRUE)
 #define VM_CONFIG_SWAP_IS_ACTIVE                (vm_config.swap_is_active == TRUE)
 #define VM_CONFIG_FREEZER_SWAP_IS_ACTIVE        (vm_config.freezer_swap_is_active == TRUE)
+#define VM_CONFIG_SCAVENGER_SWAP_IS_ACTIVE      (vm_config.scavenger_swap_is_active == TRUE)
 
 #endif  /* KERNEL_PRIVATE */
 

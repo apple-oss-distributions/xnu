@@ -171,9 +171,9 @@ bind_to_cluster_id(int cluster_id)
 {
 	int ret;
 	int old_cluster = 0;
-	ret = sysctlbyname("kern.sched_thread_bind_cluster_id", &old_cluster,
+	ret = sysctlbyname("kern.sched_thread_bind_pset_id", &old_cluster,
 	    &(size_t){ sizeof(old_cluster) }, &cluster_id, sizeof(cluster_id));
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.sched_thread_bind_cluster_id");
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "kern.sched_thread_bind_pset_id");
 	return old_cluster;
 }
 

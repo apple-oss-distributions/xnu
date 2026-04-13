@@ -11,7 +11,6 @@
 
 FILE *_log = NULL;
 
-static test_hw_topology_t current_hw_topology = {0};
 static const int default_cpu = 0;
 
 /* Mocking mach_absolute_time() */
@@ -54,45 +53,16 @@ cleanup_runqueue_harness(void)
 	fclose(_log);
 }
 
-void
-set_hw_topology(test_hw_topology_t hw_topology)
-{
-	current_hw_topology = hw_topology;
-}
-
-test_hw_topology_t
-get_hw_topology(void)
-{
-	return current_hw_topology;
-}
-
 int
 pset_id_to_cpu_id(int pset_id)
 {
-	test_hw_topology_t topo = get_hw_topology();
-	int cpu_index = 0;
-	for (int p = 0; p < topo.num_psets; p++) {
-		if (p == pset_id) {
-			return cpu_index;
-		}
-		cpu_index += topo.psets[p].num_cpus;
-	}
-	T_QUIET; T_ASSERT_FAIL("pset id %d never found out of %d psets", pset_id, topo.num_psets);
+	return impl_pset_id_to_cpu_id((pset_id_t)pset_id);
 }
 
 int
 cpu_id_to_pset_id(int cpu_id)
 {
-	test_hw_topology_t topo = get_hw_topology();
-	T_QUIET; T_ASSERT_LT(cpu_id, topo.total_cpus, "cpu id out of bounds");
-	int cpu_count = 0;
-	for (int p = 0; p < topo.num_psets; p++) {
-		cpu_count += topo.psets[p].num_cpus;
-		if (cpu_id < cpu_count) {
-			return p;
-		}
-	}
-	T_QUIET; T_ASSERT_FAIL("failed to find pset for cpu %d somehow", cpu_id);
+	return (int)impl_cpu_id_to_pset_id(cpu_id);
 }
 
 static char _log_filepath[MAXPATHLEN];
@@ -121,7 +91,6 @@ void
 init_runqueue_harness(void)
 {
 	init_harness_logging(T_NAME);
-	set_hw_topology(single_core);
 	impl_init_runqueue();
 }
 
@@ -364,12 +333,19 @@ cpu_check_preempt_current(int cpu_id, bool preemption_expected)
 	return preempting == preemption_expected;
 }
 
+static bool
+tracepoint_arg_expect(uint64_t expected_arg, uint64_t found_arg)
+{
+	return (found_arg == expected_arg) || (expected_arg == TRACEPOINT_EXPECT_IGNORE_ARG);
+}
+
 bool
 tracepoint_expect(uint64_t trace_code, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
 {
 	uint64_t popped_arg1, popped_arg2, popped_arg3, popped_arg4;
 	impl_pop_tracepoint(trace_code, &popped_arg1, &popped_arg2, &popped_arg3, &popped_arg4);
-	bool pass = (arg1 == popped_arg1) && (arg2 == popped_arg2) && (arg3 == popped_arg3) && (arg4 == popped_arg4);
+	bool pass = tracepoint_arg_expect(arg1, popped_arg1) && tracepoint_arg_expect(arg2, popped_arg2) &&
+	    tracepoint_arg_expect(arg3, popped_arg3) && tracepoint_arg_expect(arg4, popped_arg4);
 	fprintf(_log, "%s: expected code %llx arg1 %llx arg2 %llx arg3 %llx arg4 %llx\n", pass ? "PASS" : "FAIL",
 	    trace_code, arg1, arg2, arg3, arg4);
 	if (pass == false) {

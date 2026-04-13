@@ -104,6 +104,7 @@
 #include <kern/cs_blobs.h>
 #include <kern/queue.h>
 #include <kern/recount.h>
+#include <kern/cpc.h>
 #include <sys/kern_sysctl.h>
 #include <sys/resource_private.h>
 
@@ -359,7 +360,7 @@ struct task {
 #endif
 #define TF_COALITION_MEMBER     0x00080000                              /* task is a member of a coalition */
 #define TF_NO_CORPSE_FORKING    0x00100000                              /* do not fork a corpse for this task */
-#define TF_USE_PSET_HINT_CLUSTER_TYPE 0x00200000                        /* bind task to task->pset_hint->pset_cluster_type */
+#define TF_USE_PSET_HINT_CLUSTER_TYPE 0x00200000                        /* bind task to task->pset_hint->pset_type */
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
 #define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
@@ -456,8 +457,7 @@ struct task {
 	mach_vm_size_t          all_image_info_size; /* section location and size */
 
 #if CONFIG_CPU_COUNTERS
-#define TASK_KPC_FORCED_ALL_CTRS        0x2     /* Bit in "t_kpc" signifying this task forced all counters */
-	uint32_t t_kpc; /* kpc flags */
+	struct cpc_task t_cpc;
 #endif /* CONFIG_CPU_COUNTERS */
 
 	_Atomic darwin_gpu_role_t       t_gpu_role;
@@ -709,7 +709,7 @@ extern lck_grp_t       task_lck_grp;
 struct task_watchport_elem {
 	task_t                          twe_task;
 	ipc_port_t                      twe_port;     /* (Space lock) */
-	ipc_port_t XNU_PTRAUTH_SIGNED_PTR("twe_pdrequest") twe_pdrequest;
+	ipc_port_t XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("twe_pdrequest") twe_pdrequest;
 };
 
 struct task_watchports {
@@ -883,7 +883,7 @@ extern kern_return_t    task_freeze(
 	uint32_t        dirty_budget,
 	uint32_t        *shared_count,
 	int             *freezer_error_code,
-	boolean_t       eval_only);
+	int              opts /* freeze_options_t */);
 
 /* Thaw a currently frozen task */
 extern kern_return_t    task_thaw(
@@ -1084,19 +1084,14 @@ extern uint32_t set_task_loadTag(task_t task, uint32_t loadTag);
 extern vm_map_t get_task_map_reference(task_t);
 extern vm_map_t swap_task_map(task_t, thread_t, vm_map_t);
 extern pmap_t   get_task_pmap(task_t);
-extern uint64_t get_task_resident_size(task_t);
 extern uint64_t get_task_compressed(task_t);
 extern uint64_t get_task_resident_max(task_t);
 extern uint64_t get_task_phys_footprint(task_t);
-#if CONFIG_LEDGER_INTERVAL_MAX
 extern uint64_t get_task_phys_footprint_interval_max(task_t, int reset);
-#endif /* CONFIG_FOOTPRINT_INTERVAL_MAX */
 extern uint64_t get_task_phys_footprint_lifetime_max(task_t);
 extern uint64_t get_task_phys_footprint_limit(task_t);
 extern uint64_t get_task_neural_nofootprint_total(task_t task);
-#if CONFIG_LEDGER_INTERVAL_MAX
 extern uint64_t get_task_neural_nofootprint_total_interval_max(task_t, int reset);
-#endif /* CONFIG_NEURAL_INTERVAL_MAX */
 extern uint64_t get_task_neural_nofootprint_total_lifetime_max(task_t);
 extern uint64_t get_task_purgeable_size(task_t);
 extern uint64_t get_task_cpu_time(task_t);
@@ -1143,7 +1138,7 @@ extern kern_return_t task_set_diag_footprint_limit(task_t task, uint64_t new_lim
 #endif /* CONFIG_MEMORYSTATUS */
 #endif /* DEBUG || DEVELOPMENT */
 extern kern_return_t task_get_conclave_mem_limit(task_t, uint64_t *conclave_limit);
-extern kern_return_t task_set_conclave_mem_limit(task_t, uint64_t conclave_limit);
+extern kern_return_t task_set_conclave_mem_limit_internal(task_t, uint64_t conclave_limit);
 
 extern security_token_t *task_get_sec_token(task_t task);
 extern void task_set_sec_token(task_t task, security_token_t *token);
@@ -1202,78 +1197,6 @@ extern void machine_task_terminate(task_t task);
 
 extern kern_return_t machine_task_process_signature(task_t task, uint32_t platform, uint32_t sdk, char const **error_msg);
 
-struct _task_ledger_indices {
-	int cpu_time;
-	int tkm_private;
-	int tkm_shared;
-	int phys_mem;
-	int wired_mem;
-	int conclave_mem;
-	int internal;
-	int iokit_mapped;
-	int external;
-	int reusable;
-	int alternate_accounting;
-	int alternate_accounting_compressed;
-	int page_table;
-	int phys_footprint;
-	int internal_compressed;
-	int purgeable_volatile;
-	int purgeable_nonvolatile;
-	int purgeable_volatile_compressed;
-	int purgeable_nonvolatile_compressed;
-	int tagged_nofootprint;
-	int tagged_footprint;
-	int tagged_nofootprint_compressed;
-	int tagged_footprint_compressed;
-	int network_volatile;
-	int network_nonvolatile;
-	int network_volatile_compressed;
-	int network_nonvolatile_compressed;
-	int media_nofootprint;
-	int media_footprint;
-	int media_nofootprint_compressed;
-	int media_footprint_compressed;
-	int graphics_nofootprint;
-	int graphics_footprint;
-	int graphics_nofootprint_compressed;
-	int graphics_footprint_compressed;
-	int neural_nofootprint;
-	int neural_footprint;
-	int neural_nofootprint_compressed;
-	int neural_footprint_compressed;
-	int neural_nofootprint_total;
-	int platform_idle_wakeups;
-	int interrupt_wakeups;
-#if CONFIG_SCHED_SFI
-	int sfi_wait_times[MAX_SFI_CLASS_ID];
-#endif /* CONFIG_SCHED_SFI */
-	int cpu_time_billed_to_me;
-	int cpu_time_billed_to_others;
-	int physical_writes;
-	int logical_writes;
-	int logical_writes_to_external;
-	int energy_billed_to_me;
-	int energy_billed_to_others;
-#if CONFIG_MEMORYSTATUS
-	int memorystatus_dirty_time;
-#endif /* CONFIG_MEMORYSTATUS */
-	int pages_grabbed;
-	int pages_grabbed_kern;
-	int pages_grabbed_iopl;
-	int pages_grabbed_upl;
-#if CONFIG_DEFERRED_RECLAIM
-	int est_reclaimable;
-#endif /* CONFIG_DEFERRED_RECLAIM */
-#if CONFIG_FREEZE
-	int frozen_to_swap;
-#endif /* CONFIG_FREEZE */
-#if CONFIG_PHYS_WRITE_ACCT
-	int fs_metadata_writes;
-#endif /* CONFIG_PHYS_WRITE_ACCT */
-	int swapins;
-};
-
 /*
  * Each runtime security mitigation that we support for userland processes
  * is tracked in the task security configuration and managed by the following
@@ -1289,8 +1212,11 @@ extern uint32_t task_get_security_config(task_t);
 
 TASK_SECURITY_CONFIG_HELPER_DECLARE(hardened_heap);
 TASK_SECURITY_CONFIG_HELPER_DECLARE(tpro);
+TASK_SECURITY_CONFIG_HELPER_DECLARE(script_restrictions);
+TASK_SECURITY_CONFIG_HELPER_DECLARE(ipc_containment_vessel);
 TASK_SECURITY_CONFIG_HELPER_DECLARE(guard_objects);
 
+extern bool task_has_fatal_vm_guards(task_t task);
 uint8_t task_get_platform_restrictions_version(task_t task);
 void    task_set_platform_restrictions_version(task_t task, uint64_t version);
 uint8_t task_get_hardened_process_version(task_t task);
@@ -1318,28 +1244,6 @@ extern uint32_t task_get_sec_policy(task_t);
 extern void task_clear_sec_soft_mode(task_t task);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
-/*
- * Many of the task ledger entries use a reduced feature set
- * (specifically they just use LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE)
- * and are stored in a smaller entry structure.
- * That structure is an implementation detail of the ledger.
- * But on PPL systems, the task ledger's memory is managed by the PPL
- * and it has to determine the size of the task ledger at compile time.
- * This define specifies the number of small entries so the PPL can
- * properly determine the ledger's size.
- *
- * If you add a new entry with only the
- * LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE | LEDGER_ENTRY_ALLOW_INACTIVE
- * flags, you need to increment this count.
- * Otherwise, PPL systems will panic at boot.
- */
-#if CONFIG_DEFERRED_RECLAIM
-#define TASK_LEDGER_NUM_SMALL_INDICES 34
-#else /* CONFIG_DEFERRED_RECLAIM */
-#define TASK_LEDGER_NUM_SMALL_INDICES 33
-#endif /* !CONFIG_DEFERRED_RECLAIM */
-extern struct _task_ledger_indices task_ledgers;
-
 /* requires task to be unlocked, returns a referenced thread */
 thread_t task_findtid(task_t task, uint64_t tid);
 int pid_from_task(task_t task);
@@ -1366,7 +1270,6 @@ extern void task_bank_init(task_t task);
 
 #if CONFIG_MEMORYSTATUS
 extern void task_ledger_settle_dirty_time(task_t t);
-extern void task_ledger_settle_dirty_time_locked(task_t t);
 #endif /* CONFIG_MEMORYSTATUS */
 extern void task_ledger_settle(task_t t);
 
@@ -1638,17 +1541,111 @@ extern bool task_is_translated(task_t task);
 
 #ifdef MACH_KERNEL_PRIVATE
 
+/*
+ * Many of the task ledger entries use a reduced feature set
+ * and are stored in a smaller entry structure.
+ *
+ * That structure is an implementation detail of the ledger.
+ * But on PPL systems, the task ledger's memory is managed by the PPL
+ * and it has to determine the size of the task ledger at compile time.
+ * This define specifies the number of small entries so the PPL can
+ * properly determine the ledger's size.
+ *
+ * If you add a new entry with only the following features,
+ * - LFEAT_NONE
+ * - LFEAT_SCALABLE
+ * - LFEAT_ASSERT_POSITIVE
+ *
+ * ... then you should place their corresponding ledger_entry_id_t before
+ * "last_small_ledger_entry", otherwise after.
+ */
+struct _task_ledger_indices {
+	ledger_entry_id_t tkm_private;
+	ledger_entry_id_t tkm_shared;
+	ledger_entry_id_t wired_mem;
+	ledger_entry_id_t iokit_mapped;
+	ledger_entry_id_t alternate_accounting;
+	ledger_entry_id_t alternate_accounting_compressed;
+	ledger_entry_id_t page_table;
+	ledger_entry_id_t pages_grabbed;
+	ledger_entry_id_t pages_grabbed_kern;
+	ledger_entry_id_t pages_grabbed_iopl;
+	ledger_entry_id_t pages_grabbed_upl;
+	ledger_entry_id_t purgeable_volatile;
+	ledger_entry_id_t purgeable_nonvolatile;
+	ledger_entry_id_t purgeable_volatile_compress;
+	ledger_entry_id_t purgeable_nonvolatile_compress;
+	ledger_entry_id_t tagged_nofootprint;
+	ledger_entry_id_t tagged_footprint;
+	ledger_entry_id_t tagged_nofootprint_compressed;
+	ledger_entry_id_t tagged_footprint_compressed;
+	ledger_entry_id_t network_volatile;
+	ledger_entry_id_t network_nonvolatile;
+	ledger_entry_id_t network_volatile_compressed;
+	ledger_entry_id_t network_nonvolatile_compressed;
+	ledger_entry_id_t media_nofootprint;
+	ledger_entry_id_t media_footprint;
+	ledger_entry_id_t media_nofootprint_compressed;
+	ledger_entry_id_t media_footprint_compressed;
+	ledger_entry_id_t graphics_nofootprint;
+	ledger_entry_id_t graphics_footprint;
+	ledger_entry_id_t graphics_nofootprint_compressed;
+	ledger_entry_id_t graphics_footprint_compressed;
+	ledger_entry_id_t neural_nofootprint;
+	ledger_entry_id_t neural_footprint;
+	ledger_entry_id_t neural_nofootprint_compressed;
+	ledger_entry_id_t neural_footprint_compressed;
+	ledger_entry_id_t energy_billed_to_me;
+	ledger_entry_id_t energy_billed_to_others;
+	ledger_entry_id_t cpu_time_billed_to_me;
+	ledger_entry_id_t cpu_time_billed_to_others;
+	ledger_entry_id_t platform_idle_wakeups;
+#if CONFIG_FREEZE
+	ledger_entry_id_t frozen_to_swap;
+#endif /* CONFIG_FREEZE */
+#if CONFIG_SCHED_SFI
+	/* the SFI_CLASS_UNSPECIFIED ID is actually not used */
+	ledger_entry_id_t sfi_wait_times[MAX_SFI_CLASS_ID];
+#endif /* CONFIG_SCHED_SFI */
+#if CONFIG_DEFERRED_RECLAIM
+	ledger_entry_id_t est_reclaimable;
+#endif /* CONFIG_DEFERRED_RECLAIM */
+
+	char last_small_ledger_entry[0];
+
+	ledger_entry_id_t cpu_time;
+	ledger_entry_id_t phys_mem;
+	ledger_entry_id_t conclave_mem;
+	ledger_entry_id_t internal;
+	ledger_entry_id_t external;
+	ledger_entry_id_t reusable;
+	ledger_entry_id_t phys_footprint;
+	ledger_entry_id_t internal_compressed;
+	ledger_entry_id_t neural_nofootprint_total;
+	ledger_entry_id_t interrupt_wakeups;
+	ledger_entry_id_t physical_writes;
+	ledger_entry_id_t logical_writes;
+	ledger_entry_id_t logical_writes_to_external;
+#if CONFIG_MEMORYSTATUS
+	ledger_entry_id_t memorystatus_dirty_time;
+#endif /* CONFIG_MEMORYSTATUS */
+#if CONFIG_PHYS_WRITE_ACCT
+	ledger_entry_id_t fs_metadata_writes;
+#endif /* CONFIG_PHYS_WRITE_ACCT */
+	ledger_entry_id_t swapins;
+};
+
+extern struct _task_ledger_indices task_ledgers;
+
 void task_procname(task_t task, char *buf, int size);
 const char *task_best_name(task_t task);
 
 #endif /* MACH_KERNEL_PRIVATE */
 
-#if HAS_MTE
 /* Must be callable from IOKit as it sometimes has need to asynchronously
  * terminate tasks. Takes the task lock.
  */
-void task_set_ast_mte_synthesize_mach_exception(task_t task);
-#endif /* HAS_MTE */
+void task_set_ast_synthesize_async_fault_mach_exception(task_t task);
 
 
 #ifdef KERNEL_PRIVATE

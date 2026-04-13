@@ -726,10 +726,6 @@ bpf_attachd(struct bpf_d *d, struct bpf_if *bp)
 	bpf_acquire_d(d);
 
 	if (first) {
-		struct ifnet *ifp = NULL;
-		bool is_primary_dlt = false;
-		bpf_tap_func tap_func = NULL;
-
 		/* Find the default bpf entry for this ifp */
 		if (bp->bif_ifp->if_bpf == NULL) {
 			struct bpf_if   *tmp, *primary = NULL;
@@ -742,29 +738,16 @@ bpf_attachd(struct bpf_d *d, struct bpf_if *bp)
 			}
 			bp->bif_ifp->if_bpf = primary;
 		}
-
-		ifp = bp->bif_ifp;
-
 		/* Only call dlil_set_bpf_tap for primary dlt */
 		if (bp->bif_ifp->if_bpf == bp) {
-			is_primary_dlt = true;
-		}
-
-		tap_func = bp->bif_tap;
-
-		/* Unlock to workaround lock ordering issue with driver */
-		lck_mtx_unlock(bpf_mlock);
-
-		if (is_primary_dlt) {
-			dlil_set_bpf_tap(ifp, BPF_TAP_INPUT_OUTPUT,
+			dlil_set_bpf_tap(bp->bif_ifp, BPF_TAP_INPUT_OUTPUT,
 			    bpf_tap_callback);
 		}
 
-		if (tap_func != NULL) {
-			error = tap_func(bp->bif_ifp, bp->bif_dlt,
+		if (bp->bif_tap != NULL) {
+			error = bp->bif_tap(bp->bif_ifp, bp->bif_dlt,
 			    BPF_TAP_INPUT_OUTPUT);
 		}
-		lck_mtx_lock(bpf_mlock);
 	}
 
 	/*
@@ -792,9 +775,8 @@ bpf_detachd(struct bpf_d *d, struct proc *proc)
 	struct bpf_if *bp;
 	struct ifnet  *ifp;
 	uint32_t dlt;
-	bpf_tap_func disable_tap = NULL;
+	bpf_tap_func disable_tap;
 	uint8_t bd_promisc;
-	bool is_primary_dlt = false;
 
 	int bpf_closed = d->bd_flags & BPF_CLOSING;
 	/*
@@ -828,7 +810,7 @@ bpf_detachd(struct bpf_d *d, struct proc *proc)
 		 */
 		/* Only call dlil_set_bpf_tap for primary dlt */
 		if (bp->bif_ifp->if_bpf == bp) {
-			is_primary_dlt = true;
+			dlil_set_bpf_tap(ifp, BPF_TAP_DISABLE, NULL);
 		}
 
 		disable_tap = bp->bif_tap;
@@ -867,15 +849,6 @@ bpf_detachd(struct bpf_d *d, struct proc *proc)
 	d->bd_promisc = 0;
 
 	lck_mtx_unlock(bpf_mlock);
-
-	if (is_primary_dlt) {
-		dlil_set_bpf_tap(ifp, BPF_TAP_DISABLE, NULL);
-	}
-
-	if (disable_tap) {
-		disable_tap(ifp, dlt, BPF_TAP_DISABLE);
-	}
-
 	if (bd_promisc) {
 		if (ifnet_set_promiscuous(ifp, 0)) {
 			/*
@@ -890,6 +863,9 @@ bpf_detachd(struct bpf_d *d, struct proc *proc)
 		}
 	}
 
+	if (disable_tap) {
+		disable_tap(ifp, dlt, BPF_TAP_DISABLE);
+	}
 	lck_mtx_lock(bpf_mlock);
 
 	/*

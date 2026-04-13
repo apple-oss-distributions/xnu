@@ -1804,6 +1804,11 @@ os_channel_packet_free(const channel_t chd, packet_t ph)
 	midx = METADATA_IDX(QUM_ADDR(ph));
 	_SLOT_METADATA_IDX_VERIFY(chrd, QUM_ADDR(ph), midx);
 	_SLOT_ATTACH_METADATA(_SLOT_DESC(chrd, idx), midx);
+	/*
+	 * Make sure kernel doesn't see head advanced before
+	 * metadata attached.
+	 */
+	os_atomic_thread_fence(seq_cst);
 	ring->ring_head = _CHANNEL_RING_NEXT(ring, idx);
 
 	return __improbable(_CHANNEL_RING_IS_DEFUNCT(chrd)) ? ENXIO : 0;

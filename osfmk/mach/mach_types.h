@@ -120,7 +120,7 @@
  * the basic mach types.
  */
 typedef struct task                     *task_t, *task_name_t, *task_inspect_t, *task_read_t, *task_suspension_token_t, *task_policy_set_t, *task_policy_get_t;
-typedef struct thread                   *thread_t, *thread_act_t, *thread_inspect_t, *thread_read_t;
+typedef struct thread                   *thread_t, *thread_act_t, *thread_inspect_t, *thread_read_t, *thread_suspension_token_t;
 typedef struct ipc_space                *ipc_space_t, *ipc_space_read_t, *ipc_space_inspect_t;
 typedef struct coalition                *coalition_t;
 typedef struct host                     *host_t;
@@ -184,6 +184,7 @@ typedef mach_port_t             thread_t;
 typedef mach_port_t             thread_act_t;
 typedef mach_port_t             thread_inspect_t;
 typedef mach_port_t             thread_read_t;
+typedef mach_port_t             thread_suspension_token_t;
 typedef mach_port_t             ipc_space_t;
 typedef mach_port_t             ipc_space_read_t;
 typedef mach_port_t             ipc_space_inspect_t;
@@ -378,6 +379,9 @@ typedef unsigned int            mach_thread_flavor_t;
 /* DEPRECATED */
 typedef natural_t               ledger_item_t;
 #define LEDGER_ITEM_INFINITY    ((ledger_item_t) (~0))
+
+typedef uint32_t                ledger_entry_id_t;
+#define LEDGER_ENTRY_ID_INVALID ((ledger_entry_id_t)0)
 
 typedef int64_t                 ledger_amount_t;
 #define LEDGER_LIMIT_INFINITY   ((ledger_amount_t)((1ULL << 63) - 1))

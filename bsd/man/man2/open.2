@@ -2,14 +2,14 @@
 .\" Copyright (c) 2010 Apple Inc.  All rights reserved.
 .\"
 .\" @APPLE_LICENSE_HEADER_START@
-.\" 
+.\"
 .\" This file contains Original Code and/or Modifications of Original Code
 .\" as defined in and that are subject to the Apple Public Source License
 .\" Version 2.0 (the 'License'). You may not use this file except in
 .\" compliance with the License. Please obtain a copy of the License at
 .\" http://www.opensource.apple.com/apsl/ and read it before using this
 .\" file.
-.\" 
+.\"
 .\" The Original Code and all software distributed under the License are
 .\" distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
 .\" EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -17,7 +17,7 @@
 .\" FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
 .\" Please see the License for the specific language governing rights and
 .\" limitations under the License.
-.\" 
+.\"
 .\" @APPLE_LICENSE_HEADER_END@
 .\"
 .\"
@@ -235,8 +235,8 @@ will be for the symbolic link itself, not what it links to.
 .Pp
 The
 .Dv O_EVTONLY
-flag is only intended for monitoring a file for changes (e.g. kqueue). Note: when 
-this flag is used, the opened file will not prevent an unmount 
+flag is only intended for monitoring a file for changes (e.g. kqueue). Note: when
+this flag is used, the opened file will not prevent an unmount
 of the volume that contains the file.
 .Pp
 The
@@ -384,7 +384,7 @@ The process has already reached its limit for open file descriptors.
 .It Bq Er ENAMETOOLONG
 A component of a pathname exceeds
 .Dv {NAME_MAX}
-characters, or an entire path name exceeded 
+characters, or an entire path name exceeded
 .Dv {PATH_MAX}
 characters.
 .\" ===========
@@ -514,13 +514,14 @@ without changing your controlling terminal.
 .Xr dup 2 ,
 .Xr getdtablesize 2 ,
 .Xr lseek 2 ,
+.Xr openat_authenticated_np 2 ,
 .Xr read 2 ,
 .Xr umask 2 ,
 .Xr write 2
 .Sh HISTORY
 An
 .Fn open
-function call appeared in 
+function call appeared in
 .At v6 .
 The
 .Fn openat

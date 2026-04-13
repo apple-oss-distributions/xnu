@@ -1662,7 +1662,7 @@ default_getxattr_doubleagent(vnode_t vp, const char *name, uio_t uio,
 	int fileflags;
 	int error;
 	kern_return_t kr;
-	char cName[XATTR_MAXNAMELEN] = {0};
+	char cName[XATTR_MAXNAMELEN + 1] = {0};
 	bool have_iocount = true;
 
 	fileflags = FREAD | O_SHLOCK;
@@ -1681,7 +1681,7 @@ default_getxattr_doubleagent(vnode_t vp, const char *name, uio_t uio,
 	vnode_put(xvp);
 	have_iocount = false;
 
-	strncpy(cName, name, XATTR_MAXNAMELEN);
+	(void)strlcpy(cName, name, XATTR_MAXNAMELEN + 1);
 
 	/*
 	 * Call doubleagentd to look up the xattr.  The fileport argument
@@ -1842,7 +1842,7 @@ default_setxattr_doubleagent(vnode_t vp, const char *name, uio_t uio,
 	int namelen;
 	int fileflags;
 	int error;
-	char cName[XATTR_MAXNAMELEN] = {0};
+	char cName[XATTR_MAXNAMELEN + 1] = {0};
 	char finfo[FINDERINFOSIZE];
 	uio_t finfo_uio = NULL;
 	mach_port_t fileport = MACH_PORT_NULL;
@@ -1915,6 +1915,18 @@ default_setxattr_doubleagent(vnode_t vp, const char *name, uio_t uio,
 		if (datalen > UINT32_MAX) {
 			return EINVAL;
 		}
+
+		/*
+		 * Don't allow overriding a part of the resource fork header (the first
+		 * sizeof(rsrcfork_header_t) bytes of the resource fork).  We only allow
+		 * overriding it completely, or writing beyond it.
+		 * Note that datalen = uio_offset(uio) + uio_resid(uio).
+		 */
+		if ((uio_offset(uio) > 0 &&
+		    uio_offset(uio) < sizeof(rsrcfork_header_t)) ||
+		    (datalen < sizeof(rsrcfork_header_t))) {
+			return EINVAL;
+		}
 	}
 
 	/*
@@ -1935,7 +1947,7 @@ default_setxattr_doubleagent(vnode_t vp, const char *name, uio_t uio,
 	vnode_put(xvp);
 	have_iocount = false;
 
-	strncpy(cName, name, XATTR_MAXNAMELEN);
+	(void)strlcpy(cName, name, XATTR_MAXNAMELEN + 1);
 
 	/*
 	 * Call doubleagentd to allocate space for the xattr.  The
@@ -2019,7 +2031,7 @@ default_removexattr_doubleagent(vnode_t vp, const char *name,
 	int error;
 	int64_t fsize;
 	boolean_t is_empty = false;
-	char cName[XATTR_MAXNAMELEN] = {0};
+	char cName[XATTR_MAXNAMELEN + 1] = {0};
 	mach_port_t fileport = MACH_PORT_NULL;
 	kern_return_t kr;
 	bool have_iocount = true;
@@ -2040,7 +2052,7 @@ default_removexattr_doubleagent(vnode_t vp, const char *name,
 	vnode_put(xvp);
 	have_iocount = false;
 
-	strncpy(cName, name, XATTR_MAXNAMELEN);
+	(void)strlcpy(cName, name, XATTR_MAXNAMELEN + 1);
 
 	/*
 	 * Call doubleagentd to remove the xattr.  The fileport argument

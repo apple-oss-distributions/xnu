@@ -1,6 +1,7 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  */
+
 #include <stdio.h>
 #include <errno.h>
 #include <stdio.h>
@@ -13,6 +14,13 @@
 #include <sys/sysctl.h>
 #include <darwintest.h>
 #include <TargetConditionals.h>
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("rpaulo")
+	);
 
 #define MAX_FDS ((MCLBYTES - sizeof(struct cmsghdr)) / sizeof(void *))
 

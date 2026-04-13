@@ -522,6 +522,8 @@ build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int bufl
 	unsigned int  len;
 	int  ret = 0;
 	int  fixhardlink;
+	int  chroot_violation = 0;
+	int  encountered_chroot = 0;
 
 	if (first_vp == NULLVP) {
 		return EINVAL;
@@ -554,6 +556,7 @@ again:
 	 * /full/path/to/dir instead of "/".
 	 */
 	if (proc_root_dir_vp == first_vp) {
+		encountered_chroot = 1;
 		*--end = '/';
 		goto out;
 	}
@@ -595,6 +598,9 @@ again:
 			 * It's the root of the root file system, so it's
 			 * just "/".
 			 */
+			if (vp == proc_root_dir_vp) {
+				encountered_chroot = 1;
+			}
 			*--end = '/';
 
 			goto out_unlock;
@@ -856,6 +862,7 @@ bad_news:
 
 		while (tvp) {
 			if (tvp == proc_root_dir_vp) {
+				encountered_chroot = 1;
 				goto out_unlock;        /* encountered the root */
 			}
 
@@ -887,6 +894,17 @@ bad_news:
 	}
 out_unlock:
 	NAME_CACHE_UNLOCK();
+
+	/*
+	 * If we have a chroot directory set (proc_root_dir_vp != NULL), then we should
+	 * have encountered the chroot directory during our traversal. If we didn't,
+	 * it means the path is outside the chroot and we should fail rather than
+	 * return the full absolute path.
+	 */
+	if (proc_root_dir_vp != NULL && !encountered_chroot && ret == 0) {
+		ret = ENOENT;
+		chroot_violation = 1;
+	}
 out:
 	if (vp_with_iocount) {
 		vnode_put(vp_with_iocount);
@@ -907,8 +925,9 @@ out:
 	/* One of the parents was moved during path reconstruction.
 	 * The caller is interested in knowing whether any of the
 	 * parents moved via BUILDPATH_CHECK_MOVED, so return EAGAIN.
+	 * Don't convert chroot violations to EAGAIN as they should not be retried.
 	 */
-	if ((ret == ENOENT) && (flags & BUILDPATH_CHECK_MOVED)) {
+	if ((ret == ENOENT) && (flags & BUILDPATH_CHECK_MOVED) && !chroot_violation) {
 		ret = EAGAIN;
 	}
 
@@ -1748,6 +1767,18 @@ can_check_v_mountedhere(vnode_t vp)
 	       (vp->v_type == VDIR));
 }
 
+bool
+mount_skip_rsrc_lookup(mount_t dmp)
+{
+	/* Skip volfs file systems that don't support native streams. */
+	if ((dmp != NULL) &&
+	    (dmp->mnt_flag & MNT_DOVOLFS) &&
+	    (dmp->mnt_kern_flag & MNTK_NAMED_STREAMS) == 0) {
+		return true;
+	}
+	return false;
+}
+
 /*
  * Returns:	0			Success
  *		ERECYCLE		vnode was recycled from underneath us.  Force lookup to be re-driven from namei.
@@ -1875,12 +1906,10 @@ retry:
 				break;
 			}
 
-			/* Skip volfs file systems that don't support native streams. */
-			if ((dmp != NULL) &&
-			    (dmp->mnt_flag & MNT_DOVOLFS) &&
-			    (dmp->mnt_kern_flag & MNTK_NAMED_STREAMS) == 0) {
+			if (mount_skip_rsrc_lookup(dmp)) {
 				goto skiprsrcfork;
 			}
+
 			cnp->cn_flags |= CN_WANTSRSRCFORK;
 			cnp->cn_flags |= ISLASTCN;
 			ndp->ni_next[0] = '\0';
@@ -2101,6 +2130,7 @@ skiprsrcfork:
 				if (vp->v_type == VDIR) {
 					vp = v_fmlink;
 					vvid = vnode_vid(vp);
+					ndp->ni_flag |= NAMEI_FIRMLINK_FOLLOWED;
 				} else if ((cnp->cn_flags & FOLLOW) ||
 				    (ndp->ni_flag & NAMEI_TRAILINGSLASH) || *ndp->ni_next == '/') {
 					if (ndp->ni_loopcnt >= MAXSYMLINKS - 1) {
@@ -2268,7 +2298,7 @@ need_dp:
 		 * it should already hold an io ref. No need to increase ref.
 		 */
 		if (last_dp != dp) {
-			if (dp == ndp->ni_usedvp) {
+			if (dp == ndp->ni_usedvp && (cnp->cn_flags & USEDVP)) {
 				/*
 				 * if this vnode matches the one passed in via USEDVP
 				 * than this context already holds an io_count... just

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <unistd.h>
 
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -80,6 +81,38 @@ map_buffer(size_t memsize, int flags)
 	}
 	return (unsigned char*)address;
 #endif
+}
+
+unsigned char *
+map_file_backed_buffer(size_t memsize, FILE **file_out)
+{
+	FILE *f = tmpfile();
+
+	char *buf = malloc(memsize);
+	if (!buf) {
+		fprintf(stderr, "%s: malloc failed\n", __FUNCTION__);
+		exit(2);
+	}
+	uint64_t pattern = 0xDEADBEEF;
+	memset_pattern4(buf, &pattern, memsize);
+	fwrite(buf, 1, memsize, f);
+	int ret = fsync(fileno(f));
+	if (ret) {
+		fprintf(stderr, "%s: fsync failed: %s\n", __FUNCTION__, strerror(errno));
+		exit(2);
+	}
+
+	unsigned char* addr = mmap(NULL, memsize, PROT_READ | PROT_WRITE,
+	    MAP_SHARED, fileno(f), 0);
+	if (addr == MAP_FAILED) {
+		fprintf(stderr, "%s: mmap failed: %s\n", __FUNCTION__, strerror(errno));
+		exit(2);
+	}
+
+	free(buf);
+
+	*file_out = f;
+	return addr;
 }
 
 unsigned int

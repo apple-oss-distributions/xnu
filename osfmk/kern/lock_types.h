@@ -76,8 +76,48 @@ __options_decl(lck_option_t, unsigned int, {
 	LCK_OPTION_DISABLE_RW_DEBUG = 0x10, /**< Disable RW lock best-effort debugging. */
 });
 
-#endif // XNU_KERNEL_PRIVATE
+__END_DECLS
 
+/*!
+ * @typedef lck_dep_value_t
+ *
+ * @abstract
+ * Type used in a few advanced locking API to inject a dependency into unlock.
+ *
+ * @discussion
+ * When a critical section protected by a lock is not performing any mutation,
+ * and that the only property that is expected is for a specific load to be
+ * ordered with unlock, then the value loaded can be passed with unlock variants
+ * that admit an @c lck_dep_value_t in order to avoid costly barriers on unlock.
+ *
+ * Do note that such APIs make no guarantee for other loads or any stores
+ * performed in that critical section.
+ *
+ * Such APIs will have "after_lookup" in their names.
+ */
+union lck_dep_value {
+	unsigned long           lck_ul;
+	long                    lck_il;
+	const void             *lck_ptr;
+#ifdef __cplusplus
+	inline lck_dep_value(unsigned long ul) : lck_ul(ul) {
+	}
+	inline lck_dep_value(long il) : lck_il(il) {
+	}
+	template <typename T>
+	inline lck_dep_value(T * ptr) : lck_ptr(reinterpret_cast<const void *>(ptr)) {
+	}
+#endif
+};
+#ifdef __cplusplus
+typedef union lck_dep_value lck_dep_value_t;
+#else
+typedef union lck_dep_value __attribute__((__transparent_union__)) lck_dep_value_t;
+#endif
+
+__BEGIN_DECLS
+
+#endif // XNU_KERNEL_PRIVATE
 #if MACH_KERNEL_PRIVATE
 
 /*
@@ -166,6 +206,20 @@ __enum_closed_decl(hw_spin_timeout_status_t, _Bool, {
 	HW_LOCK_TIMEOUT_CONTINUE,       /**< keep spinning                  */
 });
 
+#if SCHED_HYGIENE_DEBUG && XNU_MONITOR
+#define HW_SPIN_TIMEOUT_TRACK_PPL     1
+#else
+#define HW_SPIN_TIMEOUT_TRACK_PPL     0
+#endif
+
+#if SCHED_HYGIENE_DEBUG || __x86_64__
+#define HW_SPIN_TIMEOUT_TRACK_IRQ     1
+#else
+#define HW_SPIN_TIMEOUT_TRACK_IRQ     0
+#endif
+
+#define HW_SPIN_TIMEOUT_STOLEN_BITS \
+	(HW_SPIN_TIMEOUT_TRACK_PPL + HW_SPIN_TIMEOUT_TRACK_IRQ)
 
 /*!
  * @typedef hw_spin_timeout_t
@@ -174,11 +228,13 @@ __enum_closed_decl(hw_spin_timeout_status_t, _Bool, {
  * Describes the timeout used for a given spinning session.
  */
 typedef struct {
-	uint64_t                hwst_timeout;
-#if SCHED_HYGIENE_DEBUG
-	bool                    hwst_in_ppl;
-	bool                    hwst_interruptible;
-#endif /* SCHED_HYGIENE_DEBUG */
+#if HW_SPIN_TIMEOUT_TRACK_PPL
+	bool                    hwst_in_ppl : 1;
+#endif /* HW_SPIN_TIMEOUT_TRACK_PPL */
+#if HW_SPIN_TIMEOUT_TRACK_IRQ
+	bool                    hwst_interruptible : 1;
+#endif /* HW_SPIN_TIMEOUT_TRACK_IRQ */
+	uint64_t                hwst_timeout : 64 - HW_SPIN_TIMEOUT_STOLEN_BITS;
 } hw_spin_timeout_t;
 
 

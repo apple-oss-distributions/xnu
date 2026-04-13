@@ -201,7 +201,6 @@ routine processor_set_default(
 #if KERNEL_SERVER
 skip; /* processor_set_create */
 #else
-
 routine processor_set_create(
 		host		: host_t;
 	out	new_set		: processor_set_t;
@@ -405,5 +404,17 @@ routine mach_zone_get_btlog_records(
 #else
 skip;
 #endif
+
+/*
+ * Always returns the redacted version of the mach_memory_info output
+ */
+routine mach_memory_info_redacted(
+		host		: mach_port_t;
+	out	names		: mach_zone_name_array_t,
+					Dealloc;
+	out	info		: mach_zone_info_array_t,
+					Dealloc;
+	out	memory_info	: mach_memory_info_array_t,
+					Dealloc);
 
 /* vim: set ft=c : */

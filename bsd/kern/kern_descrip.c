@@ -404,13 +404,52 @@ fg_sendable(struct fileglob *fg)
 
 #pragma mark file descriptor table (static helpers)
 
+
+/*
+ * procfdtbl_reservefd
+ *
+ * Description: Reserves slot for given descriptor id
+ *
+ * Parameters:
+ *      p - proc_t (or pointer to struct proc) which owns the descriptors table;
+ *      fd - user visible file descriptor id to reserve
+ *
+ * Returns: void
+ *
+ * Locks: proc_fdlock(p) must be taken
+ *
+ * Discussion:
+ * This call must be eventually balanced with a call to `procfdtbl_releasefd`
+ * in order to make reserved fd released to userspace. Usually the reservefd side is
+ * called in fd allocator functions such as fdalloc, fdup*, release side is called
+ * eventually in callers of fdalloc.
+ */
 static void
 procfdtbl_reservefd(struct proc * p, int fd)
 {
+	/* file descriptor must not be reserved or used already */
+	assert(0 == (p->p_fd.fd_ofileflags[fd] & UF_RESERVED));
 	p->p_fd.fd_ofiles[fd] = NULL;
 	p->p_fd.fd_ofileflags[fd] |= UF_RESERVED;
 }
 
+/*
+ * procfdtbl_releasefd
+ *
+ * Description: Releases reserved slot for given descriptor id
+ *
+ * Parameters:
+ * p - proc_t (or pointer to struct proc) which owns the descriptors table;
+ * fd - user visible file descriptor id to reserve
+ *
+ * Returns: void
+ *
+ * Locks: proc_fdlock(p) must be taken
+ *
+ * Discussion:
+ * Look at the discusison of the `procfdtbl_reservefd`
+ *
+ */
 void
 procfdtbl_releasefd(struct proc * p, int fd, struct fileproc * fp)
 {
@@ -2114,18 +2153,52 @@ file_vnode(int fd, struct vnode **vpp)
 int
 file_vnode_withvid(int fd, struct vnode **vpp, uint32_t *vidp)
 {
+	return file_vnode_ext(fd, vpp, vidp, 0);
+}
+
+int
+file_vnode_ext(int fd, struct vnode **vpp, uint32_t *vidp, int flags)
+{
+	proc_t p = current_proc();
 	struct fileproc *fp;
 	int error;
 
-	error = fp_get_ftype(current_proc(), fd, DTYPE_VNODE, EINVAL, &fp);
-	if (error == 0) {
-		if (vpp) {
-			*vpp = (struct vnode *)fp_get_data(fp);
-		}
-		if (vidp) {
-			*vidp = vnode_vid((struct vnode *)fp_get_data(fp));
-		}
+	error = fp_get_ftype(p, fd, DTYPE_VNODE, EINVAL, &fp);
+	if (error) {
+		goto out;
 	}
+
+	if (flags) {
+		proc_fdlock_spin(p);
+		if ((flags & FREAD) != 0 && (fp->f_flag & FREAD) == 0) {
+			error = EBADF;
+			goto out_fdunlock;
+		}
+		if (flags & FWRITE) {
+			if ((fp->f_flag & FWRITE) == 0) {
+				error = EBADF;
+				goto out_fdunlock;
+			}
+			if (fp_isguarded(fp, GUARD_WRITE)) {
+				error = fp_guard_exception(p, fd, fp,
+				    kGUARD_EXC_WRITE);
+				goto out_fdunlock;
+			}
+		}
+		proc_fdunlock(p);
+	}
+
+	if (vpp) {
+		*vpp = (struct vnode *)fp_get_data(fp);
+	}
+	if (vidp) {
+		*vidp = vnode_vid((struct vnode *)fp_get_data(fp));
+	}
+out:
+	return error;
+out_fdunlock:
+	fp_drop(p, fd, fp, 1);
+	proc_fdunlock(p);
 	return error;
 }
 
@@ -2571,6 +2644,9 @@ sys_fcntl(proc_t p, struct fcntl_args *uap, int32_t *retval)
 #define ACCOUNT_OPENFROM_ENTITLEMENT \
 	"com.apple.private.vfs.role-account-openfrom"
 
+#define VFS_PRIV_DIRLSEEK_ENTITLEMENT \
+	"com.apple.private.vfs.dirlseek"
+
 /*
  * sys_fcntl_nocancel
  *
@@ -2884,6 +2960,40 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		tmp = CAST_DOWN_EXPLICIT(int, uap->arg); /* arg is an int, so we won't lose bits */
 		AUDIT_ARG(value32, tmp);
+
+		if (fp->f_type == DTYPE_VNODE && (fp->f_flag & FWRITE)) {
+			/* Check authorization when setting O_APPEND on vnodes */
+			if (!(fp->f_flag & O_APPEND) && (tmp & O_APPEND)) {
+				vp = (struct vnode *)fp_get_data(fp);
+
+				if ((error = vnode_getwithref(vp))) {
+					goto out;
+				}
+
+				/* Check KAUTH_VNODE_APPEND_DATA permission */
+				error = vnode_authorize(vp, NULL, KAUTH_VNODE_APPEND_DATA, &context);
+				vnode_put(vp);
+				if (error) {
+					goto out;
+				}
+			}
+
+			/* Only allow clearing O_APPEND if the file itself isn't append-only. */
+			if ((fp->f_flag & O_APPEND) && !(tmp & O_APPEND)) {
+				vp = (struct vnode *)fp_get_data(fp);
+
+				if ((error = vnode_getwithref(vp))) {
+					goto out;
+				}
+
+				if (vnode_isappendonly(vp)) {
+					vnode_put(vp);
+					error = EPERM;
+					goto out;
+				}
+				vnode_put(vp);
+			}
+		}
 
 		os_atomic_rmw_loop(&fp->f_flag, oflags, nflags, relaxed, {
 			nflags  = oflags & ~FCNTLFLAGS;
@@ -5229,6 +5339,92 @@ dropboth:
 
 		goto outdrop;
 	}
+	case F_DIRLSEEK: {
+		fdirlseek_t args;
+		fsioc_dirlseek_t fsioc_args = {};
+		size_t copylen;
+		struct fd_vn_data *fvdata;
+
+		if (fp->f_type != DTYPE_VNODE) {
+			error = EBADF;
+			goto out;
+		}
+
+		if (!IOCurrentTaskHasEntitlement(VFS_PRIV_DIRLSEEK_ENTITLEMENT)) {
+			error = EPERM;
+			goto out;
+		}
+
+		vp = (struct vnode *)fp_get_data(fp);
+		proc_fdunlock(p);
+
+		if ((error = vnode_getwithref(vp))) {
+			goto outdrop;
+		}
+
+		if (!vnode_isdir(vp)) {
+			(void)vnode_put(vp);
+			error = ENOTDIR;
+			goto outdrop;
+		}
+
+		if ((error = copyin(argp, (caddr_t)&args, sizeof(args)))) {
+			(void)vnode_put(vp);
+			goto outdrop;
+		}
+
+		if (args.fdls_name == USER_ADDR_NULL) {
+			(void)vnode_put(vp);
+			error = EINVAL;
+			goto outdrop;
+		}
+
+		if ((fsioc_args.nameptr = zalloc(ZV_NAMEI)) == NULL) {
+			(void)vnode_put(vp);
+			error = ENOMEM;
+			goto outdrop;
+		}
+
+		if ((error = copyinstr(args.fdls_name, fsioc_args.nameptr,
+		    MAXPATHLEN, &copylen)) || (copylen == 0)) {
+			zfree(ZV_NAMEI, fsioc_args.nameptr);
+			(void)vnode_put(vp);
+			goto outdrop;
+		}
+
+		if (strchr(fsioc_args.nameptr, '/')) {
+			zfree(ZV_NAMEI, fsioc_args.nameptr);
+			(void)vnode_put(vp);
+			error = EINVAL;
+			goto outdrop;
+		}
+
+		fsioc_args.namelen = copylen - 1;
+		fsioc_args.flags = args.fdls_flags;
+
+		fvdata = (struct fd_vn_data *)fp->fp_glob->fg_vn_data;
+		if (!fvdata) {
+			panic("Directory for F_DIRLSEEK expected to have fg_vn_data");
+		}
+
+		FV_LOCK(fvdata);
+
+		error = VNOP_IOCTL(vp, FSIOC_DIRLSEEK, (caddr_t)&fsioc_args, 0, &context);
+		if (!error) {
+			args.fdls_offset = fsioc_args.offset;
+			fp->fp_glob->fg_offset = fsioc_args.offset;
+			fvdata->fv_offset = fsioc_args.offset;
+			fvdata->fv_eofflag = 0;
+			error = copyout((caddr_t)&args, argp, sizeof(args));
+		}
+
+		FV_UNLOCK(fvdata);
+
+		zfree(ZV_NAMEI, fsioc_args.nameptr);
+		(void)vnode_put(vp);
+
+		goto outdrop;
+	}
 
 	default:
 		/*
@@ -5255,6 +5451,7 @@ dropboth:
 		case (int)FSIOC_KERNEL_ROOTAUTH:
 		case (int)FSIOC_GRAFT_FS:
 		case (int)FSIOC_UNGRAFT_FS:
+		case (int)FSIOC_DIRLSEEK:
 		case (int)APFSIOC_IS_GRAFT_SUPPORTED:
 		case (int)FSIOC_AUTH_FS:
 		case HFS_GET_BOOT_INFO:

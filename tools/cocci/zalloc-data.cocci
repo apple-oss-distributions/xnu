@@ -9,19 +9,19 @@ type T;
 identifier V;
 @@
 (
-- kheap_alloc(KHEAP_DATA_BUFFERS, E, F)
+- kheap_alloc(KHEAP_DATA_PRIVATE, E, F)
 + kalloc_data(E, F)
 |
-- (T)kheap_alloc(KHEAP_DATA_BUFFERS, E, F)
+- (T)kheap_alloc(KHEAP_DATA_PRIVATE, E, F)
 + (T)kalloc_data(E, F)
 |
-- kheap_alloc_tag(KHEAP_DATA_BUFFERS, E, F, G)
+- kheap_alloc_tag(KHEAP_DATA_PRIVATE, E, F, G)
 + kalloc_data_tag(E, F, G)
 |
-- kheap_free(KHEAP_DATA_BUFFERS, E, F)
+- kheap_free(KHEAP_DATA_PRIVATE, E, F)
 + kfree_data(E, F)
 |
-- kheap_free_addr(KHEAP_DATA_BUFFERS, E)
+- kheap_free_addr(KHEAP_DATA_PRIVATE, E)
 + kfree_data_addr(E)
 )
 

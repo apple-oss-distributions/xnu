@@ -252,7 +252,7 @@ kern_return_t CSM_PREFIX(resolve_kernel_entitlements)(
 
 kern_return_t CSM_PREFIX(accelerate_entitlements)(
 	void *sig_obj,
-	CEQueryContext_t *ce_ctx);
+	const CEContext_t **ce_ctx);
 
 #endif /* CODE_SIGNING_MONITOR */
 

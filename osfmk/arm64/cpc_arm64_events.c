@@ -29,20 +29,12 @@
 #include <kern/assert.h>
 #include <kern/cpc.h>
 #include <kern/startup.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
 
-struct cpc_event {
-	const char *cev_name;
-	uint16_t cev_selector;
-};
-
-struct cpc_event_list {
-	unsigned int cel_event_count;
-	struct cpc_event cel_events[];
-};
-static const struct cpc_event_list _known_cpmu_events;
+const struct cpc_event_list cpc_known_cpmu_events;
 
 static const struct cpc_event_list _no_events = {
 	.cel_event_count = 0,
@@ -50,21 +42,21 @@ static const struct cpc_event_list _no_events = {
 };
 
 const struct cpc_event_list * const _cpc_known_events[CPC_HW_COUNT] = {
-	[CPC_HW_CPMU] = &_known_cpmu_events,
+	[CPC_HW_CPMU] = &cpc_known_cpmu_events,
 	[CPC_HW_UPMU] = &_no_events,
 };
 
-static const struct cpc_event *
+static cpc_event_t
 _cpc_select_event(cpc_hw_t hw, uint16_t selector)
 {
 	assert(hw < CPC_HW_COUNT);
 	const struct cpc_event_list *list = _cpc_known_events[hw];
 	for (unsigned int i = 0; i < list->cel_event_count; i++) {
 		if (list->cel_events[i].cev_selector == selector) {
-			return &list->cel_events[i];
+			return (cpc_event_t)i;
 		}
 	}
-	return NULL;
+	return CPC_EVENT_INVALID;
 }
 
 static
@@ -89,8 +81,8 @@ cpc_set_event_policy(cpc_event_policy_t new_policy)
 
 #endif // CPC_INSECURE
 
-bool
-cpc_event_allowed(
+cpc_event_t
+cpc_find_event(
 	cpc_hw_t hw,
 	uint16_t event_selector)
 {
@@ -100,20 +92,20 @@ cpc_event_allowed(
 	switch (_cpc_event_policy) {
 #if CPC_INSECURE
 	case CPC_EVPOL_ALLOW_ALL:
-		return true;
+		return ((uint32_t)1 << 31) | (uint32_t)event_selector;
 #endif // CPC_INSECURE
 	case CPC_EVPOL_DENY_ALL:
-		return false;
+		return CPC_EVENT_INVALID;
 	case CPC_EVPOL_RESTRICT_TO_KNOWN:
-		return _cpc_select_event(hw, event_selector) != NULL;
+		return _cpc_select_event(hw, event_selector);
 	}
 	return false;
 }
 
 
-static const struct cpc_event_list _known_cpmu_events = {
+const struct cpc_event_list cpc_known_cpmu_events = {
 #if   defined(ARM64_BOARD_CONFIG_T6000)
-	.cel_event_count = 59,
+	.cel_event_count = 60,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -124,6 +116,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0008, .cev_name = "MMU_TABLE_WALK_DATA" },
 		{ .cev_selector = 0x000a, .cev_name = "L2_TLB_MISS_INSTRUCTION" },
 		{ .cev_selector = 0x000b, .cev_name = "L2_TLB_MISS_DATA" },
+		{ .cev_selector = 0x003c, .cev_name = NULL },
 		{ .cev_selector = 0x0051, .cev_name = "SCHEDULE_EMPTY" },
 		{ .cev_selector = 0x0052, .cev_name = "SCHEDULE_UOP" },
 		{ .cev_selector = 0x006c, .cev_name = "INTERRUPT_PENDING" },
@@ -176,7 +169,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00e6, .cev_name = "LD_NT_UOP" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T6020)
-	.cel_event_count = 59,
+	.cel_event_count = 60,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -187,6 +180,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0008, .cev_name = "MMU_TABLE_WALK_DATA" },
 		{ .cev_selector = 0x000a, .cev_name = "L2_TLB_MISS_INSTRUCTION" },
 		{ .cev_selector = 0x000b, .cev_name = "L2_TLB_MISS_DATA" },
+		{ .cev_selector = 0x003c, .cev_name = NULL },
 		{ .cev_selector = 0x0051, .cev_name = "SCHEDULE_EMPTY" },
 		{ .cev_selector = 0x006c, .cev_name = "INTERRUPT_PENDING" },
 		{ .cev_selector = 0x0070, .cev_name = "MAP_STALL_DISPATCH" },
@@ -239,7 +233,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00e6, .cev_name = "LD_NT_UOP" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T6030)
-	.cel_event_count = 65,
+	.cel_event_count = 67,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -271,6 +265,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00cb, .cev_name = "BRANCH_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01db, .cev_name = "L1I_CACHE_MISS_DEMAND" },
@@ -306,9 +301,10 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T6031)
-	.cel_event_count = 65,
+	.cel_event_count = 67,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -340,6 +336,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00cb, .cev_name = "BRANCH_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01db, .cev_name = "L1I_CACHE_MISS_DEMAND" },
@@ -375,9 +372,10 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T6041)
-	.cel_event_count = 102,
+	.cel_event_count = 104,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0003, .cev_name = "ARM_L1D_CACHE_REFILL" },
@@ -400,6 +398,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0040, .cev_name = "ARM_L1D_CACHE_RD" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01de, .cev_name = "FETCH_RESTART" },
@@ -453,6 +452,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 		{ .cev_selector = 0x0884, .cev_name = "FLUSH_RESTART_OTHER_NONSPEC" },
 		{ .cev_selector = 0x088e, .cev_name = "INST_BRANCH_CALL" },
 		{ .cev_selector = 0x088f, .cev_name = "INST_BRANCH_RET" },
@@ -483,7 +483,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x4006, .cev_name = "L1I_CACHE_MISS_DEMAND" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8101)
-	.cel_event_count = 59,
+	.cel_event_count = 60,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -494,6 +494,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0008, .cev_name = "MMU_TABLE_WALK_DATA" },
 		{ .cev_selector = 0x000a, .cev_name = "L2_TLB_MISS_INSTRUCTION" },
 		{ .cev_selector = 0x000b, .cev_name = "L2_TLB_MISS_DATA" },
+		{ .cev_selector = 0x003c, .cev_name = NULL },
 		{ .cev_selector = 0x0051, .cev_name = "SCHEDULE_EMPTY" },
 		{ .cev_selector = 0x0052, .cev_name = "SCHEDULE_UOP" },
 		{ .cev_selector = 0x006c, .cev_name = "INTERRUPT_PENDING" },
@@ -546,7 +547,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00e6, .cev_name = "LD_NT_UOP" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8103)
-	.cel_event_count = 59,
+	.cel_event_count = 60,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -557,6 +558,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0008, .cev_name = "MMU_TABLE_WALK_DATA" },
 		{ .cev_selector = 0x000a, .cev_name = "L2_TLB_MISS_INSTRUCTION" },
 		{ .cev_selector = 0x000b, .cev_name = "L2_TLB_MISS_DATA" },
+		{ .cev_selector = 0x003c, .cev_name = NULL },
 		{ .cev_selector = 0x0051, .cev_name = "SCHEDULE_EMPTY" },
 		{ .cev_selector = 0x0052, .cev_name = "SCHEDULE_UOP" },
 		{ .cev_selector = 0x006c, .cev_name = "INTERRUPT_PENDING" },
@@ -609,7 +611,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00e6, .cev_name = "LD_NT_UOP" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8112)
-	.cel_event_count = 59,
+	.cel_event_count = 60,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -620,6 +622,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0008, .cev_name = "MMU_TABLE_WALK_DATA" },
 		{ .cev_selector = 0x000a, .cev_name = "L2_TLB_MISS_INSTRUCTION" },
 		{ .cev_selector = 0x000b, .cev_name = "L2_TLB_MISS_DATA" },
+		{ .cev_selector = 0x003c, .cev_name = NULL },
 		{ .cev_selector = 0x0051, .cev_name = "SCHEDULE_EMPTY" },
 		{ .cev_selector = 0x006c, .cev_name = "INTERRUPT_PENDING" },
 		{ .cev_selector = 0x0070, .cev_name = "MAP_STALL_DISPATCH" },
@@ -672,7 +675,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00e6, .cev_name = "LD_NT_UOP" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8122_T8130)
-	.cel_event_count = 65,
+	.cel_event_count = 67,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0001, .cev_name = "RETIRE_UOP" },
@@ -704,6 +707,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x00cb, .cev_name = "BRANCH_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01db, .cev_name = "L1I_CACHE_MISS_DEMAND" },
@@ -739,9 +743,10 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8132)
-	.cel_event_count = 102,
+	.cel_event_count = 104,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0003, .cev_name = "ARM_L1D_CACHE_REFILL" },
@@ -764,6 +769,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0040, .cev_name = "ARM_L1D_CACHE_RD" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01de, .cev_name = "FETCH_RESTART" },
@@ -817,6 +823,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 		{ .cev_selector = 0x0884, .cev_name = "FLUSH_RESTART_OTHER_NONSPEC" },
 		{ .cev_selector = 0x088e, .cev_name = "INST_BRANCH_CALL" },
 		{ .cev_selector = 0x088f, .cev_name = "INST_BRANCH_RET" },
@@ -847,7 +854,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x4006, .cev_name = "L1I_CACHE_MISS_DEMAND" },
 	},
 #elif defined(ARM64_BOARD_CONFIG_T8142)
-	.cel_event_count = 102,
+	.cel_event_count = 136,
 	.cel_events = {
 		{ .cev_selector = 0x0000, .cev_name = "NONE" },
 		{ .cev_selector = 0x0003, .cev_name = "ARM_L1D_CACHE_REFILL" },
@@ -856,6 +863,8 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0010, .cev_name = "ARM_BR_MIS_PRED" },
 		{ .cev_selector = 0x0011, .cev_name = "CORE_ACTIVE_CYCLE" },
 		{ .cev_selector = 0x0012, .cev_name = "ARM_BR_PRED" },
+		{ .cev_selector = 0x0013, .cev_name = "ARM_MEM_ACCESS" },
+		{ .cev_selector = 0x0014, .cev_name = "ARM_L1I_CACHE" },
 		{ .cev_selector = 0x0021, .cev_name = "INST_BRANCH" },
 		{ .cev_selector = 0x0022, .cev_name = "BRANCH_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x0023, .cev_name = "ARM_STALL_FRONTEND" },
@@ -868,12 +877,16 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x003e, .cev_name = "ARM_STALL_SLOT_FRONTEND" },
 		{ .cev_selector = 0x003f, .cev_name = "ARM_STALL_SLOT" },
 		{ .cev_selector = 0x0040, .cev_name = "ARM_L1D_CACHE_RD" },
+		{ .cev_selector = 0x0066, .cev_name = "ARM_MEM_ACCESS_RD" },
+		{ .cev_selector = 0x0067, .cev_name = "ARM_MEM_ACCESS_WR" },
 		{ .cev_selector = 0x0182, .cev_name = "MAP_DISPATCH_BUBBLE_IC" },
 		{ .cev_selector = 0x0183, .cev_name = "MAP_DISPATCH_BUBBLE_ITLB" },
+		{ .cev_selector = 0x0186, .cev_name = "DECODE_UOP" },
 		{ .cev_selector = 0x01d4, .cev_name = "L1I_TLB_MISS_DEMAND" },
 		{ .cev_selector = 0x01d6, .cev_name = "MAP_DISPATCH_BUBBLE" },
 		{ .cev_selector = 0x01de, .cev_name = "FETCH_RESTART" },
 		{ .cev_selector = 0x01e1, .cev_name = "MAP_DISPATCH_BUBBLE_SLOT" },
+		{ .cev_selector = 0x01e4, .cev_name = "MAP_DISPATCH_BUBBLE_TAKENBR_SLOT" },
 		{ .cev_selector = 0x026c, .cev_name = "INTERRUPT_PENDING" },
 		{ .cev_selector = 0x0270, .cev_name = "MAP_STALL_DISPATCH" },
 		{ .cev_selector = 0x0275, .cev_name = "MAP_REWIND" },
@@ -892,6 +905,8 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0290, .cev_name = "LDST_UNIT_OLD_L1D_CACHE_MISS" },
 		{ .cev_selector = 0x0291, .cev_name = "LDST_UNIT_WAITING_OLD_L1D_CACHE_MISS" },
 		{ .cev_selector = 0x0294, .cev_name = "LD_UNIT_WAITING_YOUNG_L1D_CACHE_MISS" },
+		{ .cev_selector = 0x0295, .cev_name = "CORE_WAITING_SME_ENGINE_CYCLE" },
+		{ .cev_selector = 0x029d, .cev_name = "LDST_OLDEST_MTE_TAG_CHECK_CYCLE" },
 		{ .cev_selector = 0x02ad, .cev_name = "MAP_RECOVERY" },
 		{ .cev_selector = 0x02ae, .cev_name = "MAP_STALL_NONRECOVERY" },
 		{ .cev_selector = 0x0351, .cev_name = "SCHEDULE_EMPTY" },
@@ -910,6 +925,7 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x0575, .cev_name = "LD_SME_NORMAL_UOP" },
 		{ .cev_selector = 0x0576, .cev_name = "ST_SME_NORMAL_UOP" },
 		{ .cev_selector = 0x0577, .cev_name = "LDST_SME_PRED_INACTIVE" },
+		{ .cev_selector = 0x0580, .cev_name = "LDST_MEM_ACCESS_CHECKED_X2K" },
 		{ .cev_selector = 0x05a0, .cev_name = "L1D_TLB_ACCESS" },
 		{ .cev_selector = 0x05a1, .cev_name = "L1D_TLB_MISS" },
 		{ .cev_selector = 0x05a2, .cev_name = "L1D_CACHE_MISS_ST" },
@@ -923,10 +939,12 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x05b4, .cev_name = "ATOMIC_OR_EXCLUSIVE_FAIL" },
 		{ .cev_selector = 0x05e5, .cev_name = "ST_NT_UOP" },
 		{ .cev_selector = 0x05e6, .cev_name = "LD_NT_UOP" },
+		{ .cev_selector = 0x073c, .cev_name = NULL },
 		{ .cev_selector = 0x0884, .cev_name = "FLUSH_RESTART_OTHER_NONSPEC" },
 		{ .cev_selector = 0x088e, .cev_name = "INST_BRANCH_CALL" },
 		{ .cev_selector = 0x088f, .cev_name = "INST_BRANCH_RET" },
 		{ .cev_selector = 0x0890, .cev_name = "INST_BRANCH_TAKEN" },
+		{ .cev_selector = 0x0891, .cev_name = "INST_BRANCH_CALL_INDIR" },
 		{ .cev_selector = 0x0893, .cev_name = "INST_BRANCH_INDIR" },
 		{ .cev_selector = 0x0894, .cev_name = "INST_BRANCH_COND" },
 		{ .cev_selector = 0x0895, .cev_name = "INST_INT_LD" },
@@ -942,15 +960,38 @@ static const struct cpc_event_list _known_cpmu_events = {
 		{ .cev_selector = 0x08a1, .cev_name = "INST_SME_ENGINE_LD" },
 		{ .cev_selector = 0x08a2, .cev_name = "INST_SME_ENGINE_ST" },
 		{ .cev_selector = 0x08a3, .cev_name = "INST_SME_ENGINE_ALU" },
+		{ .cev_selector = 0x08a4, .cev_name = "INST_MICROCODED" },
+		{ .cev_selector = 0x08af, .cev_name = "LD_SRC_STORE_NONSPEC" },
+		{ .cev_selector = 0x08b0, .cev_name = "LD_SRC_PL2_CACHE_NONSPEC" },
+		{ .cev_selector = 0x08b1, .cev_name = "LD_SRC_LL_CACHE_NONSPEC" },
+		{ .cev_selector = 0x08b2, .cev_name = "LD_SRC_CORE_SAMECLUSTER_NONSPEC" },
+		{ .cev_selector = 0x08b3, .cev_name = "LD_SRC_OTHERCLUSTER_NONSPEC" },
+		{ .cev_selector = 0x08b4, .cev_name = "LD_SRC_OTHERCLUSTER_OTHERDIE_NONSPEC" },
+		{ .cev_selector = 0x08b9, .cev_name = "LD_SRC_MEMSYS_NONSPEC" },
+		{ .cev_selector = 0x08ba, .cev_name = "LD_SRC_MEMSYS_OTHERDIE_NONSPEC" },
 		{ .cev_selector = 0x08bf, .cev_name = "L1D_CACHE_MISS_LD_NONSPEC" },
 		{ .cev_selector = 0x08c0, .cev_name = "L1D_CACHE_MISS_ST_NONSPEC" },
 		{ .cev_selector = 0x08c1, .cev_name = "L1D_TLB_MISS_NONSPEC" },
 		{ .cev_selector = 0x08c4, .cev_name = "ST_MEM_ORDER_VIOL_LD_NONSPEC" },
 		{ .cev_selector = 0x08c5, .cev_name = "BRANCH_COND_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x08c6, .cev_name = "BRANCH_INDIR_MISPRED_NONSPEC" },
+		{ .cev_selector = 0x08c7, .cev_name = "BRANCH_BR_INDIR_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x08c8, .cev_name = "BRANCH_RET_INDIR_MISPRED_NONSPEC" },
 		{ .cev_selector = 0x08ca, .cev_name = "BRANCH_CALL_INDIR_MISPRED_NONSPEC" },
+		{ .cev_selector = 0x0916, .cev_name = "PL2_CACHE_ACCESS_MMU" },
+		{ .cev_selector = 0x0917, .cev_name = "PL2_CACHE_MISS_MMU" },
+		{ .cev_selector = 0x0918, .cev_name = "PL2_CACHE_ACCESS_INSTRUCTION" },
+		{ .cev_selector = 0x0919, .cev_name = "PL2_CACHE_MISS_INSTRUCTION" },
+		{ .cev_selector = 0x091b, .cev_name = "PL2_CACHE_MISS_LD" },
+		{ .cev_selector = 0x091c, .cev_name = "PL2_CACHE_ACCESS_ST" },
+		{ .cev_selector = 0x091d, .cev_name = "PL2_CACHE_MISS_ST" },
+		{ .cev_selector = 0x091e, .cev_name = "PL2_CACHE_ACCESS" },
+		{ .cev_selector = 0x091f, .cev_name = "PL2_CACHE_MISS" },
+		{ .cev_selector = 0x09e0, .cev_name = NULL },
 		{ .cev_selector = 0x4006, .cev_name = "L1I_CACHE_MISS_DEMAND" },
+		{ .cev_selector = 0x4024, .cev_name = "ARM_MEM_ACCESS_CHECKED" },
+		{ .cev_selector = 0x4025, .cev_name = "ARM_MEM_ACCESS_CHECKED_RD" },
+		{ .cev_selector = 0x4026, .cev_name = "ARM_MEM_ACCESS_CHECKED_WR" },
 	},
 #else
 	.cel_event_count = 0,

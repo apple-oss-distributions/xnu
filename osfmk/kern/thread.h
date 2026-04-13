@@ -139,6 +139,7 @@
 #include <os/refcnt.h>
 
 #include <ipc/ipc_kmsg.h>
+#include <ipc/ipc_policy.h>
 
 #include <machine/atomic.h>
 #include <machine/cpu_data.h>
@@ -206,11 +207,6 @@ struct thread_ro {
 #endif
 	struct task                *tro_task;
 
-	struct ipc_port            *tro_ports[THREAD_SELF_PORT_COUNT];  /* no right */
-#if CONFIG_CSR
-	struct ipc_port            *tro_settable_self_port;             /* send right */
-#endif /* CONFIG_CSR */
-
 	struct exception_action    *tro_exc_actions;
 };
 
@@ -262,6 +258,19 @@ __options_decl(thread_set_status_flags_t, uint32_t, {
  */
 #define CTID_SIZE_BIT 20
 typedef uint32_t ctid_t;
+
+#define THREAD_BOUND_CLUSTER_NONE UINT32_MAX
+#define THREAD_BOUND_PSET_NONE    PSET_ID_INVALID
+
+/* Thread resume modes */
+__options_closed_decl(thread_suspend_mode, uint8_t, {
+	/* calling from thread_resume */
+	THREAD_SUSPEND_NORMAL    = 0,
+	/* calling from thread_resume */
+	THREAD_SUSPEND_LEGACY    = 1,
+	/* calling from thread_suspension_no_senders */
+	THREAD_SUSPEND_ALL        = 2,
+});
 
 #endif /* XNU_KERNEL_PRIVATE */
 #ifdef MACH_KERNEL_PRIVATE
@@ -322,6 +331,9 @@ __options_decl(thread_exclaves_state_flags_t, uint16_t, {
 	 * Must not re-enter exclaves or return to Darwin userspace.
 	 */
 	TH_EXCLAVES_RESUME_PANIC_THREAD        = 0x80,
+	/* Thread is an AOE exclave thread
+	 */
+	TH_EXCLAVES_AOE                        = 0x100,
 });
 #define TH_EXCLAVES_STATE_ANY           ( \
     TH_EXCLAVES_RPC               | \
@@ -382,6 +394,8 @@ typedef union thread_rr_state {
 	};
 } thread_rr_state_t;
 
+struct vm_map_lock_ctx;
+
 struct thread {
 #if MACH_ASSERT
 #define THREAD_MAGIC 0x1fc01fc01fc01fc0ULL /* materializes with a single mov immediate */
@@ -419,7 +433,7 @@ struct thread {
 	struct priority_queue_sched_max base_inheritor_queue; /* Inheritor queue for user promotion */
 
 #if CONFIG_SCHED_EDGE
-	bool            th_bound_cluster_enqueued;
+	bool            th_bound_pset_enqueued;
 	bool            th_shared_rsrc_enqueued[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 	bool            th_shared_rsrc_heavy_user[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 	bool            th_shared_rsrc_heavy_perf_control[CLUSTER_SHARED_RSRC_TYPE_COUNT];
@@ -467,9 +481,6 @@ struct thread {
 #define TH_OPT_IPC_TG_BLOCKED   0x2000          /* Thread blocked in sync IPC and has made the thread group blocked callout */
 #define TH_OPT_FORCED_LEDGER    0x4000          /* Thread has a forced CPU limit  */
 #define TH_IN_MACH_EXCEPTION    0x8000          /* Thread is currently handling a mach exception */
-#if CONFIG_EXCLAVES
-#define TH_OPT_AOE              0x10000   /* Thread is an AOE exclave thread */
-#endif /* CONFIG_EXCLAVES */
 
 	bool                    wake_active;    /* wake event on stop */
 	bool                    at_safe_point;  /* thread_abort_safely allowed */
@@ -578,6 +589,8 @@ struct thread {
 
 #define TH_SFLAG_FAILSAFE_REPORTED 0x400000 /* whether the kernel has already logged that thread triggered the failsafe (to prevent log spam) */
 
+#define TH_SFLAG_AUTO_RESUMED 0x800000 /* thread is auto resumed after the suspending task exited */
+
 	int16_t                 sched_pri;              /* scheduled (current) priority */
 	int16_t                 base_pri;               /* effective base priority (equal to req_base_pri unless TH_SFLAG_BASE_PRI_FROZEN) */
 	int16_t                 req_base_pri;           /* requested base priority */
@@ -594,9 +607,11 @@ struct thread {
 
 	uint32_t                rwlock_count;           /* Number of lck_rw_t locks held by thread */
 	struct smrq_slist_head  smr_stack;
-#ifdef DEBUG_RW
-	rw_lock_debug_t         rw_lock_held;           /* rw_locks currently held by the thread */
-#endif /* DEBUG_RW */
+#if MACH_ASSERT
+	struct rw_lock_debug    rw_lock_held;           /* rw_locks currently held by the thread */
+#endif /* MACH_ASSERT */
+
+	struct vm_map_lock_ctx  *vm_map_lock_ctx_held;  /* range lock currently declared by the thread (may or may not be locked) */
 
 	integer_t               importance;             /* task-relative importance */
 
@@ -763,6 +778,7 @@ struct thread {
 
 	/* User level suspensions */
 	int32_t                 user_stop_count;
+	int32_t                 legacy_user_stop_count;
 
 	/* IPC data structures */
 #if IMPORTANCE_INHERITANCE
@@ -816,7 +832,12 @@ struct thread {
 
 	decl_lck_mtx_data(, mutex);
 
-	struct ipc_port         *ith_special_reply_port;   /* ref to special reply port */
+	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("thread.ith_special_reply_port") ith_special_reply_port;       /* ref to special reply port */
+	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("thread.thread_ports") thread_ports[THREAD_SELF_PORT_COUNT];   /* no right */
+#if CONFIG_CSR
+	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("thread.thread_settable_self_port") thread_settable_self_port; /* send right */
+#endif /* CONFIG_CSR */
+	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("thread.thread_resume_port") thread_resume_port;
 
 #if CONFIG_DTRACE
 	uint16_t                t_dtrace_flags;         /* DTrace thread states */
@@ -864,8 +885,50 @@ struct thread {
 	uint32_t                kperf_pet_cnt;  /* how many times a thread has been sampled by PET */
 #if CONFIG_EXCLAVES
 	uint32_t                kperf_exclaves_ast;
-#endif
-#endif
+#endif /* CONFIG_EXCLAVES */
+#endif /* KPERF */
+
+	_Atomic uint16_t        t_telemetry_ast;
+
+#if CONFIG_MEMORY_MICROSTACKSHOT
+	/*
+	 * Metadata for a page grab sample emitted in microstackshots.
+	 */
+	struct {
+		/*
+		 * The number of UPL grabs generating samples on this thread.
+		 */
+		uint8_t tpgi_upl_count;
+		/*
+		 * The number of IOPL grabs generating samples on this thread.
+		 */
+		uint8_t tpgi_iopl_count;
+		/*
+		 * The VM tag for the pages being grabbed.
+		 */
+		uint16_t tpgi_tag;
+	} t_page_grab_info;
+
+	/*
+	 * Metadata for a VM fault sample emitted in microstackshots.
+	 */
+	struct {
+		/*
+		 * The virtual address of the VM fault.
+		 */
+		uint64_t tvfi_va:48;
+		/*
+		 * How the fault was resolved, what source it came from (e.g. page
+		 * page, demand I/O, speculative, etc.).
+		 */
+		uint64_t  tvfi_type:8;
+		/*
+		 * Any flags related to the fault; see `telemetry.h`'s
+		 * `telemetry_vm_fault_flags_t`.
+		 */
+		uint64_t  tvfi_flags:8;
+	} t_vm_fault_info;
+#endif /* CONFIG_MEMORY_MICROSTACKSHOT */
 
 #ifdef CONFIG_CPU_COUNTERS
 	/* accumulated performance counters for this thread */
@@ -880,9 +943,9 @@ struct thread {
 	/* Statistics accumulated per-thread and aggregated per-task */
 	uint32_t                syscalls_unix;
 	uint32_t                syscalls_mach;
-	ledger_t                t_ledger;
-	ledger_t                t_threadledger; /* per thread ledger */
-	ledger_t                t_bankledger;                /* ledger to charge someone */
+	ledger_t                t_ledger;              /* shortcut to task ledger */
+	ledger_t                t_threadledger;        /* per thread ledger */
+	ledger_t                t_bankledger;          /* ledger to charge someone */
 	uint64_t                t_deduct_bank_ledger_time;   /* cpu time to be deducted from bank ledger */
 	uint64_t                t_deduct_bank_ledger_energy; /* energy to be deducted from bank ledger */
 
@@ -925,16 +988,23 @@ struct thread {
 	    callout_woken_from_icontext:1,
 	    callout_woken_from_platform_idle:1,
 	    callout_woke_thread:1,
-	    mach_exc_fatal:1,
+	/*
+	 * If a pending exception does not have this bit set, and a new exception
+	 * is raised that does have this bit set, the new exception will overwrite
+	 * the prior one.
+	 * If the prior and new exceptions both have this bit set, the exception raised
+	 * first will be retained.
+	 */
+	    mach_exc_sticky:1,
 	    mach_exc_ktriage:1,
 	    thread_bitfield_unused:11;
 
-#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
 	/*
-	 * Cluster to which the thread is soft-bound for scheduling. The thread will always run
-	 * on its bound cluster unless that cluster has been derecommended for scheduling.
+	 * Pset to which the thread is soft-bound for scheduling. The thread will
+	 * always run on its bound pset unless that pset has been derecommended for
+	 * scheduling.
 	 */
-	uint32_t                 th_bound_cluster_id;
+	pset_id_t               th_bound_pset_id;
 
 #if CONFIG_THREAD_GROUPS
 #if CONFIG_PREADOPT_TG
@@ -1074,6 +1144,12 @@ struct thread {
 	 */
 	task_t iomd_faultable_buffer_provider;
 #endif /* HAS_MTE */
+
+	/*
+	 * This accounting is similar in spirit to `mach_exc_info` et al: this field stashes metadata
+	 * about an in-flight IPC policy violation for which we've raised an AST but have not yet processed it.
+	 */
+	ipc_sec_policy_in_flight_violation_info_t pending_ipc_sec_policy_violation_info;
 };
 
 #define ith_receive         saved.receive
@@ -1342,7 +1418,7 @@ extern kern_return_t    machine_thread_set_tsd_base(
 	mach_vm_offset_t                tsd_base);
 
 #define thread_mtx_try(thread)                  lck_mtx_try_lock(&(thread)->mutex)
-#define thread_mtx_held(thread)                 lck_mtx_assert(&(thread)->mutex, LCK_MTX_ASSERT_OWNED)
+#define thread_mtx_held(thread)                 LCK_MTX_ASSERT_DEBUG(&(thread)->mutex, LCK_MTX_ASSERT_OWNED)
 
 extern void thread_apc_ast(thread_t thread);
 
@@ -1453,7 +1529,8 @@ extern kern_return_t    thread_setstatus_from_user(
 	mach_msg_type_number_t  count,
 	thread_state_t          old_tstate,
 	mach_msg_type_number_t  old_count,
-	thread_set_status_flags_t flags);
+	thread_set_status_flags_t flags,
+	audit_token_t           *audit);
 
 extern kern_return_t    thread_getstatus(
 	thread_t                thread,
@@ -1510,7 +1587,7 @@ extern void thread_depress_timer_setup(
 #define THREAD_CPULIMIT_DISABLE         0x3
 
 struct _thread_ledger_indices {
-	int cpu_time;
+	ledger_entry_id_t cpu_time;
 };
 
 extern struct _thread_ledger_indices thread_ledgers;
@@ -1685,9 +1762,66 @@ extern int is_64signalregset(void);
 
 extern void act_set_kperf(thread_t);
 extern void act_set_astledger(thread_t thread);
-extern void act_set_astledger_async(thread_t thread);
-extern void act_set_io_telemetry_ast(thread_t);
-extern void act_set_macf_telemetry_ast(thread_t);
+
+/**
+ * Options for how to sample for telemetry, if @code AST_TELEMETRY is set in
+ * @code ast_bits on a {@code struct thread}.
+ */
+__options_decl(telemetry_ast_t, uint16_t, {
+	/**
+	 * Telemetry triggered by a Performance Monitor Interrupt (PMI), like from
+	 * the CPU cycle counter.  Only available if @code CONFIG_CPU_COUNTERS
+	 * is configured.
+	 */
+	TELEMETRY_AST_PMI       = 0x0001,
+
+	/**
+	 * Telemetry triggered by logical disk writes.
+	 */
+	TELEMETRY_AST_IO        = 0x0002,
+
+	/**
+	 * Telemetry triggered by a hook invoked by the Mandatory Access Control
+	 * Framework (MACF).  Only available if @code CONFIG_MACF is configured.
+	 */
+	TELEMETRY_AST_MACF      = 0x0004,
+
+	/**
+	 * Telemetry triggered by a VM fault.  Only available if
+	 * @code CONFIG_MEMORY_MICROSTACKSHOTS is configured.
+	 *
+	 * Must use @code asct_set_telemetry_ast_vm_fault to set.
+	 */
+	TELEMETRY_AST_VM_FAULT  = 0x0008,
+
+	/**
+	 * Telemetry triggered by a page grab.  Only available if
+	 * @code CONFIG_MEMORY_MICROSTACKSHOTS is configured.
+	 *
+	 * Must use @code asct_set_telemetry_ast_page_grab to set.
+	 */
+	TELEMETRY_AST_PAGE_GRAB = 0x0010,
+
+	/*
+	 * Add additional triggers above this point.
+	 */
+
+	/**
+	 * Telemetry was triggered while the thread was running in user space.
+	 */
+	TELEMETRY_AST_USER      = 0x1000,
+
+	/**
+	 * Telemetry was triggered while the thread was running in the kernel.
+	 */
+	TELEMETRY_AST_KERNEL    = 0x2000,
+});
+
+extern void act_set_telemetry_ast(thread_t, telemetry_ast_t);
+extern telemetry_ast_t act_clear_telemetry_ast(thread_t thread);
+extern void act_set_telemetry_ast_vm_fault(thread_t, uint64_t, int, uint16_t);
+extern void act_set_telemetry_ast_page_grab(thread_t, bool, uint16_t);
+
 extern void act_set_astproc_resource(thread_t);
 
 extern vm_offset_t thread_get_kernel_stack(thread_t);
@@ -1732,6 +1866,10 @@ extern void mach_port_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
 extern void virt_memory_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
+#if CONFIG_FREEZE
+extern void frozen_swapin_guard_ast(thread_t,
+    mach_exception_code_t, mach_exception_subcode_t);
+#endif /* CONFIG_FREEZE */
 extern void thread_ast_mach_exception(thread_t,
     int, exception_type_t, mach_exception_code_t, mach_exception_subcode_t, bool, bool);
 extern void thread_guard_violation(thread_t,
@@ -1827,6 +1965,9 @@ extern ctid_t thread_get_ctid(thread_t thread);
 typedef struct thread_pri_floor {
 	thread_t thread;
 } thread_pri_floor_t;
+
+/* Accessor functions for thread block hint information */
+extern uint32_t thread_get_block_hint(thread_t thread);
 
 #ifdef MACH_KERNEL_PRIVATE
 extern void thread_floor_boost_ast(thread_t thread);
@@ -2031,6 +2172,18 @@ extern void thread_reference(
 
 extern void thread_deallocate(
 	thread_t        thread);
+
+#ifdef XNU_KERNEL_PRIVATE
+extern kern_return_t
+thread_suspend_internal(
+	thread_t            thread,
+	thread_suspend_mode  mode);
+
+extern kern_return_t
+thread_resume_internal(
+	thread_t            thread,
+	thread_suspend_mode mode);
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*! @function kernel_thread_start
  *   @abstract Create a kernel thread.

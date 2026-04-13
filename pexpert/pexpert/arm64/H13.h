@@ -51,21 +51,14 @@
 #define HAS_SPECRES             1 /* Supports SPECRES. */
 
 #define CPU_HAS_APPLE_PAC                    1
-#define HAS_UNCORE_CTRS                      1
-#define UNCORE_VERSION                       2
-#define UNCORE_PER_CLUSTER                   1
-#define UNCORE_NCTRS                         16
-#define CORE_NCTRS                           10
-#define HAS_CPMU_PC_CAPTURE                  1
 
 /* Performance Monitor */
 #define CPMU_PMC_COUNT                       10
 #define CPMU_INSTRUCTION_MATCHING            1
 #define CPMU_MEMORY_FILTERING                1
+#define HAS_CPMU_PC_CAPTURE                  1
 #define HAS_UPMU                             1
-#define UPMU_VERSION                         2
 #define UPMU_PMC_COUNT                       16
-#define UPMU_PER_CLUSTER                     1
 #define UPMU_AF_LATENCY                      1
 #define UPMU_META_EVENTS                     1
 

@@ -114,8 +114,7 @@ __options_decl(port_intrans_options_t, uint32_t, {
 /* Initialize a thread's IPC state */
 extern void ipc_thread_init(
 	task_t          task,
-	thread_t        thread,
-	thread_ro_t     tro);
+	thread_t        thread);
 
 /* Disable IPC access to a thread */
 extern void ipc_thread_disable(

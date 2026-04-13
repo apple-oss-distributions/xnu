@@ -235,7 +235,7 @@ task_identity_token_get_task_port(
 	/* holding a ref on (corpse) task */
 
 	if (flavor == TASK_FLAVOR_CONTROL && task == current_task()) {
-		/* copyout determines immovability, see `should_mark_immovable_send` */
+		/* copyout determines immovability, see `ipc_should_mark_immovable_send` */
 		*portp = convert_task_to_port(task); /* consumes task ref */
 		return KERN_SUCCESS;
 	}

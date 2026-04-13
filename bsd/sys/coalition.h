@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -50,11 +50,6 @@ int coalition_info_resource_usage(uint64_t cid, struct coalition_resource_usage 
 int coalition_info_set_name(uint64_t cid, const char *name, size_t size);
 int coalition_info_set_efficiency(uint64_t cid, uint64_t flags);
 int coalition_ledger_set_logical_writes_limit(uint64_t cid, int64_t limit);
-
-#ifdef PRIVATE
-int coalition_info_pid_list(uint64_t cid, pid_t *pid_list, size_t *size_inout);
-int coalition_info_debug_info(uint64_t cid, struct coalinfo_debuginfo *cru, size_t sz);
-#endif /* PRIVATE */
 
 #else /* KERNEL */
 
@@ -266,10 +261,10 @@ coalition_get_pid_list(__unused coalition_t coal,
 
 #endif /* KERNEL */
 
-#ifdef PRIVATE
-#define COALITION_INFO_PID_LIST_MAX_PIDS 512
-#endif
-
 __END_DECLS
+
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
+#include <sys/coalition_private.h>
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* _SYS_COALITION_H_ */

@@ -52,8 +52,9 @@ T_GLOBAL_META(
 	T_META_ASROOT(true),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("networking"),
-	T_META_CHECK_LEAKS(false));
-
+	T_META_CHECK_LEAKS(false),
+	T_META_OWNER("vlubet")
+	);
 
 #define MAXBUF 32
 static void

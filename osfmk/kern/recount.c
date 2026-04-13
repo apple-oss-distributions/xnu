@@ -178,7 +178,7 @@ recount_snapshot_speculative(struct recount_snap *snap)
 {
 	snap->rsn_time_mach = recount_timestamp_speculative();
 #if CONFIG_PERVASIVE_CPI
-	mt_cur_cpu_cycles_instrs_speculative(&snap->rsn_cycles, &snap->rsn_insns);
+	snap->rsn_cpu_counts = cpc_cycles_instrs_spec();
 #endif // CONFIG_PERVASIVE_CPI
 }
 
@@ -341,8 +341,8 @@ recount_usage_add_snap(struct recount_usage *usage, recount_level_t level,
 
 	metrics->rm_time_mach += snap->rsn_time_mach;
 #if CONFIG_PERVASIVE_CPI
-	metrics->rm_cycles += snap->rsn_cycles;
-	metrics->rm_instructions += snap->rsn_insns;
+	metrics->rm_cycles += snap->rsn_cpu_counts.cycles;
+	metrics->rm_instructions += snap->rsn_cpu_counts.instrs;
 #else // CONFIG_PERVASIVE_CPI
 #pragma unused(usage)
 #endif // !CONFIG_PERVASIVE_CPI
@@ -526,10 +526,10 @@ recount_snap_diff(struct recount_snap *result,
 	assert3u(lhs->rsn_time_mach, >=, rhs->rsn_time_mach);
 	result->rsn_time_mach = lhs->rsn_time_mach - rhs->rsn_time_mach;
 #if CONFIG_PERVASIVE_CPI
-	assert3u(lhs->rsn_insns, >=, rhs->rsn_insns);
-	assert3u(lhs->rsn_cycles, >=, rhs->rsn_cycles);
-	result->rsn_cycles = lhs->rsn_cycles - rhs->rsn_cycles;
-	result->rsn_insns = lhs->rsn_insns - rhs->rsn_insns;
+	assert3u(lhs->rsn_cpu_counts.instrs, >=, rhs->rsn_cpu_counts.instrs);
+	assert3u(lhs->rsn_cpu_counts.cycles, >=, rhs->rsn_cpu_counts.cycles);
+	result->rsn_cpu_counts.cycles = lhs->rsn_cpu_counts.cycles - rhs->rsn_cpu_counts.cycles;
+	result->rsn_cpu_counts.instrs = lhs->rsn_cpu_counts.instrs - rhs->rsn_cpu_counts.instrs;
 #endif // CONFIG_PERVASIVE_CPI
 }
 
@@ -888,6 +888,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	struct recount_track *pr_track = was_idle ? NULL : recount_update_start(
 		&processor->pr_recount.rpr_active, recount_processor_plan.rpl_topo,
 		processor);
+	// Publish updates to the sequence locks.
 	recount_update_commit();
 
 	recount_usage_add_snap(&th_track->rt_usage, level, to_add);
@@ -899,6 +900,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 		recount_usage_add_snap(&pr_track->rt_usage, level, to_add);
 	}
 
+	// Publish the new values of all the data.
 	recount_update_commit();
 	recount_update_end(th_track);
 	if (__probable(!was_idle)) {
@@ -908,6 +910,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 		recount_update_end(tk_track);
 		recount_update_end(pr_track);
 	}
+	// No need for a release barrier after updating the locks above.
 }
 
 void
@@ -985,7 +988,7 @@ recount_log_switch_thread(const struct recount_snap *snap)
 #if CONFIG_PERVASIVE_CPI
 	if (kdebug_debugid_explicitly_enabled(MT_KDBG_IC_CPU_CSWITCH)) {
 		// In Monotonic's event hierarchy for backwards-compatibility.
-		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH, snap->rsn_insns, snap->rsn_cycles);
+		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH, snap->rsn_cpu_counts.instrs, snap->rsn_cpu_counts.cycles);
 	}
 #else // CONFIG_PERVASIVE_CPI
 #pragma unused(snap)
@@ -1001,7 +1004,7 @@ recount_log_switch_thread_on(const struct recount_snap *snap)
 			snap = recount_get_snap(current_processor());
 		}
 		// In Monotonic's event hierarchy for backwards-compatibility.
-		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH_ON, snap->rsn_insns, snap->rsn_cycles);
+		KDBG_RELEASE(MT_KDBG_IC_CPU_CSWITCH_ON, snap->rsn_cpu_counts.instrs, snap->rsn_cpu_counts.cycles);
 	}
 #else // CONFIG_PERVASIVE_CPI
 #pragma unused(snap)
@@ -1196,6 +1199,7 @@ recount_processor_idle(struct recount_processor *pr, struct recount_snap *snap)
 	uint64_t new_state_stamp = RCT_PR_IDLING | snap->rsn_time_mach;
 	os_atomic_store_wide(&pr->rpr_state_last_abs_time, new_state_stamp,
 	    relaxed);
+	os_atomic_inc(&pr->rpr_idle_count, relaxed);
 }
 
 OS_PURE OS_ALWAYS_INLINE
@@ -1210,7 +1214,7 @@ recount_processor_init(processor_t processor)
 {
 #if __AMP__
 	processor->pr_recount.rpr_cpu_kind_index =
-	    processor->processor_set->pset_cluster_type == PSET_AMP_P ?
+	    processor->processor_set->pset_type == PSET_AMP_P ?
 	    RCT_CPU_PERFORMANCE : RCT_CPU_EFFICIENCY;
 #else // __AMP__
 #pragma unused(processor)

@@ -1909,13 +1909,15 @@ nx_netif_compat_xmit_frame(struct nexus_adapter *na, struct mbuf *m,
 		STATS_INC(nifs, NETIF_STATS_TX_COPY_SUM);
 	}
 
-	nif->nif_pkt_copy_to_mbuf(NR_TX, ph, pkt->pkt_headroom, m, 0, len,
+	ret = nif->nif_pkt_copy_to_mbuf(NR_TX, ph, pkt->pkt_headroom, m, 0, len,
 	    PACKET_HAS_PARTIAL_CHECKSUM(pkt), pkt->pkt_csum_tx_start_off);
 
-	/* used for tx notification */
-	ret = mbuf_set_tx_compl_data(m, (uintptr_t)ifp, (uintptr_t)NULL);
-	ASSERT(ret == 0);
+	if (ret == 0) {
+		/* used for tx notification */
+		ret = mbuf_set_tx_compl_data(m, (uintptr_t)ifp, (uintptr_t)NULL);
+		ASSERT(ret == 0);
 
-	ret = dlil_output_handler(ifp, m);
+		ret = dlil_output_handler(ifp, m);
+	}
 	return ret;
 }

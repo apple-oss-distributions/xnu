@@ -290,7 +290,7 @@ rtclock_init(void)
 
 	assert(!ml_get_interrupts_enabled());
 
-	if (cpu_number() == master_cpu) {
+	if (cpu_number() == boot_cpu_id) {
 		assert(tscFreq);
 
 		/*

@@ -85,6 +85,7 @@
 #include <os/refcnt.h>
 #include <libkern/OSDebug.h>
 #include <kern/uipc_domain.h>
+#include <net/if_ports_used.h>
 
 #define NX_NETIF_MAXRINGS       NX_MAX_NUM_RING_PAIR
 #define NX_NETIF_MINSLOTS       2       /* XXX same as above */
@@ -1673,6 +1674,9 @@ nx_netif_llink_notify(struct kern_nexus *nx, struct netif_llink *llink,
 	struct netif_qset *qset;
 
 	SLIST_FOREACH(qset, &llink->nll_qset_list, nqs_list) {
+		if ((qset->nqs_flags & NETIF_QSET_FLAG_EXT_INITED) == 0) {
+			continue;
+		}
 		(void) nx_tx_qset_notify(nx, qset->nqs_ctx);
 	}
 }
@@ -3798,6 +3802,12 @@ netif_rx_notify(struct __kern_channel_ring *ring, struct proc *p,
 			ring->ckr_netif_mit_stats(ring, stats.nps_pkts,
 			    stats.nps_bytes);
 		}
+
+		/* Increment LPW receive statistics */
+		if (__improbable(is_net_lpw_mode())) {
+			os_atomic_add(&nif->nif_ifp->if_data.ifi_lpw_ipackets, stats.nps_pkts, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_rx_packets, stats.nps_pkts, relaxed);
+		}
 	}
 
 put_out:
@@ -4413,9 +4423,21 @@ kern_netif_increment_queue_stats(kern_netif_queue_t queue,
 	if ((queue->nq_flags & NETIF_QUEUE_IS_RX) == 0) {
 		os_atomic_add(&ifp->if_data.ifi_opackets, pkt_count, relaxed);
 		os_atomic_add(&ifp->if_data.ifi_obytes, byte_count, relaxed);
+
+		/* Increment LPW transmit statistics */
+		if (__improbable(is_net_lpw_mode())) {
+			os_atomic_add(&ifp->if_data.ifi_lpw_opackets, pkt_count, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_tx_packets, pkt_count, relaxed);
+		}
 	} else {
 		os_atomic_add(&ifp->if_data.ifi_ipackets, pkt_count, relaxed);
 		os_atomic_add(&ifp->if_data.ifi_ibytes, byte_count, relaxed);
+
+		/* Increment LPW receive statistics */
+		if (__improbable(is_net_lpw_mode())) {
+			os_atomic_add(&ifp->if_data.ifi_lpw_ipackets, pkt_count, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_rx_packets, pkt_count, relaxed);
+		}
 	}
 
 	if (ifp->if_data_threshold != 0) {
@@ -4513,6 +4535,12 @@ kern_netif_queue_rx_enqueue(kern_netif_queue_t queue, kern_packet_t ph_chain,
 		sk_sync_unprotect(protect);
 		kern_netif_increment_queue_stats(queue, (uint32_t)stats.nps_pkts,
 		    (uint32_t)stats.nps_bytes);
+
+		/* Increment LPW receive statistics */
+		if (__improbable(is_net_lpw_mode())) {
+			os_atomic_add(&llink->nll_nif->nif_ifp->if_data.ifi_lpw_ipackets, stats.nps_pkts, relaxed);
+			os_atomic_add(&if_ports_used_stats.ifpu_lpw_rx_packets, stats.nps_pkts, relaxed);
+		}
 	}
 }
 

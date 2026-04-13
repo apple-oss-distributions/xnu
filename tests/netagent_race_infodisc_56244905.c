@@ -17,6 +17,11 @@
 
 #include <darwintest.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("NetworkExtension"));
+
 static int finished = 0;
 
 #ifndef KEV_NETAGENT_SUBCLASS

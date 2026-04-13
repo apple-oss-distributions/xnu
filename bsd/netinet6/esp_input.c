@@ -315,6 +315,14 @@ esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 		goto bad;
 	}
 
+	/*
+	 * We exit LPW mode when have an ESP packet we can begin to process
+	 */
+	if (__improbable(if_is_lpw_enabled(m->m_pkthdr.rcvif))) {
+		if_ports_used_match_mbuf(m->m_pkthdr.rcvif, PF_INET, m);
+		if_exit_lpw(m->m_pkthdr.rcvif, "LPW ESP");
+	}
+
 	seq = ntohl(((struct newesp *)esp)->esp_seq);
 
 	if ((sav->flags2 & SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) ==
@@ -371,14 +379,14 @@ esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 			goto noreplaycheck;
 		}
 		siz = (((*sumalgo->sumsiz)(sav) + 3) & ~(4 - 1));
-		if (m->m_pkthdr.len < off + ESPMAXLEN + siz) {
+		if (__improbable(m->m_pkthdr.len < off + ESPMAXLEN + siz)) {
 			ipseclog((LOG_DEBUG,
 			    "invalid ESP packet length %u, missing ICV\n",
 			    m->m_pkthdr.len));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
 			goto bad;
 		}
-		if (AH_MAXSUMSIZE < siz) {
+		if (__improbable(AH_MAXSUMSIZE < siz)) {
 			ipseclog((LOG_DEBUG,
 			    "internal error: AH_MAXSUMSIZE must be larger than %u\n",
 			    (u_int32_t)siz));
@@ -388,14 +396,14 @@ esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 
 		m_copydata(m, m->m_pkthdr.len - (int)siz, (int)siz, (caddr_t) &sum0[0]);
 
-		if (esp_auth(m, off, m->m_pkthdr.len - off - siz, sav, sum)) {
+		if (__improbable(esp_auth(m, off, m->m_pkthdr.len - off - siz, sav, sum))) {
 			ipseclog((LOG_WARNING, "auth fail in IPv4 ESP input: %s %s\n",
 			    ipsec4_logpacketstr(ip, spi), ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_espauthfail);
 			goto bad;
 		}
 
-		if (cc_cmp_safe(siz, sum0, sum)) {
+		if (__improbable(cc_cmp_safe(siz, sum0, sum) != 0)) {
 			ipseclog((LOG_WARNING, "cc_cmp fail in IPv4 ESP input: %s %s\n",
 			    ipsec4_logpacketstr(ip, spi), ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_espauthfail);
@@ -409,7 +417,7 @@ esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 		 * update replay window.
 		 */
 		if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[replay_index] != NULL) {
-			if (ipsec_updatereplay(seq, sav, (u_int8_t)replay_index)) {
+			if (__improbable(ipsec_updatereplay(seq, sav, (u_int8_t)replay_index))) {
 				IPSEC_STAT_INCREMENT(ipsecstat.in_espreplay);
 				goto bad;
 			}
@@ -489,7 +497,7 @@ noreplaycheck:
 	m->m_flags |= M_DECRYPTED;
 
 	if (algo->finalizedecrypt) {
-		if ((*algo->finalizedecrypt)(sav, saved_icv, algo->icvlen)) {
+		if (__improbable((*algo->finalizedecrypt)(sav, saved_icv, algo->icvlen))) {
 			ipseclog((LOG_ERR, "esp4 packet decryption ICV failure: %s\n",
 			    ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsecstat.in_espauthfail);
@@ -503,7 +511,7 @@ noreplaycheck:
 			 * update replay window.
 			 */
 			if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[replay_index] != NULL) {
-				if (ipsec_updatereplay(seq, sav, (u_int8_t)replay_index)) {
+				if (__improbable(ipsec_updatereplay(seq, sav, (u_int8_t)replay_index))) {
 					IPSEC_STAT_INCREMENT(ipsecstat.in_espreplay);
 					goto bad;
 				}
@@ -1028,6 +1036,14 @@ esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 		goto bad;
 	}
 
+	/*
+	 * We exit LPW mode when have an ESP packet we can begin to process
+	 */
+	if (__improbable(if_is_lpw_enabled(m->m_pkthdr.rcvif))) {
+		if_ports_used_match_mbuf(m->m_pkthdr.rcvif, PF_INET6, m);
+		if_exit_lpw(m->m_pkthdr.rcvif, "LPW ESP");
+	}
+
 	seq = ntohl(((struct newesp *)esp)->esp_seq);
 
 	if ((sav->flags2 & SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) ==
@@ -1084,7 +1100,7 @@ esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 			goto noreplaycheck;
 		}
 		siz = (((*sumalgo->sumsiz)(sav) + 3) & ~(4 - 1));
-		if (m->m_pkthdr.len < off + ESPMAXLEN + siz) {
+		if (__improbable(m->m_pkthdr.len < off + ESPMAXLEN + siz)) {
 			ipseclog((LOG_DEBUG,
 			    "invalid ESP packet length %u, missing ICV\n",
 			    m->m_pkthdr.len));
@@ -1101,14 +1117,14 @@ esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 
 		m_copydata(m, m->m_pkthdr.len - (int)siz, (int)siz, (caddr_t) &sum0[0]);
 
-		if (esp_auth(m, off, m->m_pkthdr.len - off - siz, sav, sum)) {
+		if (__improbable(esp_auth(m, off, m->m_pkthdr.len - off - siz, sav, sum))) {
 			ipseclog((LOG_WARNING, "auth fail in IPv6 ESP input: %s %s\n",
 			    ipsec6_logpacketstr(ip6, spi), ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_espauthfail);
 			goto bad;
 		}
 
-		if (cc_cmp_safe(siz, sum0, sum)) {
+		if (__improbable(cc_cmp_safe(siz, sum0, sum) != 0)) {
 			ipseclog((LOG_WARNING, "auth fail in IPv6 ESP input: %s %s\n",
 			    ipsec6_logpacketstr(ip6, spi), ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_espauthfail);
@@ -1122,7 +1138,7 @@ esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 		 * update replay window.
 		 */
 		if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[replay_index] != NULL) {
-			if (ipsec_updatereplay(seq, sav, (u_int8_t)replay_index)) {
+			if (__improbable(ipsec_updatereplay(seq, sav, (u_int8_t)replay_index))) {
 				IPSEC_STAT_INCREMENT(ipsec6stat.in_espreplay);
 				goto bad;
 			}
@@ -1198,7 +1214,7 @@ noreplaycheck:
 	m->m_flags |= M_DECRYPTED;
 
 	if (algo->finalizedecrypt) {
-		if ((*algo->finalizedecrypt)(sav, saved_icv, algo->icvlen)) {
+		if (__improbable((*algo->finalizedecrypt)(sav, saved_icv, algo->icvlen))) {
 			ipseclog((LOG_ERR, "esp6 packet decryption ICV failure: %s\n",
 			    ipsec_logsastr(sav)));
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_espauthfail);
@@ -1212,7 +1228,7 @@ noreplaycheck:
 			 * update replay window.
 			 */
 			if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[replay_index] != NULL) {
-				if (ipsec_updatereplay(seq, sav, (u_int8_t)replay_index)) {
+				if (__improbable(ipsec_updatereplay(seq, sav, (u_int8_t)replay_index))) {
 					IPSEC_STAT_INCREMENT(ipsec6stat.in_espreplay);
 					goto bad;
 				}

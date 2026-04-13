@@ -75,7 +75,6 @@
 extern pmap_paddr_t pmap_release_ppl_pages_to_kernel_internal(void);
 extern kern_return_t mapping_free_prime_internal(void);
 
-extern void pmap_ledger_verify_size_internal(size_t);
 extern ledger_t pmap_ledger_alloc_internal(void);
 extern void pmap_ledger_free_internal(ledger_t);
 
@@ -121,6 +120,7 @@ extern void pmap_ledger_free_internal(ledger_t);
  * Global variables exported to the rest of the internal pmap implementation.
  */
 extern lck_grp_t pmap_lck_grp;
+extern lck_attr_t pmap_lck_rw_attr;
 extern bool hib_entry_pmap_lockdown;
 extern pmap_paddr_t avail_start;
 extern pmap_paddr_t avail_end;
@@ -145,10 +145,9 @@ extern void pmap_tte_deallocate(
 extern void pmap_set_ptov_ap(unsigned int, unsigned int, boolean_t);
 #endif /* defined(PVH_FLAG_EXEC) */
 
-
 extern pmap_t current_pmap(void);
-extern void pmap_tt_ledger_credit(pmap_t, vm_size_t);
-extern void pmap_tt_ledger_debit(pmap_t, vm_size_t);
+extern void pmap_tt_ledger_credit(pmap_t, vm_size_t, bool);
+extern void pmap_tt_ledger_debit(pmap_t, vm_size_t, bool);
 
 extern void write_pte(pt_entry_t *, pt_entry_t);
 
@@ -205,8 +204,7 @@ extern void qsort(void *a, size_t n, size_t es, cmpfunc_t cmp);
 static inline void
 pmap_lock_init(pmap_t pmap)
 {
-	lck_rw_init(&pmap->rwlock, &pmap_lck_grp, 0);
-	pmap->rwlock.lck_rw_can_sleep = FALSE;
+	lck_rw_init(&pmap->rwlock, &pmap_lck_grp, &pmap_lck_rw_attr);
 }
 
 /**

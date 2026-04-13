@@ -85,18 +85,6 @@ mapping_free_prime(void)
 
 /**
  * SPTM TODO: delete this function once the SPTM pmap becomes the sole pmap implementation.
- * See pmap_ledger_verify_size_internal()'s function header for more information.
- */
-__attribute__((noreturn))
-void
-pmap_ledger_verify_size(size_t size)
-{
-	panic("%s: unsupported on non-PPL systems, size=%lu", __func__, size);
-	__builtin_unreachable();
-}
-
-/**
- * SPTM TODO: delete this function once the SPTM pmap becomes the sole pmap implementation.
  * See pmap_ledger_alloc_internal()'s function header for more information.
  */
 ledger_t

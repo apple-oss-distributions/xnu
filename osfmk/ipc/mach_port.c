@@ -281,13 +281,13 @@ mach_port_names(
 		size = size_needed;
 
 		kr = kmem_alloc(ipc_kernel_map, &addr1, size,
-		    KMA_DATA, VM_KERN_MEMORY_IPC);
+		    KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
 		kr = kmem_alloc(ipc_kernel_map, &addr2, size,
-		    KMA_DATA, VM_KERN_MEMORY_IPC);
+		    KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(ipc_kernel_map, addr1, size);
 			return KERN_RESOURCE_SHORTAGE;
@@ -1277,7 +1277,7 @@ mach_port_get_set_status(
 		ipc_pset_t pset;
 
 		kr = kmem_alloc(ipc_kernel_map, &addr, size,
-		    KMA_DATA, VM_KERN_MEMORY_IPC);
+		    KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -1531,6 +1531,13 @@ mach_port_request_notification(
 
 	if (!MACH_PORT_VALID(name)) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * Check if `notify` port can receive notifications.
+	 */
+	if (!ipc_port_can_receive_notifications(space, notify)) {
+		return KERN_INVALID_CAPABILITY;
 	}
 
 	switch (id) {
@@ -2391,17 +2398,6 @@ mach_port_construct_check_service_port(
 	return KERN_SUCCESS;
 }
 
-static bool
-mach_port_should_enforce_prp_entitlement(void)
-{
-#if XNU_TARGET_OS_OSX && CONFIG_CSR
-	/* In macOS, only enforce if SIP is on */
-	return csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0;
-#endif
-	/* default return true */
-	return true;
-}
-
 /*
  *	Routine:	mach_port_construct [kernel call]
  *	Purpose:
@@ -2450,7 +2446,8 @@ mach_port_construct(
 	case MPO_SERVICE_PORT:
 	case MPO_CONNECTION_PORT:
 	case MPO_REPLY_PORT:
-	case MPO_PROVISIONAL_REPLY_PORT:
+	case MPO_WEAK_REPLY_PORT:
+	case MPO_NOTIFICATION_PORT:
 	case MPO_EXCEPTION_PORT:
 	case MPO_CONNECTION_PORT_WITH_PORT_ARRAY:
 		break;
@@ -2493,18 +2490,21 @@ mach_port_construct(
 	case MPO_EXCEPTION_PORT:
 		label.io_type = IOT_EXCEPTION_PORT;
 		break;
+	case MPO_NOTIFICATION_PORT:
+		label.io_type = IOT_NOTIFICATION_PORT;
+		break;
 	case MPO_REPLY_PORT:
 		label.io_type = IOT_REPLY_PORT;
 		if (!ipc_should_apply_policy(policy, IPC_POLICY_ENHANCED_V1)) {
 			/*
 			 * non-hardened tasks won't adopt reply port semantics,
-			 * opt them out with provisional reply ports
+			 * opt them out with weak reply ports
 			 */
-			label.io_type = IOT_PROVISIONAL_REPLY_PORT;
+			label.io_type = IOT_WEAK_REPLY_PORT;
 		}
 		break;
-	case MPO_PROVISIONAL_REPLY_PORT:
-		label.io_type = IOT_PROVISIONAL_REPLY_PORT;
+	case MPO_WEAK_REPLY_PORT:
+		label.io_type = IOT_WEAK_REPLY_PORT;
 		break;
 	case MPO_CONNECTION_PORT_WITH_PORT_ARRAY:
 		label.io_type = IOT_CONNECTION_PORT_WITH_PORT_ARRAY;
@@ -2521,12 +2521,32 @@ mach_port_construct(
 	    ipc_should_apply_policy(policy, IPC_POLICY_ENHANCED_V1) &&
 	    !IOCurrentTaskHasEntitlement(port_policy_entitlement)) {
 		/*
-		 * enforce the policy construct entitlement on all
-		 * port types, besides provisional reply port which
-		 * requires an extra check.
+		 * Constructing this port type requires an entitlement, but this actor
+		 * is lacking the required entitlement.
+		 *
+		 * In general we should throw a policy violation, but we currently
+		 * conditionally apply this policy for weak reply ports in particular.
 		 */
-		if (!(options->flags & MPO_PROVISIONAL_REPLY_PORT) ||
-		    mach_port_should_enforce_prp_entitlement()) {
+		if ((options->flags & MPO_WEAK_REPLY_PORT)) {
+			/*
+			 * Special policy just for weak reply ports, because we're not
+			 * yet in global enforcement mode for this port type.
+			 *
+			 * Register the violation and ask what to do next.
+			 */
+			ipc_sec_policy_violation_action_t action = ipc_triage_policy_violation(
+				IPC_SEC_POLICY_DISALLOW_CONSTRUCT_WEAK_REPLY_PORT_WITHOUT_ENTITLEMENT,
+				space,
+				options->flags,
+				0,
+				IP_NULL,
+				0
+				);
+			if (action == IPC_SEC_POLICY_VIOLATION_ACTION_DENY) {
+				return KERN_DENIED;
+			}
+		} else {
+			/* General case, throw the violation */
 			mach_port_guard_exception(options->flags, 0,
 			    kGUARD_EXC_INVALID_MPO_ENTITLEMENT);
 			return KERN_DENIED;
@@ -2582,13 +2602,14 @@ mach_port_construct(
 	 *	and early returns for errors is fraught with peril.
 	 */
 
-	if (ip_is_any_service_port_type(label.io_type) ||
-	    ip_is_bootstrap_port_type(label.io_type)) {
+	if (ip_is_any_service_port_type(label.io_type)) {
 		kr = ipc_service_port_label_alloc(&sp_info, &label);
+	} else if (ip_is_bootstrap_port_type(label.io_type)) {
+		kr = ipc_bootstrap_port_label_alloc(&sp_info, &label);
 	} else if (label.io_type == IOT_CONNECTION_PORT &&
 	    options->service_port_name != MPO_ANONYMOUS_SERVICE) {
 		kr = ipc_service_port_derive_sblabel(options->service_port_name,
-		    (options->flags & MPO_FILTER_MSG), &label);
+		    &label, options->flags);
 	}
 	if (kr != KERN_SUCCESS) {
 		return kr;
@@ -2623,6 +2644,10 @@ mach_port_construct(
 		if (options->flags & MPO_TEMPOWNER) {
 			port->ip_tempowner = 1;
 		}
+	}
+
+	if (options->flags & MPO_ENFORCE_REPLY_PORT_SEMANTICS) {
+		port->ip_enforce_reply_semantics = 1;
 	}
 
 	if (options->flags & MPO_CONTEXT_AS_GUARD) {
@@ -3024,9 +3049,10 @@ mach_port_get_service_port_info(
 	/* port is locked and active */
 
 	label = ip_label_get(port);
-	if (ip_is_any_service_port_type(label.io_type) ||
-	    ip_is_bootstrap_port_type(label.io_type)) {
+	if (ip_is_any_service_port_type(label.io_type)) {
 		ipc_service_port_label_get_info(label.iol_service, sp_info);
+	} else if (ip_is_bootstrap_port_type(label.io_type)) {
+		ipc_bootstrap_port_label_get_info(label.iol_bootstrap, sp_info);
 	} else {
 		kr = KERN_INVALID_CAPABILITY;
 	}

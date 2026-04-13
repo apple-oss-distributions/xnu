@@ -1158,9 +1158,9 @@ nat464_addr_cksum_fixup(uint16_t *pc, struct nat464_addr *ao, struct nat464_addr
 		switch (naf) {
 		case PF_INET6:
 			if (do_ones_complement) {
-				*pc = ~nat464_cksum_fixup(nat464_cksum_fixup(
+				*pc = (uint16_t)~nat464_cksum_fixup(nat464_cksum_fixup(
 					    nat464_cksum_fixup(nat464_cksum_fixup(nat464_cksum_fixup(
-						    nat464_cksum_fixup(nat464_cksum_fixup(nat464_cksum_fixup(~*pc,
+						    nat464_cksum_fixup(nat464_cksum_fixup(nat464_cksum_fixup((uint16_t)~*pc,
 						    ao->nataddr16[0], an->nataddr16[0], u),
 						    ao->nataddr16[1], an->nataddr16[1], u),
 						    0, an->nataddr16[2], u),

@@ -324,13 +324,11 @@ handle_user_asts_interrupts_enabled(ast_t reasons, thread_t thread, task_t task)
 		thread_apc_ast(thread);
 	}
 
-#if HAS_MTE
 	if (reasons & AST_SYNTHESIZE_MACH) {
-		extern void mte_synthesize_async_tag_check_fault(thread_t thread, vm_map_t map);
+		extern void vm_map_synthesize_guard_exception(vm_map_t, thread_t);
 		thread_ast_clear(thread, AST_SYNTHESIZE_MACH);
-		mte_synthesize_async_tag_check_fault(thread, get_threadtask(thread)->map);
+		vm_map_synthesize_guard_exception(get_threadtask(thread)->map, thread);
 	}
-#endif /* HAS_MTE */
 
 #if CONFIG_LARGE_SIZE_TELEMETRY
 	if (reasons & AST_LARGE_ENTER_TELEMETRY) {
@@ -380,19 +378,20 @@ handle_user_asts_interrupts_enabled(ast_t reasons, thread_t thread, task_t task)
 	}
 
 #if CONFIG_TELEMETRY
-	if (reasons & AST_TELEMETRY_ALL) {
-		ast_t telemetry_reasons = reasons & AST_TELEMETRY_ALL;
-		thread_ast_clear(thread, AST_TELEMETRY_ALL);
-		telemetry_ast(thread, telemetry_reasons);
+	if (reasons & AST_TELEMETRY) {
+		telemetry_ast_t ast_reasons = act_clear_telemetry_ast(thread);
+		if (ast_reasons) {
+			telemetry_handle_ast(thread, ast_reasons);
+		}
 	}
-#endif
+#endif /* CONFIG_TELEMETRY */
 
 #if MACH_ASSERT
 	if (reasons & AST_DEBUG_ASSERT) {
 		thread_ast_clear(thread, AST_DEBUG_ASSERT);
 		thread_debug_return_to_user_ast(thread);
 	}
-#endif
+#endif /* MACH_ASSERT */
 }
 
 static inline void
@@ -410,13 +409,9 @@ assert_thread_return_to_user(thread_t thread)
 	    TH_SFLAG_EXEC_PROMOTED |
 	    TH_SFLAG_FLOOR_PROMOTED |
 	    TH_SFLAG_DEPRESS));
-
-#if CONFIG_EXCLAVES
-	assert3u(thread->options & TH_OPT_AOE, ==, 0);
-#endif /* CONFIG_EXCLAVES */
 }
 
-#define ASYNC_THREAD_ASTS_HANDLED (AST_MACH_EXCEPTION | AST_DTRACE | AST_TELEMETRY_ALL | AST_KPERF | AST_DEBUG_ASSERT)
+#define ASYNC_THREAD_ASTS_HANDLED (AST_MACH_EXCEPTION | AST_DTRACE | AST_TELEMETRY | AST_KPERF | AST_DEBUG_ASSERT)
 
 /*
  * Check if ASTs need to be handled for threads that do work on other threads (currently

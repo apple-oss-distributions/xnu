@@ -421,6 +421,7 @@ apple_protect_pager_data_request(
 		 * We already hold a reference on the src_top_object.
 		 */
 retry_src_fault:
+		vm_page_grab_prime();
 		vm_object_lock(src_top_object);
 		vm_object_paging_begin(src_top_object);
 		error_code = 0;
@@ -437,7 +438,8 @@ retry_src_fault:
 		    NULL,
 		    &error_code,
 		    FALSE,
-		    &fault_info);
+		    &fault_info,
+		    NULL);
 		switch (vmfr) {
 		case VM_FAULT_SUCCESS:
 			break;

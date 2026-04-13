@@ -242,7 +242,7 @@ lck_mtx_prof_probe(
 	LOCKSTAT_RECORD(id, mtx, (uintptr_t)lck_grp_resolve(grp_attr_id));
 }
 
-#define lck_mtx_time_stat_begin(id) ({ \
+#define lck_time_stat_begin(id) ({ \
 	uint64_t __start = 0;                                                   \
 	if (__lck_time_stat_enabled(id, LCK_GRP_NULL)) {                        \
 	        __start = ml_get_timebase();                                    \
@@ -251,10 +251,16 @@ lck_mtx_prof_probe(
 	__start;                                                                \
 })
 
-extern void lck_mtx_time_stat_record(
+extern void lck_time_stat_record(
 	enum lockstat_probe_id  id,
-	lck_mtx_t              *mtx,
+	const void             *lock,
 	uint32_t                grp_attr_id,
+	uint64_t                start);
+
+extern void lck_time_stat_record_grp(
+	enum lockstat_probe_id  id,
+	const void             *lock,
+	lck_grp_t              *grp,
 	uint64_t                start);
 
 /*
@@ -309,8 +315,8 @@ LCK_MTX_PROF_WAIT(
 
 #define __lck_time_stat_enabled(lspid, grp)                     false
 #define lck_mtx_prof_probe(id, mtx, grp, profile)               ((void)0)
-#define lck_mtx_time_stat_begin(id)                             0ull
-#define lck_mtx_time_stat_record(id, lck, grp, start)           ((void)(start))
+#define lck_time_stat_begin(id)                                 0ull
+#define lck_time_stat_record(id, lck, grp, start)               ((void)(start))
 
 #endif /* !CONFIG_DTRACE */
 
@@ -411,22 +417,22 @@ lck_grp_ticket_update_spin(void *lock LCK_GRP_ARG(lck_grp_t *grp), uint64_t time
 	lck_mtx_prof_probe(LS_LCK_MTX_UNLOCK_RELEASE, mtx, grp, profile)
 
 #define LCK_MTX_BLOCK_BEGIN() \
-	lck_mtx_time_stat_begin(LS_LCK_MTX_LOCK_BLOCK)
+	lck_time_stat_begin(LS_LCK_MTX_LOCK_BLOCK)
 
 #define LCK_MTX_BLOCK_END(mtx, grp, start) \
-	lck_mtx_time_stat_record(LS_LCK_MTX_LOCK_BLOCK, mtx, grp, start)
+	lck_time_stat_record(LS_LCK_MTX_LOCK_BLOCK, mtx, grp, start)
 
 #define LCK_MTX_ADAPTIVE_SPIN_BEGIN() \
-	lck_mtx_time_stat_begin(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN)
+	lck_time_stat_begin(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN)
 
 #define LCK_MTX_ADAPTIVE_SPIN_END(mtx, grp, start) \
-	lck_mtx_time_stat_record(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, mtx, grp, start)
+	lck_time_stat_record(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, mtx, grp, start)
 
 #define LCK_MTX_SPIN_SPIN_BEGIN() \
-	lck_mtx_time_stat_begin(LS_LCK_MTX_LOCK_SPIN_SPIN)
+	lck_time_stat_begin(LS_LCK_MTX_LOCK_SPIN_SPIN)
 
 #define LCK_MTX_SPIN_SPIN_END(mtx, grp, start) \
-	lck_mtx_time_stat_record(LS_LCK_MTX_LOCK_SPIN_SPIN, mtx, grp, start)
+	lck_time_stat_record(LS_LCK_MTX_LOCK_SPIN_SPIN, mtx, grp, start)
 
 #endif /* MACH_KERNEL_PRIVATE */
 

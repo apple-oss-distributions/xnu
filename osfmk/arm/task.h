@@ -110,12 +110,16 @@ __options_closed_decl(task_sec_policy_t, uint8_t, {
 #define TASK_ADDITIONS_UEXC uint64_t uexc[4];
 
 #if !__ARM_KERNEL_PROTECT__
-#define TASK_ADDITIONS_X18 bool preserve_x18;
+#define TASK_ADDITIONS_X18 \
+	bool preserve_x18_entitled; \
+	bool preserve_x18_always;
 #else
 #define TASK_ADDITIONS_X18
 #endif
 
 #define TASK_ADDITIONS_APT
+
+#define TASK_X86_64_COMPAT
 
 #define MACHINE_TASK \
 	void * XNU_PTRAUTH_SIGNED_PTR("task.task_debug") task_debug; \
@@ -125,4 +129,5 @@ __options_closed_decl(task_sec_policy_t, uint8_t, {
 	TASK_ADDITIONS_UEXC \
 	TASK_ADDITIONS_X18 \
 	TASK_ADDITIONS_APT \
-	bool uses_1ghz_timebase;
+	bool uses_1ghz_timebase; \
+	TASK_X86_64_COMPAT

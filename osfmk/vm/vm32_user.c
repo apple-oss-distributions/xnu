@@ -90,7 +90,7 @@
 #include <vm/vm_protos.h>
 #include <vm/vm_iokit.h>
 #include <vm/vm_sanitize_internal.h>
-#include <vm/vm_map_internal.h>
+#include <vm/vm_map_lock_internal.h>
 
 #ifdef VM32_SUPPORT
 
@@ -141,7 +141,7 @@ vm32_vm_deallocate(
 	start = vm_sanitize_expand_addr_to_64(start32);
 	size = vm_sanitize_expand_size_to_64(size32);
 
-	return mach_vm_deallocate(map, start, size);
+	return mach_vm_deallocate_external(map, start, size);
 }
 
 kern_return_t
@@ -659,13 +659,36 @@ vm32_vm_map_exec_lockdown(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_lock(map);
+	vm_map_ilk_lock(map);
 	map->map_disallow_new_exec = TRUE;
-	vm_map_unlock(map);
+	vm_map_ilk_unlock(map);
 
 	vmlp_api_end(VM32__MAP_EXEC_LOCKDOWN, KERN_SUCCESS);
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+vm32_vm_reallocate(
+	vm_map_t                  map,
+	vm32_address_ut           src,
+	vm32_size_ut              src_size,
+	vm32_address_ut          *dst_inout,
+	vm32_size_ut              dst_size,
+	vm32_offset_ut            align_mask,
+	int                       options,
+	int                       flags)
+{
+	kern_return_t kr;
+	mach_vm_address_ut  src_mach = vm_sanitize_expand_addr_to_64(src);
+	mach_vm_size_ut     src_size_mach = vm_sanitize_expand_size_to_64(src_size);
+	mach_vm_address_ut  dst_inout_mach = vm_sanitize_expand_addr_to_64(*dst_inout);
+	mach_vm_size_ut     dst_size_mach = vm_sanitize_expand_size_to_64(dst_size);
+	mach_vm_offset_ut   align_mask_mach = vm_sanitize_expand_addr_to_64(align_mask);
+
+	kr = mach_vm_reallocate(map, src_mach, src_size_mach, &dst_inout_mach, dst_size_mach, align_mask_mach, options, flags);
+	*dst_inout = vm_sanitize_trunc_addr_to_32(dst_inout_mach);
+
+	return kr;
+}
 
 #endif /* VM32_SUPPORT */

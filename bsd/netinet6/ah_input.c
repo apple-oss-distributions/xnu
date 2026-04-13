@@ -287,7 +287,7 @@ ah4_input(struct mbuf *m, int off)
 	 * some of IP header fields are flipped to the host endian.
 	 * convert them back to network endian.  VERY stupid.
 	 */
-	if ((ip->ip_len + hlen) > UINT16_MAX) {
+	if (__improbable((ip->ip_len + hlen) > UINT16_MAX)) {
 		ipseclog((LOG_DEBUG, "IPv4 AH input: "
 		    "bad length ip header len %u, total len %u\n",
 		    ip->ip_len, hlen));
@@ -297,7 +297,7 @@ ah4_input(struct mbuf *m, int off)
 
 	ip->ip_len = htons((u_int16_t)(ip->ip_len + hlen));
 	ip->ip_off = htons(ip->ip_off);
-	if (ah4_calccksum(m, (caddr_t)cksum, siz1, algo, sav)) {
+	if (__improbable(ah4_calccksum(m, (caddr_t)cksum, siz1, algo, sav))) {
 		kfree_data(cksum, siz1);
 		IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
 		goto fail;
@@ -320,7 +320,7 @@ ah4_input(struct mbuf *m, int off)
 			sumpos = (caddr_t)(((struct newah *)ah) + 1);
 		}
 
-		if (bcmp(sumpos, cksum, siz) != 0) {
+		if (__improbable(cc_cmp_safe(siz, sumpos, cksum) != 0)) {
 			ipseclog((LOG_WARNING,
 			    "checksum mismatch in IPv4 AH input: %s %s\n",
 			    ipsec4_logpacketstr(ip, spi), ipsec_logsastr(sav)));
@@ -349,7 +349,7 @@ ah4_input(struct mbuf *m, int off)
 	 * update sequence number.
 	 */
 	if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[0] != NULL) {
-		if (ipsec_updatereplay(ntohl(((struct newah *)ah)->ah_seq), sav, 0)) {
+		if (__improbable(ipsec_updatereplay(ntohl(((struct newah *)ah)->ah_seq), sav, 0))) {
 			IPSEC_STAT_INCREMENT(ipsecstat.in_ahreplay);
 			goto fail;
 		}
@@ -720,7 +720,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		goto fail;
 	}
 
-	if (ah6_calccksum(m, (caddr_t)cksum, siz1, algo, sav)) {
+	if (__improbable(ah6_calccksum(m, (caddr_t)cksum, siz1, algo, sav))) {
 		kfree_data(cksum, siz1);
 		IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
 		goto fail;
@@ -738,7 +738,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 			sumpos = (caddr_t)(((struct newah *)ah) + 1);
 		}
 
-		if (bcmp(sumpos, cksum, siz) != 0) {
+		if (__improbable(cc_cmp_safe(siz, sumpos, cksum) != 0)) {
 			ipseclog((LOG_WARNING,
 			    "checksum mismatch in IPv6 AH input: %s %s\n",
 			    ipsec6_logpacketstr(ip6, spi), ipsec_logsastr(sav)));
@@ -767,7 +767,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	 * update sequence number.
 	 */
 	if ((sav->flags & SADB_X_EXT_OLD) == 0 && sav->replay[0] != NULL) {
-		if (ipsec_updatereplay(ntohl(((struct newah *)ah)->ah_seq), sav, 0)) {
+		if (__improbable(ipsec_updatereplay(ntohl(((struct newah *)ah)->ah_seq), sav, 0))) {
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_ahreplay);
 			goto fail;
 		}

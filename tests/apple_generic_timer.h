@@ -1,6 +1,8 @@
 #pragma once
 
 #include <darwintest.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 
 #define TEST_ITERATIONS         10000000
 #define ITERATIONS_BETWEEN_LOGS 100000
@@ -9,9 +11,20 @@
 #define CNTFREQ_1_GHZ           1000000000ULL
 
 #if __arm64__
+static inline bool
+read_hw_optional_arm_sysctl(const char *name)
+{
+	int val = 0;
+	size_t size = sizeof(val);
+	int err = sysctlbyname(name, &val, &size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "sysctlbyname(%s)", name);
+	return !!val;
+}
+
 static void
 agt_test_helper(bool expect_1ghz)
 {
+
 	for (unsigned i = 0; i < TEST_ITERATIONS; i++) {
 		const uint64_t freq = __builtin_arm_rsr64("CNTFRQ_EL0");
 

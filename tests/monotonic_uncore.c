@@ -2,6 +2,7 @@
 
 #include <darwintest.h>
 #include "test_utils.h"
+#include "recount/recount_test_utils.h"
 #include <fcntl.h>
 #include <inttypes.h>
 #ifndef PRIVATE
@@ -294,7 +295,7 @@ T_DECL(uncore_accuracy,
 	times[0] = mach_absolute_time();
 	uncore_counts(fd, ctr_mask, counts[0]);
 
-	usleep(SLEEP_USECS);
+	run_on_all_perf_levels();
 
 	uncore_counts(fd, ctr_mask, counts[1]);
 	times[1] = mach_absolute_time();
@@ -332,6 +333,12 @@ T_DECL(uncore_accuracy,
 			uint64_t delta = after - before;
 			T_LOG("%d,%2d: %12" PRIu64 "%12" PRIu64 " = %10" PRIu64, mon, i,
 			    before, after, delta);
+		}
+	}
+	for (int mon = 0; mon < nmonitors; mon++) {
+		for (int i = 0; i < nctrs; i++) {
+			uint64_t after = counts[1][i * mon];
+			uint64_t before = counts[0][i * mon];
 			T_QUIET;
 			T_EXPECT_GT(after, before,
 			    "uncore %d counter %d value is monotonically increasing",

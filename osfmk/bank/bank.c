@@ -70,10 +70,16 @@ static ZONE_DEFINE_TYPE(bank_account_zone, "bank_account",
 #define CAST_TO_BANK_TASK(x) ((bank_task_t)((void *)(x)))
 #define CAST_TO_BANK_ACCOUNT(x) ((bank_account_t)((void *)(x)))
 
-ipc_voucher_attr_control_t  bank_voucher_attr_control;    /* communication channel from ATM to voucher system */
+static ipc_voucher_attr_control_t  bank_voucher_attr_control;    /* communication channel from ATM to voucher system */
 
-static ledger_template_t bank_ledger_template = NULL;
-struct _bank_ledger_indices bank_ledgers = { .cpu_time = -1, .energy = -1 };
+SECURITY_READ_ONLY_LATE(struct _bank_ledger_indices) bank_ledgers;
+
+static SECURITY_READ_ONLY_LATE(struct ledger_entry_template) bank_ledger_entries[] = {
+	LEDGER_ENTRY("cpu_time", "sched", "ns", LFEAT_NONE),
+	LEDGER_ENTRY("energy", "power", "nj", LFEAT_NONE),
+};
+
+static LEDGER_TEMPLATE_DEFINE(bank_ledger_template, "Bank ledger", bank_ledger_entries);
 
 static bank_task_t bank_task_alloc_init(task_t task);
 static bank_account_t bank_account_alloc_init(bank_task_t bank_holder, bank_task_t bank_merchant,
@@ -918,8 +924,12 @@ bank_command(
  */
 
 static boolean_t
-bank_task_is_persona_adoption_allowed(task_t task __unused, struct persona *persona)
+bank_task_is_persona_adoption_allowed(task_t task, struct persona *persona)
 {
+	/* Some processes do not want to inherit personas via IPC. */
+	if (IOTaskHasEntitlement(task, ENTITLEMENT_PERSONA_NO_INHERIT)) {
+		return FALSE;
+	}
 #if defined(XNU_TARGET_OS_OSX)
 	/*
 	 * On macOS platform binaries spawned in no persona are allowed to adopt
@@ -1056,14 +1066,8 @@ bank_account_alloc_init(
 	bank_account_t new_bank_account;
 	bank_account_t bank_account;
 	boolean_t entry_found = FALSE;
-	ledger_t new_ledger = ledger_instantiate(bank_ledger_template, LEDGER_CREATE_INACTIVE_ENTRIES);
+	ledger_t new_ledger = ledger_instantiate(&bank_ledger_template);
 
-	if (new_ledger == LEDGER_NULL) {
-		return BANK_ACCOUNT_NULL;
-	}
-
-	ledger_entry_setactive(new_ledger, bank_ledgers.cpu_time);
-	ledger_entry_setactive(new_ledger, bank_ledgers.energy);
 	new_bank_account = zalloc_flags(bank_account_zone, Z_WAITOK | Z_NOFAIL);
 
 	new_bank_account->ba_type = BANK_ACCOUNT;
@@ -1315,46 +1319,31 @@ bank_rollup_chit_to_tasks(
 	int bank_holder_pid,
 	int bank_merchant_pid)
 {
-	ledger_amount_t credit;
-	ledger_amount_t debit;
+	ledger_amount_t balance;
 	kern_return_t ret;
 
 	if (bank_holder_ledger == bank_merchant_ledger) {
 		return;
 	}
 
-	ret = ledger_get_entries(bill, bank_ledgers.cpu_time, &credit, &debit);
+	ret = ledger_get_balance(bill, bank_ledgers.cpu_time, LEO_SETTLE, &balance);
 	if (ret == KERN_SUCCESS) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    (BANK_CODE(BANK_ACCOUNT_INFO, (BANK_SETTLE_CPU_TIME))) | DBG_FUNC_NONE,
-		    bank_merchant_pid, bank_holder_pid, credit, debit, 0);
+		    bank_merchant_pid, bank_holder_pid, balance, 0, 0);
 
-		if (bank_holder_ledger) {
-			ledger_credit(bank_holder_ledger, task_ledgers.cpu_time_billed_to_me, credit);
-			ledger_debit(bank_holder_ledger, task_ledgers.cpu_time_billed_to_me, debit);
-		}
-
-		if (bank_merchant_ledger) {
-			ledger_credit(bank_merchant_ledger, task_ledgers.cpu_time_billed_to_others, credit);
-			ledger_debit(bank_merchant_ledger, task_ledgers.cpu_time_billed_to_others, debit);
-		}
+		ledger_credit(bank_holder_ledger, task_ledgers.cpu_time_billed_to_me, balance);
+		ledger_credit(bank_merchant_ledger, task_ledgers.cpu_time_billed_to_others, balance);
 	}
 
-	ret = ledger_get_entries(bill, bank_ledgers.energy, &credit, &debit);
+	ret = ledger_get_balance(bill, bank_ledgers.energy, LEO_SETTLE, &balance);
 	if (ret == KERN_SUCCESS) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 		    (BANK_CODE(BANK_ACCOUNT_INFO, (BANK_SETTLE_ENERGY))) | DBG_FUNC_NONE,
-		    bank_merchant_pid, bank_holder_pid, credit, debit, 0);
+		    bank_merchant_pid, bank_holder_pid, balance, 0, 0);
 
-		if (bank_holder_ledger) {
-			ledger_credit(bank_holder_ledger, task_ledgers.energy_billed_to_me, credit);
-			ledger_debit(bank_holder_ledger, task_ledgers.energy_billed_to_me, debit);
-		}
-
-		if (bank_merchant_ledger) {
-			ledger_credit(bank_merchant_ledger, task_ledgers.energy_billed_to_others, credit);
-			ledger_debit(bank_merchant_ledger, task_ledgers.energy_billed_to_others, debit);
-		}
+		ledger_credit(bank_holder_ledger, task_ledgers.energy_billed_to_me, balance);
+		ledger_credit(bank_merchant_ledger, task_ledgers.energy_billed_to_others, balance);
 	}
 }
 
@@ -1399,27 +1388,12 @@ bank_task_initialize(task_t task)
 static void
 init_bank_ledgers(void)
 {
-	ledger_template_t t;
-	int idx;
+	ledger_template_t t = &bank_ledger_template;
 
-	assert(bank_ledger_template == NULL);
+	ledger_template_finalize(t, false);
 
-	if ((t = ledger_template_create("Bank ledger")) == NULL) {
-		panic("couldn't create bank ledger template");
-	}
-
-	if ((idx = ledger_entry_add(t, "cpu_time", "sched", "ns")) < 0) {
-		panic("couldn't create cpu_time entry for bank ledger template");
-	}
-	bank_ledgers.cpu_time = idx;
-
-	if ((idx = ledger_entry_add(t, "energy", "power", "nj")) < 0) {
-		panic("couldn't create energy entry for bank ledger template");
-	}
-	bank_ledgers.energy = idx;
-
-	ledger_template_complete(t);
-	bank_ledger_template = t;
+	LEDGER_KEY_MEMOIZE(t, bank_ledgers, cpu_time);
+	LEDGER_KEY_MEMOIZE(t, bank_ledgers, energy);
 }
 
 /* Routine: bank_billed_balance_safe
@@ -1432,10 +1406,8 @@ void
 bank_billed_balance_safe(task_t task, uint64_t *cpu_time, uint64_t *energy)
 {
 	bank_task_t bank_task = BANK_TASK_NULL;
-	ledger_amount_t credit, debit;
 	uint64_t cpu_balance = 0;
 	uint64_t energy_balance = 0;
-	kern_return_t kr;
 
 	/* Task might be in exec, grab the global bank task lock before accessing bank context. */
 	global_bank_task_lock();
@@ -1450,16 +1422,10 @@ bank_billed_balance_safe(task_t task, uint64_t *cpu_time, uint64_t *energy)
 		bank_billed_balance(bank_task, &cpu_balance, &energy_balance);
 		bank_task_dealloc(bank_task);
 	} else {
-		kr = ledger_get_entries(task->ledger, task_ledgers.cpu_time_billed_to_me,
-		    &credit, &debit);
-		if (kr == KERN_SUCCESS) {
-			cpu_balance = credit - debit;
-		}
-		kr = ledger_get_entries(task->ledger, task_ledgers.energy_billed_to_me,
-		    &credit, &debit);
-		if (kr == KERN_SUCCESS) {
-			energy_balance = credit - debit;
-		}
+		ledger_get_balance(task->ledger, task_ledgers.cpu_time_billed_to_me,
+		    LEO_SETTLE, (ledger_amount_t *)&cpu_balance);
+		ledger_get_balance(task->ledger, task_ledgers.energy_billed_to_me,
+		    LEO_SETTLE, (ledger_amount_t *)&energy_balance);
 	}
 
 	*cpu_time = cpu_balance;
@@ -1490,7 +1456,8 @@ bank_billed_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energy)
 
 	/* bt_acc_to_pay_lock locked, no need to take ledger reference for bt_ledger */
 	if (bank_task->bt_ledger != LEDGER_NULL) {
-		kr = ledger_get_balance(bank_task->bt_ledger, task_ledgers.cpu_time_billed_to_me, &temp);
+		kr = ledger_get_balance(bank_task->bt_ledger,
+		    task_ledgers.cpu_time_billed_to_me, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			cpu_balance += temp;
 		}
@@ -1500,7 +1467,8 @@ bank_billed_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energy)
 		}
 #endif /* DEVELOPMENT || DEBUG */
 
-		kr = ledger_get_balance(bank_task->bt_ledger, task_ledgers.energy_billed_to_me, &temp);
+		kr = ledger_get_balance(bank_task->bt_ledger,
+		    task_ledgers.energy_billed_to_me, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			energy_balance += temp;
 		}
@@ -1508,7 +1476,8 @@ bank_billed_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energy)
 
 	queue_iterate(&bank_task->bt_accounts_to_pay, bank_account, bank_account_t, ba_next_acc_to_pay) {
 		temp = 0;
-		kr = ledger_get_balance(bank_account->ba_bill, bank_ledgers.cpu_time, &temp);
+		kr = ledger_get_balance(bank_account->ba_bill,
+		    bank_ledgers.cpu_time, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			cpu_balance += temp;
 		}
@@ -1518,7 +1487,8 @@ bank_billed_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energy)
 		}
 #endif /* DEVELOPMENT || DEBUG */
 
-		kr = ledger_get_balance(bank_account->ba_bill, bank_ledgers.energy, &temp);
+		kr = ledger_get_balance(bank_account->ba_bill,
+		    bank_ledgers.energy, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			energy_balance += temp;
 		}
@@ -1539,10 +1509,8 @@ void
 bank_serviced_balance_safe(task_t task, uint64_t *cpu_time, uint64_t *energy)
 {
 	bank_task_t bank_task = BANK_TASK_NULL;
-	ledger_amount_t credit, debit;
 	uint64_t cpu_balance = 0;
 	uint64_t energy_balance = 0;
-	kern_return_t kr;
 
 	/* Task might be in exec, grab the global bank task lock before accessing bank context. */
 	global_bank_task_lock();
@@ -1557,17 +1525,10 @@ bank_serviced_balance_safe(task_t task, uint64_t *cpu_time, uint64_t *energy)
 		bank_serviced_balance(bank_task, &cpu_balance, &energy_balance);
 		bank_task_dealloc(bank_task);
 	} else {
-		kr = ledger_get_entries(task->ledger, task_ledgers.cpu_time_billed_to_others,
-		    &credit, &debit);
-		if (kr == KERN_SUCCESS) {
-			cpu_balance = credit - debit;
-		}
-
-		kr = ledger_get_entries(task->ledger, task_ledgers.energy_billed_to_others,
-		    &credit, &debit);
-		if (kr == KERN_SUCCESS) {
-			energy_balance = credit - debit;
-		}
+		ledger_get_balance(task->ledger, task_ledgers.cpu_time_billed_to_others,
+		    LEO_SETTLE, (ledger_amount_t *)&cpu_balance);
+		ledger_get_balance(task->ledger, task_ledgers.energy_billed_to_others,
+		    LEO_SETTLE, (ledger_amount_t *)&energy_balance);
 	}
 
 	*cpu_time = cpu_balance;
@@ -1601,7 +1562,8 @@ bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energ
 	lck_mtx_lock(&bank_task->bt_acc_to_charge_lock);
 
 	if (ledger) {
-		kr = ledger_get_balance(ledger, task_ledgers.cpu_time_billed_to_others, &temp);
+		kr = ledger_get_balance(ledger,
+		    task_ledgers.cpu_time_billed_to_others, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			cpu_balance += temp;
 		}
@@ -1611,7 +1573,8 @@ bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energ
 		}
 #endif /* DEVELOPMENT || DEBUG */
 
-		kr = ledger_get_balance(ledger, task_ledgers.energy_billed_to_others, &temp);
+		kr = ledger_get_balance(ledger,
+		    task_ledgers.energy_billed_to_others, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			energy_balance += temp;
 		}
@@ -1619,7 +1582,8 @@ bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energ
 
 	queue_iterate(&bank_task->bt_accounts_to_charge, bank_account, bank_account_t, ba_next_acc_to_charge) {
 		temp = 0;
-		kr = ledger_get_balance(bank_account->ba_bill, bank_ledgers.cpu_time, &temp);
+		kr = ledger_get_balance(bank_account->ba_bill,
+		    bank_ledgers.cpu_time, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			cpu_balance += temp;
 		}
@@ -1629,7 +1593,8 @@ bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uint64_t *energ
 		}
 #endif /* DEVELOPMENT || DEBUG */
 
-		kr = ledger_get_balance(bank_account->ba_bill, bank_ledgers.energy, &temp);
+		kr = ledger_get_balance(bank_account->ba_bill,
+		    bank_ledgers.energy, LEO_SETTLE, &temp);
 		if (kr == KERN_SUCCESS && temp >= 0) {
 			energy_balance += temp;
 		}

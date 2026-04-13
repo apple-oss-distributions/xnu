@@ -201,6 +201,25 @@ exclaves_audio_buffer_copyout_with_status(mach_port_t audio_buffer_port,
 	           status);
 }
 
+kern_return_t
+exclaves_arbitrated_buffer_create(mach_port_t port, const char *buffer_name,
+    mach_vm_size_t size, mach_port_t* out_arbitrated_buffer_port)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(ARBITRATED_BUFFER_CREATE, 0);
+	return EXCLAVES_CTL_TRAP(port, opf, (exclaves_id_t) buffer_name,
+	           (uintptr_t) out_arbitrated_buffer_port, size, 0, 0, 0);
+}
+
+kern_return_t
+exclaves_arbitrated_buffer_copyout(mach_port_t arbitrated_buffer_port,
+    mach_vm_address_t dst_buffer, mach_vm_size_t size, mach_vm_size_t offset,
+    uint64_t param1, uint64_t param2, exclaves_sensor_status_t *status)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(ARBITRATED_BUFFER_COPYOUT, 0);
+	return EXCLAVES_CTL_TRAP(arbitrated_buffer_port, opf,
+	           (exclaves_id_t) offset, dst_buffer, size, param1, param2,
+	           status);
+}
 
 kern_return_t
 exclaves_sensor_create(mach_port_t port, const char *sensor_name,
@@ -284,6 +303,52 @@ exclaves_notification_create(__unused mach_port_t port, const char *name,
 }
 
 kern_return_t
+exclaves_daemon_notification_register(__unused mach_port_t port,
+    const char *conclave_name, const char *notification_name,
+    mach_port_name_t send_right)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(DAEMON_NOTIFICATION_REGISTER, 0);
+	struct exclaves_daemon_notification register_args = {0};
+
+	if (conclave_name == NULL || notification_name == NULL ||
+	    !MACH_PORT_VALID(send_right) ||
+	    strnlen(conclave_name, MAXCONCLAVENAME) >= MAXCONCLAVENAME ||
+	    strnlen(notification_name, MAXCONCLAVENAME) >= MAXCONCLAVENAME) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	strlcpy(register_args.conclave_name, conclave_name, sizeof(register_args.conclave_name));
+	strlcpy(register_args.notification_name, notification_name, sizeof(register_args.notification_name));
+	register_args.send_right = send_right;
+
+	return EXCLAVES_CTL_TRAP(port, opf, 0,
+	           (mach_vm_address_t)&register_args, sizeof(register_args), 0, 0, 0);
+}
+
+kern_return_t
+exclaves_daemon_notification_deregister(__unused mach_port_t port,
+    const char *conclave_name, const char *notification_name,
+    mach_port_name_t send_right)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(DAEMON_NOTIFICATION_DEREGISTER, 0);
+	struct exclaves_daemon_notification deregister_args = {0};
+
+	if (conclave_name == NULL || notification_name == NULL ||
+	    !MACH_PORT_VALID(send_right) ||
+	    strnlen(conclave_name, MAXCONCLAVENAME) >= MAXCONCLAVENAME ||
+	    strnlen(notification_name, MAXCONCLAVENAME) >= MAXCONCLAVENAME) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	strlcpy(deregister_args.conclave_name, conclave_name, sizeof(deregister_args.conclave_name));
+	strlcpy(deregister_args.notification_name, notification_name, sizeof(deregister_args.notification_name));
+	deregister_args.send_right = send_right;
+
+	return EXCLAVES_CTL_TRAP(port, opf, 0,
+	           (mach_vm_address_t)&deregister_args, sizeof(deregister_args), 0, 0, 0);
+}
+
+kern_return_t
 exclaves_aoe_setup(__unused mach_port_t port, uint8_t *num_message,
     uint8_t *num_worker)
 {
@@ -291,6 +356,20 @@ exclaves_aoe_setup(__unused mach_port_t port, uint8_t *num_message,
 	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_SETUP, 0);
 	return EXCLAVES_CTL_TRAP(port, opf, 0, (uintptr_t)num_message, 0, 0, 0,
 	           (uintptr_t)num_worker);
+}
+
+kern_return_t
+exclaves_aoe_enumerate_and_setup_services(__unused mach_port_t port, uint8_t *num_services)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_ENUMERATE_AND_SETUP_SERVICES, 0);
+	return EXCLAVES_CTL_TRAP(port, opf, 0, (uintptr_t)num_services, 0, 0, 0, 0);
+}
+
+kern_return_t
+exclaves_aoe_get_all_service_infos(__unused mach_port_t port, exclaves_aoe_service_info_t *sinfos, mach_vm_size_t sinfos_size)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_GET_ALL_SERVICE_INFOS, 0);
+	return EXCLAVES_CTL_TRAP(port, opf, 0, (uintptr_t)sinfos, sinfos_size, 0, 0, 0);
 }
 
 kern_return_t
@@ -305,4 +384,18 @@ exclaves_aoe_message_loop(__unused mach_port_t port)
 {
 	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_MESSAGE_LOOP, 0);
 	return EXCLAVES_CTL_TRAP(port, opf, 0, 0, 0, 0, 0, 0);
+}
+
+kern_return_t
+exclaves_aoe_work_loop_with_service_id(__unused mach_port_t port, uint64_t service_id)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_WORK_LOOP_WITH_SERVICE_ID, 0);
+	return EXCLAVES_CTL_TRAP(port, opf, 0, 0, 0, service_id, 0, 0);
+}
+
+kern_return_t
+exclaves_aoe_message_loop_with_service_id(__unused mach_port_t port, uint64_t service_id)
+{
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(AOE_MESSAGE_LOOP_WITH_SERVICE_ID, 0);
+	return EXCLAVES_CTL_TRAP(port, opf, 0, 0, 0, service_id, 0, 0);
 }

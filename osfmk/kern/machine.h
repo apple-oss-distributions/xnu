@@ -63,6 +63,9 @@ extern void init_ast_check(
 extern void cause_ast_check(
 	processor_t         processor);
 
+extern void cause_maintenance_ipi(
+	int                 cpu);
+
 extern kern_return_t cpu_control(
 	int                 slot_num,
 	processor_info_t    info,

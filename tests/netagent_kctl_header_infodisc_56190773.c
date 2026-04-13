@@ -12,6 +12,11 @@
 
 #include <darwintest.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("NetworkExtension"));
+
 // netagent_message_header, but with the padding between
 // message_flags and message_id explicitly specified.
 struct netagent_message_header_with_padding {

@@ -512,7 +512,8 @@ nx_fsw_prov_config(struct kern_nexus_domain_provider *nxdom_prov,
 			err = EPERM;
 			goto done;
 		}
-	} /* fall through */
+		OS_FALLTHROUGH;
+	}
 	case NXCFG_CMD_FLOW_CONFIG: {
 		/* checks flow PID ownership instead of nxctl creditial */
 		struct nx_flow_req nfr;

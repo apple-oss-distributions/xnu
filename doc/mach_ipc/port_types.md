@@ -34,7 +34,7 @@ new code generally should not use these.
 
 ### IOT_SERVICE_PORT
 #### Creation
-- pass `MPO_SERVICE_PORT` to `mach_port_construct`
+- pass `MPO_SERVICE_PORT` with `MPO_ENFORCE_REPLY_PORT_SEMANTICS` to `mach_port_construct` (or use `MPO_STRICT_SERVICE_PORT`)
 #### Behavior/Usage
 - Used by `launchd` as the port which drives the launch-on-demand behavior of
 services/daemons on the system. Clients lookup the service port for some service
@@ -65,7 +65,7 @@ enforced for this port.
 
 ### IOT_WEAK_SERVICE_PORT
 #### Creation
-- pass `MPO_WEAK_SERVICE_PORT` to `mach_port_construct`
+- pass `MPO_SERVICE_PORT` to `mach_port_construct` (without `MPO_ENFORCE_REPLY_PORT_SEMANTICS`)
 #### Behavior/Usage
 - Same feature set and usage as `IOT_SERVICE_PORT` above, the only difference is
 the associated security policy.
@@ -156,9 +156,9 @@ dispatch to provide turnstile/importance inheritance capabilities.
 #### Security Restrictions
 - same as reply ports above
 
-### IOT_PROVISIONAL_REPLY_PORT
+### IOT_WEAK_REPLY_PORT
 #### Creation
-- pass `MPO_PROVISIONAL_REPLY_PORT` to `mach_port_construct`
+- pass `MPO_WEAK_REPLY_PORT` to `mach_port_construct`
 #### Behavior/Usage
 - This has the mechanics of a normal `IOT_PORT` in that it has no special
 behaviors/usage/restrictions, but it counts as reply port for the purposes of

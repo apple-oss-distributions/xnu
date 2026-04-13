@@ -357,6 +357,7 @@
 #include <mach/task_info.h>
 
 #include <net/sockaddr_utils.h>
+#include <netinet/flow_divert.h>
 
 #define MAX_CONTENT_FILTER 8
 
@@ -793,6 +794,7 @@ static int cfil_action_data_pass(struct socket *, struct cfil_info *, uint32_t, 
     uint64_t, uint64_t);
 static int cfil_action_drop(struct socket *, struct cfil_info *, uint32_t);
 static int cfil_action_bless_client(uint32_t, struct cfil_msg_hdr *);
+static int cfil_action_qualify_flow(uint32_t, struct cfil_msg_hdr *);
 static int cfil_action_set_crypto_key(uint32_t, struct cfil_msg_hdr *);
 static int cfil_dispatch_closed_event(struct socket *, struct cfil_info *, int);
 static int cfil_data_common(struct socket *, struct cfil_info *, int, struct sockaddr *,
@@ -1977,6 +1979,17 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 			goto done;
 		}
 		error = cfil_action_set_crypto_key(kcunit, msghdr);
+		goto done;
+	case CFM_OP_QUALIFY_FLOW:
+		if (msghdr->cfm_len != sizeof(struct cfil_msg_qualify_flow)) {
+			OSIncrementAtomic(&cfil_stats.cfs_ctl_action_bad_len);
+			error = EINVAL;
+			CFIL_LOG(LOG_ERR, "bad len: %u for op %u",
+			    msghdr->cfm_len,
+			    msghdr->cfm_op);
+			goto done;
+		}
+		error = cfil_action_qualify_flow(kcunit, msghdr);
 		goto done;
 	default:
 		OSIncrementAtomic(&cfil_stats.cfs_ctl_action_bad_op);
@@ -3278,7 +3291,7 @@ cfil_dispatch_data_event_sign(cfil_crypto_state_t crypto_state,
 		.csp_signature = msg->cfd_signature,
 		.csp_signature_size = &msg->cfd_signature_length,
 	};
-	necp_with_inp_domain_name(so, &parameters, cfil_sign_with_domain_name);
+	necp_with_inp_domain_name_locked(so, &parameters, cfil_sign_with_domain_name);
 
 	if (msg->cfd_signature_length == 0) {
 		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign data msg <sockID %llu <%llx>>",
@@ -3353,7 +3366,7 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 		.csp_signature = msg->cfc_signature,
 		.csp_signature_size = &msg->cfc_signature_length
 	};
-	necp_with_inp_domain_name(so, &parameters, cfil_sign_with_domain_name);
+	necp_with_inp_domain_name_locked(so, &parameters, cfil_sign_with_domain_name);
 
 	if (msg->cfc_signature_length == 0) {
 		CFIL_LOG(LOG_ERR, "CFIL: Failed to sign closed msg <sockID %llu <%llx>>",
@@ -3520,7 +3533,7 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 		}
 	}
 
-	necp_with_inp_domain_name(so, msg_attached, cfil_populate_attached_msg_domain_name);
+	necp_with_inp_domain_name_locked(so, msg_attached, cfil_populate_attached_msg_domain_name);
 
 	if (cfil_info->cfi_debug) {
 		cfil_info_log(LOG_ERR, cfil_info, "CFIL: SENDING ATTACH UP");
@@ -4853,6 +4866,16 @@ cfil_action_data_pass(struct socket *so, struct cfil_info *cfil_info, uint32_t k
 
 	socket_lock_assert_owned(so);
 
+	if (!IS_UDP(so) && outgoing) { // Guard Proxy is currently TCP Out only
+		CFIL_LOG(LOG_NOTICE, "CFIL: evaluating Guard Proxy for %s (so %p). so_flags: 0x%x", IS_UDP(so) ? "UDP" : "TCP", so, so->so_flags);
+		if ((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL) {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: flow_divert option is set: VERDICT - PASS");
+			flow_divert_handle_cfil_verdict(so, FLOW_DIVERT_GUARD_PROXY_VERDICT_PASS);
+		} else {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: flow_divert option is NOT set: VERDICT - PASS");
+		}
+	}
+
 	error = cfil_acquire_sockbuf(so, cfil_info, outgoing);
 	if (error != 0) {
 		CFIL_LOG(LOG_INFO, "so %llx %s dropped",
@@ -4993,6 +5016,15 @@ cfil_action_drop(struct socket *so, struct cfil_info *cfil_info, uint32_t kcunit
 		cfil_info_log(LOG_ERR, cfil_info, "CFIL: DROP - DETACH");
 	}
 
+	if (!IS_UDP(so)) { // Guard Proxy is TCP only
+		if ((so->so_flags & SOF_FLOW_DIVERT) && so->so_fd_pcb != NULL) {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: flow_divert option is set: DROP - DETACH");
+		} else {
+			cfil_info_log(LOG_ERR, cfil_info, "CFIL: flow_divert option is NOT set: DROP - DETACH");
+		}
+		flow_divert_handle_cfil_verdict(so, FLOW_DIVERT_GUARD_PROXY_VERDICT_DROP);
+	}
+
 	CFIL_LOG(LOG_INFO, "so %llx detached %u",
 	    (uint64_t)VM_KERNEL_ADDRPERM(so), kcunit);
 
@@ -5042,6 +5074,38 @@ cfil_action_bless_client(uint32_t kcunit, struct cfil_msg_hdr *msghdr)
 	}
 
 	return error;
+}
+
+int
+cfil_action_qualify_flow(uint32_t kcunit, struct cfil_msg_hdr *msghdr)
+{
+	if (msghdr == NULL) {
+		return EINVAL;
+	}
+	if (kcunit > MAX_CONTENT_FILTER) {
+		return EINVAL;
+	}
+
+	cfil_rw_lock_shared(&cfil_lck_rw);
+
+	if (content_filters[kcunit - 1] == NULL) {
+		cfil_rw_unlock_shared(&cfil_lck_rw);
+		return EINVAL;
+	}
+	struct content_filter *cfc = content_filters[kcunit - 1];
+	if (cfc == NULL) {
+		CFIL_LOG(LOG_ERR, "%s: kcunit %d - null cfc", __FUNCTION__, kcunit);
+		cfil_rw_unlock_shared(&cfil_lck_rw);
+		return EINVAL;
+	}
+	uint32_t necp_control_unit = cfc->cf_necp_control_unit;
+
+	cfil_rw_unlock_shared(&cfil_lck_rw);
+
+	CFIL_LOG(LOG_INFO, "%s: kcunit %d cf_necp_control_unit %d", __FUNCTION__, kcunit, necp_control_unit);
+
+	struct cfil_msg_qualify_flow *qualifymsg = (struct cfil_msg_qualify_flow *)msghdr;
+	return necp_client_qualify_flow(&qualifymsg->flow_uuid, qualifymsg->flow_protocol, &qualifymsg->flow_local, &qualifymsg->flow_remote, necp_control_unit);
 }
 
 int
@@ -6145,13 +6209,13 @@ cfil_inp_log(int level, struct socket *so, const char* msg)
 		if (so->so_cfil->cfi_so_attach_laddr.sa.sa_family == AF_INET6) {
 			sin6 = SIN6(&so->so_cfil->cfi_so_attach_laddr.sa);
 			addr = &sin6->sin6_addr;
-			inet_ntop(AF_INET6, addr, local, sizeof(remote));
-			fport = sin6->sin6_port;
+			inet_ntop(AF_INET6, addr, local, sizeof(local));
+			lport = sin6->sin6_port;
 		} else if (so->so_cfil->cfi_so_attach_laddr.sa.sa_family == AF_INET) {
 			sin = SIN(&so->so_cfil->cfi_so_attach_laddr.sa);
 			addr = &sin->sin_addr.s_addr;
-			inet_ntop(AF_INET, addr, local, sizeof(remote));
-			fport = sin->sin_port;
+			inet_ntop(AF_INET, addr, local, sizeof(local));
+			lport = sin->sin_port;
 		}
 	}
 
@@ -7561,4 +7625,23 @@ go_sleep:
 	cfil_rw_unlock_shared(&cfil_lck_rw);
 	thread_block_parameter((thread_continue_t) cfil_stats_report, NULL);
 	/* NOTREACHED */
+}
+
+bool
+cfil_check_filter_control_unit(u_int32_t necp_control_unit, u_int32_t match_control_unit, bool *matched)
+{
+	if (necp_control_unit == 0 ||
+	    necp_control_unit == NECP_FILTER_UNIT_NO_FILTER ||
+	    (necp_control_unit & NECP_MASK_USERSPACE_ONLY) != 0) {
+		return false;
+	}
+
+	if (match_control_unit != 0 && matched != NULL) {
+		// Mask off control bits
+		u_int32_t no_control_bits = (necp_control_unit & 0x1FFFFFFF);
+		if (match_control_unit == no_control_bits) {
+			*matched = true;
+		}
+	}
+	return true;
 }

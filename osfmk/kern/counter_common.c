@@ -64,13 +64,13 @@ scalable_counter_static_init(scalable_counter_t *counter)
 	 * We pointed the counter to a single global value during early boot.
 	 * Grab that value now. We'll store it in our current CPU's value
 	 */
-	uint64_t current_value = os_atomic_load_wide(zpercpu_get(*counter), relaxed);
+	uint64_t current_value = os_atomic_load(zpercpu_get(*counter), relaxed);
 	/*
 	 * This counter can't be freed so we allocate it out of the permanent zone rather than
 	 * our counter zone.
 	 */
 	*counter = zalloc_percpu_permanent(sizeof(uint64_t), ZALIGN_64);
-	os_atomic_store_wide(zpercpu_get(*counter), current_value, relaxed);
+	os_atomic_store(zpercpu_get(*counter), current_value, relaxed);
 	num_static_scalable_counters++;
 }
 
@@ -85,7 +85,7 @@ OS_OVERLOADABLE
 void
 counter_alloc(atomic_counter_t *counter)
 {
-	os_atomic_store_wide(counter, 0, relaxed);
+	os_atomic_store(counter, 0, relaxed);
 }
 
 OS_OVERLOADABLE
@@ -148,7 +148,7 @@ OS_OVERLOADABLE
 uint64_t
 counter_load(atomic_counter_t *counter)
 {
-	return os_atomic_load_wide(counter, relaxed);
+	return os_atomic_load(counter, relaxed);
 }
 
 OS_OVERLOADABLE
@@ -156,8 +156,13 @@ uint64_t
 counter_load(scalable_counter_t *counter)
 {
 	uint64_t value = 0;
+
+	if (__improbable(startup_phase < STARTUP_SUB_PERCPU)) {
+		return os_atomic_load(zpercpu_get(*counter), relaxed);
+	}
+
 	zpercpu_foreach(it, *counter) {
-		value += os_atomic_load_wide(it, relaxed);
+		value += os_atomic_load(it, relaxed);
 	}
 	return value;
 }

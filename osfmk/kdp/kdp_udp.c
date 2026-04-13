@@ -591,7 +591,7 @@ kdp_reply(
 	ip->ip_hl = sizeof(struct kdp_ip) >> 2;
 	ip->ip_ttl = udp_ttl;
 	ip->ip_sum = 0;
-	ip->ip_sum = htons(~ip_sum((unsigned char *)ip, ip->ip_hl));
+	ip->ip_sum = htons((ushort_t)(~ip_sum((unsigned char *)ip, ip->ip_hl)));
 #if DO_ALIGN
 	bcopy((char *)ip, (char *)&pkt.data[pkt.off], sizeof(*ip));
 #endif
@@ -668,7 +668,7 @@ kdp_send(
 	ip->ip_hl = sizeof(struct kdp_ip) >> 2;
 	ip->ip_ttl = udp_ttl;
 	ip->ip_sum = 0;
-	ip->ip_sum = htons(~ip_sum((unsigned char *)ip, ip->ip_hl));
+	ip->ip_sum = htons((ushort_t)(~ip_sum((unsigned char *)ip, ip->ip_hl)));
 #if DO_ALIGN
 	bcopy((char *)ip, (char *)&pkt.data[pkt.off], sizeof(*ip));
 #endif
@@ -1558,7 +1558,7 @@ create_panic_header(unsigned int request, const char *corename,
 	ip->ip_hl = sizeof(struct kdp_ip) >> 2;
 	ip->ip_ttl = udp_ttl;
 	ip->ip_sum = 0;
-	ip->ip_sum = htons(~ip_sum((unsigned char *)ip, ip->ip_hl));
+	ip->ip_sum = htons((ushort_t)(~ip_sum((unsigned char *)ip, ip->ip_hl)));
 #if DO_ALIGN
 	bcopy((char *)ip, (char *)&pkt.data[pkt.off], sizeof(*ip));
 #endif

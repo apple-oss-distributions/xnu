@@ -337,6 +337,9 @@ xnu_tests_driverkit:
 	$(MAKE) -C $(SRCROOT)/tests/driverkit $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
 		SRCROOT=$(SRCROOT)/tests/driverkit
 
+# Notice when building xnu_unittests target from the main makefile, the executables are
+# created at BUILD/sym, whereas if you run the makefile directly with make -C
+# the executables are created at tests/unit/build/sym
 xnu_unittests:
 	$(MAKE) -C $(SRCROOT)/tests/unit	$(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
 		SRCROOT=$(SRCROOT)/tests/unit

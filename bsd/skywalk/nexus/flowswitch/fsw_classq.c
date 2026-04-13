@@ -79,7 +79,7 @@ fsw_classq_kpkt_to_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 	}
 
 	/* copy packet data */
-	fsw->fsw_pkt_copy_to_mbuf(NR_TX, SK_PTR_ENCODE(pkt,
+	error = fsw->fsw_pkt_copy_to_mbuf(NR_TX, SK_PTR_ENCODE(pkt,
 	    METADATA_TYPE(pkt), METADATA_SUBTYPE(pkt)), pkt->pkt_headroom,
 	    m, 0, pkt->pkt_length, PACKET_HAS_PARTIAL_CHECKSUM(pkt),
 	    pkt->pkt_csum_tx_start_off);

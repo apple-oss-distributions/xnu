@@ -60,7 +60,7 @@ typedef enum thread_snapshot_wait_flags {
 	kThreadWaitCompressor           = 0x14,
 	kThreadWaitParkedBoundWorkQueue = 0x15,
 	kThreadWaitPageBusy             = 0x16,
-	kThreadWaitPagerInit            = 0x17,
+	kThreadWaitPLReqInProgress      = 0x17,
 	kThreadWaitPagerReady           = 0x18,
 	kThreadWaitPagingActivity       = 0x19,
 	kThreadWaitMappingInProgress    = 0x1a,
@@ -69,6 +69,9 @@ typedef enum thread_snapshot_wait_flags {
 	kThreadWaitPageInThrottle       = 0x1d,
 	kThreadWaitExclaveCore          = 0x1e,
 	kThreadWaitExclaveKit           = 0x1f,
+	kThreadWaitVMEntryExclEvent     = 0x20,
+	kThreadWaitVMEntrySharedEvent   = 0x21,
+	kThreadWaitVMEntryKUnwireEvent  = 0x22,
 } __attribute__((packed)) block_hint_t;
 
 _Static_assert(sizeof(block_hint_t) <= sizeof(short),

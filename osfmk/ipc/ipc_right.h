@@ -72,7 +72,7 @@
 #include <ipc/ipc_entry.h>
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 #define ipc_right_lookup_two_read       ipc_right_lookup_two_write
 
@@ -229,7 +229,7 @@ extern void ipc_right_copyout_recv_and_unlock_space(
 	ipc_entry_t             entry,
 	mach_msg_guarded_port_descriptor_t *gdesc);
 
-#pragma GCC visibility pop
+__exported_pop
 __ASSUME_PTR_ABI_SINGLE_END __END_DECLS
 
 #endif  /* _IPC_IPC_RIGHT_H_ */

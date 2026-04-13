@@ -481,14 +481,14 @@ ntp_adjtime(struct proc *p, struct ntp_adjtime_args *uap, int32_t *retval)
 
 		user_ntv.modes = modes;
 		if (time_status & STA_NANO) {
-			user_ntv.offset = L_GINT(time_offset);
+			user_ntv.offset = (user32_long_t)L_GINT(time_offset);
 		} else {
 			user_ntv.offset = L_GINT(time_offset) / 1000;
 		}
 		if (time_freq > 0) {
-			user_ntv.freq = L_GINT((time_freq / 1000LL) << 16);
+			user_ntv.freq = (user32_long_t)L_GINT((time_freq / 1000LL) << 16);
 		} else {
-			user_ntv.freq = -L_GINT((-(time_freq) / 1000LL) << 16);
+			user_ntv.freq = (user32_long_t)-L_GINT((-(time_freq) / 1000LL) << 16);
 		}
 		user_ntv.maxerror = (user32_long_t)time_maxerror;
 		user_ntv.esterror = (user32_long_t)time_esterror;

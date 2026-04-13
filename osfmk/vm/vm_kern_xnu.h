@@ -103,7 +103,7 @@ typedef struct {
 	uint32_t                kmg_context : 30;
 } kmem_guard_t;
 #define KMEM_GUARD_NONE         (kmem_guard_t){ }
-#define KMEM_GUARD_SUBMAP       (kmem_guard_t){ .kmg_atomic = 0, .kmg_submap = 1 }
+#define KMEM_GUARD_SUBMAP       (kmem_guard_t){ .kmg_atomic = 1, .kmg_submap = 1 }
 
 
 /*!
@@ -202,10 +202,8 @@ typedef struct {
  * @const KMEM_DATA (alloc, suballoc, realloc)
  *	The memory must be allocated from the "Data" range.
  *
- * @const KMEM_SPRAYQTN (alloc, realloc)
- *	The memory must be allocated from the "spray quarantine" range. For more
- *	details on what allocations qualify to use this flag see
- *	@c KMEM_RANGE_ID_SPRAYQTN.
+ * @const KMEM_IO (alloc, suballoc, realloc)
+ *	The memory must be allocated from the "IO" range.
  *
  * @const KMEM_GUESS_SIZE (free)
  *	When freeing an atomic entry (requires a valid kmem guard),
@@ -289,7 +287,7 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_GUESS_SIZE     = 0x00004000,
 	KMEM_DATA           = 0x00008000,
 	KMEM_DATA_SHARED    = 0x00010000,
-	KMEM_SPRAYQTN       = 0x00020000,
+	KMEM_IO             = 0x00020000,
 
 	/* Entry properties */
 	KMEM_PERMANENT      = 0x00200000,
@@ -476,7 +474,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_LAST_FREE       = KMEM_LAST_FREE,
 	KMA_DATA            = KMEM_DATA,
 	KMA_DATA_SHARED     = KMEM_DATA_SHARED,
-	KMA_SPRAYQTN        = KMEM_SPRAYQTN,
+	KMA_IO              = KMEM_IO,
 
 	/* Entry properties */
 	KMA_PERMANENT       = KMEM_PERMANENT,
@@ -627,9 +625,7 @@ __options_decl(kms_flags_t, uint32_t, {
 	KMS_LAST_FREE       = KMEM_LAST_FREE,
 	KMS_DATA            = KMEM_DATA,
 	KMS_DATA_SHARED     = KMEM_DATA_SHARED,
-
-	/* Entry properties */
-	KMS_PERMANENT       = KMEM_PERMANENT,
+	KMS_IO              = KMEM_IO,
 });
 
 /*!
@@ -683,7 +679,7 @@ __options_decl(kmr_flags_t, uint32_t, {
 	KMR_LAST_FREE       = KMEM_LAST_FREE,
 	KMR_DATA            = KMEM_DATA,
 	KMR_DATA_SHARED     = KMEM_DATA_SHARED,
-	KMR_SPRAYQTN        = KMEM_SPRAYQTN,
+	KMR_IO              = KMEM_IO,
 
 	/* Entry properties */
 	KMR_GUARD_FIRST     = KMEM_GUARD_FIRST,
@@ -1258,6 +1254,12 @@ extern kern_return_t mach_vm_purgable_control(
 	int                    *state);
 
 
+extern kern_return_t
+mach_vm_deallocate_kernel(
+	vm_map_t                map,
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u);
+
 #ifdef MACH_KERNEL_PRIVATE
 #pragma mark - map copyio
 
@@ -1605,6 +1607,7 @@ extern uint64_t         vm_tag_get_size(
  * - @c VM_KERN_MEMORY_DIAG,
  * - @c VM_KERN_MEMORY_KALLOC,
  * - @c VM_KERN_MEMORY_KALLOC_DATA,
+ * - @c VM_KERN_MEMORY_KALLOC_SHARED,
  * - @c VM_KERN_MEMORY_KALLOC_TYPE,
  * - @c VM_KERN_MEMORY_LIBKERN,
  * - @c VM_KERN_MEMORY_OSFMK,
@@ -1688,33 +1691,6 @@ extern kern_return_t    vm_page_diagnose(
 	bool                    redact_info);
 
 #if DEBUG || DEVELOPMENT
-
-/*!
- * @typedef kmem_gobj_stats
- *
- * @brief
- * Statistics about the "guard objects" allocator for the pointer ranges
- * of kmem.
- */
-typedef struct {
-	vm_map_size_t meta_sz;        /**< total faulted size of metadata */
-	vm_map_size_t pte_sz;         /**< total faulted leaf PTE size    */
-	vm_map_size_t total_va;       /**< total amount of VA ever used   */
-	vm_map_size_t total_used;     /**< current amount of VA allocated */
-} kmem_gobj_stats;
-
-
-/*!
- * @function kmem_get_gobj_stats()
- *
- * @brief
- * Returns statistics about the guard objects allocator.
- *
- * @description
- * This is the backend of the @c vm.kmem_gobj_stats sysctl.
- */
-extern kmem_gobj_stats  kmem_get_gobj_stats(void);
-
 
 /*!
  * @function vm_kern_allocation_info()

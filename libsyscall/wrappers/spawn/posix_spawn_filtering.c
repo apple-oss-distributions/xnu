@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <TargetConditionals.h>
+#include <_simple_getenv.h>
 
 extern void __posix_spawnattr_init(struct _posix_spawnattr *psattrp);
 
@@ -48,23 +49,6 @@ extern int __execve(const char *fname, char * const *argp, char * const *envp);
 extern int __open_nocancel(const char *path, int oflag, mode_t mode);
 extern ssize_t __read_nocancel(int, void *, size_t);
 extern int __close_nocancel(int fd);
-
-static const char *
-_simple_getenv(char * const *envp, const char *var)
-{
-	size_t var_len = strlen(var);
-
-	for (char * const *p = envp; p && *p; p++) {
-		size_t p_len = strlen(*p);
-
-		if (p_len >= var_len && memcmp(*p, var, var_len) == 0 &&
-		    (*p)[var_len] == '=') {
-			return &(*p)[var_len + 1];
-		}
-	}
-
-	return NULL;
-}
 
 /*
  * Check that file exists and is accessible.
@@ -256,7 +240,7 @@ _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
 	 * inspect the parent's env instead. For testing only purposes, it's fine.
 	 */
 	const char *rules_file_path =
-	    _simple_getenv(envp, "POSIX_SPAWN_FILTERING_RULES_PATH");
+	    _simple_getenv((char const * const *)envp, "POSIX_SPAWN_FILTERING_RULES_PATH");
 
 #if TARGET_OS_IPHONE
 	/*
@@ -343,8 +327,10 @@ _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
 	 */
 	size_t envp_count = 0;
 	char *const *ep = envp;
-	while (*ep++) {
-		envp_count += 1;
+	if (ep) {
+		while (*ep++) {
+			envp_count += 1;
+		}
 	}
 
 	/*

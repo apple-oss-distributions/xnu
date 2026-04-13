@@ -181,7 +181,7 @@ typedef struct task_qos_policy *task_qos_policy_t;
 #define PROC_FLAG_APPLICATION        0x1000000 /* Process is an application */
 #define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION /* Process is an application */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <mach/task_policy_private.h>
 #elif defined(MACH_KERNEL_PRIVATE)
 #include <mach/task_policy_private.h>

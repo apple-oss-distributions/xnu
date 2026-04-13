@@ -1,4 +1,5 @@
 INCLUDED_TEST_SOURCE_DIRS += ktrace
+
 EXCLUDED_SOURCES += ktrace/kperf_helpers.c
 KTRACE_LDFLAGS = -framework ktrace -framework kperf -framework kperfdata -ldarwintest_utils
 

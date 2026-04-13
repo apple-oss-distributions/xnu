@@ -568,7 +568,8 @@ IONVRAMCHRPHandler::unserializeVariables(void)
 				if (_provider->_diags) {
 					_provider->_diags->logVariable(currentRegion->type,
 					    kIONVRAMOperationInit, varName,
-					    (void *)(uintptr_t)(cnt - cntStart));
+					    (void *)(uintptr_t)propDataLength,
+					    (void *)(uintptr_t)cntStart);
 				}
 
 				if (currentRegion->type == kIONVRAMPartitionSystem) {
@@ -809,8 +810,7 @@ IONVRAMCHRPHandler::setVariableInternal(const uuid_t varGuid, const char *variab
 
 		if (_provider->_diags) {
 			_provider->_diags->logVariable(getPartitionTypeForGUID(varGuid),
-			    kIONVRAMOperationDelete, variableName,
-			    nullptr);
+			    kIONVRAMOperationDelete, variableName);
 		}
 	}
 

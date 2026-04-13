@@ -606,7 +606,7 @@ typedef struct necp_cache_buffer {
 /*
  * NECP Client definitions
  */
-#define NECP_MAX_CLIENT_PARAMETERS_SIZE                                 1024
+#define NECP_MAX_CLIENT_PARAMETERS_SIZE                                 2048
 #define NECP_MAX_CLIENT_RESULT_SIZE                                     512 // Legacy
 #define NECP_BASE_CLIENT_RESULT_SIZE                                    1024
 #define NECP_CLIENT_FLOW_RESULT_SIZE                                    512
@@ -1616,6 +1616,7 @@ struct necp_client_nexus_parameters {
 	unsigned is_demuxable_parent:1;
 	unsigned reuse_port:1;
 	unsigned use_aop_offload:1;
+	unsigned disabled:1;
 
 	uuid_t parent_flow_uuid;
 	struct necp_demux_pattern demux_patterns[NECP_MAX_DEMUX_PATTERNS];
@@ -1671,7 +1672,10 @@ extern void necp_client_early_close(uuid_t client_id); // Cause a single client 
 struct nstat_domain_info;
 extern void necp_copy_inp_domain_info(struct inpcb *, struct socket *, struct nstat_domain_info *);
 extern void necp_with_inp_domain_name(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx));
+extern void necp_with_inp_domain_name_locked(struct socket *so, void *ctx, void (*with_func)(char *domain_name __null_terminated, void *ctx));
 extern bool net_domain_contains_hostname(char *hostname_string __null_terminated, char *domain_string __null_terminated);
+extern bool cfil_check_filter_control_unit(u_int32_t, u_int32_t, bool *);
+extern int necp_client_qualify_flow(uuid_t *flow_uuid, int flow_protocol, union sockaddr_in_4_6 *flow_local, union sockaddr_in_4_6 *flow_remote, u_int32_t filter_control_unit);
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */
 

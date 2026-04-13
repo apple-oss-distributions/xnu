@@ -70,6 +70,14 @@
 #include "bpflib.h"
 #include "in_cksum.h"
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_ASROOT(true),
+	T_META_OWNER("dieter")
+	);
+
 #define TEN_NET                 0x0a000000
 #define TEN_1_NET               (TEN_NET | 0x010000)
 
@@ -331,14 +339,14 @@ bond_test_traffic(bool hw_vlan)
 #endif /* TARGET_OS_OSX */
 }
 
-T_DECL(net_if_bond_test_software_tagging,
+T_DECL(if_bond_test_software_tagging,
     "bond test traffic software tagging",
     T_META_ASROOT(true))
 {
 	bond_test_traffic(false);
 }
 
-T_DECL(net_if_bond_test_hardware_tagging,
+T_DECL(if_bond_test_hardware_tagging,
     "bond test hardware tagging",
     T_META_ASROOT(true))
 {

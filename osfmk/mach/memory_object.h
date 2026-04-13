@@ -69,7 +69,7 @@
 #include <mach/memory_object_types.h>
 
 __BEGIN_DECLS
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 /*
  *	Initialize the specified memory object, providing
@@ -163,7 +163,7 @@ extern kern_return_t memory_object_map(
 extern kern_return_t memory_object_last_unmap(
 	memory_object_t memory_object);
 
-#pragma GCC visibility pop
+__exported_pop
 __END_DECLS
 
 #endif  /* _MACH_MEMORY_OBJECT_H_ */

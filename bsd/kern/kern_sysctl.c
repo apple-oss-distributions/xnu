@@ -2057,6 +2057,9 @@ proc_2025_fall_os_sdk_or_later(struct proc *p)
 	switch (proc_platform(p)) {
 	case PLATFORM_MACOS:
 		return proc_sdk_ver >= 0x00100000; // DYLD_MACOSX_VERSION_16_0
+	case PLATFORM_XROS:
+	case PLATFORM_XROSSIMULATOR:
+		return proc_sdk_ver >= 0x00030000; // DYLD_VISIONOS_VERSION_3_0
 	case PLATFORM_IOS:
 	case PLATFORM_IOSSIMULATOR:
 	case PLATFORM_MACCATALYST:
@@ -3734,7 +3737,7 @@ SYSCTL_PROC(_vm, VM_LOADAVG, loadavg,
     0, 0, sysctl_loadavg, "S,loadavg", "");
 
 /*
- * Note:	Thread safe; vm_map_lock protects in  vm_toggle_entry_reuse()
+ * Note:	Thread safe; vm_map_ilk_lock protects in  vm_toggle_entry_reuse()
  */
 STATIC int
 sysctl_vm_toggle_address_reuse(__unused struct sysctl_oid *oidp, __unused void *arg1,
@@ -4521,10 +4524,8 @@ SYSCTL_INT(_vm, OID_AUTO, vm_copy_src_not_internal, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_INT(_vm, OID_AUTO, vm_copy_src_not_symmetric, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_map_copy_overwrite_aligned_src_not_symmetric, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, vm_copy_src_large, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_map_copy_overwrite_aligned_src_large, 0, "");
 
-
-extern uint32_t vm_page_external_count;
-
-SYSCTL_INT(_vm, OID_AUTO, vm_page_external_count, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_page_external_count, 0, "");
+SYSCTL_SCALABLE_COUNTER(_vm, vm_page_internal_count, vm_page_internal_count, "");
+SYSCTL_SCALABLE_COUNTER(_vm, vm_page_external_count, vm_page_external_count, "");
 
 SYSCTL_INT(_vm, OID_AUTO, vm_page_filecache_min, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_state.vm_page_filecache_min, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, vm_page_xpmapped_min, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_state.vm_page_xpmapped_min, 0, "");
@@ -4546,8 +4547,6 @@ extern uint32_t c_segments_limit;
 extern uint32_t c_segment_pages_compressed_limit;
 extern uint64_t compressor_pool_size;
 extern uint32_t compressor_pool_multiplier;
-extern uint32_t vm_ripe_target_age;
-extern uint32_t swapout_target_age;
 extern _Atomic uint64_t compressor_bytes_used;
 extern _Atomic uint64_t c_segment_input_bytes;
 extern _Atomic uint64_t c_segment_compressed_bytes;
@@ -4653,7 +4652,7 @@ SYSCTL_QUAD(_vm, OID_AUTO, compressor_input_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, 
 SYSCTL_QUAD(_vm, OID_AUTO, compressor_compressed_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, ((uint64_t *)&c_segment_compressed_bytes), "");
 SYSCTL_QUAD(_vm, OID_AUTO, compressor_bytes_used, CTLFLAG_RD | CTLFLAG_LOCKED, ((uint64_t *)&compressor_bytes_used), "");
 
-SYSCTL_INT(_vm, OID_AUTO, compressor_swapout_target_age, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_target_age, 0, "");
+SYSCTL_QUAD(_vm, OID_AUTO, compressor_swapout_target_age, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_target_age, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_available, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_available, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_segment_buffer_size, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_bufsize, 0, "");
 SYSCTL_QUAD(_vm, OID_AUTO, compressor_pool_size, CTLFLAG_RD | CTLFLAG_LOCKED, &compressor_pool_size, "");
@@ -4683,8 +4682,6 @@ SYSCTL_QUAD(_vm, OID_AUTO, compressor_ro_uncompressed_swap_pages_on_disk, CTLFLA
 
 extern int min_csegs_per_major_compaction;
 SYSCTL_INT(_vm, OID_AUTO, compressor_min_csegs_per_major_compaction, CTLFLAG_RW | CTLFLAG_LOCKED, &min_csegs_per_major_compaction, 0, "");
-
-SYSCTL_INT(_vm, OID_AUTO, vm_ripe_target_age_in_secs, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_ripe_target_age, 0, "");
 
 SYSCTL_INT(_vm, OID_AUTO, compressor_eval_period_in_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &compressor_eval_period_in_msecs, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_sample_min_in_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &compressor_sample_min_in_msecs, 0, "");
@@ -5577,6 +5574,52 @@ sysctl_simultaneous_panic_test SYSCTL_HANDLER_ARGS
 	}
 }
 
+#if __arm64__ && (DEVELOPMENT || DEBUG)
+#if CONFIG_SPTM
+extern void __attribute__((noreturn)) sptm_vs_xnu_panic_test(void);
+extern void __attribute__((noreturn)) xnu_vs_sptm_panic_test(void);
+extern void __attribute__((noreturn)) sptm_vs_sptm_panic_test(void);
+#endif /* CONFIG_SPTM */
+extern void __attribute__((noreturn)) xnu_vs_xnu_panic_test(void);
+extern void __attribute__((noreturn)) stack_overflow_panic_test(void);
+
+static int
+sysctl_panic_test SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error) {
+		return error;
+	}
+
+	switch (val) {
+#if CONFIG_SPTM
+	case 1:
+		sptm_vs_xnu_panic_test();
+	case 2:
+		xnu_vs_sptm_panic_test();
+	case 3:
+		sptm_vs_sptm_panic_test();
+#endif /* CONFIG_SPTM */
+	case 4:
+		xnu_vs_xnu_panic_test();
+	case 5:
+		(void) ml_set_interrupts_enabled(false);
+		stack_overflow_panic_test();
+	case 6:
+		Debugger("panic_test");
+		break;
+	default:
+		return ERANGE;
+	}
+
+	return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, panic_test, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, sysctl_panic_test, "I", "panic test");
+#endif /* __arm64__ && (DEVELOPMENT || DEBUG) */
+
 extern unsigned int panic_test_failure_mode;
 SYSCTL_INT(_debug, OID_AUTO, xnu_panic_failure_mode, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &panic_test_failure_mode, 0, "panic/debugger test failure mode");
 
@@ -5797,6 +5840,22 @@ SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_size, CTLFLAG_RD | CTLFLAG_LOCKED | C
     "size in bytes of the phys_carveout_mb boot-arg region");
 
 
+
+static int
+cseg_wedge_setup SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+
+	do_cseg_wedge_setup();
+	return 0;
+}
+SYSCTL_PROC(_kern, OID_AUTO, cseg_wedge_setup, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, cseg_wedge_setup, "I", "setup for wedging c_seg thread");
 
 static int
 cseg_wedge_thread SYSCTL_HANDLER_ARGS
@@ -6350,6 +6409,79 @@ unlink_kernelcore_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern, OID_AUTO, unlink_kernelcore,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
     unlink_kernelcore_sysctl, "-", "unlink the kernelcore file");
+
+typedef struct {
+	uint64_t thread_id;
+	pid_t pid;
+} thread_block_hint_args;
+
+extern uint32_t thread_get_block_hint(thread_t thread);
+
+static int
+sysctl_thread_block_hint SYSCTL_HANDLER_ARGS
+{
+	int error;
+	thread_block_hint_args args;
+	uint32_t block_hint = 0;
+	proc_t proc = PROC_NULL;
+	task_t task = TASK_NULL;
+	thread_t thread = THREAD_NULL;
+
+	error = SYSCTL_IN(req, &args, sizeof(args));
+	if (error) {
+		return error;
+	}
+
+	if (!args.pid || !args.thread_id) {
+		return EINVAL;
+	}
+
+	/* Find the proc for the given PID */
+	proc = proc_find(args.pid);
+	if (proc == PROC_NULL) {
+		printf("couldn't find proc for pid %d\n", args.pid);
+		return EINVAL;
+	}
+
+	/* Get the task from the proc */
+	task = proc_task(proc);
+	if (task == TASK_NULL) {
+		printf("couldn't find task for pid %d\n", args.pid);
+		error = EINVAL;
+		goto done;
+	}
+
+	/* Find the thread with the given thread ID */
+	thread = task_findtid(task, args.thread_id);
+	if (thread == THREAD_NULL) {
+		printf("couldn't find thread %llu in task for pid %d\n", args.thread_id, args.pid);
+		error = EINVAL;
+		goto done;
+	}
+
+	/* Get the block hint information using accessor functions */
+	block_hint = thread_get_block_hint(thread);
+	printf("The block_hint is %d\n", block_hint);
+
+	thread_deallocate(thread);
+
+	/* Return the result */
+	error = SYSCTL_OUT(req, &block_hint, sizeof(block_hint));
+done:
+	proc_rele(proc);
+	return error;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, thread_block_hint, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+    0, 0, &sysctl_thread_block_hint, "I", "Get thread block hint information");
+
+/* Used for signaling in stackshot tests */
+extern _Atomic uint64_t vm_stackshot_test_blocker_tid;
+SYSCTL_QUAD(_kern, OID_AUTO,
+    stackshot_test_blocker_tid,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &vm_stackshot_test_blocker_tid,
+    "");
 #endif /* DEVELOPMENT || DEBUG */
 
 #if CONFIG_IOTRACE
@@ -6373,8 +6505,9 @@ SYSCTL_PROC(_kern, OID_AUTO, page_protection_type,
     CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_page_protection_type, "I", "Type of page protection that the system supports");
 
-#if CONFIG_SPTM && HAS_SPTM_SYSCTL
+#if HAS_SPTM_SYSCTL
 extern bool disarm_protected_io;
+extern bool disarm_protected_io_ever;
 static int sysctl_sptm_disarm_protected_io SYSCTL_HANDLER_ARGS
 {
 	int error = 0;
@@ -6389,10 +6522,20 @@ static int sysctl_sptm_disarm_protected_io SYSCTL_HANDLER_ARGS
 	uint64_t new_disarm_protected_io = old_disarm_protected_io;
 	if (req->newptr) {
 		error = SYSCTL_IN(req, &new_disarm_protected_io, sizeof(new_disarm_protected_io));
-		if (!disarm_protected_io && new_disarm_protected_io) {
-			sptm_sysctl(SPTM_SYSCTL_DISARM_PROTECTED_IO, SPTM_SYSCTL_SET, 1);
+		if (error || (new_disarm_protected_io == old_disarm_protected_io)) {
+			return error;
+		}
+
+		const sptm_sysctl_setter_return_t sptm_error = sptm_sysctl(
+			SPTM_SYSCTL_DISARM_PROTECTED_IO, SPTM_SYSCTL_SET, !!new_disarm_protected_io);
+		if (SPTM_SYSCTL_SET_SUCCESS == sptm_error) {
 			os_atomic_thread_fence(release);
-			disarm_protected_io = true;
+			disarm_protected_io = !!new_disarm_protected_io;
+
+			/* Latch that we've ever disarmed SPTM for debugging / coredump */
+			disarm_protected_io_ever = disarm_protected_io_ever || disarm_protected_io;
+		} else {
+			return EINVAL;
 		}
 	}
 
@@ -6430,7 +6573,7 @@ static int sysctl_sptm_sysctl_poke SYSCTL_HANDLER_ARGS
 	return error;
 }
 SYSCTL_PROC(_kern, OID_AUTO, sptm_sysctl_poke, CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_sptm_sysctl_poke, "Q", "");
-#endif /* CONFIG_SPTM && HAS_SPTM_SYSCTL */
+#endif /* HAS_SPTM_SYSCTL */
 
 #if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
 /**

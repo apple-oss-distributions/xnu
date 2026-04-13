@@ -241,6 +241,7 @@ PRIVATE_DATAFILES = $(sort \
 	vm_prot.h \
 	vm_reclaim.h \
 	vm_reclaim_private.h \
+	vm_region_private.h \
 	${EXCLAVES_DATAFILES} \
 	${EXTRA_PRIVATE_DATAFILES} \
 	${MIG_PRIVATE_DEFS})
@@ -257,6 +258,7 @@ INSTALL_MI_LCL_LIST = $(sort \
 	thread_policy_private.h \
 	vm_reclaim.h \
 	vm_reclaim_private.h \
+	vm_region_private.h \
 	${EXCLAVES_DATAFILES} \
 	${EXTRA_PRIVATE_DATAFILES})
 

@@ -27,7 +27,7 @@
 // code shared with kernel/kext tests
 #include "../../osfmk/tests/vm_parameter_validation.h"
 
-#define GOLDEN_FILES_VERSION "vm_parameter_validation_golden_images_a2474e92.tar.xz"
+#define GOLDEN_FILES_VERSION "vm_parameter_validation_golden_images_881c911e.tar.xz"
 #define GOLDEN_FILES_ASSET_FILE_POINTER GOLDEN_FILES_VERSION
 
 /*
@@ -201,8 +201,14 @@ static bool EXC_GUARD_ENABLED = true;
 static int
 call_munlock(void *start, size_t size)
 {
+	int result;
 	int err = munlock(start, size);
-	return err ? errno : 0;
+	result = err ? errno : 0;
+	if (result == ENOMEM) {
+		/* RANGELOCKINGTODO rdar://144322132 (Entry Locking: Update golden files for vm_parameter validation and remove ACCEPTABLE hacks) */
+		result = ACCEPTABLE;
+	}
+	return result;
 }
 
 static int
@@ -492,6 +498,117 @@ call_vm_read_list(MAP_T map, vm_address_t start, vm_size_t size)
 }
 #endif
 
+#if __LP64__
+static inline void
+check_mach_vm_reallocate_outparam_changes(kern_return_t *kr, mach_vm_address_t dst_in, mach_vm_address_t dst_out)
+{
+	if (*kr != KERN_SUCCESS && dst_in != dst_out) {
+		*kr = OUT_PARAM_BAD;
+	}
+}
+
+static kern_return_t
+call_mach_vm_reallocate__src__src_size(MAP_T map, mach_vm_address_t src, mach_vm_size_t src_size)
+{
+	kern_return_t kr;
+	mach_vm_address_t dst, dst_in = dst = 0;
+	vm_size_t dst_size = src_size * 2;
+	kr = mach_vm_reallocate(map, src, src_size, &dst, dst_size, 0, VM_REALLOCATE_DEALLOCATE_SOURCE, VM_FLAGS_ANYWHERE);
+
+	/*
+	 * Clean up the destination on success.
+	 */
+	if (kr == KERN_SUCCESS) {
+		kr = mach_vm_deallocate(map, dst, dst_size);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	check_mach_vm_reallocate_outparam_changes(&kr, dst_in, dst);
+	return kr;
+}
+
+static kern_return_t
+call_mach_vm_reallocate__dst__dst_size(MAP_T map, mach_vm_address_t *dst, mach_vm_size_t dst_size, int flags)
+{
+	kern_return_t kr;
+	mach_vm_address_t src = 0;
+	mach_vm_address_t dst_in = *dst;
+	vm_size_t src_size = PAGE_SIZE;
+
+	/*
+	 * Allocate an arbitrary 1-page source.
+	 */
+	assert(mach_vm_allocate(map, &src, src_size, VM_FLAGS_ANYWHERE) == KERN_SUCCESS);
+
+	/*
+	 * Resize to destination.
+	 */
+	kr = mach_vm_reallocate(map, src, src_size, dst, dst_size, 0, VM_REALLOCATE_DEALLOCATE_SOURCE, flags);
+
+	/*
+	 * Deallocate the source if we failed to relocate to the destination.
+	 */
+	if (kr != KERN_SUCCESS) {
+		assert(mach_vm_deallocate(map, src, src_size) == KERN_SUCCESS);
+	}
+
+	check_mach_vm_reallocate_outparam_changes(&kr, dst_in, *dst);
+	return kr;
+}
+
+static kern_return_t
+call_mach_vm_reallocate__anywhere__dst__dst_size(MAP_T map, mach_vm_address_t *dst, mach_vm_size_t dst_size)
+{
+	return call_mach_vm_reallocate__dst__dst_size(map, dst, dst_size, VM_FLAGS_ANYWHERE);
+}
+
+static kern_return_t
+call_mach_vm_reallocate__fixed__dst__dst_size(MAP_T map, mach_vm_address_t *dst, mach_vm_size_t dst_size)
+{
+	return call_mach_vm_reallocate__dst__dst_size(map, dst, dst_size, VM_FLAGS_FIXED);
+}
+
+static kern_return_t
+call_mach_vm_reallocate__flags(MAP_T map, mach_vm_address_t src, mach_vm_address_t src_size, int flags)
+{
+	kern_return_t kr;
+	mach_vm_address_t dst, dst_in = dst = 0;
+	vm_size_t dst_size = src_size * 2;
+	kr = mach_vm_reallocate(map, src, src_size, &dst, dst_size, 0, VM_REALLOCATE_DEALLOCATE_SOURCE, flags);
+
+	/*
+	 * Clean up the destination on success.
+	 */
+	if (kr == KERN_SUCCESS) {
+		kr = mach_vm_deallocate(map, dst, dst_size);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	check_mach_vm_reallocate_outparam_changes(&kr, dst_in, dst);
+	return kr;
+}
+
+static kern_return_t
+call_mach_vm_reallocate__align_mask(MAP_T map, mach_vm_address_t src, mach_vm_address_t src_size, mach_vm_offset_t align_mask)
+{
+	kern_return_t kr;
+	mach_vm_address_t dst, dst_in = dst = 0;
+	vm_size_t dst_size = src_size * 2;
+	kr = mach_vm_reallocate(map, src, src_size, &dst, dst_size, align_mask, VM_REALLOCATE_DEALLOCATE_SOURCE, VM_FLAGS_ANYWHERE);
+
+	/*
+	 * Clean up the destination on success.
+	 */
+	if (kr == KERN_SUCCESS) {
+		kr = mach_vm_deallocate(map, dst, dst_size);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	check_mach_vm_reallocate_outparam_changes(&kr, dst_in, dst);
+	return kr;
+}
+#endif /* __LP64__ */
+
 static inline void
 check_vm_read_overwrite_outparam_changes(kern_return_t * kr, mach_vm_size_t size, mach_vm_size_t requested_size)
 {
@@ -662,7 +779,21 @@ call_vm_write__dst(MAP_T map, vm_address_t start, vm_size_t size)
 
 // mach_vm_wire, vm_wire (start/size)
 // "wire" and "unwire" paths diverge internally; test both
-#define IMPL(FN, T, FLAVOR, PROT)                                       \
+#define UNWIRE_IMPL(FN, T, FLAVOR, PROT)                                \
+	static kern_return_t                                            \
+	call_ ## FN ## __ ## FLAVOR(MAP_T map, T start, T size)         \
+	{                                                               \
+	        mach_port_t host_priv = HOST_PRIV_NULL;                 \
+	        kern_return_t kr = host_get_host_priv_port(mach_host_self(), &host_priv); \
+	        assert(kr == 0);  /* host priv port on macOS requires entitlements or root */ \
+	        kr = FN(host_priv, map, start, size, PROT);             \
+	        if (kr == KERN_INVALID_ADDRESS) {                       \
+	                return ACCEPTABLE;                              \
+	        }                                                       \
+	        return kr;                                              \
+	}
+
+#define WIRE_IMPL(FN, T, FLAVOR, PROT)                                \
 	static kern_return_t                                            \
 	call_ ## FN ## __ ## FLAVOR(MAP_T map, T start, T size)         \
 	{                                                               \
@@ -672,14 +803,17 @@ call_vm_write__dst(MAP_T map, vm_address_t start, vm_size_t size)
 	        kr = FN(host_priv, map, start, size, PROT);             \
 	        return kr;                                              \
 	}
-IMPL(mach_vm_wire, mach_vm_address_t, wire, VM_PROT_READ)
-IMPL(mach_vm_wire, mach_vm_address_t, unwire, VM_PROT_NONE)
+
+WIRE_IMPL(mach_vm_wire, mach_vm_address_t, wire, VM_PROT_READ)
+UNWIRE_IMPL(mach_vm_wire, mach_vm_address_t, unwire, VM_PROT_NONE)
 // The declaration of vm_wire is buggy on U32.
 // We compile in our own MIG user stub for it with a "replacement_" prefix.
 // rdar://118258929
-IMPL(replacement_vm_wire, mach_vm_address_t, wire, VM_PROT_READ)
-IMPL(replacement_vm_wire, mach_vm_address_t, unwire, VM_PROT_NONE)
-#undef IMPL
+
+WIRE_IMPL(replacement_vm_wire, mach_vm_address_t, wire, VM_PROT_READ)
+UNWIRE_IMPL(replacement_vm_wire, mach_vm_address_t, unwire, VM_PROT_NONE)
+#undef WIRE_IMPL
+#undef UNWIRE_IMPL
 
 // mach_vm_wire, vm_wire (vm_prot_t)
 #define IMPL(FN, T)                                                     \
@@ -1550,10 +1684,26 @@ static int
 call_shared_region_map_and_slide_2_np_in_thread(uint32_t files_count, const struct shared_file_np *files,
     uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings)
 {
-	// From vm/vm_shared_region.c: After a chroot(), the calling process keeps using its original shared region [...]
-	// But its children will use a different shared region [...]
-	if (chroot(".") < 0) {
-		return BUSTED;
+	if (!isRosetta()) {
+		/*
+		 * Provoke the "root_dir mismatch" error in shared_region_map_and_slide_setup(),
+		 * if the test doesn't hit another error first.
+		 */
+		if (chroot(".") < 0) {
+			return BUSTED;
+		}
+	} else {
+		/*
+		 * Rosetta intercepts shared_region_map_and_slide_2_np()
+		 * and calls fcntl(F_GETPATH) on the file descriptor.
+		 * That file is outside the chroot so fcntl fails and
+		 * we never call into the kernel.
+		 *
+		 * Instead, don't call chroot.
+		 * This has no effect on the test results because the trials
+		 * that would reach the "root_dir mismatch" check also happen
+		 * to be excluded by shared_region_map_and_slide_would_crash().
+		 */
 	}
 
 	map_n_slice_thread_args args = {files_count, files, mappings_count, mappings};
@@ -1562,16 +1712,20 @@ call_shared_region_map_and_slide_2_np_in_thread(uint32_t files_count, const stru
 		return -91;
 	}
 
-	int *err;
-	if (pthread_join(thread, (void**)&err) < 0) {
+	int *err_p;
+	if (pthread_join(thread, (void**)&err_p) < 0) {
 		return BUSTED;
 	}
 
-	if (chroot("/") < 0) {
-		return BUSTED;
+	if (!isRosetta()) {
+		if (chroot("/") < 0) {
+			return BUSTED;
+		}
 	}
 
-	return *err;
+	int err = *err_p;
+	free(err_p);
+	return err;
 }
 
 static int
@@ -2511,6 +2665,10 @@ fill_golden_trials(uint64_t trialsargs[static TRIALSARGUMENTS_SIZE],
 		vm_map_kernel_flags_trials_t * trials SMART_VM_MAP_KERNEL_FLAGS_TRIALS();
 		FILL_TRIALS_NAMES(results, trials);
 	}
+	case eSMART_ALIGN_MASK_TRIALS: {
+		align_mask_trials_t *trials SMART_ALIGN_MASK_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
 	case eSMART_VM_INHERIT_TRIALS: {
 		vm_inherit_trials_t *trials SMART_VM_INHERIT_TRIALS();
 		FILL_TRIALS_NAMES(results, trials);
@@ -3065,7 +3223,7 @@ T_DECL(vm_parameter_validation_user,
 	/*
 	 * -- memory entry functions --
 	 * The memory entry test functions use macros to generate each flavor of memory entry function.
-	 * This is partially becauseof many entrypoints (mach_make_memory_entry/mach_make_memory_entry_64/mach_make_memory_entry)
+	 * This is partially because of many entrypoints (mach_make_memory_entry/mach_make_memory_entry_64/_mach_make_memory_entry)
 	 * and partially because many flavors of each function are called (copy/memonly/share/...).
 	 */
 
@@ -3328,6 +3486,25 @@ T_DECL(vm_parameter_validation_user,
 	RUN(call_mlock, "mlock");
 	RUN(call_munlock, "munlock");
 #undef RUN
+
+#if __LP64__
+#define RUN(fn, name) dealloc_results(process_results(test_deallocator(fn, name " (src/size)")))
+	RUN(call_mach_vm_reallocate__src__src_size, "mach_vm_reallocate");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_deallocator_with_flags(fn, name " (flags)")))
+	RUN(call_mach_vm_reallocate__flags, "mach_vm_reallocate");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_deallocator_with_align_mask(fn, name " (align_mask)")))
+	RUN(call_mach_vm_reallocate__align_mask, "mach_vm_reallocate");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_mach_allocation_func_with_start_size(fn, name " (dst/size)")))
+	RUN(call_mach_vm_reallocate__anywhere__dst__dst_size, "mach_vm_reallocate (anywhere)");
+	RUN(call_mach_vm_reallocate__fixed__dst__dst_size, "mach_vm_reallocate (fixed)");
+#undef RUN
+#endif /* __LP64__ */
 
 #define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
 	RUN(call_mach_vm_wire__wire, "mach_vm_wire (wire)");

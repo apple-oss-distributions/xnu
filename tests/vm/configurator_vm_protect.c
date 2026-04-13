@@ -105,10 +105,22 @@ vm_protect_with_holes(
 {
 	kern_return_t kr;
 
-	/*
-	 * No checker updates here. vm_map_protect preflights its checks,
-	 * so it fails with no side effects when the address range has holes.
-	 */
+	if (is_new_vm()) {
+		/*
+		 * Range-locking VM clips the start and
+		 * does not simplify after the failure.
+		 */
+		vm_entry_checker_t *checker =
+		    checker_list_find_checker(checker_list, start);
+		if (checker && checker->kind == Allocation) {
+			checker_clip_left(checker_list, checker, start);
+		}
+	} else {
+		/*
+		 * No checker updates here. vm_map_protect preflights its checks,
+		 * so it fails with no side effects when the address range has holes.
+		 */
+	}
 
 	kr = mach_vm_protect(mach_task_self(), start, size, false, VM_PROT_READ);
 	if (kr != KERN_INVALID_ADDRESS) {
@@ -274,6 +286,11 @@ T_DECL(vm_protect,
 		.single_entry_2 = vm_protect_max_rw0,
 		.single_entry_3 = vm_protect_max_rw0,
 		.single_entry_4 = vm_protect_max_rw0,
+
+		.single_entry_nonnull_1 = vm_protect_max_rw0,
+		.single_entry_nonnull_2 = vm_protect_max_rw0,
+		.single_entry_nonnull_3 = vm_protect_max_rw0,
+		.single_entry_nonnull_4 = vm_protect_max_rw0,
 
 		.multiple_entries_1 = vm_protect_max_rw0,
 		.multiple_entries_2 = vm_protect_max_rw0,

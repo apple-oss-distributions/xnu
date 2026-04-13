@@ -44,4 +44,58 @@ struct task_security_config {
 	uint8_t hardened_process_version;
 };
 
+__options_closed_decl(ipc_space_policy_t, uint32_t, {
+	IPC_SPACE_POLICY_INVALID       = 0x0000,
+
+	/* Security level */
+	IPC_SPACE_POLICY_DEFAULT       = 0x0001, /* MACH64_POLICY_DEFAULT */
+	IPC_SPACE_POLICY_ENHANCED      = 0x0002,
+	IPC_SPACE_POLICY_PLATFORM      = 0x0004,
+	IPC_SPACE_POLICY_CONTAINED     = 0x0008,
+	IPC_SPACE_POLICY_KERNEL        = 0x0010,
+
+	/* flags to turn off security */
+#if XNU_TARGET_OS_OSX
+	IPC_SPACE_POLICY_SIMULATED     = 0x0020,
+#else
+	IPC_SPACE_POLICY_SIMULATED     = 0x0000,
+#endif
+#if CONFIG_ROSETTA
+	IPC_SPACE_POLICY_TRANSLATED    = 0x0040,
+#else
+	IPC_SPACE_POLICY_TRANSLATED    = 0x0000,
+#endif
+#if XNU_TARGET_OS_OSX
+	IPC_SPACE_POLICY_OPTED_OUT     = 0x0080,
+#else
+	IPC_SPACE_POLICY_OPTED_OUT     = 0x0000,
+#endif
+
+
+	IPC_SPACE_POLICY_MASK          = (
+		IPC_SPACE_POLICY_DEFAULT |
+		IPC_SPACE_POLICY_ENHANCED |
+		IPC_SPACE_POLICY_PLATFORM |
+		IPC_SPACE_POLICY_CONTAINED |
+		IPC_SPACE_POLICY_KERNEL |
+		IPC_SPACE_POLICY_SIMULATED |
+		IPC_SPACE_POLICY_TRANSLATED |
+		IPC_SPACE_POLICY_OPTED_OUT),
+
+
+/* platform restrictions Versioning Levels */
+	IPC_SPACE_POLICY_ENHANCED_V0 = 0x100,   /* DEPRECATED - includes macos hardened runtime */
+	IPC_SPACE_POLICY_ENHANCED_V1 = 0x200,   /* ES features exposed to 3P in FY2024 release */
+	IPC_SPACE_POLICY_ENHANCED_V2 = 0x300,   /* ES features exposed to 3P in FY2025 release */
+	IPC_SPACE_POLICY_ENHANCED_V3 = 0x400,   /* ES features exposed to 3P in FY2026 release */
+	IPC_SPACE_POLICY_ENHANCED_VERSION_MASK = (
+		IPC_SPACE_POLICY_ENHANCED_V0 |
+		IPC_SPACE_POLICY_ENHANCED_V1 |
+		IPC_SPACE_POLICY_ENHANCED_V2 |
+		IPC_SPACE_POLICY_ENHANCED_V3
+		),
+});
+
+#define HARDENED_PROCESS_VERSION_LATEST 2
+
 #endif /* TASK_SECURITY_CONFIG_H */

@@ -81,6 +81,8 @@
 
 #include <console/serial_protos.h>
 
+#include <machine/machine_cpc.h>
+
 #if KPERF
 #include <kperf/kptimer.h>
 #endif /* KPERF */
@@ -216,10 +218,10 @@ smp_init(void)
 
 	cpu_thread_init();
 
-	DBGLOG_CPU_INIT(master_cpu);
+	DBGLOG_CPU_INIT(boot_cpu_id);
 
 	mp_cpus_call_init();
-	mp_cpus_call_cpu_init(master_cpu);
+	mp_cpus_call_cpu_init(boot_cpu_id);
 
 #if DEBUG || DEVELOPMENT
 	if (PE_parse_boot_argn("interrupt_watchdog",
@@ -549,6 +551,10 @@ cpu_signal_handler(x86_saved_state_t *regs)
 		if (regs == NULL) {
 			/* Called to poll only for cross-calls and TLB flush */
 			break;
+		} else if (i_bit(MP_MAINTENANCE, my_word)) {
+			DBGLOG(cpu_handle, my_cpu, MP_MAINTENANCE);
+			i_bit_clear(MP_MAINTENANCE, my_word);
+			maintenance_ack_ipi(my_cpu);
 		} else if (i_bit(MP_AST, my_word)) {
 			DBGLOG(cpu_handle, my_cpu, MP_AST);
 			i_bit_clear(MP_AST, my_word);
@@ -569,7 +575,7 @@ NMI_pte_corruption_callback(__unused void *arg0, __unused void *arg1, uint16_t l
 	snprintf(&pstr[0], sizeof(pstr),
 	    "Panic(CPU %d): PTE corruption detected on PTEP 0x%llx VAL 0x%llx\n",
 	    lcpu, (unsigned long long)(uintptr_t)PTE_corrupted_ptr, *(uint64_t *)PTE_corrupted_ptr);
-	panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, current_cpu_datap()->cpu_int_state);
+	panic_i386_backtrace(stackptr, 128, &pstr[0], TRUE, current_cpu_datap()->cpu_int_state);
 	return 0;
 }
 
@@ -608,22 +614,22 @@ NMIInterruptHandler(x86_saved_state_t *regs)
 		    "spinlock owner: %p, current_thread: %p, spinlock_owner_cpu: 0x%x\n",
 		    cpu_number(), now, lsti->lock, (void *)lsti->owner_thread_cur,
 		    current_thread(), lsti->owner_cpu);
-		panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, regs);
+		panic_i386_backtrace(stackptr, 128, &pstr[0], TRUE, regs);
 	} else if (NMI_panic_reason == TLB_FLUSH_TIMEOUT) {
 		snprintf(&pstr[0], sizeof(pstr),
 		    "Panic(CPU %d, time %llu): NMIPI for unresponsive processor: TLB flush timeout, TLB state:0x%x\n",
 		    cpu_number(), now, current_cpu_datap()->cpu_tlb_invalid);
-		panic_i386_backtrace(stackptr, 48, &pstr[0], TRUE, regs);
+		panic_i386_backtrace(stackptr, 128, &pstr[0], TRUE, regs);
 	} else if (NMI_panic_reason == CROSSCALL_TIMEOUT) {
 		snprintf(&pstr[0], sizeof(pstr),
 		    "Panic(CPU %d, time %llu): NMIPI for unresponsive processor: cross-call timeout\n",
 		    cpu_number(), now);
-		panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, regs);
+		panic_i386_backtrace(stackptr, 128, &pstr[0], TRUE, regs);
 	} else if (NMI_panic_reason == INTERRUPT_WATCHDOG) {
 		snprintf(&pstr[0], sizeof(pstr),
 		    "Panic(CPU %d, time %llu): NMIPI for unresponsive processor: interrupt watchdog for vector 0x%x\n",
 		    cpu_number(), now, vector_timed_out);
-		panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, regs);
+		panic_i386_backtrace(stackptr, 128, &pstr[0], TRUE, regs);
 	}
 
 #if MACH_KDP
@@ -681,7 +687,7 @@ cpu_interrupt(int cpu)
 		did_IPI = TRUE;
 	}
 
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), cpu, did_IPI, 0, 0, 0);
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), cpu, did_IPI);
 }
 
 /*
@@ -1350,7 +1356,7 @@ mp_cpus_call1(
 	 */
 	mp_disable_preemption();
 	intrs_enabled = ml_get_interrupts_enabled();
-	topo_lock = (cpus != cpu_to_cpumask(master_cpu));
+	topo_lock = (cpus != cpu_to_cpumask(boot_cpu_id));
 	if (topo_lock) {
 		ml_set_interrupts_enabled(FALSE);
 		(void) mp_safe_spin_lock(&x86_topo_lock);
@@ -1581,14 +1587,14 @@ i386_deactivate_cpu(void)
 	 * and poke it in case there's a sooner deadline for it to schedule.
 	 * We don't need to wait for it to ack the IPI.
 	 */
-	timer_queue_shutdown(master_cpu,
+	timer_queue_shutdown(boot_cpu_id,
 	    &cdp->rtclock_timer.queue,
-	    &cpu_datap(master_cpu)->rtclock_timer.queue);
+	    &cpu_datap(boot_cpu_id)->rtclock_timer.queue);
 
-	mp_cpus_call(cpu_to_cpumask(master_cpu), NOSYNC, timer_queue_expire_local, NULL);
+	mp_cpus_call(cpu_to_cpumask(boot_cpu_id), NOSYNC, timer_queue_expire_local, NULL);
 
 #if CONFIG_CPU_COUNTERS
-	mt_cpu_down(cdp);
+	cpc_cpu_transition(CPC_CPU_OFFLINE, cdp);
 #endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
@@ -1970,9 +1976,18 @@ cause_ast_check(
 
 	if (cpu != cpu_number()) {
 		i386_signal_cpu(cpu, MP_AST, ASYNC);
-		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), cpu, 1, 0, 0, 0);
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), cpu, 1);
 	}
 }
+
+void
+cause_maintenance_ipi(int cpu)
+{
+	if (cpu != cpu_number()) {
+		i386_signal_cpu(cpu, MP_MAINTENANCE, ASYNC);
+	}
+}
+
 
 void
 machine_cpu_reinit(void *param)
@@ -2116,7 +2131,7 @@ ml_interrupt_prewarm(
 	/*
 	 * For now, non-local interrupts happen on the master processor.
 	 */
-	ct = mp_cpus_call(cpu_to_cpumask(master_cpu), SYNC, _cpu_warm_setup, &cwd);
+	ct = mp_cpus_call(cpu_to_cpumask(boot_cpu_id), SYNC, _cpu_warm_setup, &cwd);
 	if (ct == 0) {
 		free_warm_timer_call(call);
 		return KERN_FAILURE;

@@ -78,5 +78,9 @@ struct ifmibdata_supplemental {
  */
 #define IFDATA_LINKHEURISTICS   6       /* struct if_linkheuristics */
 
+/*
+ * MIB tags for LPW statistics
+ */
+#define IFDATA_LPWSTATS         7       /* struct if_lpw_stats */
 
 #endif /* _NET_IF_MIB_PRIVATE_H */

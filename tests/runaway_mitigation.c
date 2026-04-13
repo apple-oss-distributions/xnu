@@ -41,6 +41,7 @@
 
 #include <darwintest.h>
 #include <darwintest_utils.h>
+#include <sched/sched_test_utils.h>
 
 #include <sys/sfi.h>
 #include <Kernel/kern/ledger.h>  /* TODO: this should be installed for userspace */
@@ -358,7 +359,13 @@ spin_thread(void *arg)
 
 T_DECL(runaway_mode_child_sfi, "runaway mitigation mode should cause SFI")
 {
+	if (!wait_for_quiescence_default(argc, argv)) {
+		T_LOG("WARN: System did not quiesce. This test is sensitive to thermal effects, so other workloads may cause interference.");
+	}
+
 	T_LOG("uid: %d", getuid());
+
+	trace_handle_t trace = begin_collect_trace(argc, argv, T_NAME);
 
 	check_runaway_mode(false);
 
@@ -436,8 +443,10 @@ T_DECL(runaway_mode_child_sfi, "runaway mitigation mode should cause SFI")
 	/*
 	 * If the System SFI configuration was changed out from under us during the test, either us or them will be confused.
 	 */
-	T_QUIET; T_ASSERT_EQ(custom_sfi_window, final_sfi_window, "System SFI window should not unexpectedly change during the test");
-	T_QUIET; T_ASSERT_EQ(custom_class_offtime, final_class_offtime, "System SFI offtime should not unexpectedly change during the test");
+	T_QUIET; T_ASSERT_EQ(custom_sfi_window, final_sfi_window, "[%s] System SFI window should not unexpectedly change during the test", platform_train_descriptor());
+	T_QUIET; T_ASSERT_EQ(custom_class_offtime, final_class_offtime, "[%s] System SFI offtime should not unexpectedly change during the test", platform_train_descriptor());
+
+	end_collect_trace(trace);
 }
 
 #if defined(__arm64__)

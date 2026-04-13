@@ -308,6 +308,9 @@ $(XNU_VERSION): ALWAYS
 	@echo "xnuVersion unchanged: checked for \"$(RC_DARWIN_KERNEL_VERSION)\" in $@"
 endif
 
+ifeq ($(SPTM_ENABLED),1)
+lastkerneldataconst.o_CFLAGS_ADD = -DCONFIG_SPTM=1
+endif # !SPTM_ENABLED
 -include lastkerneldataconst.d
 lastkerneldataconst.o: .CFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
 lastkerneldataconst.o: $(SRCROOT)/libsa/lastkerneldataconst.c

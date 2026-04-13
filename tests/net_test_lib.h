@@ -218,6 +218,8 @@ extern int siocdrvspec(const char * ifname,
 
 extern void fake_set_peer(const char * feth, const char * feth_peer);
 
+extern void ifnet_set_low_power_wake(const char * ifname, bool enable);
+
 extern void siocsifvlan(const char * vlan, const char * phys, uint16_t tag);
 
 extern void route_add_inet_scoped_subnet(char * ifname, u_short if_index,

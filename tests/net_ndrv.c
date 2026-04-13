@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -52,6 +52,15 @@
 #include <stdbool.h>
 #include <TargetConditionals.h>
 #include <darwintest_utils.h>
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_ASROOT(true),
+	T_META_TAG_VM_PREFERRED,
+	T_META_OWNER("dieter")
+	);
 
 static const struct ether_addr multicast_one = {
 	{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x01 }
@@ -127,9 +136,7 @@ ndrv_socket_multicast_add_remove(const char * ifname)
 	close(s);
 }
 
-T_DECL(ndrv_socket_multicast_add_remove,
-    "ndrv socket multicast add remove",
-    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+T_DECL(ndrv_socket_multicast_add_remove, "ndrv socket multicast add remove")
 {
 	ndrv_socket_multicast_add_remove("lo0");
 }

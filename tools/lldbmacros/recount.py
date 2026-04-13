@@ -513,39 +513,42 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
     active_threads = "-T" in cmd_options
     if active_threads:
         thread_plan = RecountPlan("thread", mach_times=mach_times)
-    hdr_prefix = "{:>18s} {:>4s} {:>4s} ".format(
+    hdr_prefix = "{:>18s} {:>4s} {:>5s} ".format(
         "processor",
         "cpu",
         "kind",
     )
-    header_fmt = " {:>12s} {:>12s} {:>8s}"
-    hdr_suffix = header_fmt.format("idle-time", "total-time", "idle-pct")
-    null_suffix = header_fmt.format("-", "-", "-")
+    header_fmt = "{:>12s} {:>12s} {:>12s} {:>8s} {:>10s}"
+    hdr_suffix = header_fmt.format("int-time", "idle-time", "total-time", "idle-pct", "idle-count")
+    null_suffix = header_fmt.format("-", "-", "-", "-", "-")
     levels = RecountPlan.levels()
     with O.table(hdr_prefix + plan.usage_header() + hdr_suffix):
         for pr in prs:
             usage = pr.pr_recount.rpr_active.rt_usage
             idle_time = pr.pr_recount.rpr_idle_time_mach
+            int_time = pr.pr_recount.rpr_interrupt_duration_mach
+            idle_count = pr.pr_recount.rpr_idle_count
             times = [usage.ru_metrics[i].rm_time_mach for (_, i) in levels]
             total_time = sum(times) + idle_time
             if not mach_times:
                 idle_time = kern.GetNanotimeFromAbstime(idle_time) / 1e9
+                int_time = kern.GetNanotimeFromAbstime(int_time) / 1e9
                 total_time = kern.GetNanotimeFromAbstime(total_time) / 1e9
             pset = pr.processor_set
-            cluster_kind = "SMP"
-            if unsigned(pset.pset_cluster_type) != 0:
-                cluster_kind = GetEnumName(
-                    "pset_cluster_type_t", pset.pset_cluster_type, "PSET_AMP_"
-                )
-            prefix = "{:<#018x} {:>4d} {:>4s} ".format(
-                unsigned(pr), pr.cpu_id, cluster_kind
+            pset_kind = GetEnumName(
+                "pset_type_t", pset.pset_type, "PSET_"
+            )
+            prefix = "{:<#018x} {:>4d} {:>5s} ".format(
+                unsigned(pr), pr.cpu_id, pset_kind
             )
             suffix = (
-                " "
+                plan.time_fmt().format(int_time)
+                + " "
                 + plan.time_fmt().format(idle_time)
                 + " "
                 + plan.time_fmt().format(total_time)
                 + " {:>7.2f}%".format(idle_time / total_time * 100)
+                + " {:>10,}".format(idle_count)
             )
             usage_lines = plan.format_usage(usage, O=O)
             for i, line in enumerate(usage_lines):
@@ -562,10 +565,10 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
 @header("{:>4s} {:>20s} {:>20s} {:>20s}".format("cpu", "time-mach", "cycles", "insns"))
 def GetRecountSnapshot(cpu, snap, O=None):
     (insns, cycles) = (0, 0)
-    if hasattr(snap, "rsn_cycles"):
-        (insns, cycles) = (snap.rsn_insns, snap.rsn_cycles)
+    if hasattr(snap, "rsn_cpu_counts"):
+        (insns, cycles) = (snap.rsn_cpu_counts.instrs, snap.rsn_cpu_counts.cycles)
     return O.format(
-        "{:4d} {:20d} {:20d} {:20d}", cpu, snap.rsn_time_mach, cycles, insns
+        "{:4d} {:20,} {:20,} {:20,}", cpu, snap.rsn_time_mach, cycles, insns
     )
 
 
@@ -624,7 +627,7 @@ def RecountDiagnoseTask(task_ptrs, cmd_options={}, O=None):  # noqa: E74
         tasks = [kern.GetValueFromAddress(t, "task_t") for t in task_ptrs]
 
     line_fmt = "{:20s} = {:10.3f}"
-    row_fmt = "{:>12s} {:>6s} {:>12.3f} {:>20d} {:>20d}"
+    row_fmt = "{:>12s} {:>6s} {:>12.3f} {:>20,} {:>20,}"
 
     task_plan = RecountPlan("task", mach_times=False)
     term_plan = RecountPlan("task_terminated", mach_times=False)

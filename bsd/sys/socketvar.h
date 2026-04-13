@@ -272,7 +272,7 @@ struct socket {
 #define SOF1_PRECONNECT_DATA            0x00000020 /* request for preconnect data */
 #define SOF1_EXTEND_BK_IDLE_WANTED      0x00000040 /* option set */
 #define SOF1_EXTEND_BK_IDLE_INPROG      0x00000080 /* socket */
-/* UNUSED */
+#define SOF1_TRACKER_LOOKUP_DONE        0x00000100 /* tracker lookup already performed */
 #define SOF1_TFO_REWIND                 0x00000200 /* rewind mptcp meta data */
 #define SOF1_CELLFALLBACK               0x00000400 /* Initiated by cell fallback */
 #define SOF1_QOSMARKING_ALLOWED         0x00000800 /* policy allows DSCP map */
@@ -494,6 +494,8 @@ struct  xsocket64 {
 #define XSO_KCB         0x080
 #define XSO_EVT         0x100
 #define XSO_UNPCB       0x200
+#define XSO_ROUTEPCB    0x400
+#define XSO_KEYPCB      0x800
 
 struct  xsocket_n {
 	u_int32_t               xso_len;        /* length of this structure */
@@ -1099,6 +1101,8 @@ extern user_ssize_t recv_msg_array_resid(struct recv_msg_elem * __counted_by(cou
 void sotoxsocket_n(struct socket *, struct xsocket_n *);
 void sbtoxsockbuf_n(struct sockbuf *, struct xsockbuf_n *);
 void sbtoxsockstat_n(struct socket *, struct xsockstat_n *);
+
+extern bool socket_tracker_lookup_locked(struct socket *, struct sockaddr *);
 
 __ASSUME_PTR_ABI_SINGLE_END
     __END_DECLS

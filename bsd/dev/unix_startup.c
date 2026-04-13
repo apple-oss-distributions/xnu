@@ -158,8 +158,7 @@ bsd_startupearly(void)
 	    size,
 	    VM_MAP_CREATE_NEVER_FAULTS,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    KMS_PERMANENT | KMS_NOFAIL,
-	    VM_KERN_MEMORY_FILE).kmr_submap;
+	    KMS_NOFAIL, VM_KERN_MEMORY_FILE).kmr_submap;
 
 	kmem_alloc(bufferhdr_map,
 	    &(vm_offset_t){ bufferhdr_range.min_address },
@@ -215,8 +214,7 @@ bsd_bufferinit(void)
 	    (vm_size_t) (nmbclusters * MCLBYTES),
 	    FALSE,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    KMS_PERMANENT | KMS_NOFAIL,
-	    VM_KERN_MEMORY_MBUF).kmr_submap;
+	    KMS_NOFAIL, VM_KERN_MEMORY_MBUF).kmr_submap;
 	mbutl = (unsigned char *)mb_range.min_address;
 #endif /* CONFIG_MBUF_MCACHE */
 

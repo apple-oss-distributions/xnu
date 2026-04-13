@@ -50,12 +50,7 @@ write_one_memory(
 {
 	if (checker->kind == Allocation &&
 	    prot_contains_all(checker->protection, VM_PROT_READ | VM_PROT_WRITE)) {
-		checker_fault_for_prot_not_cow(checker_list, checker, VM_PROT_WRITE);
-		memset((char *)checker->address, 0xff, checker->size);
-		if (checker->object) {
-			checker->object->fill_pattern.mode = Fill;
-			checker->object->fill_pattern.pattern = 0xffffffffffffffff;
-		}
+		checker_write_new_fill_pattern(checker_list, checker);
 	}
 }
 
@@ -67,7 +62,10 @@ write_memory(
 {
 	entry_checker_range_t limit =
 	    checker_list_find_range_including_holes(checker_list, start, size);
-	/* TODO: this writes beyond [start, size) */
+	/*
+	 * TODO page modeling: this writes beyond [start, size), need page
+	 * modeling to be more precise about the expected contents of the memory
+	 */
 	FOREACH_CHECKER(checker, limit) {
 		write_one_memory(checker_list, checker);
 	}
@@ -80,11 +78,12 @@ vm_behavior_common_no_cow(
 	mach_vm_address_t start,
 	mach_vm_size_t size,
 	vm_behavior_t behavior,
-	bool has_holes)
+	bool has_holes,
+	const char *message_suffix)
 {
 	kern_return_t kr;
 	test_result_t test_results[1];
-	bool clip, reject_submaps;
+	bool clip_start, clip_end, reject_submaps;
 
 	kern_return_t expected_kr = KERN_SUCCESS;
 	if (has_holes) {
@@ -93,19 +92,19 @@ vm_behavior_common_no_cow(
 
 	switch (behavior) {
 	case VM_BEHAVIOR_DEFAULT:
-		clip = true;
+		clip_start = clip_end = true;
 		reject_submaps = false;
 		break;
 	case VM_BEHAVIOR_FREE:
-		clip = false;
+		clip_start = clip_end = false;
 		reject_submaps = false;
 		break;
 	case VM_BEHAVIOR_CAN_REUSE:
-		clip = false;
+		clip_start = clip_end = false;
 		reject_submaps = true;
 		break;
 	default:
-		T_FAIL("don't know whether to clip with behavior %s",
+		T_FAIL("don't know whether to clip for behavior %s",
 		    name_for_behavior(behavior));
 		return TestFailed;
 	}
@@ -113,24 +112,34 @@ vm_behavior_common_no_cow(
 	entry_checker_range_t limit;
 	if (has_holes) {
 		limit = checker_list_find_range_including_holes(checker_list, start, size);
-	} else {
-		limit = checker_list_find_range(checker_list, start, size);
-		if (clip) {
-			checker_clip_left(checker_list, limit.head, start);
-		}
-		bool rejected = false;
-		if (reject_submaps) {
-			FOREACH_CHECKER(checker, limit) {
-				if (checker->kind == Submap) {
-					expected_kr = KERN_INVALID_ADDRESS;
-					rejected = true;
-					break;
-				}
+		if (!is_new_vm()) {
+			/* old vm: hole failures do not clip */
+			clip_start = clip_end = false;
+		} else {
+			/* new vm: hole failures can still clip at start */
+			if (!checker_contains_address(limit.head, start)) {
+				clip_start = false;
+			}
+			if (!checker_contains_address(limit.head, start + size)) {
+				clip_end = false;
 			}
 		}
-		if (clip) {
-			checker_clip_right(checker_list, limit.tail, start + size);
+	} else {
+		limit = checker_list_find_range(checker_list, start, size);
+	}
+	if (clip_start) {
+		checker_clip_left(checker_list, limit.head, start);
+	}
+	if (reject_submaps) {
+		FOREACH_CHECKER(checker, limit) {
+			if (checker->kind == Submap) {
+				expected_kr = KERN_INVALID_ADDRESS;
+				break;
+			}
 		}
+	}
+	if (clip_end) {
+		checker_clip_right(checker_list, limit.tail, start + size);
 	}
 
 	kr = mach_vm_behavior_set(mach_task_self(), start, size, behavior);
@@ -150,7 +159,8 @@ vm_behavior_common_no_cow(
 		}
 	}
 
-	TEMP_CSTRING(when, "after vm_behavior_set(%s)", name_for_behavior(behavior));
+	TEMP_CSTRING(when, "after vm_behavior_set(%s) %s",
+	    name_for_behavior(behavior), message_suffix);
 	test_results[0] = verify_vm_state(checker_list, when);
 
 	return worst_result(test_results, countof(test_results));
@@ -167,8 +177,8 @@ vm_behavior_no_cow_maybe_rw_maybe_holes(
 {
 	test_result_t result;
 
-	result = vm_behavior_common_no_cow(
-		checker_list, start, size, behavior, has_holes);
+	result = vm_behavior_common_no_cow(checker_list, start, size,
+	    behavior, has_holes, "first time");
 	if (result != TestSucceeded) {
 		return result;
 	}
@@ -181,8 +191,8 @@ vm_behavior_no_cow_maybe_rw_maybe_holes(
 			return result;
 		}
 
-		result = vm_behavior_common_no_cow(
-			checker_list, start, size, behavior, has_holes);
+		result = vm_behavior_common_no_cow(checker_list, start, size,
+		    behavior, has_holes, "second time");
 		if (result != TestSucceeded) {
 			return result;
 		}
@@ -343,7 +353,7 @@ vm_behavior_zero_once(
 	 * so we can't use the common code from other behaviors
 	 */
 
-	if (task_page_size_less_than_vm_page_size()) {
+	if (PAGE_SIZE < xnu_vm_page_size()) {
 		/*
 		 * VM_BEHAVIOR_ZERO does nothing and returns KERN_NO_ACCESS
 		 * if the map's page size is less than the VM's page size.
@@ -353,16 +363,22 @@ vm_behavior_zero_once(
 		goto checker_update_done;
 	}
 
-	/* Check for holes first. */
-	FOREACH_CHECKER(checker, limit) {
-		if (checker->kind == Hole) {
-			expected_kr = KERN_INVALID_ADDRESS;
-			goto checker_update_done;
+	/* Old VM checks for holes first. New VM checks for holes as it proceeds. */
+	if (!is_new_vm()) {
+		FOREACH_CHECKER(checker, limit) {
+			if (checker->kind == Hole) {
+				expected_kr = KERN_INVALID_ADDRESS;
+				goto checker_update_done;
+			}
 		}
 	}
 
 	/* Zero the checkers' fill patterns, stopping if we hit an unacceptable entry */
 	FOREACH_CHECKER(checker, limit) {
+		if (checker->kind == Hole) {
+			expected_kr = KERN_INVALID_ADDRESS;
+			goto checker_update_done;
+		}
 		if (!prot_contains_all(checker->protection, VM_PROT_WRITE)) {
 			/* stop after the first unwriteable entry */
 			expected_kr = KERN_PROTECTION_FAILURE;
@@ -408,7 +424,10 @@ vm_behavior_zero(
 	/* write to the memory and do it again */
 	bool any_written = false;
 	entry_checker_range_t limit = checker_list_find_range_including_holes(checker_list, start, size);
-	/* TODO: this writes beyond [start, size) */
+	/*
+	 * TODO page modeling: this writes beyond [start, size), need page
+	 * modeling to be more precise about the expected contents of the memory
+	 */
 	FOREACH_CHECKER(checker, limit) {
 		if (checker->kind != Allocation) {
 			continue;
@@ -446,6 +465,12 @@ T_DECL(vm_behavior_set_default,
 		.single_entry_2 = vm_behavior_default_no_cow_rw_no_holes,
 		.single_entry_3 = vm_behavior_default_no_cow_rw_no_holes,
 		.single_entry_4 = vm_behavior_default_no_cow_rw_no_holes,
+
+		.single_entry_nonnull_1 = vm_behavior_default_no_cow_rw_no_holes,
+		/* TODO need page modeling for the rw test of these */
+		.single_entry_nonnull_2 = vm_behavior_default_no_cow_ro_no_holes,
+		.single_entry_nonnull_3 = vm_behavior_default_no_cow_ro_no_holes,
+		.single_entry_nonnull_4 = vm_behavior_default_no_cow_ro_no_holes,
 
 		.multiple_entries_1 = vm_behavior_default_no_cow_rw_no_holes,
 		.multiple_entries_2 = vm_behavior_default_no_cow_rw_no_holes,
@@ -561,6 +586,12 @@ T_DECL(vm_behavior_set_free,
 		.single_entry_2 = vm_behavior_free_no_cow_rw_no_holes,
 		.single_entry_3 = vm_behavior_free_no_cow_rw_no_holes,
 		.single_entry_4 = vm_behavior_free_no_cow_rw_no_holes,
+
+		.single_entry_nonnull_1 = vm_behavior_free_no_cow_rw_no_holes,
+		/* TODO need page modeling for the rw test of these */
+		.single_entry_nonnull_2 = vm_behavior_free_no_cow_ro_no_holes,
+		.single_entry_nonnull_3 = vm_behavior_free_no_cow_ro_no_holes,
+		.single_entry_nonnull_4 = vm_behavior_free_no_cow_ro_no_holes,
 
 		.multiple_entries_1 = vm_behavior_free_no_cow_rw_no_holes,
 		.multiple_entries_2 = vm_behavior_free_no_cow_rw_no_holes,
@@ -688,6 +719,11 @@ T_DECL(vm_behavior_set_can_reuse,
 		.single_entry_3 = vm_behavior_can_reuse_no_cow_rw_no_holes,
 		.single_entry_4 = vm_behavior_can_reuse_no_cow_rw_no_holes,
 
+		.single_entry_nonnull_1 = vm_behavior_can_reuse_no_cow_rw_no_holes,
+		.single_entry_nonnull_2 = vm_behavior_can_reuse_no_cow_rw_no_holes,
+		.single_entry_nonnull_3 = vm_behavior_can_reuse_no_cow_rw_no_holes,
+		.single_entry_nonnull_4 = vm_behavior_can_reuse_no_cow_rw_no_holes,
+
 		.multiple_entries_1 = vm_behavior_can_reuse_no_cow_rw_no_holes,
 		.multiple_entries_2 = vm_behavior_can_reuse_no_cow_rw_no_holes,
 		.multiple_entries_3 = vm_behavior_can_reuse_no_cow_rw_no_holes,
@@ -802,6 +838,11 @@ T_DECL(vm_behavior_set_zero,
 		.single_entry_2 = vm_behavior_zero,
 		.single_entry_3 = vm_behavior_zero,
 		.single_entry_4 = vm_behavior_zero,
+
+		.single_entry_nonnull_1 = vm_behavior_zero,
+		.single_entry_nonnull_2 = vm_behavior_zero,
+		.single_entry_nonnull_3 = vm_behavior_zero,
+		.single_entry_nonnull_4 = vm_behavior_zero,
 
 		.multiple_entries_1 = vm_behavior_zero,
 		.multiple_entries_2 = vm_behavior_zero,

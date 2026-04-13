@@ -470,26 +470,3 @@ SYSCTL_ULONG(_debug, OID_AUTO, trap_telemetry_capacity_dropped_events,
 #endif /* CONFIG_TELEMETRY && (DEBUG || DEVELOPMENT) */
 
 
-#if DEBUG || DEVELOPMENT
-/* A sysctl that can be used to check if the platform supports DRAM ECC and error injection. */
-static int
-dram_ecc_error_injection_capable SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2, req)
-	int capable = 0;
-
-/* T6041 does not support error injection. */
-
-	return SYSCTL_OUT(req, &capable, sizeof(capable));
-}
-SYSCTL_PROC(_vm, OID_AUTO, dram_ecc_error_injection_capable, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    0, 0, &dram_ecc_error_injection_capable, "I", "");
-#endif /* DEBUG || DEVELOPMENT */
-
-
-#if DEBUG || DEVELOPMENT
-extern _Atomic unsigned int ipcpv_telemetry_count;
-SYSCTL_UINT(_debug, OID_AUTO, ipcpv_telemetry_count,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ipcpv_telemetry_count,
-    0, "Number of ipc policy violation telemetry emitted");
-#endif /* DEBUG || DEVELOPMENT */

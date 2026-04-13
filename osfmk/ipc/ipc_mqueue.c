@@ -234,7 +234,7 @@ ipc_mqueue_add_locked(
 		thread_t th;
 
 		th = waitq_wakeup64_identify_locked(wqset, IPC_MQUEUE_RECEIVE,
-		    WAITQ_KEEP_LOCKED);
+		    WAITQ_KEEP_LOCKED, NULL);
 		/* port and pset still locked, thread not runnable */
 
 		if (th == THREAD_NULL) {
@@ -667,7 +667,7 @@ ipc_mqueue_post(
 		thread_t receiver;
 
 		receiver = waitq_wakeup64_identify_locked(waitq,
-		    IPC_MQUEUE_RECEIVE, WAITQ_KEEP_LOCKED);
+		    IPC_MQUEUE_RECEIVE, WAITQ_KEEP_LOCKED, NULL);
 		/* waitq still locked, thread not runnable */
 
 		if (receiver == THREAD_NULL) {

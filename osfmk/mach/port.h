@@ -95,6 +95,46 @@
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*
+ * Helpers to declare and lock down the expected size for structures.
+ * Some structures must remain a constant size due to performance or ABI implications.
+ * It's not necessarily an issue if you need to bump a size passed to these macros: act judiciously.
+ */
+#if __arm64__
+#define xnu_static_assert_struct_size(name, expected_size) _Static_assert(\
+	sizeof(name) == expected_size, "struct changed size unexpectedly")
+#else /* __arm64__ */
+/* Don't bother trying to lock down structure sizes on !__arm64__ */
+#define xnu_static_assert_struct_size(name, expected_size) _Static_assert(0 == 0, "no-op assert")
+#endif /* __arm64__ */
+
+#if KERNEL
+#ifdef __LP64__
+/* 64-bit kernel build */
+#define xnu_static_assert_struct_size_kernel_user(name, expected_kernel_size, expected_user_size) \
+	xnu_static_assert_struct_size(name, expected_kernel_size)
+#define xnu_static_assert_struct_size_kernel_user64_user32(name, expected_kernel_size, _u64_size, _u32_size) \
+	xnu_static_assert_struct_size(name, expected_kernel_size)
+#else /* __LP64__ */
+/* 32-bit kernel build */
+/* Don't bother trying to lock down structure sizes on a 32-bit kernel build */
+#define xnu_static_assert_struct_size_kernel_user(name, expected_kernel_size, expected_user_size) \
+	_Static_assert(0 == 0, "no-op assert")
+#define xnu_static_assert_struct_size_kernel_user64_user32(name, expected_kernel_size, _u64_size, _u32_size) \
+	_Static_assert(0 == 0, "no-op assert")
+#endif /* __LP64__ */
+#else /* KERNEL */
+#define xnu_static_assert_struct_size_kernel_user(name, expected_kernel_size, expected_user_size) \
+	xnu_static_assert_struct_size(name, expected_user_size)
+#ifdef __LP64__
+#define xnu_static_assert_struct_size_kernel_user64_user32(name, _kern_size, expected_user64_size, _u32_size) \
+	xnu_static_assert_struct_size(name, expected_user64_size)
+#else /* __LP64__ */
+#define xnu_static_assert_struct_size_kernel_user64_user32(name, _kern_size, _u64_size, expected_user32_size) \
+	xnu_static_assert_struct_size(name, expected_user32_size)
+#endif /* __LP64__ */
+#endif /* KERNEL */
+
+/*
  *	mach_port_name_t - the local identity for a Mach port
  *
  *	The name is Mach port namespace specific.  It is used to
@@ -455,8 +495,8 @@ typedef struct mach_service_port_info * mach_service_port_info_t;
  */
 #define MACH_PORT_CONNECTION_PORT_WITH_PORT_ARRAY "com.apple.developer.allow-connection-port-with-port-array"
 
-/* Allows 1p process to create provisional reply port (to be rename to weak reply port) */
-#define MACH_PORT_PROVISIONAL_REPLY_ENTITLEMENT "com.apple.private.allow-weak-reply-port"
+/* Allows 1p process to create weak reply port */
+#define MACH_PORT_WEAK_REPLY_ENTITLEMENT "com.apple.private.allow-weak-reply-port"
 
 /*
  * Flags for mach_port_options (used for
@@ -504,7 +544,8 @@ __enum_closed_decl(mpo_flags_t, uint32_t, {
 	#define MPO_SERVICE_PORT                    MPO_SERVICE_PORT
 	#define MPO_CONNECTION_PORT                 MPO_CONNECTION_PORT
 	#define MPO_REPLY_PORT                      MPO_REPLY_PORT
-	#define MPO_PROVISIONAL_REPLY_PORT          MPO_PROVISIONAL_REPLY_PORT
+	#define MPO_WEAK_REPLY_PORT                 MPO_WEAK_REPLY_PORT
+	#define MPO_NOTIFICATION_PORT               MPO_NOTIFICATION_PORT
 	#define MPO_EXCEPTION_PORT                  MPO_EXCEPTION_PORT
 	#define MPO_CONNECTION_PORT_WITH_PORT_ARRAY MPO_CONNECTION_PORT_WITH_PORT_ARRAY
 __options_decl(mpo_flags_t, uint32_t, {
@@ -517,13 +558,19 @@ __options_decl(mpo_flags_t, uint32_t, {
 	MPO_CONNECTION_PORT                 = MPO_MAKE_PORT_TYPE(0, 2),  /* 0x800 */
 	/* Designate port as a reply port */
 	MPO_REPLY_PORT                      = MPO_MAKE_PORT_TYPE(0, 4),  /* 0x1000 */
-	/* Designate port as a provisional (fake) reply port */
-	MPO_PROVISIONAL_REPLY_PORT          = MPO_MAKE_PORT_TYPE(1, 0),  /* 0x4000 */
+	/* Designate port as a weak (fake) reply port */
+	MPO_WEAK_REPLY_PORT                 = MPO_MAKE_PORT_TYPE(1, 0),  /* 0x4000 */
+	/* Designate port as a notification port */
+	MPO_NOTIFICATION_PORT               = MPO_MAKE_PORT_TYPE(1, 1),  /* 0x4400 */
 	/* Used for hardened exceptions - immovable */
 	MPO_EXCEPTION_PORT                  = MPO_MAKE_PORT_TYPE(2, 0),  /* 0x8000 */
 	/* Can receive OOL port array descriptors */
 	MPO_CONNECTION_PORT_WITH_PORT_ARRAY = MPO_MAKE_PORT_TYPE(4, 0),  /* 0x10000 */
 });
+
+/* For bincompat: weak reply port used to be called provisional reply port */
+#define MPO_PROVISIONAL_REPLY_PORT MPO_WEAK_REPLY_PORT
+
 #define MPO_UNUSED_BITS         ~(MPO_OPTIONS_MASK | MPO_PORT_TYPE_MASK)
 
 /* Denotes an anonymous service */
@@ -578,7 +625,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_SET_CONTEXT                  = 4,
 	kGUARD_EXC_THREAD_SET_STATE             = 5,
 	kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE   = 6,
-	kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL = 7,        /* unused, for future sp defense enablement */
+	kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL = 7,
 	kGUARD_EXC_UNGUARDED                    = 8,
 	kGUARD_EXC_KOBJECT_REPLY_PORT_SEMANTICS = 9,
 	kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS = 10,
@@ -588,7 +635,7 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_INVALID_NOTIFICATION_REQ     = 65,
 	kGUARD_EXC_INVALID_MPO_ENTITLEMENT      = 66,
 	kGUARD_EXC_DESCRIPTOR_VIOLATION         = 67,
-	kGUARD_EXC_MSG_FILTERED                 = 128,
+	kGUARD_EXC_MSG_FILTERED                         = 128,
 	/* start of [optionally] non-fatal guards */
 	kGUARD_EXC_INVALID_RIGHT                = 256,
 	kGUARD_EXC_INVALID_NAME                 = 512,
@@ -604,17 +651,24 @@ enum mach_port_guard_exception_codes {
 	kGUARD_EXC_RCV_INVALID_NAME             = 1u << 19,
 	/* start of always non-fatal guards */
 	kGUARD_EXC_RCV_GUARDED_DESC             = 0x00100000,     /* for development only */
-	kGUARD_EXC_SERVICE_PORT_VIOLATION_NON_FATAL = 0x00100001, /* unused, for future sp defense enablement */
-	kGUARD_EXC_PROVISIONAL_REPLY_PORT       = 0x00100002, /* unused */
+	kGUARD_EXC_SERVICE_PORT_VIOLATION_NON_FATAL = 0x00100001, /* unused */
+	kGUARD_EXC_INVALID_NOTIFICATION_PORT    = 0x00100006,
+	kGUARD_EXC_MACH_EXC_THREAD_SET_STATE    = 0x00100007,
+	kGUARD_EXC_CV_NOTIFICATION_PORT_REQ     = 0x00100008,
+	kGUARD_EXC_WEAK_REPLY_PORT              = 0x00100002, /* unused */
 	kGUARD_EXC_OOL_PORT_ARRAY_CREATION      = 0x00100003, /* unused */
-	kGUARD_EXC_MOVE_PROVISIONAL_REPLY_PORT  = 0x00100004,
+	kGUARD_EXC_MOVE_WEAK_REPLY_PORT         = 0x00100004,
 	kGUARD_EXC_REPLY_PORT_SINGLE_SO_RIGHT   = 0x00100005,
 	kGUARD_EXC_MOD_REFS_NON_FATAL           = 1u << 21,
-	kGUARD_EXC_IMMOVABLE_NON_FATAL          = 1u << 22, /* unused*/
+	kGUARD_EXC_IMMOVABLE_NON_FATAL          = 1u << 22, /* unused */
 };
 
 #define MAX_FATAL_kGUARD_EXC_CODE               kGUARD_EXC_MSG_FILTERED
 #define MAX_OPTIONAL_kGUARD_EXC_CODE            kGUARD_EXC_RCV_INVALID_NAME
+
+/* Temporary! Should be removed after rdar://166892063 */
+#define kGUARD_EXC_PROVISIONAL_REPLY_PORT       kGUARD_EXC_WEAK_REPLY_PORT
+#define kGUARD_EXC_MOVE_PROVISIONAL_REPLY_PORT  kGUARD_EXC_MOVE_WEAK_REPLY_PORT
 
 #ifdef XNU_KERNEL_PRIVATE
 /*

@@ -50,7 +50,7 @@ _does_pid_have_mte(pid_t pid)
  *  as pid 1, and should be MTE enabled (launchctl procinfo 1 should show MTE
  *  enabled) */
 T_DECL(check_launchd_mte_enabled, "launchd__test__1",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC,
     T_META_REQUIRES_REBOOT(true),
     T_META_ASROOT(true)) {
@@ -65,7 +65,7 @@ T_DECL(check_launchd_mte_enabled, "launchd__test__1",
 /* Case 2: Upon reboot (with am MTE disabling boot-arg), launchd should
  *  run as pid 1, and should not be MTE enabled */
 T_DECL(check_launchd_mte_disabled, "launchd__test__2",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1), XNU_T_META_SOC_SPECIFIC, T_META_BOOTARGS_SET("-disable_mte"), T_META_ASROOT(true)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1), XNU_T_META_SOC_SPECIFIC, T_META_BOOTARGS_SET("-disable_mte"), T_META_ASROOT(true)) {
 	#if !__arm64__
 	T_SKIP("Running on non-arm64 target, skipping...");
 	#else /* !__arm64__ */

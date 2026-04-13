@@ -16,7 +16,10 @@
 #include "test_utils.h"
 #include "sched_test_utils.h"
 
-#include "thread_group_fairness_workload_config.h"
+static const unsigned char sched_thread_group_fairness_workload_config_plist[] = {
+#embed "thread_group_fairness_workload_config.plist" suffix(,)
+	0,
+};
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -34,7 +37,7 @@ workload_config_load(void)
 	size_t len = 0;
 	ret = sysctlbyname("kern.workload_config", NULL, &len,
 	    sched_thread_group_fairness_workload_config_plist,
-	    sched_thread_group_fairness_workload_config_plist_len);
+	    strlen(sched_thread_group_fairness_workload_config_plist));
 	if (ret == -1 && errno == ENOENT) {
 		T_SKIP("kern.workload_config failed");
 	}
@@ -159,8 +162,8 @@ snapshot_user_time_usec(pthread_t *threads)
 T_DECL(thread_group_fairness,
     "Ensure that thread groups tagged as higher priority do not starve out "
     "thread groups tagged as lower priority when both behave as CPU spinners",
-    XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,     /* needed to set workload config */
-    T_META_ASROOT(YES))
+    T_META_ASROOT(YES),
+    XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL)
 {
 	T_SETUPBEGIN;
 

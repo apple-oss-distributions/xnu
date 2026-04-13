@@ -86,6 +86,7 @@ MI_ENTRY_POINT(_msgsys)
 #endif
 	MI_CALL_EXTERNAL(___msgsys)
 	POP_FRAME
+	ARM64_STACK_EPILOG
 
 /*
  * int semsys(int, ...);

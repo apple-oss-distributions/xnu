@@ -96,6 +96,7 @@ LEXT(_start)
 
 start_boot_path:
 	/* Clear thread pointers */
+	msr		TPIDR_EL0, xzr
 	msr		TPIDR_EL1, xzr
 	msr		TPIDRRO_EL0, xzr
 
@@ -183,6 +184,9 @@ start_warm:
 	bl		EXT(set_bp_ret)
 #endif
 
+	/* Zero TPIDR_EL0, so that it has a predictable value. */
+	msr TPIDR_EL0, xzr
+
 	/**
 	 * Search for the correct CPU Data entry.
 	 * This works by iterating over the per-CPU data array,
@@ -218,7 +222,11 @@ start_warm:
 check_cpu_data_entry:
 	/* Load physical CPU data address */
 	ldr		x21, [x1, CPU_DATA_VADDR]
+#if USE_APPLEARMSMP
 	cbz		x21, .
+#else
+	cbz		x21, next_cpu_data_entry
+#endif
 
 	/* Attempt to match the physical CPU ID */
 	ldr		w2, [x21, CPU_PHYS_ID]

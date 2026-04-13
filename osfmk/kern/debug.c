@@ -130,6 +130,7 @@ extern volatile struct xnu_hw_shmem_dbg_command_info *hwsd_info;
 #endif
 
 #include <san/kcov.h>
+#include <san/kcov_ksancov.h>
 
 #if CONFIG_XNUPOST
 #include <tests/xnupost.h>
@@ -186,6 +187,7 @@ struct additional_panic_data_buffer *panic_data_buffers = NULL;
 #define panic_stop()    pmCPUHalt(PM_HALT_PANIC)
 #else
 #define panic_stop()    panic_spin_forever()
+_Atomic(unsigned int)   panic_stop_count;
 #endif
 
 /*
@@ -325,7 +327,9 @@ boolean_t extended_debug_log_enabled = FALSE;
 #define KDBG_TRACE_PANIC_FILENAME "/var/log/panic.trace"
 #endif
 
+#if defined(__arm64__)
 static inline boolean_t debug_fatal_panic_begin(void);
+#endif
 
 /* Debugger state */
 atomic_int     debugger_cpu = DEBUGGER_NO_CPU;
@@ -385,6 +389,11 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) phys_carveout = 0;
 SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_pa = 0;
 SECURITY_READ_ONLY_LATE(size_t) phys_carveout_size = 0;
 
+#if DEVELOPMENT || DEBUG
+SECURITY_READ_ONLY_LATE(vm_offset_t) cputrace_carveout = 0;
+SECURITY_READ_ONLY_LATE(uintptr_t) cputrace_carveout_pa = 0;
+SECURITY_READ_ONLY_LATE(size_t) cputrace_carveout_size = 0;
+#endif /* DEVELOPMENT || DEBUG */
 
 #if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
 /**
@@ -1311,15 +1320,16 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	ml_set_interrupts_enabled(FALSE);
 	disable_preemption();
 
+#if defined(__arm64__)
 	if (!debug_fatal_panic_begin()) {
 		/*
-		 * This CPU lost the race to be the first to panic. Re-enable
-		 * interrupts and dead loop here awaiting the debugger xcall from
-		 * the CPU that first panicked.
+		 * This CPU lost the race to be the first to panic. Mark our CPU
+		 * as quiesced and dead loop here.
 		 */
-		ml_set_interrupts_enabled(TRUE);
+		os_atomic_add(&panic_stop_count, 1, release);
 		panic_stop();
 	}
+#endif /* __arm64__ */
 
 #if defined (__x86_64__)
 	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE);
@@ -1448,6 +1458,8 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 	/* Try not to break core dump path by sanitizer. */
 	kcov_panic_disable();
 #endif
+
+	ksancov_on_panic_log();
 
 	if ((debugger_current_op == DBOP_PANIC) ||
 	    ((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic)) {
@@ -1796,15 +1808,16 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 #endif
 	} else {
 		/* note: this is the panic path...  */
+#if defined(__arm64__)
 		if (!debug_fatal_panic_begin()) {
 			/*
-			 * This CPU lost the race to be the first to panic. Re-enable
-			 * interrupts and dead loop here awaiting the debugger xcall from
-			 * the CPU that first panicked.
+			 * This CPU lost the race to be the first to panic. Mark our CPU
+			 * as quiesced and dead loop here.
 			 */
-			ml_set_interrupts_enabled(TRUE);
+			os_atomic_add(&panic_stop_count, 1, release);
 			panic_stop();
 		}
+#endif /* __arm64__ */
 #if defined(__arm64__) && (DEBUG || DEVELOPMENT)
 		if (!PE_arm_debug_and_trace_initialized()) {
 			paniclog_append_noflush("kernel panicked before debug and trace infrastructure initialized!\n"
@@ -2228,6 +2241,7 @@ STARTUP(TUNABLES, STARTUP_RANK_LAST, kern_feature_override_init);
 
 #if MACH_ASSERT
 STATIC_IF_KEY_DEFINE_TRUE(mach_assert);
+STATIC_IF_KEY_DEFINE_TRUE(lck_rw_debug);
 #endif
 
 #if SCHED_HYGIENE_DEBUG
@@ -2240,6 +2254,7 @@ __static_if_init_func
 static void
 kern_feature_override_apply(const char *args)
 {
+	bool lck_rw_assert_disable = false;
 	uint64_t kf_ovrd;
 
 	/*
@@ -2251,10 +2266,20 @@ kern_feature_override_apply(const char *args)
 		kf_ovrd |= KF_SERVER_PERF_MODE_OVRD;
 	}
 
-#if DEBUG_RW
-	lck_rw_assert_init(args, kf_ovrd);
-#endif /* DEBUG_RW */
+	if (kf_ovrd & KF_MACH_ASSERT_OVRD) {
+		lck_rw_assert_disable = true;
+	}
+
 #if MACH_ASSERT
+	if (static_if_boot_arg_uint64(args, "lcks", 0) &
+	    LCK_OPTION_DISABLE_RW_DEBUG) {
+		lck_rw_assert_disable = true;
+	}
+
+	if (lck_rw_assert_disable) {
+		static_if_key_disable(lck_rw_debug);
+	}
+
 	if (kf_ovrd & KF_MACH_ASSERT_OVRD) {
 		static_if_key_disable(mach_assert);
 	}
@@ -2512,6 +2537,7 @@ set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);
 
+#if defined(__arm64__)
 /**
  * Signal that the system is going down for a panic. Returns true if it is safe to
  * proceed with the panic flow, false if we should re-enable interrupts and spin
@@ -2550,3 +2576,4 @@ debug_fatal_panic_begin(void)
 #endif /* CONFIG_SPTM */
 	return true;
 }
+#endif /* __arm64__ */

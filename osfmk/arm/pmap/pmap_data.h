@@ -1861,7 +1861,7 @@ extern uint64_t pmap_release_ppl_pages_to_kernel(void);
 extern uint64_t pmap_ledger_validate(const volatile void *);
 void pmap_ledger_retain(ledger_t ledger);
 void pmap_ledger_release(ledger_t ledger);
-extern void pmap_ledger_check_balance(pmap_t pmap);
+extern void pmap_ledger_flush(void);
 
 kern_return_t pmap_alloc_pmap(pmap_t *pmap);
 void pmap_free_pmap(pmap_t pmap);
@@ -1904,14 +1904,55 @@ extern pv_alloc_return_t pmap_enter_pv(
 extern void pmap_remove_pv(pmap_t, pt_entry_t *, int, bool, bool *, bool *);
 
 extern void ptd_bootstrap(pt_desc_t *, unsigned int);
-extern pt_desc_t *ptd_alloc_unlinked(void);
+extern pt_desc_t *ptd_alloc_unlinked(pmap_t);
 extern pt_desc_t *ptd_alloc(pmap_t);
 extern void ptd_deallocate(pt_desc_t *);
 extern void ptd_info_init(
 	pt_desc_t *, pmap_t, vm_map_address_t, unsigned int, pt_entry_t *);
 
-extern kern_return_t pmap_ledger_credit(pmap_t, int, ledger_amount_t);
-extern kern_return_t pmap_ledger_debit(pmap_t, int, ledger_amount_t);
+/**
+ * Returns the pmap's ledger
+ *
+ * @note This helper is here so that the compiler can hoist access to it.
+ */
+__pure2
+static inline ledger_t
+pmap_ledger(pmap_t pmap)
+{
+	return pmap->ledger;
+}
+
+/**
+ * Credit a specific ledger entry within the passed in pmap's ledger object.
+ *
+ * @param pmap The pmap whose ledger should be updated.
+ * @param entry The specifc ledger entry to update. This needs to be one of the
+ *              task_ledger entries.
+ * @param amount The amount to credit from the ledger.
+ */
+#if XNU_MONITOR
+#define pmap_ledger_credit(pmap, entry, amount) \
+	ledger_credit_scalable_ppl(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+#else
+#define pmap_ledger_credit(pmap, entry, amount) \
+	ledger_credit_scalable(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+#endif
+
+/**
+ * Debit a specific ledger entry within the passed in pmap's ledger object.
+ *
+ * @param pmap The pmap whose ledger should be updated.
+ * @param entry The specifc ledger entry to update. This needs to be one of the
+ *              task_ledger entries.
+ * @param amount The amount to debit from the ledger.
+ */
+#if XNU_MONITOR
+#define pmap_ledger_debit(pmap, entry, amount) \
+	ledger_debit_scalable_ppl(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+#else
+#define pmap_ledger_debit(pmap, entry, amount) \
+	ledger_debit_scalable(&task_ledger_template, pmap_ledger(pmap), entry, amount)
+#endif
 
 extern void validate_pmap_internal(const volatile struct pmap *, const char *);
 extern void validate_pmap_mutable_internal(const volatile struct pmap *, const char *);

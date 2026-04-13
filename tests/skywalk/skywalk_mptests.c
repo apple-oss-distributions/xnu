@@ -102,7 +102,7 @@
  * skywalk_mptests bats
  */
 #define X(test, desc, ...)                                                 \
-	T_DECL(test, desc, T_META_NAMESPACE("xnu.skywalk_mptests"))        \
+	T_DECL(test, desc, T_META_NAMESPACE("xnu.net.skywalk_mptests"))    \
 	{                                                                  \
 	        const char *ignorefail_str = getenv("ignorefail");         \
 	        bool ignorefail = false;                                   \

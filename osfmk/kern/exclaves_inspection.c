@@ -66,6 +66,7 @@ static ctid_t ctid_list[EXCLAVES_STACKSHOT_BATCH_SIZE];
 static size_t scid_list_count;
 bool exclaves_stackshot_raw_addresses;
 bool exclaves_stackshot_all_address_spaces;
+static bool exclaves_stackshot_using_dynamic_textlayout = false;
 exclaves_resource_t * stackshot_sharedmem_resource;
 exclaves_panic_ss_status_t exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_UNKNOWN;
 
@@ -145,7 +146,7 @@ clear_pending_threads_stackshot(ctid_t *ctids, size_t count, thread_exclaves_ins
 		ctids[i] = 0;
 		assert(thread);
 
-		os_atomic_and(&thread->th_exclaves_inspection_state, ~flag, relaxed);
+		os_atomic_and(&thread->th_exclaves_inspection_state, (thread_exclaves_inspection_flags_t)~flag, relaxed);
 		wakeup_all_with_inheritor((event_t)&thread->th_exclaves_inspection_queue_stackshot, THREAD_AWAKENED);
 		thread_deallocate_safe(thread);
 	}
@@ -162,7 +163,7 @@ clear_pending_threads_kperf(ctid_t *ctids, size_t count, thread_exclaves_inspect
 		ctids[i] = 0;
 		assert(thread);
 
-		os_atomic_and(&thread->th_exclaves_inspection_state, ~flag, relaxed);
+		os_atomic_and(&thread->th_exclaves_inspection_state, (thread_exclaves_inspection_flags_t)~flag, relaxed);
 		wakeup_all_with_inheritor((event_t)&thread->th_exclaves_inspection_queue_kperf, THREAD_AWAKENED);
 		thread_deallocate_safe(thread);
 	}
@@ -178,7 +179,7 @@ clear_stackshot_queue(thread_exclaves_inspection_flags_t flag)
 	while (!queue_empty(&exclaves_inspection_queue_stackshot)) {
 		thread = qe_dequeue_tail(&exclaves_inspection_queue_stackshot, struct thread, th_exclaves_inspection_queue_stackshot);
 		assert(thread);
-		os_atomic_and(&thread->th_exclaves_inspection_state, ~flag, relaxed);
+		os_atomic_and(&thread->th_exclaves_inspection_state, (thread_exclaves_inspection_flags_t)~flag, relaxed);
 		wakeup_all_with_inheritor((event_t)&thread->th_exclaves_inspection_queue_stackshot, THREAD_AWAKENED);
 		thread_deallocate_safe(thread);
 	}
@@ -194,7 +195,7 @@ clear_kperf_queue(thread_exclaves_inspection_flags_t flag)
 	while (!queue_empty(&exclaves_inspection_queue_kperf)) {
 		thread = qe_dequeue_tail(&exclaves_inspection_queue_kperf, struct thread, th_exclaves_inspection_queue_kperf);
 		assert(thread);
-		os_atomic_and(&thread->th_exclaves_inspection_state, ~flag, relaxed);
+		os_atomic_and(&thread->th_exclaves_inspection_state, (thread_exclaves_inspection_flags_t)~flag, relaxed);
 		wakeup_all_with_inheritor((event_t)&thread->th_exclaves_inspection_queue_kperf, THREAD_AWAKENED);
 		thread_deallocate_safe(thread);
 	}
@@ -323,6 +324,7 @@ exclaves_collect_threads_thread(void __unused *arg, wait_result_t __unused wr)
 		panic("exclaves stackshot: failed to allocate collect ipcb: %d", kr);
 	}
 
+	__block bool enabled_dynamic_textlayout = exclaves_stackshot_using_dynamic_textlayout;
 	os_atomic_store(&current_thread()->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_NOINSPECT, relaxed);
 	lck_mtx_lock(&exclaves_collect_init_mtx);
 	exclaves_collect_thread_ready = true;
@@ -332,8 +334,39 @@ exclaves_collect_threads_thread(void __unused *arg, wait_result_t __unused wr)
 	lck_mtx_lock(&exclaves_collect_mtx);
 
 	for (;;) {
-		while (queue_empty(&exclaves_inspection_queue_stackshot) && queue_empty(&exclaves_inspection_queue_kperf)) {
+		while (queue_empty(&exclaves_inspection_queue_stackshot) && queue_empty(&exclaves_inspection_queue_kperf) && enabled_dynamic_textlayout == exclaves_stackshot_using_dynamic_textlayout) {
 			lck_mtx_sleep(&exclaves_collect_mtx, LCK_SLEEP_DEFAULT, (event_t)&exclaves_collect_event, THREAD_UNINT);
+		}
+
+		if (enabled_dynamic_textlayout != exclaves_stackshot_using_dynamic_textlayout) {
+			exclaves_debug_printf(show_errors, "enabling dynamic textlayout: current %d want %d\n", enabled_dynamic_textlayout, exclaves_stackshot_using_dynamic_textlayout);
+			if (exclaves_stackshot_client.variant == STACKSHOT_STACKSHOTSERVERVARIANT_INTERNAL) {
+				/* we need to be able to block while doing this, because stackshot may allocate while it's expanding its textlayout shared memory region. */
+				os_atomic_store(&current_thread()->th_exclaves_inspection_state, 0, relaxed);
+				lck_mtx_unlock(&exclaves_collect_mtx);
+				tb_error_t tberr = stackshot_taker_enabledynamicconclavetextlayout(&exclaves_stackshot_client.conn.internal, ^(stackshot_taker_enabledynamicconclavetextlayout__result_s res) {
+					if (stackshot_taker_enabledynamicconclavetextlayout__result_get_success(&res)) {
+					        /* succeeded */
+					        enabled_dynamic_textlayout = exclaves_stackshot_using_dynamic_textlayout;
+					} else {
+					        exclaves_debug_printf(show_errors, "failed to enable dynamic textlayout\n");
+					        /* failed */
+					        exclaves_stackshot_using_dynamic_textlayout = false;
+					        enabled_dynamic_textlayout = false;
+					}
+				});
+				lck_mtx_lock(&exclaves_collect_mtx);
+				os_atomic_store(&current_thread()->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_NOINSPECT, relaxed);
+				if (tberr != TB_ERROR_SUCCESS) {
+					exclaves_debug_printf(show_errors, "error enabling conclave textlayout: 0x%x\n", tberr);
+					exclaves_stackshot_using_dynamic_textlayout = false;
+					enabled_dynamic_textlayout = false;
+				}
+			} else {
+				exclaves_debug_printf(show_errors, "dynamic textlayout not supported in production build\n");
+				exclaves_stackshot_using_dynamic_textlayout = false;
+				enabled_dynamic_textlayout = false;
+			}
 		}
 
 		if (!queue_empty(&exclaves_inspection_queue_stackshot)) {
@@ -562,5 +595,23 @@ kdp_read_panic_exclaves_stackshot(struct exclaves_panic_stackshot *eps)
 	eps->stackshot_buffer = exclaves_stackshot_buffer;
 	eps->stackshot_buffer_size = panic_magic->size;
 }
+
+#if DEBUG || DEVELOPMENT
+static int
+exclaves_stackshot_set_dynamic_textlayout(__unused int64_t in, __unused int64_t *out)
+{
+	if (exclaves_stackshot_using_dynamic_textlayout) {
+		exclaves_debug_printf(show_errors, "already enabled dynamic textlayout, not doing anything else\n");
+		return KERN_SUCCESS;
+	}
+
+	/* we must do this from the stackshot thread while holding the stackshot mutex, as it could block. */
+	exclaves_stackshot_using_dynamic_textlayout = true;
+	thread_wakeup_thread((event_t)&exclaves_collect_event, exclaves_collection_thread);
+	return KERN_SUCCESS;
+}
+
+SYSCTL_TEST_REGISTER(exclaves_stackshot_dynamic_textlayout, exclaves_stackshot_set_dynamic_textlayout);
+#endif
 
 #endif /* CONFIG_EXCLAVES */

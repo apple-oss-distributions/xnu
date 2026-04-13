@@ -44,14 +44,17 @@
 
 extern void read_random(void* buffer, u_int numBytes);
 
-extern ledger_template_t task_ledger_template;
-
 extern boolean_t arm_force_fast_fault(ppnum_t, vm_prot_t, int, void*);
 extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, bool);
 
 kern_return_t test_pmap_enter_disconnect(unsigned int num_loops);
 kern_return_t test_pmap_compress_remove(unsigned int num_loops);
+kern_return_t test_pmap_protect_remove(unsigned int num_loops);
+kern_return_t test_pmap_query_remove(unsigned int num_loops);
 kern_return_t test_pmap_exec_remove(unsigned int num_loops);
+kern_return_t test_pmap_exec_remove_4k(unsigned int num_loops);
+kern_return_t test_pmap_enter_remove(unsigned int num_loops);
+kern_return_t test_pmap_enter_remove_4k(unsigned int num_loops);
 kern_return_t test_pmap_nesting(unsigned int num_loops);
 kern_return_t test_pmap_iommu_disconnect(void);
 kern_return_t test_pmap_extended(void);
@@ -63,13 +66,20 @@ kern_return_t test_pmap_reentrance(unsigned int num_loops);
 kern_return_t test_surt(unsigned int num_surts);
 #endif
 
-#define PMAP_TEST_VA (0xDEADULL << PAGE_SHIFT)
+/**
+ * This VA is chosen so that it will force 4K pmaps to use the 4th L1 TTE in the group
+ * of 4 TTEs mapping the 16K next-level page table, so that the tests below that concurrently
+ * execute pmap_enter() will exercise the race in rdar://156154834.
+ */
+#define PMAP_TEST_VA (0x3DEADULL << PAGE_SHIFT)
 
 typedef struct {
 	pmap_t pmap;
 	vm_map_address_t va;
 	processor_t proc;
 	ppnum_t pn;
+	vm_prot_t prot;
+	volatile unsigned int nthreads;
 	volatile boolean_t stop;
 } pmap_test_thread_args;
 
@@ -86,11 +96,9 @@ pmap_create_wrapper(unsigned int flags)
 {
 	pmap_t new_pmap = NULL;
 	ledger_t ledger;
-	assert(task_ledger_template != NULL);
-	if ((ledger = ledger_instantiate(task_ledger_template, LEDGER_CREATE_ACTIVE_ENTRIES)) == NULL) {
-		return NULL;
-	}
-	new_pmap = pmap_create_options(ledger, 0, flags);
+
+	ledger = ledger_instantiate(&task_ledger_template);
+	new_pmap = pmap_create_options(ledger, 0, flags | PMAP_CREATE_64BIT);
 	ledger_dereference(ledger);
 	return new_pmap;
 }
@@ -138,7 +146,11 @@ pmap_disconnect_thread(void *arg, wait_result_t __unused wres)
 	do {
 		pmap_disconnect(args->pn);
 	} while (!args->stop);
-	thread_wakeup((event_t)args);
+	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
+	os_atomic_thread_fence(acquire);
+	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+		thread_wakeup((event_t)args);
+	}
 }
 
 kern_return_t
@@ -156,7 +168,7 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 		return KERN_FAILURE;
 	}
 	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
-	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .pn = phys_page};
+	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .pn = phys_page, .nthreads = 1};
 	kern_return_t res = kernel_thread_start_priority(pmap_disconnect_thread,
 	    &args, thread_kern_get_pri(current_thread()), &disconnect_thread);
 	if (res) {
@@ -186,13 +198,18 @@ static void
 pmap_remove_thread(void *arg, wait_result_t __unused wres)
 {
 	pmap_test_thread_args *args = arg;
+	const vm_map_address_t va = os_atomic_add_orig(&args->va, PAGE_SIZE, relaxed);
 	do {
-		__assert_only kern_return_t kr = pmap_enter_options(args->pmap, args->va, args->pn,
-		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL, PMAP_MAPPING_TYPE_INFER);
+		__assert_only kern_return_t kr = pmap_enter_options(args->pmap, va, args->pn,
+		    args->prot, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
-		pmap_remove(args->pmap, args->va, args->va + PAGE_SIZE);
+		pmap_remove(args->pmap, va, va + PAGE_SIZE);
 	} while (!args->stop);
-	thread_wakeup((event_t)args);
+	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
+	os_atomic_thread_fence(acquire);
+	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+		thread_wakeup((event_t)args);
+	}
 }
 
 /**
@@ -218,7 +235,8 @@ test_pmap_compress_remove(unsigned int num_loops)
 		return KERN_FAILURE;
 	}
 	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
-	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA, .pn = phys_page};
+	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA,
+		                      .pn = phys_page, .prot = VM_PROT_READ, .nthreads = 1};
 	kern_return_t res = kernel_thread_start_priority(pmap_remove_thread,
 	    &args, thread_kern_get_pri(current_thread()), &remove_thread);
 	if (res) {
@@ -242,6 +260,112 @@ test_pmap_compress_remove(unsigned int num_loops)
 	return KERN_SUCCESS;
 }
 
+/**
+ * Test that a mapping can be entered and removed (possibly freeing a page table page)
+ * while the same VA region is having its protections changed, without triggering panics.
+ */
+kern_return_t
+test_pmap_protect_remove(unsigned int num_loops)
+{
+	thread_t remove_thread;
+	pmap_t new_pmap = pmap_create_wrapper(0);
+	if (new_pmap == NULL) {
+		return KERN_FAILURE;
+	}
+	vm_page_t m = pmap_test_alloc_vm_page();
+	if (m == VM_PAGE_NULL) {
+		pmap_destroy(new_pmap);
+		return KERN_FAILURE;
+	}
+	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
+	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA,
+		                      .pn = phys_page, .prot = VM_PROT_READ | VM_PROT_WRITE,
+		                      .nthreads = 1};
+	kern_return_t res = kernel_thread_start_priority(pmap_remove_thread,
+	    &args, thread_kern_get_pri(current_thread()), &remove_thread);
+	if (res) {
+		pmap_destroy(new_pmap);
+		pmap_test_free_vm_page(m);
+		return res;
+	}
+	thread_deallocate(remove_thread);
+
+	while (num_loops-- != 0) {
+		pmap_protect(new_pmap, PMAP_TEST_VA - (64 * PAGE_SIZE),
+		    PMAP_TEST_VA + (64 * PAGE_SIZE), VM_PROT_READ);
+	}
+
+	assert_wait((event_t)&args, THREAD_UNINT);
+	args.stop = TRUE;
+	thread_block(THREAD_CONTINUE_NULL);
+
+	pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + PAGE_SIZE);
+	pmap_destroy(new_pmap);
+	pmap_test_free_vm_page(m);
+	return KERN_SUCCESS;
+}
+
+/**
+ * Test that a mapping can be entered and removed (possibly freeing a page table page)
+ * while the same VA region is having its mapping state queried, without triggering panics.
+ */
+kern_return_t
+test_pmap_query_remove(unsigned int num_loops)
+{
+	thread_t remove_thread;
+	pmap_t new_pmap = pmap_create_wrapper(0);
+	if (new_pmap == NULL) {
+		return KERN_FAILURE;
+	}
+	vm_page_t m = pmap_test_alloc_vm_page();
+	if (m == VM_PAGE_NULL) {
+		pmap_destroy(new_pmap);
+		return KERN_FAILURE;
+	}
+	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
+	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA,
+		                      .pn = phys_page, .prot = VM_PROT_READ | VM_PROT_WRITE,
+		                      .nthreads = 1};
+	kern_return_t res = kernel_thread_start_priority(pmap_remove_thread,
+	    &args, thread_kern_get_pri(current_thread()), &remove_thread);
+	if (res) {
+		pmap_destroy(new_pmap);
+		pmap_test_free_vm_page(m);
+		return res;
+	}
+	thread_deallocate(remove_thread);
+
+	while (num_loops-- != 0) {
+		int disposition;
+		res = pmap_query_page_info(new_pmap, PMAP_TEST_VA, &disposition);
+		assert3u(res, ==, KERN_SUCCESS);
+		assertf((disposition == 0) || (disposition == (PMAP_QUERY_PAGE_PRESENT | PMAP_QUERY_PAGE_INTERNAL)),
+		    "%s: unexpected mapping disposition %d for page 0x%lx", __func__, disposition, (unsigned long)phys_page);
+		mach_vm_size_t compressed = 0;
+		mach_vm_size_t resident = pmap_query_resident(new_pmap, PMAP_TEST_VA - (64 * PAGE_SIZE),
+		    PMAP_TEST_VA + (64 * PAGE_SIZE), &compressed);
+		assert3u(compressed, ==, 0);
+		assertf((resident == 0) || (resident == PAGE_SIZE),
+		    "%s: unexpected resident byte count 0x%llx for page 0x%lx", __func__, (unsigned long long)resident,
+		    (unsigned long)phys_page);
+	}
+
+	assert_wait((event_t)&args, THREAD_UNINT);
+	args.stop = TRUE;
+	thread_block(THREAD_CONTINUE_NULL);
+
+	pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + PAGE_SIZE);
+	pmap_destroy(new_pmap);
+	pmap_test_free_vm_page(m);
+	return KERN_SUCCESS;
+}
+
+
+kern_return_t
+test_pmap_exec_remove_4k(unsigned int num_loops __unused)
+{
+	return KERN_NOT_SUPPORTED;
+}
 
 kern_return_t
 test_pmap_exec_remove(unsigned int num_loops __unused)
@@ -249,6 +373,78 @@ test_pmap_exec_remove(unsigned int num_loops __unused)
 	return KERN_NOT_SUPPORTED;
 }
 
+
+static kern_return_t
+test_pmap_enter_remove_internal(unsigned int num_loops, unsigned int pmap_flags)
+{
+	kern_return_t kr = KERN_SUCCESS, res = KERN_SUCCESS;
+	pmap_t new_pmap = pmap_create_wrapper(PMAP_CREATE_TEST | pmap_flags);
+	if (new_pmap == NULL) {
+		return KERN_FAILURE;
+	}
+
+	vm_page_t m = pmap_test_alloc_vm_page();
+	if (m == VM_PAGE_NULL) {
+		pmap_destroy(new_pmap);
+		return KERN_FAILURE;
+	}
+	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
+	pmap_test_thread_args args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA + PAGE_SIZE,
+		                      .pn = phys_page, .prot = VM_PROT_READ, .nthreads = 0};
+
+	static const unsigned int num_workers = 2;
+	do {
+		thread_t remove_thread;
+		res = kernel_thread_start_priority(pmap_remove_thread,
+		    &args, thread_kern_get_pri(current_thread()), &remove_thread);
+		if (res != KERN_SUCCESS) {
+			goto pmap_enter_remove_cleanup;
+		}
+		++args.nthreads;
+		thread_deallocate(remove_thread);
+	} while (args.nthreads < num_workers);
+
+	while (num_loops-- != 0) {
+		kr = pmap_enter(new_pmap, PMAP_TEST_VA, phys_page, VM_PROT_READ | VM_PROT_WRITE,
+		    VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
+		assertf(kr == KERN_SUCCESS, "pmap_enter() failed with 0x%x", kr);
+		pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + PAGE_SIZE);
+	}
+
+pmap_enter_remove_cleanup:
+	if (args.nthreads) {
+		assert_wait((event_t)&args, THREAD_UNINT);
+		args.stop = TRUE;
+		thread_block(THREAD_CONTINUE_NULL);
+	}
+	pmap_test_free_vm_page(m);
+	pmap_destroy(new_pmap);
+	return res;
+}
+
+kern_return_t
+test_pmap_enter_remove(unsigned int num_loops)
+{
+	return test_pmap_enter_remove_internal(num_loops, 0);
+}
+
+#if __ARM_MIXED_PAGE_SIZE__
+
+kern_return_t
+test_pmap_enter_remove_4k(unsigned int num_loops)
+{
+	return test_pmap_enter_remove_internal(num_loops, PMAP_CREATE_FORCE_4K_PAGES);
+}
+
+#else /* __ARM_MIXED_PAGE_SIZE__ */
+
+kern_return_t
+test_pmap_enter_remove_4k(unsigned int num_loops __unused)
+{
+	return KERN_SUCCESS;
+}
+
+#endif /* __ARM_MIXED_PAGE_SIZE__ */
 
 #if defined(__arm64__)
 
@@ -410,10 +606,10 @@ test_pmap_nesting(unsigned int num_loops)
 		#undef TEST_NEST_THREADS
 		#define TEST_NEST_THREADS MAX_CPUS - 1
 		#endif
-		thread_t nest_threads[TEST_NEST_THREADS];
 		kern_return_t thread_krs[TEST_NEST_THREADS];
 		pmap_test_thread_args args[TEST_NEST_THREADS];
-		for (unsigned int j = 0; j < (sizeof(nest_threads) / sizeof(nest_threads[0])); j++) {
+		for (unsigned int j = 0; j < (sizeof(args) / sizeof(args[0])); j++) {
+			thread_t nest_thread;
 			args[j].pmap = nested_pmap;
 			args[j].stop = FALSE;
 			/**
@@ -422,9 +618,10 @@ test_pmap_nesting(unsigned int num_loops)
 			 * while also allowing some threads to run concurrently on other CPUs.
 			 */
 			args[j].proc = ((j % 2) ? PROCESSOR_NULL : nest_proc);
-			thread_krs[j] = kernel_thread_start_priority(pmap_nest_thread, &args[j], MAXPRI_KERNEL - (j % 4), &nest_threads[j]);
+			thread_krs[j] = kernel_thread_start_priority(pmap_nest_thread, &args[j], MAXPRI_KERNEL - (j % 4), &nest_thread);
 			if (thread_krs[j] == KERN_SUCCESS) {
-				thread_set_thread_name(nest_threads[j], "pmap_nest_thread");
+				thread_set_thread_name(nest_thread, "pmap_nest_thread");
+				thread_deallocate(nest_thread);
 			}
 		}
 
@@ -489,7 +686,7 @@ test_pmap_nesting(unsigned int num_loops)
 			}
 		}
 
-		for (unsigned int j = 0; j < (sizeof(nest_threads) / sizeof(nest_threads[0])); j++) {
+		for (unsigned int j = 0; j < (sizeof(args) / sizeof(args[0])); j++) {
 			if (thread_krs[j] == KERN_SUCCESS) {
 				assert_wait((event_t)&args[j], THREAD_UNINT);
 				args[j].stop = TRUE;
@@ -591,7 +788,6 @@ ppo_cleanup:
 typedef struct {
 	pmap_test_thread_args args;
 	unsigned int num_mappings;
-	volatile unsigned int nthreads;
 	thread_call_t panic_callout;
 } pmap_hugepv_test_thread_args;
 
@@ -624,7 +820,7 @@ hugepv_remove_enter_thread(void *arg, wait_result_t __unused wres)
 	} while (!args->args.stop);
 	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
 	os_atomic_thread_fence(acquire);
-	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+	if (os_atomic_dec(&args->args.nthreads, relaxed) == 0) {
 		thread_wakeup((event_t)args);
 	}
 }
@@ -653,7 +849,7 @@ hugepv_fast_fault_thread(void *arg, wait_result_t __unused wres)
 	} while (!args->args.stop);
 	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
 	os_atomic_thread_fence(acquire);
-	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+	if (os_atomic_dec(&args->args.nthreads, relaxed) == 0) {
 		thread_wakeup((event_t)args);
 	}
 }
@@ -676,7 +872,7 @@ hugepv_cache_attr_thread(void *arg, wait_result_t __unused wres)
 	} while (!args->args.stop);
 	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
 	os_atomic_thread_fence(acquire);
-	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+	if (os_atomic_dec(&args->args.nthreads, relaxed) == 0) {
 		thread_wakeup((event_t)args);
 	}
 }
@@ -779,8 +975,8 @@ test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings)
 	thread_call_t huge_pv_panic_call = thread_call_allocate(huge_pv_test_panic, NULL);
 
 	pmap_hugepv_test_thread_args args = {
-		.args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA, .pn = phys_page},
-		.nthreads = 0, .num_mappings = num_mappings, .panic_callout = huge_pv_panic_call
+		.args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA, .pn = phys_page, .nthreads = 0},
+		.num_mappings = num_mappings, .panic_callout = huge_pv_panic_call
 	};
 
 	thread_call_t huge_pv_timer_call = thread_call_allocate(huge_pv_test_timeout, &args);
@@ -790,7 +986,7 @@ test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings)
 	if (kr != KERN_SUCCESS) {
 		goto hugepv_cleanup;
 	}
-	++args.nthreads;
+	++args.args.nthreads;
 	thread_deallocate(remove_enter_thread);
 
 	kr = kernel_thread_start_priority(hugepv_fast_fault_thread, &args,
@@ -798,7 +994,7 @@ test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings)
 	if (kr != KERN_SUCCESS) {
 		goto hugepv_cleanup;
 	}
-	++args.nthreads;
+	++args.args.nthreads;
 	thread_deallocate(fast_fault_thread);
 
 	kr = kernel_thread_start_priority(hugepv_cache_attr_thread, &args,
@@ -806,7 +1002,7 @@ test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings)
 	if (kr != KERN_SUCCESS) {
 		goto hugepv_cleanup;
 	}
-	++args.nthreads;
+	++args.args.nthreads;
 	thread_deallocate(cache_attr_thread);
 
 	/**
@@ -842,18 +1038,18 @@ hugepv_cleanup:
 		 * the workers to terminate as they may already be doing so.  Spin in a WFE loop
 		 * instead.
 		 */
-		while (os_atomic_load_exclusive(&args.nthreads, relaxed) != 0) {
+		while (os_atomic_load_exclusive(&args.args.nthreads, relaxed) != 0) {
 			__builtin_arm_wfe();
 		}
 		os_atomic_clear_exclusive();
-	} else if (args.nthreads > 0) {
+	} else if (args.args.nthreads > 0) {
 		/* Ensure prior stores to nthreads are visible before the update to args.args.stop. */
 		os_atomic_thread_fence(release);
 		huge_pv_start_panic_timer(huge_pv_panic_call);
 		assert_wait((event_t)&args, THREAD_UNINT);
 		args.args.stop = TRUE;
 		thread_block(THREAD_CONTINUE_NULL);
-		assert(args.nthreads == 0);
+		assert(args.args.nthreads == 0);
 	}
 
 	thread_call_cancel_wait(huge_pv_panic_call);

@@ -393,6 +393,9 @@ __options_decl(cluster_shared_rsrc_type_t, uint32_t, {
 	CLUSTER_SHARED_RSRC_TYPE_NONE                   = CLUSTER_SHARED_RSRC_TYPE_COUNT,
 });
 
+typedef uint8_t pset_id_t;
+#define PSET_ID_INVALID ((pset_id_t)UINT8_MAX)
+
 #endif  /* defined(KERNEL_PRIVATE) || SCHED_TEST_HARNESS */
 
 #endif  /* _KERN_KERN_TYPES_H_ */

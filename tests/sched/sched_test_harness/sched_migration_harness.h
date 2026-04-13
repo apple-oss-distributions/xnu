@@ -6,7 +6,10 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
+#include <kern/kern_types.h>
+
 #include "sched_runqueue_harness.h"
+
 
 /* Mocking the HW topology */
 typedef enum {
@@ -15,43 +18,64 @@ typedef enum {
 	TEST_CPU_TYPE_MAX,
 } test_cpu_type_t;
 
-typedef struct {
+extern const char * test_cpu_type_to_str(test_cpu_type_t cpu_type);
+
+typedef const struct test_hw_cpu_range {
 	test_cpu_type_t cpu_type;
+	int             cluster_id;
+	int             die_id;
+	int             first_cpu_id;
+	int             num_cpus;
+} test_hw_cpu_range;
+
+typedef const struct test_hw_topology {
 	int num_cpus;
-	int cluster_id;
-	int die_id;
-} test_pset_t;
+	int boot_cpu;
+	test_hw_cpu_range cpu_ranges[];
+} *test_hw_topology_t;
 
-typedef struct {
-	test_pset_t *psets;
-	int num_psets;
-	int total_cpus;
-} test_hw_topology_t;
+/* The mocked hardware topology is translated into a mocked scheduler topology. */
+typedef struct test_pset {
+	test_cpu_type_t cpu_type;
+	unsigned int    num_cpus;
+	unsigned int    cluster_id;
+	unsigned int    die_id;
+} test_pset;
 
-extern int                   pset_id_to_cpu_id(int pset_id);
-extern int                   cpu_id_to_pset_id(int cpu_id);
-extern test_hw_topology_t    get_hw_topology(void);
-extern void                  set_hw_topology(test_hw_topology_t hw_topology);
-extern char                  test_cpu_type_to_char(test_cpu_type_t cpu_type);
+typedef const struct test_scheduler_topology {
+	unsigned int num_psets;
+	test_pset   *psets;
+} *test_sched_topology_t;
+
+extern int                       pset_id_to_cpu_id(int pset_id);
+extern int                       cpu_id_to_pset_id(int cpu_id);
+extern test_sched_topology_t     get_sched_topology(void);
 
 /* Given topologies */
-extern test_hw_topology_t single_core; // 1P
-extern test_hw_topology_t basic_amp; // 2P + 4E
-extern test_hw_topology_t dual_die; // 2E + 4P + 4P + 2E + 4P + 4P
+extern struct test_hw_topology single_core; // 1P
+extern struct test_hw_topology basic_amp; // 2P + 4E
+extern struct test_hw_topology dual_die; // 2E + 4P + 4P + 2E + 4P + 4P
+extern struct test_hw_topology two_of_each; // 2E + 2P + 2E + 2P
 
 /* Test harness utilities */
-extern void      init_migration_harness(test_hw_topology_t hw_topology);
-extern void      set_tg_sched_bucket_preferred_pset(struct thread_group *tg, int sched_bucket, int cluster_id);
-extern void      set_thread_cluster_bound(test_thread_t thread, int cluster_id);
+extern test_sched_topology_t init_migration_harness(test_hw_topology_t hw_topology);
+extern void      set_tg_sched_bucket_preferred_pset(struct thread_group *tg, int sched_bucket, pset_id_t pset_id);
+extern void      set_thread_pset_bound(test_thread_t thread, pset_id_t pset_id);
 extern int       choose_pset_for_thread(test_thread_t thread);
+typedef enum {
+	TEST_SCHED_NONE = 0x0,
+	TEST_SCHED_CSW  = 0x20,
+} test_sched_options_t; // Mirrors sched_options_t
+extern int       choose_pset_for_thread_options(test_thread_t thread, test_sched_options_t options);
 extern bool      choose_pset_for_thread_expect(test_thread_t thread, int expected_cluster_id);
 extern test_thread_t  cpu_steal_thread(int cpu_id);
 extern bool      cpu_processor_balance(int cpu_id);
+extern void      cpu_clear_pending_ast_bits(int cpu_id);
 extern bool      thread_avoid_processor_expect(test_thread_t thread, int cpu_id, bool quantum_expiry, bool avoid_expected);
 extern void      cpu_expire_quantum(int cpu_id);
 extern void      set_current_processor(int cpu_id);
 /* Note that load avg will be overriden by cpu_set_thread_current() or enqueue_thread() operations */
-extern void      set_pset_load_avg(int cluster_id, int QoS, uint64_t load_avg);
+extern void      set_pset_load_avg(int cluster_id, int QoS, uint32_t load_avg);
 extern void      set_pset_recommended(int cluster_id);
 extern void      set_pset_derecommended(int cluster_id);
 typedef enum {
@@ -74,3 +98,4 @@ extern void      cpu_send_ipi_for_thread(int cpu_id, test_thread_t thread, test_
 #define QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE              0x4
 extern bool      max_parallelism_expect(int qos, uint64_t options, uint32_t expected_parallelism);
 extern int       iterate_pset_search_order_expect(int src_pset_id, uint64_t candidate_map, int sched_bucket, int *expected_pset_ids, int num_psets);
+extern int       pset_id_for_cluster_id(int cluster_id);

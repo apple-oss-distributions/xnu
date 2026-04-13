@@ -75,8 +75,10 @@ DATAFILES = \
 	fsync.2			\
 	fs_snapshot_create.2	\
 	fs_snapshot_list.2	\
+	fs_snapshot_mount.2	\
 	fs_snapshot_delete.2	\
 	fs_snapshot_rename.2	\
+	fs_snapshot_revert.2	\
 	ftruncate.2		\
 	futimens.2		\
 	futimes.2		\
@@ -125,6 +127,7 @@ DATAFILES = \
 	lchown.2		\
 	link.2			\
 	linkat.2		\
+	lio_listio.2	\
 	listen.2		\
 	listxattr.2		\
 	lseek.2			\
@@ -150,6 +153,7 @@ DATAFILES = \
 	nfssvc.2		\
 	open.2			\
 	openat.2		\
+	openat_authenticated_np.2	\
 	pathconf.2		\
 	pipe.2			\
 	poll.2			\

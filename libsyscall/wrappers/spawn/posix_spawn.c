@@ -2823,6 +2823,23 @@ posix_spawnattr_set_conclave_id_np(const posix_spawnattr_t *attr, const char *co
 }
 
 int
+posix_spawnattr_set_telemetry_np(posix_spawnattr_t *attr, posix_spawn_telemetry_flags_t flags, uint64_t argument)
+{
+#pragma unused(flags, argument)
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	if (flags & PSA_TELEMETRY_PAGEIN) {
+		psattr->psa_options |= PSA_OPTION_PAGEIN_TELEMETRY;
+	}
+	return 0;
+}
+
+int
 posix_spawnattr_set_portlimits_ext(posix_spawnattr_t * __restrict attr,
     uint32_t port_soft_limit, uint32_t port_hard_limit)
 {

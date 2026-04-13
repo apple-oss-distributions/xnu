@@ -44,6 +44,13 @@
 #ifdef KERNEL_PRIVATE
 struct if_interface_state;
 struct ifnet_interface_advisory;
+#include <net/if_var_status.h>
+
+struct ifnet_rx_steering_rule {
+	uint32_t                                identifier;
+	struct ifnet_traffic_descriptor_inet    descriptor;
+};
+
 #include <sys/kpi_mbuf.h>
 #endif /* KERNEL_PRIVATE */
 
@@ -3418,6 +3425,7 @@ extern errno_t ifnet_get_local_ports(ifnet_t ifp, u_int8_t bitfield[IP_PORTRANGE
 #define IFNET_GET_LOCAL_PORTS_EXTBGIDLEONLY     0x20
 #define IFNET_GET_LOCAL_PORTS_ACTIVEONLY        0x40
 #define IFNET_GET_LOCAL_PORTS_ANYTCPSTATEOK     0x80
+#define IFNET_GET_LOCAL_PORTS_BOUNDIF           0x100
 
 /*
  *       @function ifnet_get_local_ports_extended
@@ -3968,6 +3976,19 @@ extern errno_t ifnet_get_low_power_wake(ifnet_t interface, boolean_t *on);
  *       @param interface The interface.
  */
 extern void ifnet_enable_cellular_thread_group(ifnet_t interface);
+
+/*!
+ *       @function ifnet_get_rx_steering_rules
+ *       @discussion Get RX flow steering rules from the interface's flowswitch.
+ *       @param interface The interface.
+ *       @param rules_buffer Preallocated buffer to store the rules.
+ *       @param buffer_count Number of ifnet_rx_steering_rule structures the buffer can hold.
+ *       @param count_out On output, contains the actual number of rules found.
+ *       @result Returns 0 on success, EINVAL for invalid parameters, ENXIO if interface
+ *               is not available, ENODEV if interface has no associated flowswitch.
+ */
+extern errno_t ifnet_get_rx_steering_rules(ifnet_t interface,
+    struct ifnet_rx_steering_rule *__counted_by(buffer_count) rules_buffer, uint32_t buffer_count, uint32_t *count_out);
 
 #endif /* KERNEL_PRIVATE */
 

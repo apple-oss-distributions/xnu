@@ -69,6 +69,13 @@
 #include "bpflib.h"
 #include "in_cksum.h"
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("dieter")
+	);
+
 #define VLAN_UNIT_START         200 /* start at vlan200 to avoid conflicts */
 #define TEN_NET                 0x0a000000
 #define TEN_1_NET               (TEN_NET | 0x010000)
@@ -472,35 +479,35 @@ vlan_test_short_packet(void)
 	}
 }
 
-T_DECL(net_if_vlan_test_software_tagging,
+T_DECL(if_vlan_test_software_tagging,
     "vlan test traffic software tagging",
     T_META_ASROOT(true))
 {
 	vlan_test_traffic(false);
 }
 
-T_DECL(net_if_vlan_test_hardware_tagging,
+T_DECL(if_vlan_test_hardware_tagging,
     "vlan test hardware tagging",
     T_META_ASROOT(true))
 {
 	vlan_test_traffic(true);
 }
 
-T_DECL(net_if_vlan_test_software_tagging_bridged,
+T_DECL(if_vlan_test_software_tagging_bridged,
     "vlan test traffic software tagging bridged",
     T_META_ASROOT(true))
 {
 	vlan_test_bridged_traffic(false);
 }
 
-T_DECL(net_if_vlan_test_hardware_tagging_bridged,
+T_DECL(if_vlan_test_hardware_tagging_bridged,
     "vlan test hardware tagging bridged",
     T_META_ASROOT(true))
 {
 	vlan_test_bridged_traffic(true);
 }
 
-T_DECL(net_if_vlan_test_short_packet,
+T_DECL(if_vlan_test_short_packet,
     "vlan test short packet",
     T_META_ASROOT(true))
 {

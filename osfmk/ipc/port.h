@@ -85,6 +85,6 @@
 	          (((urefs) + (delta)) >= MACH_PORT_UREFS_MAX)))
 
 #define MACH_PORT_UREFS_UNDERFLOW(urefs, delta)                         \
-	        (((delta) < 0) && (((mach_port_urefs_t)-(delta)) > (urefs)))
+	        (((delta) < 0) && (((mach_port_delta_t)(urefs) + (delta) < 0)))
 
 #endif  /* _IPC_PORT_H_ */

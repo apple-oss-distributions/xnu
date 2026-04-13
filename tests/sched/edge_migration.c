@@ -9,52 +9,52 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RUN_CONCURRENTLY(true),
     T_META_OWNER("emily_peterson"));
 
-SCHED_POLICY_T_DECL(migration_cluster_bound,
-    "Verify that cluster-bound threads always choose the bound "
-    "cluster except when its derecommended")
+SCHED_POLICY_T_DECL(migration_pset_bound,
+    "Verify that pset-bound threads always choose the bound "
+    "pset except when its derecommended")
 {
 	int ret;
-	init_migration_harness(dual_die);
+	test_sched_topology_t sched_topo = init_migration_harness(&dual_die);
 	struct thread_group *tg = create_tg(0);
-	test_thread_t threads[dual_die.num_psets];
+	test_thread_t threads[sched_topo->num_psets];
 	int idle_load = 0;
 	int low_load = 100000;
 	int high_load = 10000000;
-	for (int i = 0; i < dual_die.num_psets; i++) {
+	for (int i = 0; i < sched_topo->num_psets; i++) {
 		threads[i] = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
-		set_thread_cluster_bound(threads[i], i);
+		set_thread_pset_bound(threads[i], i);
 		set_pset_load_avg(i, TH_BUCKET_SHARE_DF, low_load);
 	}
-	for (int i = 0; i < dual_die.num_psets; i++) {
+	for (int i = 0; i < sched_topo->num_psets; i++) {
 		set_current_processor(pset_id_to_cpu_id(i));
-		for (int j = 0; j < dual_die.num_psets; j++) {
-			/* Add extra load to the bound cluster, so we're definitely not just idle short-circuiting */
+		for (int j = 0; j < sched_topo->num_psets; j++) {
+			/* Add extra load to the bound pset, so we're definitely not just idle short-circuiting */
 			set_pset_load_avg(j, TH_BUCKET_SHARE_DF, high_load);
 			ret = choose_pset_for_thread_expect(threads[j], j);
-			T_QUIET; T_EXPECT_TRUE(ret, "Expecting the bound cluster");
+			T_QUIET; T_EXPECT_TRUE(ret, "Expecting the bound pset");
 			set_pset_load_avg(j, TH_BUCKET_SHARE_DF, low_load);
 		}
 	}
-	SCHED_POLICY_PASS("Cluster bound chooses bound cluster");
+	SCHED_POLICY_PASS("pset-bound chooses bound pset");
 	/* Derecommend the bound cluster */
-	for (int i = 0; i < dual_die.num_psets; i++) {
+	for (int i = 0; i < sched_topo->num_psets; i++) {
 		set_pset_derecommended(i);
 		int replacement_pset = -1;
-		for (int j = 0; j < dual_die.num_psets; j++) {
+		for (int j = 0; j < sched_topo->num_psets; j++) {
 			/* Find the first homogenous cluster and mark it as idle so we choose it */
-			if ((i != j) && (dual_die.psets[i].cpu_type == dual_die.psets[j].cpu_type)) {
+			if ((i != j) && (pset_cpu_type_for_id(i) == pset_cpu_type_for_id(j))) {
 				replacement_pset = j;
 				set_pset_load_avg(replacement_pset, TH_BUCKET_SHARE_DF, idle_load);
 				break;
 			}
 		}
 		ret = choose_pset_for_thread_expect(threads[i], replacement_pset);
-		T_QUIET; T_EXPECT_TRUE(ret, "Expecting the idle pset when the bound cluster is derecommended");
+		T_QUIET; T_EXPECT_TRUE(ret, "Expecting the idle pset when the bound pset is derecommended");
 		/* Restore pset conditions */
 		set_pset_recommended(i);
 		set_pset_load_avg(replacement_pset, TH_BUCKET_SHARE_DF, low_load);
 	}
-	SCHED_POLICY_PASS("Cluster binding is soft");
+	SCHED_POLICY_PASS("pset binding is soft");
 }
 
 SCHED_POLICY_T_DECL(migration_should_yield,
@@ -62,7 +62,7 @@ SCHED_POLICY_T_DECL(migration_should_yield,
     "to switch to")
 {
 	int ret;
-	init_migration_harness(basic_amp);
+	init_migration_harness(&basic_amp);
 	struct thread_group *tg = create_tg(0);
 	test_thread_t yielder = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
 	int p_pset = 0;
@@ -115,7 +115,7 @@ SCHED_POLICY_T_DECL(migration_stir_the_pot_basic,
     "their respective quanta have expired")
 {
 	int ret;
-	init_migration_harness(basic_amp);
+	init_migration_harness(&basic_amp);
 
 	struct thread_group *tg = create_tg(0);
 	test_thread_t starts_p = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
@@ -144,15 +144,16 @@ SCHED_POLICY_T_DECL(migration_stir_the_pot_basic,
 	T_QUIET; T_EXPECT_TRUE(ret, "Thread should preempt to get on P-core");
 
 	/* (Simulate as if we are switching to another quantum-expired thread) */
-	test_thread_t other_expired_thread = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
+	test_thread_t other_expired_thread = create_thread(TH_BUCKET_SHARE_DF, tg,
+	    root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
 	cpu_set_thread_current(other_e_cpu, other_expired_thread);
 	cpu_expire_quantum(other_e_cpu);
 	cpu_clear_thread_current(other_e_cpu);
 	cpu_set_thread_current(e_cpu, other_expired_thread);
 
 	/* ...and choosing the corresponding P-core for swap */
-	ret = choose_pset_for_thread_expect(starts_e, p_pset);
-	T_QUIET; T_EXPECT_TRUE(ret, "Should choose P-cores despite no idle cores there");
+	int chosen_pset = choose_pset_for_thread_options(starts_e, TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, p_pset, "Should choose P-cores despite no idle cores there");
 
 	/* Upon arrival, thread swapping in should preempt its predecessor */
 	enqueue_thread(pset_target(p_pset), starts_e);
@@ -163,8 +164,8 @@ SCHED_POLICY_T_DECL(migration_stir_the_pot_basic,
 	ret = dequeue_thread_expect(pset_target(p_pset), starts_e);
 	T_QUIET; T_ASSERT_TRUE(ret, "e_starts was enqueued on P");
 	cpu_set_thread_current(p_cpu, starts_e);
-	ret = choose_pset_for_thread_expect(starts_p, e_pset);
-	T_QUIET; T_EXPECT_TRUE(ret, "p_starts spilled to E, completing swap");
+	chosen_pset = choose_pset_for_thread_options(starts_p, TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, e_pset, "p_starts spilled to E, completing swap");
 
 	/*
 	 * And a second swap should be initiated for the other E-expired thread
@@ -192,8 +193,8 @@ SCHED_POLICY_T_DECL(migration_stir_the_pot_basic,
 
 	/* ...and choosing the corresponding P-core for swap */
 	cpu_clear_thread_current(e_cpu);
-	ret = choose_pset_for_thread_expect(starts_e, p_pset);
-	T_QUIET; T_EXPECT_TRUE(ret, "Should choose P-cores despite no idle cores there");
+	chosen_pset = choose_pset_for_thread_options(starts_e, TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, p_pset, "Should choose P-cores despite no idle cores there");
 
 	/* Upon arrival, thread swapping in should preempt its predecessor */
 	enqueue_thread(pset_target(p_pset), starts_e);
@@ -204,17 +205,109 @@ SCHED_POLICY_T_DECL(migration_stir_the_pot_basic,
 	ret = dequeue_thread_expect(pset_target(p_pset), starts_e);
 	T_QUIET; T_ASSERT_TRUE(ret, "e_starts was enqueued on P");
 	cpu_set_thread_current(p_cpu, starts_e);
-	ret = choose_pset_for_thread_expect(starts_p, e_pset);
-	T_QUIET; T_EXPECT_TRUE(ret, "p_starts spilled to E, completing swap");
+	chosen_pset = choose_pset_for_thread_options(starts_p, TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, e_pset, "p_starts spilled to E, completing swap");
 
 	SCHED_POLICY_PASS("Stir-the-pot successfully initiated by E-core and completed");
+}
+
+SCHED_POLICY_T_DECL(migration_stir_the_pot_swap_quantum_race,
+    "Verify stir-the-pot avoids double-selecting the same P-core in successive swap attempts")
+{
+	int ret;
+	init_migration_harness(&basic_amp);
+	int p_pset = 0;
+	sched_bucket_t sched_bucket = TH_BUCKET_SHARE_DF;
+	struct thread_group *tg = create_tg(0);
+	set_tg_sched_bucket_preferred_pset(tg, sched_bucket, p_pset);
+	/* Set one thread running on each CPU */
+	test_thread_t threads[basic_amp.num_cpus];
+	int idle_e_core = 4;
+	for (int i = 0; i < basic_amp.num_cpus; i++) {
+		threads[i] = create_thread(sched_bucket, tg, root_bucket_to_highest_pri[sched_bucket]);
+		if (i != idle_e_core) {
+			cpu_set_thread_current(i, threads[i]);
+		}
+	}
+	int first_e = 3;
+	cpu_expire_quantum(first_e);
+	int eligible_p = 1;
+	cpu_expire_quantum(eligible_p);
+	ret = ipi_expect(first_e, TEST_IPI_IMMEDIATE);
+	T_QUIET; T_EXPECT_TRUE(ret, "Should have found stir-the-pot E-candidate with expired quantum");
+	/*
+	 * Stir-the-pot swap has been initiated (by the P-core). If another E-core
+	 * expires quantum, it should not entangle the swap-pending P-core into
+	 * a second swap.
+	 */
+	int late_for_the_party_e = 5;
+	cpu_expire_quantum(late_for_the_party_e);
+	ret = thread_avoid_processor_expect(threads[late_for_the_party_e], late_for_the_party_e, false, false);
+	T_EXPECT_TRUE(ret, "Did NOT initiate stir-the-pot swap, because eligible P-core already pending");
+
+	/* See it through, that previously initiated swap completes */
+	ret = thread_avoid_processor_expect(threads[first_e], first_e, false, true);
+	T_QUIET; T_EXPECT_TRUE(ret, "Preempt for stir-the-pot to get on P-core");
+	cpu_clear_thread_current(first_e); // Simulate preemption
+	int chosen_pset = choose_pset_for_thread_options(threads[first_e], TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, p_pset, "Choose P-cores for stir-the-pot despite no idle cores there");
+}
+
+static void
+work_steal_expect_simple(int stealing_pset, int stolen_from_pset,
+    test_thread_t stolen_thread, char *msg);
+
+SCHED_POLICY_T_DECL(migration_stir_the_pot_swap_intercepted,
+    "Verify stir-the-pot policy can recover from a swapped thread being intercepted "
+    "by a core that became available")
+{
+	int ret;
+	init_migration_harness(&basic_amp);
+	int p_pset = 0;
+	sched_bucket_t sched_bucket = TH_BUCKET_SHARE_DF;
+	struct thread_group *tg = create_tg(0);
+	set_tg_sched_bucket_preferred_pset(tg, sched_bucket, p_pset);
+	/* Set one thread running on each CPU */
+	test_thread_t threads[basic_amp.num_cpus];
+	int idle_e_core = 4;
+	for (int i = 0; i < basic_amp.num_cpus; i++) {
+		threads[i] = create_thread(sched_bucket, tg, root_bucket_to_highest_pri[sched_bucket]);
+		if (i != idle_e_core) {
+			cpu_set_thread_current(i, threads[i]);
+		}
+	}
+	int first_e = 3;
+	cpu_expire_quantum(first_e);
+	int eligible_p = 1;
+	cpu_expire_quantum(eligible_p);
+	/* Stir-the-pot swap has been initiated by the P-core */
+	ret = ipi_expect(first_e, TEST_IPI_IMMEDIATE);
+	T_QUIET; T_EXPECT_TRUE(ret, "Should have found stir-the-pot E-candidate with expired quantum");
+	/* E-core in swapping pair sends over thread */
+	ret = thread_avoid_processor_expect(threads[first_e], first_e, false, true);
+	T_QUIET; T_EXPECT_TRUE(ret, "Preempt for stir-the-pot to get on P-core");
+	cpu_clear_thread_current(first_e); // Simulate preemption
+	int chosen_pset = choose_pset_for_thread_options(threads[first_e], TEST_SCHED_CSW);
+	T_QUIET; T_EXPECT_EQ(chosen_pset, p_pset, "Choose P-cores for stir-the-pot despite no idle cores there");
+	enqueue_thread(pset_target(p_pset), threads[first_e]);
+	increment_mock_time_us(1);
+	enqueue_thread(pset_target(p_pset), threads[idle_e_core]);
+	/* Say a different E-core goes idle and work-steals thread back onto E-runqueue, sabotaging the swap */
+	int e_pset = 1;
+	work_steal_expect_simple(e_pset, p_pset, threads[first_e], "E-core could race and steal stirring thread");
+	cpu_set_thread_current(idle_e_core, threads[first_e]);
+	/* Then P-core should recover at next quantum expiration by trying another swap */
+	cpu_expire_quantum(idle_e_core);
+	cpu_expire_quantum(eligible_p);
+	ret = ipi_expect(idle_e_core, TEST_IPI_IMMEDIATE);
+	T_QUIET; T_EXPECT_TRUE(ret, "Should have found stir-the-pot E-candidate with expired quantum");
 }
 
 SCHED_POLICY_T_DECL(migration_ipi_policy,
     "Verify we send the right type of IPI in different cross-core preemption scenarios")
 {
 	int ret;
-	init_migration_harness(dual_die);
+	init_migration_harness(&dual_die);
 	struct thread_group *tg = create_tg(0);
 	thread_t thread = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
 	int dst_pcore = 3;
@@ -253,7 +346,7 @@ SCHED_POLICY_T_DECL(migration_max_parallelism,
     "Verify we report expected values for recommended width of parallel workloads")
 {
 	int ret;
-	init_migration_harness(dual_die);
+	init_migration_harness(&dual_die);
 	uint32_t num_pclusters = 4;
 	uint32_t num_pcores = 4 * num_pclusters;
 	uint32_t num_eclusters = 2;
@@ -290,21 +383,21 @@ SCHED_POLICY_T_DECL(migration_rebalance_basic, "Verify that basic rebalance stea
     "running rebalance mechanisms kick in")
 {
 	int ret;
-	test_hw_topology_t topo = SCHED_POLICY_DEFAULT_TOPO;
-	init_migration_harness(topo);
+	test_hw_topology_t topo = &SCHED_POLICY_DEFAULT_TOPO;
+	test_sched_topology_t sched_topo = init_migration_harness(topo);
 	int sched_bucket = TH_BUCKET_SHARE_DF;
 	struct thread_group *tg = create_tg(0);
 	thread_t thread = create_thread(sched_bucket, tg, root_bucket_to_highest_pri[sched_bucket]);
 
-	for (int preferred_pset_id = 0; preferred_pset_id < topo.num_psets; preferred_pset_id++) {
+	for (int preferred_pset_id = 0; preferred_pset_id < sched_topo->num_psets; preferred_pset_id++) {
 		set_tg_sched_bucket_preferred_pset(tg, sched_bucket, preferred_pset_id);
 		sched_policy_push_metadata("preferred_pset_id", preferred_pset_id);
-		for (int running_on_pset_id = 0; running_on_pset_id < topo.num_psets; running_on_pset_id++) {
+		for (int running_on_pset_id = 0; running_on_pset_id < sched_topo->num_psets; running_on_pset_id++) {
 			/* Running rebalance */
 			int running_on_cpu = pset_id_to_cpu_id(running_on_pset_id);
 			cpu_set_thread_current(running_on_cpu, thread);
 			sched_policy_push_metadata("running_on_pset_id", running_on_pset_id);
-			for (int c = 0; c < topo.total_cpus; c++) {
+			for (int c = 0; c < topo->num_cpus; c++) {
 				sched_policy_push_metadata("evaluate_cpu", c);
 				int evaluate_pset = cpu_id_to_pset_id(c);
 				bool want_rebalance = cpu_processor_balance(c);
@@ -314,19 +407,19 @@ SCHED_POLICY_T_DECL(migration_rebalance_basic, "Verify that basic rebalance stea
 					sched_policy_pop_metadata();
 					continue;
 				}
-				bool should_rebalance = (topo.psets[evaluate_pset].cpu_type == topo.psets[preferred_pset_id].cpu_type) &&
-				    (topo.psets[running_on_pset_id].cpu_type != topo.psets[preferred_pset_id].cpu_type);
+				bool should_rebalance = (pset_cpu_type_for_id(evaluate_pset) == pset_cpu_type_for_id(preferred_pset_id)) &&
+				    (pset_cpu_type_for_id(running_on_pset_id) != pset_cpu_type_for_id(preferred_pset_id));
 				T_QUIET; T_EXPECT_EQ(want_rebalance, should_rebalance, "should rebalance to move thread to preferred type "
 				    "if not there already %s", sched_policy_dump_metadata());
 				if (should_rebalance) {
-					ret = tracepoint_expect(EDGE_REBAL_RUNNING, 0, c, running_on_cpu, 0);
+					ret = tracepoint_expect(EDGE_REBAL_RUNNING, running_on_pset_id, c, running_on_cpu, sched_bucket);
 					T_QUIET; T_EXPECT_TRUE(ret, "EDGE_REBAL_RUNNING tracepoint");
 					ret = thread_avoid_processor_expect(thread, running_on_cpu, false, true);
 					T_QUIET; T_EXPECT_TRUE(ret, "thread will preempt in response to running rebalance IPI %s",
 					    sched_policy_dump_metadata());
 					/* Try loading all other cores of the preferred type, forcing this decision to find the idle one */
-					for (int p = 0; p < topo.num_psets; p++) {
-						if ((topo.psets[p].cpu_type == topo.psets[preferred_pset_id].cpu_type) &&
+					for (int p = 0; p < sched_topo->num_psets; p++) {
+						if ((pset_cpu_type_for_id(p) == pset_cpu_type_for_id(preferred_pset_id)) &&
 						    (p != evaluate_pset)) {
 							set_pset_load_avg(p, sched_bucket, 10000000);
 						}
@@ -335,12 +428,13 @@ SCHED_POLICY_T_DECL(migration_rebalance_basic, "Verify that basic rebalance stea
 					T_QUIET; T_EXPECT_TRUE(ret, "...even if all other cores (except rebalancer) are full %s",
 					    sched_policy_dump_metadata());
 					/* Unload cores for clean-up */
-					for (int p = 0; p < topo.num_psets; p++) {
-						if ((topo.psets[p].cpu_type == topo.psets[preferred_pset_id].cpu_type) &&
+					for (int p = 0; p < sched_topo->num_psets; p++) {
+						if ((pset_cpu_type_for_id(p) == pset_cpu_type_for_id(preferred_pset_id)) &&
 						    (p != evaluate_pset)) {
 							set_pset_load_avg(p, sched_bucket, 0);
 						}
 					}
+					cpu_clear_pending_ast_bits(running_on_cpu);
 				}
 				sched_policy_pop_metadata();
 			}
@@ -351,16 +445,16 @@ SCHED_POLICY_T_DECL(migration_rebalance_basic, "Verify that basic rebalance stea
 			int enqueued_pset = running_on_pset_id;
 			enqueue_thread(pset_target(enqueued_pset), thread);
 			sched_policy_push_metadata("enqueued_pset", enqueued_pset);
-			for (int c = 0; c < topo.total_cpus; c++) {
+			for (int c = 0; c < topo->num_cpus; c++) {
 				sched_policy_push_metadata("evaluate_cpu", c);
 				int evaluate_pset = cpu_id_to_pset_id(c);
-				if ((topo.psets[evaluate_pset].cpu_type != topo.psets[enqueued_pset].cpu_type) &&
-				    ((topo.psets[enqueued_pset].cpu_type != TEST_CPU_TYPE_PERFORMANCE) ||
-				    (topo.psets[preferred_pset_id].cpu_type != TEST_CPU_TYPE_PERFORMANCE))) {
-					/* Only evaluate steal between mismatching cluster types and where spill is not allowed */
+				if ((pset_cpu_type_for_id(evaluate_pset) != pset_cpu_type_for_id(enqueued_pset)) &&
+				    ((pset_cpu_type_for_id(enqueued_pset) != TEST_CPU_TYPE_EFFICIENCY) ||
+				    (pset_cpu_type_for_id(preferred_pset_id) != TEST_CPU_TYPE_PERFORMANCE))) {
+					/* Only evaluate steal between mismatching pset types and where spill is not allowed */
 					thread_t stolen_thread = cpu_steal_thread(c);
-					bool should_rebalance_steal = (topo.psets[evaluate_pset].cpu_type == topo.psets[preferred_pset_id].cpu_type) &&
-					    (topo.psets[enqueued_pset].cpu_type != topo.psets[preferred_pset_id].cpu_type);
+					bool should_rebalance_steal = (pset_cpu_type_for_id(evaluate_pset) == pset_cpu_type_for_id(preferred_pset_id)) &&
+					    (pset_cpu_type_for_id(enqueued_pset) != pset_cpu_type_for_id(preferred_pset_id));
 					bool did_rebalance_steal = (stolen_thread == thread);
 					if (stolen_thread != NULL) {
 						T_QUIET; T_EXPECT_EQ(stolen_thread, thread, "should only be one thread to steal?");
@@ -385,55 +479,21 @@ SCHED_POLICY_T_DECL(migration_rebalance_basic, "Verify that basic rebalance stea
 	}
 	SCHED_POLICY_PASS("Rebalance mechanisms kicking in!");
 }
-
-static test_pset_t two_of_each_psets[6] = {
-	{
-		.cpu_type = TEST_CPU_TYPE_EFFICIENCY,
-		.num_cpus = 2,
-		.cluster_id = 0,
-		.die_id = 0,
-	},
-	{
-		.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
-		.num_cpus = 2,
-		.cluster_id = 1,
-		.die_id = 0,
-	},
-	{
-		.cpu_type = TEST_CPU_TYPE_EFFICIENCY,
-		.num_cpus = 2,
-		.cluster_id = 2,
-		.die_id = 1,
-	},
-	{
-		.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
-		.num_cpus = 2,
-		.cluster_id = 3,
-		.die_id = 1,
-	},
-};
-test_hw_topology_t two_of_each = {
-	.psets = &two_of_each_psets[0],
-	.num_psets = 4,
-	.total_cpus = 8,
-};
-
 static void
 clear_threads_from_topo(void)
 {
-	test_hw_topology_t topo = get_hw_topology();
 	int pset_first_cpu = 0;
-	for (int p = 0; p < topo.num_psets; p++) {
+	for (int p = 0; p < get_sched_topology()->num_psets; p++) {
 		while (!runqueue_empty(pset_target(p))) {
 			(void)dequeue_thread_expect(pset_target(p), (test_thread_t)0xc0ffee);
 		}
 		for (int b = 0; b < TH_BUCKET_SCHED_MAX; b++) {
 			set_pset_load_avg(p, b, 0);
 		}
-		for (int c = pset_first_cpu; c < pset_first_cpu + topo.psets[p].num_cpus; c++) {
+		for (int c = pset_first_cpu; c < pset_first_cpu + pset_cpu_count_for_id(p); c++) {
 			cpu_clear_thread_current(c);
 		}
-		pset_first_cpu += topo.psets[p].num_cpus;
+		pset_first_cpu += pset_cpu_count_for_id(p);
 	}
 }
 
@@ -449,8 +509,8 @@ typedef enum {
 	recc_type_max = 2,
 } recc_type_t;
 
-static char *
-thread_recc_to_core_type_char(recc_type_t recc)
+static const char *
+thread_recc_to_core_type_str(recc_type_t recc)
 {
 	switch (recc) {
 	case e_recc:
@@ -462,10 +522,10 @@ thread_recc_to_core_type_char(recc_type_t recc)
 	}
 }
 
-static char
-pset_id_to_core_type_char(int pset_id)
+static const char *
+pset_id_to_core_type_str(int pset_id)
 {
-	return test_cpu_type_to_char(get_hw_topology().psets[pset_id].cpu_type);
+	return test_cpu_type_to_str(get_sched_topology()->psets[pset_id].cpu_type);
 }
 
 static void
@@ -493,16 +553,16 @@ foreign_steal_expect(int stealing_pset, int stolen_from_pset,
 {
 	int ret;
 	test_thread_t thread = cpu_steal_thread(pset_id_to_cpu_id(stealing_pset));
-	char stealing_type = pset_id_to_core_type_char(stealing_pset);
-	char stolen_type = pset_id_to_core_type_char(stolen_from_pset);
-	char *recc_type = thread_recc_to_core_type_char(thread_recommendation);
+	const char *stealing_type = pset_id_to_core_type_str(stealing_pset);
+	const char *stolen_type = pset_id_to_core_type_str(stolen_from_pset);
+	const char *recc_type = thread_recc_to_core_type_str(thread_recommendation);
 	T_EXPECT_EQ(thread, thread_candidates_matrix[enqueued][stolen_from_pset][recc_type_to_ind(thread_recommendation)],
-	    "%c (%d) rebalance-steals %s-recommended from %c (%d)", stealing_type, stealing_pset,
+	    "%s (%d) rebalance-steals %s-recommended from %s (%d)", stealing_type, stealing_pset,
 	    recc_type, stolen_type, stolen_from_pset);
 	ret = tracepoint_expect(EDGE_REBAL_RUNNABLE,
 	    get_thread_tid(thread_candidates_matrix[enqueued][stolen_from_pset][recc_type_to_ind(thread_recommendation)]),
 	    stealing_pset, stolen_from_pset, 0);
-	T_QUIET; T_EXPECT_TRUE(ret, "EDGE_REBAL_RUNNABLE %c->%c %s-recommended tracepoint",
+	T_QUIET; T_EXPECT_TRUE(ret, "EDGE_REBAL_RUNNABLE %s->%s %s-recommended tracepoint",
 	    stolen_type, stealing_type, recc_type);
 }
 
@@ -513,33 +573,41 @@ work_steal_expect(int stealing_pset, int stolen_from_pset,
 {
 	int ret;
 	test_thread_t thread = cpu_steal_thread(pset_id_to_cpu_id(stealing_pset));
-	char stealing_type = pset_id_to_core_type_char(stealing_pset);
-	char stolen_type = pset_id_to_core_type_char(stolen_from_pset);
-	char *recc_type = thread_recc_to_core_type_char(thread_recommendation);
+	const char *stealing_type = pset_id_to_core_type_str(stealing_pset);
+	const char *stolen_type = pset_id_to_core_type_str(stolen_from_pset);
+	const char *recc_type = thread_recc_to_core_type_str(thread_recommendation);
 	T_EXPECT_EQ(thread, thread_candidates_matrix[enqueued][stolen_from_pset][recc_type_to_ind(thread_recommendation)],
-	    "%c (%d) work-steals %s-recommended from %c (%d)", stealing_type, stealing_pset,
+	    "%s (%d) work-steals %s-recommended from %s (%d)", stealing_type, stealing_pset,
 	    recc_type, stolen_type, stolen_from_pset);
 	ret = tracepoint_expect(EDGE_STEAL,
 	    get_thread_tid(thread_candidates_matrix[enqueued][stolen_from_pset][recc_type_to_ind(thread_recommendation)]),
 	    stealing_pset, stolen_from_pset, 0);
-	T_QUIET; T_EXPECT_TRUE(ret, "EDGE_STEAL %c->%c %s-recommended tracepoint",
+	T_QUIET; T_EXPECT_TRUE(ret, "EDGE_STEAL %s->%s %s-recommended tracepoint",
 	    stolen_type, stealing_type, recc_type);
 }
+
+static bool running_rebalance_expect_clear_ASTs = true;
 
 static void
 running_rebalance_expect(int rebalancing_pset, char *target_name,
     int num_target_cpus, int *target_cpus)
 {
 	int ret;
-	char rebalancing_type = pset_id_to_core_type_char(rebalancing_pset);
-	bool want_rebalance = cpu_processor_balance(pset_id_to_cpu_id(rebalancing_pset));
-	T_EXPECT_TRUE(want_rebalance, "Send running rebalance %s->%c IPIs",
-	    target_name, rebalancing_type);
+	const char *rebalancing_type = pset_id_to_core_type_str(rebalancing_pset);
 	for (int i = 0; i < num_target_cpus; i++) {
-		ret = tracepoint_expect(EDGE_REBAL_RUNNING, 0, pset_id_to_cpu_id(rebalancing_pset),
-		    target_cpus[i], 0);
-		T_QUIET; T_EXPECT_TRUE(ret, "EDGE_REBAL_RUNNING %s->%c IPI tracepoint %d",
+		bool want_rebalance = cpu_processor_balance(pset_id_to_cpu_id(rebalancing_pset));
+		T_EXPECT_TRUE(want_rebalance, "Send running rebalance %s->%s IPIs",
+		    target_name, rebalancing_type);
+		ret = tracepoint_expect(EDGE_REBAL_RUNNING, cpu_id_to_pset_id(target_cpus[i]),
+		    pset_id_to_cpu_id(rebalancing_pset), target_cpus[i], TRACEPOINT_EXPECT_IGNORE_ARG);
+		T_QUIET; T_EXPECT_TRUE(ret, "EDGE_REBAL_RUNNING %s->%s IPI tracepoint %d",
 		    target_name, rebalancing_type, i);
+	}
+	if (running_rebalance_expect_clear_ASTs) {
+		/* Reset AST status for later subtests */
+		for (int i = 0; i < num_target_cpus; i++) {
+			cpu_clear_pending_ast_bits(target_cpus[i]);
+		}
 	}
 }
 
@@ -547,7 +615,7 @@ SCHED_POLICY_T_DECL(migration_steal_order, "Verify that steal policy steps "
     "happen in the right order")
 {
 	int sched_bucket = TH_BUCKET_SHARE_DF;
-	init_migration_harness(two_of_each);
+	test_sched_topology_t sched_topo = init_migration_harness(&two_of_each);
 	for (int config = 0; config < 2; config++) {
 		/*
 		 * Enqueue one thread of each recommendation type on each pset,
@@ -561,61 +629,65 @@ SCHED_POLICY_T_DECL(migration_steal_order, "Verify that steal policy steps "
 		int e_pset = 0;
 		set_tg_sched_bucket_preferred_pset(e_tg, sched_bucket, e_pset);
 		test_thread_t threads[thread_type_max][4][recc_type_max];
-		for (int p = 0; p < two_of_each.num_psets; p++) {
+		int stealing_p_pset = 3;
+		int stealing_e_pset = 2;
+		for (int p = 0; p < sched_topo->num_psets; p++) {
 			for (recc_type_t r = 0; r < recc_type_max; r++) {
 				threads[enqueued][p][r] = create_thread(sched_bucket, (r == e_recc) ? e_tg : p_tg,
 				    root_bucket_to_highest_pri[sched_bucket]);
-				enqueue_thread(pset_target(p), threads[enqueued][p][r]);
-				T_LOG("Enqueued thread %p on pset %d, recc %d", threads[enqueued][p][r], p, r);
 				threads[running][p][r] = create_thread(sched_bucket, (r == e_recc) ? e_tg : p_tg,
 				    root_bucket_to_highest_pri[sched_bucket]);
-				int run_cpu_id = pset_id_to_cpu_id(p) + r;
-				cpu_set_thread_current(run_cpu_id, threads[running][p][r]);
+				/* Keep the stealing pset idle */
+				int stealing_pset = config == 0 ? stealing_p_pset : stealing_e_pset;
+				if (p != stealing_pset) {
+					enqueue_thread(pset_target(p), threads[enqueued][p][r]);
+					T_LOG("Enqueued thread %p on pset %d, recc %d", threads[enqueued][p][r], p, r);
+					int run_cpu_id = pset_id_to_cpu_id(p) + r;
+					cpu_set_thread_current(run_cpu_id, threads[running][p][r]);
+				}
 			}
 		}
-		int other_p_pset = 3;
-		int other_e_pset = 2;
 		if (config == 0) {
 			/* ~~~~~ P-core steal/idle path ~~~~~ */
 			/* 1. Foreign rebalance steal */
-			foreign_steal_expect(other_p_pset, e_pset, threads, p_recc);
-			foreign_steal_expect(other_p_pset, other_e_pset, threads, p_recc);
+			foreign_steal_expect(stealing_p_pset, e_pset, threads, p_recc);
+			foreign_steal_expect(stealing_p_pset, stealing_e_pset, threads, p_recc);
 			/* 2. Native work-steal */
-			work_steal_expect(other_p_pset, p_pset, threads, p_recc);
+			work_steal_expect(stealing_p_pset, p_pset, threads, p_recc);
 			/* 3. Running rebalance */
-			no_steal_expect(other_p_pset, "Want to perform running rebalance");
-			running_rebalance_expect(other_p_pset, "E", 2,
-			    (int[]){pset_id_to_cpu_id(e_pset) + p_recc, pset_id_to_cpu_id(other_e_pset) + p_recc});
+			no_steal_expect(stealing_p_pset, "Want to perform running rebalance");
+			running_rebalance_expect(stealing_p_pset, "E", 2,
+			    (int[]){pset_id_to_cpu_id(e_pset) + p_recc, pset_id_to_cpu_id(stealing_e_pset) + p_recc});
 			cpu_clear_thread_current(pset_id_to_cpu_id(e_pset) + p_recc);
-			cpu_clear_thread_current(pset_id_to_cpu_id(other_e_pset) + p_recc);
+			cpu_clear_thread_current(pset_id_to_cpu_id(stealing_e_pset) + p_recc);
 			/* 4. Work-steal from anywhere allowed */
-			no_steal_expect(other_p_pset, "Nothing left a P-core wants to steal");
+			no_steal_expect(stealing_p_pset, "Nothing left a P-core wants to steal");
 			SCHED_POLICY_PASS("Verified steal order steps for stealing P-core");
 		} else {
 			/* ~~~~~ E-core steal/idle path ~~~~~ */
 			/* 1. Foreign rebalance steal */
 			/* Foreign pset search starts with highest id */
-			foreign_steal_expect(other_e_pset, p_pset, threads, e_recc);
-			foreign_steal_expect(other_e_pset, other_p_pset, threads, e_recc);
+			foreign_steal_expect(stealing_e_pset, p_pset, threads, e_recc);
+			foreign_steal_expect(stealing_e_pset, stealing_p_pset, threads, e_recc);
 			/* 2. Native work-steal */
-			work_steal_expect(other_e_pset, e_pset, threads, e_recc);
-			work_steal_expect(other_e_pset, e_pset, threads, p_recc);
+			work_steal_expect(stealing_e_pset, e_pset, threads, e_recc);
+			work_steal_expect(stealing_e_pset, e_pset, threads, p_recc);
 			/* 3. Running rebalance */
-			no_steal_expect(other_e_pset, "Want to perform running rebalance");
-			running_rebalance_expect(other_e_pset, "P", 2,
-			    (int[]){pset_id_to_cpu_id(p_pset) + e_recc, pset_id_to_cpu_id(other_p_pset) + e_recc});
+			no_steal_expect(stealing_e_pset, "Want to perform running rebalance");
+			running_rebalance_expect(stealing_e_pset, "P", 2,
+			    (int[]){pset_id_to_cpu_id(p_pset) + e_recc, pset_id_to_cpu_id(stealing_p_pset) + e_recc});
 			cpu_clear_thread_current(pset_id_to_cpu_id(p_pset) + e_recc);
-			cpu_clear_thread_current(pset_id_to_cpu_id(other_p_pset) + e_recc);
+			cpu_clear_thread_current(pset_id_to_cpu_id(stealing_p_pset) + e_recc);
 			/* 4. Work-steal from anywhere allowed */
 			for (int i = 0; i < 2; i++) {
-				int src_pset = (i == 0) ? other_p_pset : p_pset;
-				no_steal_expect(other_e_pset, "Non-zero edge (P->E) steal requires excess "
+				int src_pset = (i == 0) ? stealing_p_pset : p_pset;
+				no_steal_expect(stealing_e_pset, "Non-zero edge (P->E) steal requires excess "
 				    "threads in the runqueue");
 				cpu_set_thread_current(pset_id_to_cpu_id(src_pset) + e_recc,
 				    create_thread(sched_bucket, p_tg, root_bucket_to_highest_pri[sched_bucket]));
-				work_steal_expect(other_e_pset, src_pset, threads, p_recc);
+				work_steal_expect(stealing_e_pset, src_pset, threads, p_recc);
 			}
-			no_steal_expect(other_e_pset, "Nothing left of interest to steal");
+			no_steal_expect(stealing_e_pset, "Nothing left of interest to steal");
 			SCHED_POLICY_PASS("Verified steal order steps for stealing E-core");
 		}
 		clear_threads_from_topo();
@@ -641,9 +713,10 @@ work_steal_expect_simple(int stealing_pset, int stolen_from_pset,
 SCHED_POLICY_T_DECL(migration_steal_only_excess_by_qos, "Verify that steal logic "
     "only steals across hetergeneous psets when there are excess threads at that QoS")
 {
-	init_migration_harness(dual_die);
+	test_sched_topology_t sched_topo = init_migration_harness(&dual_die);
 	int p_pset = 1;
-	int p_pset_cpus = get_hw_topology().psets[p_pset].num_cpus;
+	assert(sched_topo->psets[p_pset].cpu_type == TEST_CPU_TYPE_PERFORMANCE);
+	int p_pset_cpus = sched_topo->psets[p_pset].num_cpus;
 	int e_pset = 0;
 	int other_p_pset = 2;
 
@@ -693,34 +766,35 @@ SCHED_POLICY_T_DECL(migration_steal_only_excess_by_qos, "Verify that steal logic
 	SCHED_POLICY_PASS("Heterogeneous psets only steal from excess QoSes");
 }
 
-static test_pset_t pair_p_psets[2] = {
-	{
-		.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
-		.num_cpus = 1,
-		.cluster_id = 0,
-		.die_id = 0,
-	},
-	{
-		.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
-		.num_cpus = 1,
-		.cluster_id = 1,
-		.die_id = 0,
-	},
-};
-test_hw_topology_t pair_p = {
-	.psets = &pair_p_psets[0],
-	.num_psets = 2,
-	.total_cpus = 2,
+struct test_hw_topology pair_p = {
+	.num_cpus = 2,
+	.boot_cpu = 1,
+	.cpu_ranges = {
+		{
+			.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
+			.cluster_id = 0,
+			.die_id = 0,
+			.first_cpu_id = 0,
+			.num_cpus = 1,
+		},
+		{
+			.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
+			.cluster_id = 1,
+			.die_id = 0,
+			.first_cpu_id = 1,
+			.num_cpus = 1,
+		},
+	}
 };
 
 SCHED_POLICY_T_DECL(migration_steal_no_cluster_bound,
     "Verify that cluster-bound threads do not get stolen to a different pset")
 {
-	init_migration_harness(pair_p);
+	init_migration_harness(&pair_p);
 	int load_multiplier = 10;
 	int loaded_pset = 0;
 	int idle_pset = 1;
-	int num_bound_threads = pair_p.psets[loaded_pset].num_cpus * load_multiplier;
+	int num_bound_threads = pset_cpu_count_for_id(loaded_pset) * load_multiplier;
 	enum { eBound = 0, eNativeFirst = 1, eRoundRobin = 2, eMax = 3 } bound_type;
 	test_thread_t bound_threads[eMax][num_bound_threads];
 	struct thread_group *tg = create_tg(0);
@@ -730,7 +804,7 @@ SCHED_POLICY_T_DECL(migration_steal_no_cluster_bound,
 			    root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
 			switch (bound_type) {
 			case eBound:
-				set_thread_cluster_bound(bound_threads[bound_type][i], loaded_pset);
+				set_thread_pset_bound(bound_threads[bound_type][i], loaded_pset);
 				break;
 			case eNativeFirst:
 				edge_set_thread_shared_rsrc(bound_threads[bound_type][i], true);
@@ -759,7 +833,7 @@ SCHED_POLICY_T_DECL(migration_steal_no_cluster_bound,
 SCHED_POLICY_T_DECL(migration_steal_highest_pri,
     "Verify that higher priority threads are stolen first, across silos")
 {
-	init_migration_harness(pair_p);
+	init_migration_harness(&pair_p);
 	int idle_pset = 0;
 	int loaded_pset = 1;
 	int max_pri_to_subtract = 4;
@@ -805,8 +879,8 @@ SCHED_POLICY_T_DECL(migration_harmonious_chosen_pset,
     "should be, given current system conditions")
 {
 	int ret;
-	test_hw_topology_t topo = SCHED_POLICY_DEFAULT_TOPO;
-	init_migration_harness(topo);
+	test_hw_topology_t topo = &SCHED_POLICY_DEFAULT_TOPO;
+	test_sched_topology_t sched_topo = init_migration_harness(topo);
 	int sched_bucket = TH_BUCKET_SHARE_DF;
 	struct thread_group *tg = create_tg(0);
 	thread_t thread = create_thread(sched_bucket, tg, root_bucket_to_highest_pri[sched_bucket]);
@@ -817,10 +891,10 @@ SCHED_POLICY_T_DECL(migration_harmonious_chosen_pset,
 	}
 
 	/* Iterate conditions with different preferred psets and pset loads */
-	for (int preferred_pset_id = 0; preferred_pset_id < topo.num_psets; preferred_pset_id++) {
+	for (int preferred_pset_id = 0; preferred_pset_id < sched_topo->num_psets; preferred_pset_id++) {
 		set_tg_sched_bucket_preferred_pset(tg, sched_bucket, preferred_pset_id);
 		sched_policy_push_metadata("preferred_pset_id", preferred_pset_id);
-		for (int loaded_pset_id = 0; loaded_pset_id < topo.num_psets; loaded_pset_id++) {
+		for (int loaded_pset_id = 0; loaded_pset_id < sched_topo->num_psets; loaded_pset_id++) {
 			/* Load the loaded_pset */
 			enqueue_threads_arr(pset_target(loaded_pset_id), max_load_threads, load_threads);
 			bool preferred_is_idle = preferred_pset_id != loaded_pset_id;
@@ -835,24 +909,28 @@ SCHED_POLICY_T_DECL(migration_harmonious_chosen_pset,
 			}
 
 			/* Thread generally should not avoid a processor in its chosen pset */
-			for (int c = 0; c < topo.psets[chosen_pset].num_cpus; c++) {
+			for (int c = 0; c < pset_cpu_count_for_id(chosen_pset); c++) {
 				int avoid_cpu_id = pset_id_to_cpu_id(chosen_pset) + c;
 				sched_policy_push_metadata("avoid_cpu_id", avoid_cpu_id);
+				cpu_set_thread_current(avoid_cpu_id, thread);
 				ret = thread_avoid_processor_expect(thread, avoid_cpu_id, false, false);
 				T_QUIET; T_EXPECT_TRUE(ret, "Thread should not want to leave processor in just chosen pset %s",
 				    sched_policy_dump_metadata());
+				cpu_clear_thread_current(avoid_cpu_id);
 				sched_policy_pop_metadata();
 			}
 
 			/* Extra assertions we can make based on the preferred pset being idle */
 			if (preferred_is_idle) {
 				/* Thread should avoid processor in non-preferred pset to get to the idle preferred pset */
-				for (int c = 0; c < topo.total_cpus; c++) {
+				for (int c = 0; c < topo->num_cpus; c++) {
 					if (cpu_id_to_pset_id(c) != preferred_pset_id) {
 						sched_policy_push_metadata("avoid_non_preferred_cpu_id", c);
+						cpu_set_thread_current(c, thread);
 						ret = thread_avoid_processor_expect(thread, c, false, true);
 						T_QUIET; T_EXPECT_TRUE(ret, "Thread should avoid processor in non-preferred pset to get to idle "
 						    "preferred pset %s", sched_policy_dump_metadata());
+						cpu_clear_thread_current(c);
 						sched_policy_pop_metadata();
 					}
 				}
@@ -861,7 +939,7 @@ SCHED_POLICY_T_DECL(migration_harmonious_chosen_pset,
 			/* Other cores should not want to rebalance the running thread away from its chosen pset */
 			int chosen_cpu = pset_id_to_cpu_id(chosen_pset);
 			cpu_set_thread_current(chosen_cpu, thread);
-			for (int c = 0; c < topo.total_cpus; c++) {
+			for (int c = 0; c < topo->num_cpus; c++) {
 				if ((cpu_id_to_pset_id(c) != chosen_pset) && (cpu_id_to_pset_id(c) != loaded_pset_id)) {
 					sched_policy_push_metadata("stealing_cpu_id", c);
 					thread_t stolen_thread = cpu_steal_thread(c);
@@ -882,7 +960,7 @@ SCHED_POLICY_T_DECL(migration_harmonious_chosen_pset,
 
 			(void)dequeue_threads_expect_ordered_arr(pset_target(loaded_pset_id), max_load_threads, load_threads);
 			clear_threads_from_topo();
-			for (int pset = 0; pset < topo.num_psets; pset++) {
+			for (int pset = 0; pset < sched_topo->num_psets; pset++) {
 				T_QUIET; T_EXPECT_TRUE(runqueue_empty(pset_target(pset)), "pset %d wasn't cleared at the end of test "
 				    "scenario %s", pset, sched_policy_dump_metadata());
 			}
@@ -897,7 +975,7 @@ SCHED_POLICY_T_DECL(migration_search_order,
     "Verify that we iterate psets for spill and steal in the expected order")
 {
 	int ret;
-	init_migration_harness(dual_die);
+	test_sched_topology_t sched_topo = init_migration_harness(&dual_die);
 	int expected_orders[6][6] = {
 		{0, 3, 1, 2, 4, 5},
 		{1, 2, 4, 5, 0, 3},
@@ -906,8 +984,8 @@ SCHED_POLICY_T_DECL(migration_search_order,
 		{4, 5, 1, 2, 3, 0},
 		{5, 4, 1, 2, 3, 0},
 	};
-	for (int src_pset_id = 0; src_pset_id < dual_die.num_psets; src_pset_id++) {
-		ret = iterate_pset_search_order_expect(src_pset_id, UINT64_MAX, 0, expected_orders[src_pset_id], dual_die.num_psets);
+	for (int src_pset_id = 0; src_pset_id < sched_topo->num_psets; src_pset_id++) {
+		ret = iterate_pset_search_order_expect(src_pset_id, UINT64_MAX, 0, expected_orders[src_pset_id], sched_topo->num_psets);
 		T_QUIET; T_EXPECT_EQ(ret, -1, "Mismatched search order at ind %d for src_pset_id %d",
 		    ret, src_pset_id);
 	}
@@ -931,13 +1009,37 @@ SCHED_POLICY_T_DECL(migration_search_order,
 		{3, 0, -1, -1, -1, -1},
 	};
 	for (int i = 0; i < 2; i++) {
-		for (int src_pset_id = 0; src_pset_id < dual_die.num_psets; src_pset_id++) {
+		for (int src_pset_id = 0; src_pset_id < sched_topo->num_psets; src_pset_id++) {
 			uint64_t mask = (i == 0) ? p_mask : e_mask;
 			int *expected_order_masked = (i == 0) ? expected_p_orders[src_pset_id] : expected_e_orders[src_pset_id];
-			ret = iterate_pset_search_order_expect(src_pset_id, mask, 0, expected_order_masked, dual_die.num_psets);
+			ret = iterate_pset_search_order_expect(src_pset_id, mask, 0, expected_order_masked, sched_topo->num_psets);
 			T_QUIET; T_EXPECT_EQ(ret, -1, "Mismatched masked search order at ind %d for src_pset_id %d",
 			    ret, src_pset_id);
 		}
 	}
 	SCHED_POLICY_PASS("Search order traversal respects candidate mask");
+}
+
+SCHED_POLICY_T_DECL(migration_shared_rsrc_rr,
+    "Verify that shared-resource threads repel")
+{
+	int ret;
+	test_sched_topology_t sched_topo = init_migration_harness(&basic_amp);
+	pset_id_t pcluster_id = pset_cpu_type_for_id(0) == TEST_CPU_TYPE_PERFORMANCE ? 0 : 1;
+	struct thread_group *tg = create_tg(0);
+	set_tg_sched_bucket_preferred_pset(tg, TH_BUCKET_SHARE_DF, pcluster_id);
+	test_thread_t threads[sched_topo->num_psets];
+	for (int i = 0; i < sched_topo->num_psets; i++) {
+		threads[i] = create_thread(TH_BUCKET_SHARE_DF, tg, root_bucket_to_highest_pri[TH_BUCKET_SHARE_DF]);
+		edge_set_thread_shared_rsrc(threads[i], false);
+		cpu_set_thread_current(pset_id_to_cpu_id(pcluster_id) + i, threads[i]);
+	}
+
+	ret = thread_avoid_processor_expect(threads[0], pset_id_to_cpu_id(pcluster_id), true, true);
+	T_QUIET; T_EXPECT_TRUE(ret, "Thread should preempt to go to eCores");
+
+	ret = thread_avoid_processor_expect(threads[1], pset_id_to_cpu_id(pcluster_id) + 1, true, true);
+	T_QUIET; T_EXPECT_TRUE(ret, "Thread should preempt to go to eCores");
+
+	SCHED_POLICY_PASS("Shared resource threads repel.");
 }

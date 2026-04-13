@@ -120,9 +120,11 @@ arm_sme_init(bool is_boot_cpu)
 		sme_max_svl_b = arm_sme_svl_b();
 	}
 
-	/* disable SME prioritization */
-	const uint64_t smpri_el1 = SMPRI_EL1_PRIORITY(0);
-	__builtin_arm_wsr64("SMPRI_EL1", smpri_el1);
+	/*
+	 * Set SME priority registers to default values. They will be updated
+	 * dynamically if USE_SME_PRIORITY is set.
+	 */
+	__builtin_arm_wsr64("SMPRI_EL1", SMPRI_EL1_DEFAULT);
 
 	__builtin_arm_wsr64("TPIDR2_EL0", 0);
 }

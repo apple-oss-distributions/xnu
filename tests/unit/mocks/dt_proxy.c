@@ -46,6 +46,11 @@ pt_assert_posix_zero(int v, const char *msg)
 	T_ASSERT_POSIX_ZERO(v, "%s", msg);
 }
 static void
+pt_assert_mach_success(kern_return_t kr, const char *msg)
+{
+	T_ASSERT_MACH_SUCCESS(kr, "%s", msg);
+}
+static void
 pt_log(const char *msg)
 {
 	T_LOG("%s", msg);
@@ -58,7 +63,7 @@ pt_log_fmtstr(const char* fmt, const char *msg)
 static void
 pt_fail(const char *msg)
 {
-	T_FAIL("%s", msg);
+	T_ASSERT_FAIL("%s", msg);
 }
 static void
 pt_quiet(void)
@@ -66,14 +71,22 @@ pt_quiet(void)
 	T_QUIET;
 }
 
+static bool
+pt_state_pass(void)
+{
+	return T_STATE == T_STATE_PASS;
+}
+
 static struct dt_proxy_callbacks dt_callbacks = {
 	.t_assert_true = &pt_assert_true,
 	.t_assert_notnull = &pt_assert_notnull,
 	.t_assert_posix_zero = &pt_assert_posix_zero,
+	.t_assert_mach_success = &pt_assert_mach_success,
 	.t_log = &pt_log,
 	.t_log_fmtstr = &pt_log_fmtstr,
 	.t_fail = &pt_fail,
-	.t_quiet = &pt_quiet
+	.t_quiet = &pt_quiet,
+	.t_state_pass = &pt_state_pass
 };
 
 // This code is linked into every test executable to allow the XNU and mocks .dylibs access to some

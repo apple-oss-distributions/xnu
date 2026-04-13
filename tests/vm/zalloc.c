@@ -1,5 +1,6 @@
 #include <sys/sysctl.h>
 #include <signal.h>
+#include <mach/mach.h>
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
@@ -87,4 +88,58 @@ T_DECL(zlog_smoke_test, "check that zlog and zone tagging function at all",
 	    dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)), 0L,
 	    "found the line we wanted");
 	dispatch_release(sema);
+}
+
+T_DECL(mach_memory_info_redacted_test, "Check that mach_memory_info_redacted always returns redacted zone info",
+    T_META_TAG_VM_PREFERRED)
+{
+	kern_return_t kr;
+	uint64_t i;
+	mach_zone_name_t *name = NULL;
+	unsigned int nameCnt = 0;
+	mach_zone_info_t *info = NULL;
+	unsigned int infoCnt = 0;
+	mach_memory_info_t *wiredInfo = NULL;
+	unsigned int wiredInfoCnt = 0;
+	uint64_t zoneDataAggregate = 0;
+
+	kr = mach_memory_info_redacted(mach_host_self(),
+	    &name, &nameCnt, &info, &infoCnt,
+	    &wiredInfo, &wiredInfoCnt);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_memory_info");
+	T_QUIET; T_ASSERT_EQ(nameCnt, infoCnt, "zone name and info counts don't match");
+
+	// Sanity check
+	T_QUIET; T_ASSERT_GT(infoCnt, 0U, "Number of zones > 0");
+
+	for (i = 0; i < infoCnt; i++) {
+		T_QUIET; T_ASSERT_TRUE(info[i].mzi_cur_size == 0, "Zone current size correctly redacted");
+		T_QUIET; T_ASSERT_TRUE(info[i].mzi_max_size == 0, "Zone max size correctly redacted");
+		T_QUIET; T_ASSERT_TRUE(info[i].mzi_alloc_size == 0, "Zone alloc size correctly redacted");
+		T_QUIET; T_ASSERT_TRUE(info[i].mzi_sum_size == 0, "Zone sum size correctly redacted");
+		T_QUIET; T_ASSERT_TRUE(info[i].mzi_collectable == 0, "Zone collectable num correctly redacted");
+
+		zoneDataAggregate += info[i].mzi_cur_size + info[i].mzi_max_size + info[i].mzi_alloc_size + info[i].mzi_sum_size + info[i].mzi_collectable;
+	}
+
+	T_ASSERT_TRUE(zoneDataAggregate == 0, "Zone info correctly redacted");
+
+	// Cleanup
+	if ((name != NULL) && (nameCnt != 0)) {
+		kr = vm_deallocate(mach_task_self(), (vm_address_t) name,
+		    (vm_size_t) (nameCnt * sizeof *name));
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_deallocate name");
+	}
+
+	if ((info != NULL) && (infoCnt != 0)) {
+		kr = vm_deallocate(mach_task_self(), (vm_address_t) info,
+		    (vm_size_t) (infoCnt * sizeof *info));
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_deallocate info");
+	}
+
+	if ((wiredInfo != NULL) && (wiredInfoCnt != 0)) {
+		kr = vm_deallocate(mach_task_self(), (vm_address_t) wiredInfo,
+		    (vm_size_t) (wiredInfoCnt * sizeof *wiredInfo));
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_deallocate wiredInfo");
+	}
 }

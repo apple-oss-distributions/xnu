@@ -13,67 +13,68 @@ TODO: extend the integration tests to actually validate correctness.
 """
 import contextlib
 import functools
-import os.path
 import re
 import signal
 import sys
+import os
 import threading
 import typing
 
 import pytest
 import lldb
 
-from lldb_session import AtDeskLLDBGdbSession
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'utils'))
+from lldb_session import LLDBGdbSession
 
 
-def _get_task(session: AtDeskLLDBGdbSession, name: str) -> str:
+def _get_task(session: LLDBGdbSession, name: str) -> str:
     return session.exec(f"showtask -F {name}").split('\n')[2].split()[0]
 
 
 _get_init_task = functools.partial(_get_task, 'init')
 
 
-def _arbitrary_task(session: AtDeskLLDBGdbSession) -> str:
+def _arbitrary_task(session: LLDBGdbSession) -> str:
     return session.exec("showalltasks").split('\n')[2].split()[0]
 
 
-def _arbitrary_proc(session: AtDeskLLDBGdbSession, pid: int = 0) -> str:
+def _arbitrary_proc(session: LLDBGdbSession, pid: int = 0) -> str:
     return session.exec(f"showpid {pid}").split('\n')[1].split()[5]
 
 
-def _arbitrary_thread(session: AtDeskLLDBGdbSession, task_name: str = 'init') -> str:
+def _arbitrary_thread(session: LLDBGdbSession, task_name: str = 'init') -> str:
     return session.exec(f"showtaskthreads -F {task_name}").split('\n')[3].strip().split()[0]
 
 
-def _arbitrary_kext(session: AtDeskLLDBGdbSession, kext_name: str = 'com.apple.BootCache') -> str:
+def _arbitrary_kext(session: LLDBGdbSession, kext_name: str = 'com.apple.BootCache') -> str:
     return re.search(r"(0XFFFFF\w+)", session.exec(f"showkextmacho {kext_name}")).group(1)
 
 
-def _arbitrary_vm_line(session: AtDeskLLDBGdbSession, row: int, col: int) -> str:
+def _arbitrary_vm_line(session: LLDBGdbSession, row: int, col: int) -> str:
     return session.exec("showallvm").split('\n')[row].strip().split()[col]
 
 
-def _arbitrary_vm_map(session: AtDeskLLDBGdbSession, index: int = 1) -> str:
+def _arbitrary_vm_map(session: LLDBGdbSession, index: int = 1) -> str:
     return _arbitrary_vm_line(session, row=index, col=1)
 
 
-def _arbitrary_vm_node(session: AtDeskLLDBGdbSession) -> str:
+def _arbitrary_vm_node(session: LLDBGdbSession) -> str:
     return session.exec("showallvnodes").stdout.readlines(4)[1].strip().split()[0]
 
 
-def __arbitrary_ipc_line(session: AtDeskLLDBGdbSession, index: int) -> str:
+def __arbitrary_ipc_line(session: LLDBGdbSession, index: int) -> str:
     return session.exec('showallipc').split('\n')[1].strip().split()[index]
 
 
-def _arbitrary_ipc(session: AtDeskLLDBGdbSession) -> str:
+def _arbitrary_ipc(session: LLDBGdbSession) -> str:
     return __arbitrary_ipc_line(session, index=2)
 
 
-def _arbitrary_mbuf(session: AtDeskLLDBGdbSession) -> str:
+def _arbitrary_mbuf(session: LLDBGdbSession) -> str:
     return session.exec('mbuf_showactive').split('\n')[3].strip().split()[0]
 
 
-def _arbitrary_proc_channel(session: AtDeskLLDBGdbSession, task_name: str = 'apsd') -> str:
+def _arbitrary_proc_channel(session: LLDBGdbSession, task_name: str = 'apsd') -> str:
     proc_id = session.exec(f'showtask -F {task_name}').split('\n')[1].split()[6]
     return session.exec(f'showprocchannels {proc_id}').split('\n')[1].split()[0]
 
@@ -565,14 +566,14 @@ IGNORES = TOO_LONG + INTERACTIVE + OBSOLETE
 
 
 @pytest.fixture(scope='session')
-def lldb_gdb_session(pytestconfig: pytest.Config) -> AtDeskLLDBGdbSession:
+def lldb_gdb_session(pytestconfig: pytest.Config) -> LLDBGdbSession:
     if pytestconfig.getoption('--use-existing-debugger'):
-        session = AtDeskLLDBGdbSession(lldb.debugger.GetCommandInterpreter())
+        session = LLDBGdbSession(lldb.debugger.GetCommandInterpreter())
         session.refresh()
         yield session
         return
 
-    with AtDeskLLDBGdbSession.create(pytestconfig.getoption('--gdb-remote')) as session:
+    with LLDBGdbSession.create(pytestconfig.getoption('--gdb-remote')) as session:
         yield session
 
 
@@ -623,7 +624,7 @@ MACROS = [(i, None, []) if isinstance(i, str) else (i if len(i) == 3 else (*i, [
 @pytest.mark.parametrize('macro', [pytest.param(i[:-1], marks=i[-1], id=i[0]) for i in MACROS])
 def test_macro_exec(_timed_action: typing.Callable[[float], typing.ContextManager[None]],
                     macro: tuple[str, typing.Optional[str], typing.Optional[list[pytest.Mark]]],
-                    lldb_gdb_session: AtDeskLLDBGdbSession) -> None:
+                    lldb_gdb_session: LLDBGdbSession) -> None:
     macro, args_or_func = macro
     if hasattr(args_or_func, '__call__'):
         try:
@@ -639,7 +640,7 @@ def test_macro_exec(_timed_action: typing.Callable[[float], typing.ContextManage
         lldb_gdb_session.exec(macro)
 
 
-def test_macro_coverage(lldb_gdb_session: AtDeskLLDBGdbSession, ignores: set[str]) -> None:
+def test_macro_coverage(lldb_gdb_session: LLDBGdbSession, ignores: set[str]) -> None:
     stdout = lldb_gdb_session.exec('help')
     _start_after = 'Current user-defined commands:'
     _end_before = "For more information on any command, type 'help <command-name>'."

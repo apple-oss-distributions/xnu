@@ -1007,7 +1007,7 @@ IOService::addPowerChild2( IOPMRequest * request )
 	connection->setReadyFlag(true);
 
 	if (fControllingDriver && fParentsKnowState) {
-		fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(fParentsCurrentPowerFlags);
+		fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(this, fParentsCurrentPowerFlags);
 		// initially change into the state we are already in
 		tempDesire = fControllingDriver->driverInitialPowerStateForDomainState(fParentsCurrentPowerFlags);
 		fPreviousRequestPowerFlags = (IOPMPowerFlags)(-1);
@@ -1043,18 +1043,6 @@ IOService::addPowerChild3( IOPMRequest * request )
 		}
 	} else {
 		PM_LOG("%s: addPowerChild3 not in power plane\n", getName());
-	}
-
-	if (child) {
-		OSNumber * num;
-		OSObject * obj = child->copyProperty(kIOPMAOTAllowKey);
-		if ((num = OSDynamicCast(OSNumber, obj))) {
-			child->addPMDriverClass(num->unsigned64BitValue());
-			if (child->reserved->uvars && child->reserved->uvars->userServer) {
-				child->reserved->uvars->userServer->addPMDriverClass(num->unsigned64BitValue());
-			}
-		}
-		OSSafeReleaseNULL(obj);
 	}
 
 	connection->release();
@@ -1292,7 +1280,11 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
 		lowestPowerState   = fPowerStates[0].stateOrderToIndex;
 		fHighestPowerState = fPowerStates[numberOfStates - 1].stateOrderToIndex;
 
-		{
+		IOPMrootDomain * rootDomain = getPMRootDomain();
+		if (rootDomain) {
+			rootDomain->handleRegisterPowerDriver(this);
+		}
+		if (!fPMDriverClass && (!reserved || !reserved->uvars)) {
 			uint32_t        aotFlags;
 			IOService *     service;
 			OSObject *      object;
@@ -1381,7 +1373,7 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
 
 		if (inPlane(gIOPowerPlane) && fParentsKnowState) {
 			IOPMPowerStateIndex tempDesire;
-			fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(fParentsCurrentPowerFlags);
+			fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(this, fParentsCurrentPowerFlags);
 			// initially change into the state we are already in
 			tempDesire = fControllingDriver->driverInitialPowerStateForDomainState(fParentsCurrentPowerFlags);
 			adjustPowerState(tempDesire);
@@ -1951,7 +1943,7 @@ IOService::handlePowerDomainWillChangeTo( IOPMRequest * request )
 
 	if (fControllingDriver && !fInitialPowerChange) {
 		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
-			combinedPowerFlags);
+			this, combinedPowerFlags);
 
 		if (parentChangeFlags & kIOPMDomainPowerDrop) {
 			// fMaxPowerState set a limit on self-initiated power changes.
@@ -2071,7 +2063,7 @@ IOService::handlePowerDomainDidChangeTo( IOPMRequest * request )
 
 	if (fControllingDriver) {
 		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
-			fParentsCurrentPowerFlags);
+			this, fParentsCurrentPowerFlags);
 
 		if ((parentChangeFlags & kIOPMDomainPowerDrop) == 0) {
 			// fMaxPowerState set a limit on self-initiated power changes.
@@ -2133,7 +2125,7 @@ IOService::handlePowerDomainDidChangeTo( IOPMRequest * request )
 			}
 		}
 
-		if (getPMRootDomain()->isAOTMode()) {
+		if (getPMRootDomain()->isAOTMode() && (fCurrentPowerState != maxPowerState)) {
 			IOLog("aotPS[%ld] %s0x%qx\n", maxPowerState, getName(), getRegistryEntryID());
 		}
 
@@ -4958,7 +4950,7 @@ IOService::requestDomainPower(
 
 	if (options & kReserveDomainPower) {
 		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
-			fHeadNoteDomainTargetFlags );
+			this, fHeadNoteDomainTargetFlags );
 
 		if (StateOrder(maxPowerState) < StateOrder(ourPowerState)) {
 			PM_LOG1("%s: power desired %u:0x%x got %u:0x%x\n",
@@ -7682,7 +7674,7 @@ IOService::setPowerState(
 }
 
 //*********************************************************************************
-// [public] maxCapabilityForDomainState
+// [public]cmaxCapabilityForDomainState
 //
 // Finds the highest power state in the array whose input power requirement
 // is equal to the input parameter. Where a more intelligent decision is
@@ -7716,7 +7708,7 @@ IOService::maxCapabilityForDomainState( IOPMPowerFlags domainState )
 }
 
 unsigned long
-IOService::driverMaxCapabilityForDomainState( IOPMPowerFlags domainState )
+IOService::serviceMaxCapabilityForDomainState( IOPMPowerFlags domainState )
 {
 	IOPMDriverCallEntry callEntry;
 	IOPMPowerStateIndex powerState = kPowerStateZero;
@@ -7749,6 +7741,16 @@ IOService::driverMaxCapabilityForDomainState( IOPMPowerFlags domainState )
 	deassertPMDriverCall(&callEntry);
 
 	return powerState;
+}
+
+unsigned long
+IOService::driverMaxCapabilityForDomainState( IOService * service, IOPMPowerFlags domainState )
+{
+	if OSDynamicCast(IOUserServer, this) {
+		return service->serviceMaxCapabilityForDomainState(domainState);
+	} else {
+		return serviceMaxCapabilityForDomainState(domainState);
+	}
 }
 
 //*********************************************************************************

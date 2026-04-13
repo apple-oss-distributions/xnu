@@ -1,4 +1,4 @@
-module DarwinPrivate.net [system] {
+module DarwinPrivate.net {
   #ifndef XNU_PLATFORM_MacOSX
   module bpf {
     header "net/bpf.h"
@@ -27,14 +27,17 @@ module DarwinPrivate.net [system] {
     export *
   }
 
-  #endif
   module if_mib {
-    #ifndef XNU_PLATFORM_MacOSX
     header "net/if_mib.h"
-    #endif
+    export *
+  }
+
+  #endif
+  module if_mib_private {
     header "net/if_mib_private.h"
     export *
   }
+
   module if_var {
     header "net/if_var_private.h"
     export *
@@ -55,10 +58,14 @@ module DarwinPrivate.net [system] {
     export *
   }
 
+  #ifndef XNU_PLATFORM_MacOSX
   module route {
-    #ifndef XNU_PLATFORM_MacOSX
     header "net/route.h"
-    #endif
+    export *
+  }
+
+  #endif
+  module route_private {
     header "net/route_private.h"
     export *
   }

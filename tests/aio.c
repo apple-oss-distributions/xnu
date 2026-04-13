@@ -11,9 +11,9 @@
 #include <sys/event.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
+#include <sys/guarded.h>
 
 #include "test_utils.h"
-
 
 #ifndef SIGEV_KEVENT
 #define SIGEV_KEVENT    4
@@ -22,7 +22,7 @@
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.file_descriptors.aio"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("file descriptors"),
+	T_META_RADAR_COMPONENT_VERSION("vfs"),
 	T_META_CHECK_LEAKS(false),
 	T_META_TAG_VM_PREFERRED);
 
@@ -36,6 +36,14 @@ static char *g_testfiles[AIO_LIST_MAX];
 static int g_fds[AIO_LIST_MAX];
 static struct aiocb g_aiocbs[AIO_LIST_MAX];
 static char *g_buffers[AIO_LIST_MAX];
+
+#define FILE           "aio_test_file.txt"
+
+static char template[MAXPATHLEN];
+static char testdir_path[MAXPATHLEN + 1];
+static char *testdir = NULL;
+static char file[PATH_MAX];
+static int testdir_fd = -1;
 
 /*
  * This unit-test tests AIO (Asynchronous I/O) facility.
@@ -561,6 +569,244 @@ T_DECL(lio_listio_kevent, "Test lio_listio() with kevent.")
 			T_FAIL("Timedout listening for AIO completion event on kqueue %d", kq);
 		}
 	}
+}
+
+static void
+aio_ebadf_cleanup(void)
+{
+	if (file[0] != '\0') {
+		unlink(file);
+	}
+	if (testdir) {
+		rmdir(testdir);
+	}
+}
+
+T_DECL(aio_ebadf,
+    "Verify that aio_read/aio_write/aio_fsync returns EBAD when file descriptor is not valid")
+{
+	int fd;
+	char buf[64] = {0};
+
+	file[0] = '\0';
+
+	T_ATEND(aio_ebadf_cleanup);
+	T_SETUPBEGIN;
+
+	/* Create test root dir */
+	snprintf(template, sizeof(template), "%s/aio_ebadf-XXXXXX", dt_tmpdir());
+	T_ASSERT_POSIX_NOTNULL((testdir = mkdtemp(template)), "Creating test root dir");
+
+	/* Setup file name */
+	snprintf(file, sizeof(file), "%s/%s", testdir, "file");
+
+	/* Create the test file */
+	T_ASSERT_POSIX_SUCCESS((fd = open(file, O_CREAT | O_RDWR, 0777)), "Creating test file");
+	close(fd);
+
+	T_SETUPEND;
+
+	/* Verify aio_read */
+	T_EXPECT_POSIX_SUCCESS((fd = open(file, O_WRONLY)), "Opening file using O_WRONLY");
+	if (fd >= 0) {
+		struct aiocb cb = {0};
+
+		/* Assign aiocb attributes for read */
+		cb.aio_fildes = fd;
+		cb.aio_buf = buf;
+		cb.aio_nbytes = sizeof(buf);
+
+		T_EXPECT_POSIX_FAILURE(aio_read(&cb), EBADF, "Calling aio_read() when file is opened using the O_WRONLY flag -> Should fail with EBADF");
+		close(fd);
+	}
+
+	/* Verify aio_write */
+	T_EXPECT_POSIX_SUCCESS((fd = open(file, O_RDONLY)), "Opening file using O_RDONLY");
+	if (fd >= 0) {
+		struct aiocb cb = {0};
+
+		/* Assign aiocb attributes for write */
+		cb.aio_fildes = fd;
+		cb.aio_buf = buf;
+		cb.aio_nbytes = sizeof(buf);
+
+		T_EXPECT_POSIX_FAILURE(aio_write(&cb), EBADF, "Calling aio_write() when file is opened using the O_RDONLY flag -> Should fail with EBADF");
+		close(fd);
+	}
+
+	/* Verify aio_fsync */
+	T_EXPECT_POSIX_SUCCESS((fd = open(file, O_RDONLY)), "Opening file using O_RDONLY");
+	if (fd >= 0) {
+		struct aiocb cb = {0};
+
+		/* Assign aiocb attributes for fsync */
+		cb.aio_fildes = fd;
+
+		T_EXPECT_POSIX_FAILURE(aio_fsync(O_SYNC, &cb), EBADF, "Calling aio_fsync() when file is opened using the O_RDONLY flag -> Should fail with EBADF");
+		close(fd);
+	}
+}
+
+static void
+aio_return_errno_cleanup(void)
+{
+	if (testdir_fd != -1) {
+		unlinkat(testdir_fd, FILE, 0);
+		close(testdir_fd);
+		if (rmdir(testdir)) {
+			T_FAIL("Unable to remove the test directory (%s)", testdir);
+		}
+	}
+}
+
+T_DECL(aio_return_errno,
+    "Validate that aio_return() sets errno when it fails")
+{
+	int fd;
+	void *m;
+	struct aiocb aiocb;
+	ssize_t result;
+	int i;
+
+	T_SETUPBEGIN;
+	T_ATEND(aio_return_errno_cleanup);
+
+	/* Create test root directory */
+	snprintf(template, sizeof(template), "%s/%s-XXXXXX", dt_tmpdir(), "aio_return_errno");
+	T_ASSERT_POSIX_NOTNULL((testdir = mkdtemp(template)), "Creating test root directory");
+	T_ASSERT_POSIX_SUCCESS((testdir_fd = open(testdir, O_SEARCH, 0777)), "Opening test root directory %s", testdir);
+	T_ASSERT_POSIX_SUCCESS(fcntl(testdir_fd, F_GETPATH, testdir_path), "Calling fcntl() to get the path");
+
+	T_SETUPEND;
+
+	/* Run the test 10 times */
+	for (i = 0; i < 10; i++) {
+		/* Create the test file */
+		T_ASSERT_POSIX_SUCCESS((fd = openat(testdir_fd, FILE, O_CREAT | O_RDWR, S_IRWXU)), "Creating %s (iteration %d)", FILE, i + 1);
+
+		/* Allocate buffer for AIO operation */
+		T_ASSERT_POSIX_NOTNULL((m = malloc(0x8000)), "Allocating buffer for AIO (iteration %d)", i + 1);
+
+		/* Initialize aiocb structure */
+		memset(&aiocb, 0, sizeof(aiocb));
+		aiocb.aio_fildes = fd;
+		aiocb.aio_offset = 0;
+		aiocb.aio_buf = m;
+		aiocb.aio_nbytes = 0x8000;
+		aiocb.aio_sigevent.sigev_notify = SIGEV_NONE;
+
+		/* Start AIO write operation */
+		T_ASSERT_POSIX_SUCCESS(aio_write(&aiocb), "Starting AIO write operation (iteration %d)", i + 1);
+
+		/* Close the file descriptor to trigger the error condition */
+		close(fd);
+
+		/* Set errno to a known value to verify it gets changed */
+		errno = ENOSYS;
+
+		/* Call aio_return() - this should fail with -1 and set errno */
+		result = aio_return(&aiocb);
+		if (result == -1) {
+			T_LOG("Iteration %d: aio_return() failed with -1, errno = %d (%s)", i + 1, errno, strerror(errno));
+			T_ASSERT_NE(errno, ENOSYS, "errno should be set by aio_return() (iteration %d)", i + 1);
+		} else {
+			T_LOG("Iteration %d: aio_return() succeeded with result = %ld", i + 1, result);
+		}
+
+		/* Clean up for this iteration */
+		free(m);
+		unlinkat(testdir_fd, FILE, 0);
+	}
+}
+
+T_DECL(write_guard_exception,
+    "test that aio_write raises guard exception for write-guarded files",
+    T_META_IGNORECRASHES(".*write_guard_exception.*"),
+    T_META_ENABLED(TARGET_OS_OSX || TARGET_OS_IOS))
+{
+	const char *tmpdir = dt_tmpdir();
+	char testfile[MAXPATHLEN];
+	pid_t child_pid;
+	int status;
+
+	/* Create test file path */
+	snprintf(testfile, sizeof(testfile), "%s/write_guard_exception", tmpdir);
+
+	/* Clean up any existing test file */
+	unlink(testfile);
+
+	/* Fork to test guard exception in child process */
+	child_pid = fork();
+	T_ASSERT_NE(child_pid, -1, "fork");
+
+	if (child_pid == 0) {
+		/* Child process - this should be terminated by guard exception */
+		int fd;
+		guardid_t guard = 0xc2c2c2c2;
+		char test_data[] = "test data\n";
+		struct aiocb aiocb;
+
+		/* Create a write-guarded file */
+		fd = guarded_open_np(testfile,
+		    &guard,
+		    GUARD_WRITE | GUARD_DUP,  /* Guard against writes */
+		    O_CREAT | O_EXCL | O_CLOEXEC | O_RDWR,
+		    0666);
+
+		if (fd == -1) {
+			exit(1); /* Setup failure */
+		}
+
+		/* Set up AIO write request */
+		memset(&aiocb, 0, sizeof(aiocb));
+		aiocb.aio_fildes = fd;
+		aiocb.aio_offset = 0;
+		aiocb.aio_buf = test_data;
+		aiocb.aio_nbytes = sizeof(test_data);
+
+		/* This should trigger a guard exception and terminate the process */
+		int result = aio_write(&aiocb);
+		if (result == -1) {
+			exit(2); /* aio_write failed immediately */
+		}
+
+		/* Wait for completion - this is where the guard should trigger */
+		while (aio_error(&aiocb) == EINPROGRESS) {
+			usleep(1000);
+		}
+
+		/* If we get here, the guard exception was NOT raised - this is the bug */
+		close(fd);
+		exit(3); /* Bug reproduced - guard was bypassed */
+	} else {
+		/* Parent process - wait for child and check result */
+		T_ASSERT_POSIX_SUCCESS(waitpid(child_pid, &status, 0), "waitpid");
+
+		if (WIFEXITED(status)) {
+			int exit_code = WEXITSTATUS(status);
+			if (exit_code == 1) {
+				T_FAIL("Test setup failed in child process");
+			} else if (exit_code == 2) {
+				T_FAIL("aio_write failed immediately (unexpected)");
+			} else if (exit_code == 3) {
+				T_FAIL("aio_write bypassed write guard (security vulnerability)");
+			} else {
+				T_FAIL("Child exited with unexpected code %d", exit_code);
+			}
+		} else if (WIFSIGNALED(status)) {
+			int sig = WTERMSIG(status);
+			if (sig == SIGKILL) {
+				T_PASS("aio_write properly raised guard exception (SIGKILL)");
+			} else {
+				T_FAIL("Child killed by unexpected signal %d (expected SIGKILL)", sig);
+			}
+		} else {
+			T_FAIL("Child process terminated unexpectedly (status: %d)", status);
+		}
+	}
+
+	/* Clean up */
+	unlink(testfile);
 }
 
 /*

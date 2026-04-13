@@ -15,6 +15,7 @@ from core.configuration import *
 from core.kernelcore import *
 from utils import *
 from core.lazytarget import *
+from core import lldbwrap
 
 if os.environ.get('DEBUG_LLDB_PYTHON'):
     import debugpy
@@ -78,17 +79,17 @@ def lldb_type_summary(types_list):
         summary_function_name = "LLDBSummary" + obj.__name__
 
         def _internal_summary_function(lldbval, internal_dict):
-            args, _, _, _ = inspect.getargspec(obj)
-            if 'O' in args:
+            sig = inspect.signature(obj)
+            if 'O' in sig.parameters:
                 stream = CommandOutput(summary_function_name, fhandle=sys.stdout)
                 with RedirectStdStreams(stdout=stream), caching.ImplicitContext(lldbval):
-                    return '\n' + obj.header + '\n' + obj(core.value(lldbval), O=stream)
+                    return '\n' + obj.header + '\n' + obj(core.value(lldbwrap.SBValue(lldbval)), O=stream)
 
             out_string = ""
             if internal_dict != None and len(obj.header) > 0 :
                 out_string += "\n" + obj.header +"\n"
             with caching.ImplicitContext(lldbval):
-                out_string += obj(core.value(lldbval))
+                out_string += obj(core.value(lldbwrap.SBValue(lldbval)))
             return out_string
 
         myglobals = globals()
@@ -1645,6 +1646,7 @@ from kasan import *
 from waitq import *
 from usertaskgdbserver import *
 from ktrace import *
+from cpc import *
 from microstackshot import *
 from xnutriage import *
 from kmtriage import *

@@ -218,3 +218,32 @@ T_DECL(testposixshm, "Posix Shared Memory tests")
 	T_EXPECT_EQ(pass_count, 1, "racing shm_unlink()");
 	T_EXPECT_EQ(fail_count, nthreads - 1, "racing shm_unlink()");
 }
+
+/*
+ * Try setting each invalid flag bit and ensure they all fail.
+ */
+T_DECL(testposixshm_shm_open_invalid_flags_fail, "Verify invalid shm_open flags fail")
+{
+	int   valid_flags_mask = O_RDONLY | O_RDWR | O_CREAT | O_EXCL | O_TRUNC;
+	char *filename         = "xyz_abcdefg";
+
+	/*
+	 * Try each possible flag not included in the valid flags mask.
+	 */
+	for (int i = 0; i < 8 * sizeof(int); i++) {
+		int flag = 1 << i;
+
+		if (valid_flags_mask & flag) {
+			continue;
+		}
+
+		int fd = shm_open(filename, O_RDWR | O_CREAT | flag, S_IRUSR | S_IWUSR);
+		T_QUIET; T_EXPECT_EQ_INT(fd, -1, "shm_open() should fail with invalid flag 0x%x", flag);
+		T_WITH_ERRNO;
+		T_QUIET; T_EXPECT_EQ(errno, EINVAL, "Expected EINVAL");
+
+		if (fd != -1) {
+			T_QUIET; T_EXPECT_POSIX_ZERO(close(fd), "close()");
+		}
+	}
+}

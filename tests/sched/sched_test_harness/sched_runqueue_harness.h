@@ -58,6 +58,7 @@ extern int                   dequeue_threads_expect_ordered(test_runq_target_t r
 extern int                   dequeue_threads_expect_ordered_arr(test_runq_target_t runq_target, int num_threads, test_thread_t *threads);
 extern bool                  cpu_dequeue_thread_expect_compare_current(int cpu_id, test_thread_t expected_thread);
 extern bool                  cpu_check_preempt_current(int cpu_id, bool preemption_expected);
+#define TRACEPOINT_EXPECT_IGNORE_ARG (0xF0CACC1A)
 extern bool                  tracepoint_expect(uint64_t trace_code, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 extern void                  disable_auto_current_thread(void);
 extern void                  reenable_auto_current_thread(void);

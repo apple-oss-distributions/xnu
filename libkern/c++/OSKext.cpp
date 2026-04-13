@@ -1623,12 +1623,13 @@ OSKext::driverkitEnabled(void)
 bool
 OSKext::iokitDaemonAvailable(void)
 {
-#if !XNU_TARGET_OS_IOS && !XNU_TARGET_OS_OSX && !XNU_TARGET_OS_WATCH
+#if XNU_TARGET_OS_XR || XNU_TARGET_OS_BRIDGE
 	int notused;
 	if (PE_parse_boot_argn("-restore", &notused, sizeof(notused))) {
 		return false;
 	}
-#endif /* !XNU_TARGET_OS_IOS && !XNU_TARGET_OS_OSX && !XNU_TARGET_OS_WATCH */
+#endif /* XNU_TARGET_OS_XR || XNU_TARGET_OS_BRIDGE */
+
 	return driverkitEnabled();
 }
 
@@ -4392,7 +4393,8 @@ OSKext::lookupKextWithAddress(vm_address_t address)
 #endif /* defined (__arm64__) */
 		}
 	}
-	if ((address >= vm_kernel_stext) && (address < vm_kernel_etext)) {
+
+	if (kernel_text_contains(address)) {
 		foundKext.reset(sKernelKext, OSRetain);
 		goto finish;
 	}
@@ -16362,15 +16364,23 @@ OSKext::printKextPanicLists(int (*printf_func)(const char *fmt, ...))
 		    last_unloaded_address, last_unloaded_size);
 	}
 
-	printf_func("loaded kexts:\n");
-	if (loaded_kext_paniclist &&
-	    pmap_find_phys(kernel_pmap, (addr64_t) (uintptr_t) loaded_kext_paniclist) &&
-	    loaded_kext_paniclist[0]) {
-		printf_func("%.*s",
-		    strnlen(loaded_kext_paniclist, loaded_kext_paniclist_size),
-		    loaded_kext_paniclist);
+	/*
+	 * In most cases the set of loaded kexts is statically determined by the
+	 * Boot KC, so it isn't very interesting to see in the paniclog.
+	 */
+	if (auxKCloaded) {
+		printf_func("loaded kexts:\n");
+		if (loaded_kext_paniclist &&
+		    pmap_find_phys(kernel_pmap, (addr64_t) (uintptr_t) loaded_kext_paniclist) &&
+		    loaded_kext_paniclist[0]) {
+			printf_func("%.*s",
+			    strnlen(loaded_kext_paniclist, loaded_kext_paniclist_size),
+			    loaded_kext_paniclist);
+		} else {
+			printf_func("(none)\n");
+		}
 	} else {
-		printf_func("(none)\n");
+		printf_func("loaded kexts: (skipped, see boot kernelcache)\n");
 	}
 	return;
 }

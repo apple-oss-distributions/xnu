@@ -128,13 +128,14 @@ __END_DECLS
 
 #define vm_memtag_fast_checked_bzero(p, s)      bzero(p, s)
 #define vm_memtag_load_tag(a)                   (a)
-#define vm_memtag_store_tag(a, s)               do { } while (0)
-#define vm_memtag_generate_and_store_tag(a, s)  (a)
-#define vm_memtag_relocate_tags(n, o, l)        do { } while (0)
+#define vm_memtag_store_tag(a, s)               do { (void)(a); (void)(s); } while (0)
+#define vm_memtag_generate_and_store_tag(a, s)  ((void)(s), (a))
+#define vm_memtag_relocate_tags(n, o, l)        do { (void)(n); (void)(o); (void)(l); } while (0)
 #define vm_memtag_enable_checking()             do { } while (0)
 #define vm_memtag_disable_checking()            do { } while (0)
 #define vm_memtag_bzero_fast_checked(b, n)      bzero(b, n)
 #define vm_memtag_bzero_unchecked(b, n)         bzero(b, n)
+#define vm_memtag_verify_tag(a)                 do { (void)(a); } while (0)
 
 #endif /* ENABLE_MEMTAG_INTERFACES */
 

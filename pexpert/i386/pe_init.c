@@ -499,3 +499,9 @@ PE_write_socd_client_buffer(__unused vm_offset_t offset, __unused const void *bu
 {
 	/* not implemented */
 }
+
+boolean_t
+PE_device_is_simulated(void)
+{
+	return false;
+}

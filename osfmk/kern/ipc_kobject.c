@@ -788,7 +788,7 @@ ipc_kobject_set_raw(
  *	Conditions:
  *		The port is a kobject of the proper type.
  */
-__header_always_inline ipc_kobject_t
+__header_always_inline_testable __mockable ipc_kobject_t
 ipc_kobject_get_raw(
 	ipc_port_t              port,
 	ipc_kobject_type_t      type)

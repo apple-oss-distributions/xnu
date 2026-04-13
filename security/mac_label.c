@@ -133,14 +133,6 @@ mac_labelzone_free_owned(struct label **labelp,
 	}
 }
 
-__abortlike
-static void
-mac_label_verify_panic(struct label **labelp)
-{
-	panic("label backref mismatch: labelp:%p label:%p l_owner:%p", labelp,
-	    *labelp, (*labelp)->l_owner);
-}
-
 struct label *
 mac_label_verify(struct label **labelp)
 {
@@ -150,7 +142,8 @@ mac_label_verify(struct label **labelp)
 		zone_require_ro(ZONE_ID_MAC_LABEL, sizeof(struct label), label);
 
 		if (__improbable(label->l_owner != labelp)) {
-			mac_label_verify_panic(labelp);
+			panic("label backref mismatch: labelp:%p label:%p l_owner:%p", labelp,
+			    label, label->l_owner);
 		}
 	}
 

@@ -88,54 +88,6 @@ T_DECL(core_fixed_task, "check that task counting is working",
 	check_fixed_counts(counts);
 }
 
-T_DECL(core_fixed_kdebug, "check that the kdebug macros for monotonic work",
-    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
-{
-	__block bool saw_events = false;
-	ktrace_session_t s;
-	int r;
-	int set = 1;
-
-	T_SETUPBEGIN;
-	skip_if_unsupported();
-
-	s = ktrace_session_create();
-	T_QUIET; T_ASSERT_NOTNULL(s, "ktrace_session_create");
-
-	ktrace_events_single_paired(s,
-	    KDBG_EVENTID(DBG_MONOTONIC, DBG_MT_TMPCPU, 0x3fff),
-	    ^(struct trace_point *start, struct trace_point *end)
-	{
-		struct thsc_cpi counts[2];
-
-		saw_events = true;
-
-		counts[0].tcpi_instructions = start->arg1;
-		counts[0].tcpi_cycles = start->arg2;
-		counts[1].tcpi_instructions = end->arg1;
-		counts[1].tcpi_cycles = end->arg2;
-
-		check_fixed_counts(counts);
-	});
-
-	ktrace_set_completion_handler(s, ^{
-		T_ASSERT_TRUE(saw_events, "should see monotonic kdebug events");
-		T_END;
-	});
-	T_SETUPEND;
-
-	T_ASSERT_POSIX_ZERO(ktrace_start(s,
-	    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)), NULL);
-
-	r = sysctlbyname("kern.monotonic.kdebug_test", NULL, NULL, &set,
-	    sizeof(set));
-	T_ASSERT_POSIX_SUCCESS(r,
-	    "sysctlbyname(\"kern.monotonic.kdebug_test\", ...)");
-
-	ktrace_end(s, 0);
-	dispatch_main();
-}
-
 static void *
 spin_thread_self_counts(__unused void *arg)
 {

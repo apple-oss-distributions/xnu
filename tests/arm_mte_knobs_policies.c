@@ -135,7 +135,7 @@ default_tag_check_bypass_template(
 T_DECL(test_posix_spawn_explicit_check_bypass_knob,
     "Test MTE tag check bypass works with posix_spawnattr and flag POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	default_tag_check_bypass_template(POSIX_SPAWN_SECFLAG_EXPLICIT_ENABLE | POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS, true, false, "mte_tag_violate");
@@ -146,7 +146,7 @@ T_DECL(test_explicit_never_check_enable_with_bypass_knobs,
     "POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS results in relaxed enforcement "
     "on out of bounds memory access",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	default_tag_check_bypass_template(POSIX_SPAWN_SECFLAG_EXPLICIT_NEVER_CHECK_ENABLE | POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS, true, false, "mte_tag_violate");
@@ -155,7 +155,7 @@ T_DECL(test_explicit_never_check_enable_with_bypass_knobs,
 T_DECL(test_posix_spawn_secflag_explict_check_bypass_knob_inherited_on_fork,
     "Test that POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS is inherited on fork",
     T_META_ENABLED(TARGET_CPU_ARM64),
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE4", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	default_tag_check_bypass_template(POSIX_SPAWN_SECFLAG_EXPLICIT_CHECK_BYPASS, true, false, "mte_tag_violate_with_fork");

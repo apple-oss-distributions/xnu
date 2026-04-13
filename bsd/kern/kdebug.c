@@ -41,6 +41,7 @@
 #include <mach/vm_map.h>
 #include <kern/clock.h>
 
+#include <kern/cpu_number.h>
 #include <kern/task.h>
 #include <kern/debug.h>
 #include <kern/kalloc.h>
@@ -49,6 +50,7 @@
 #include <sys/lock.h>
 #include <pexpert/device_tree.h>
 #include <os/atomic.h>
+#include <os/log.h>
 
 #include <sys/malloc.h>
 
@@ -1052,7 +1054,6 @@ kernel_debug_string_simple(uint32_t eventid, const char *str)
 	}
 }
 
-extern int      master_cpu;             /* MACH_KERNEL_PRIVATE */
 /*
  * Used prior to start_kern_tracing() being called.
  * Log temporarily into a static buffer.
@@ -1085,7 +1086,7 @@ kernel_debug_early(
 
 	/* Do nothing if the buffer is full or we're not on the boot cpu. */
 	kd_early_overflow = kd_early_index >= KD_EARLY_EVENT_COUNT;
-	if (kd_early_overflow || cpu_number() != master_cpu) {
+	if (kd_early_overflow || cpu_number() != boot_cpu_id) {
 		return;
 	}
 
@@ -1107,7 +1108,7 @@ kernel_debug_early(
 static void
 kernel_debug_early_end(void)
 {
-	if (cpu_number() != master_cpu) {
+	if (cpu_number() != boot_cpu_id) {
 		panic("kernel_debug_early_end() not call on boot processor");
 	}
 
@@ -1181,7 +1182,7 @@ kdebug_typefilter(__unused struct proc* p, struct kdebug_typefilter_args* uap,
 	vm_size_t user_ptr_size = vm_map_is_64bit(user_map) ? 8 : 4;
 	int error = copyout((void *)&user_addr, uap->addr, user_ptr_size);
 	if (error != 0) {
-		mach_vm_deallocate(user_map, user_addr, TYPEFILTER_ALLOC_SIZE);
+		mach_vm_deallocate_kernel(user_map, user_addr, TYPEFILTER_ALLOC_SIZE);
 	}
 	return error;
 }
@@ -2172,8 +2173,7 @@ kdbg_set_nkdbufs_trace(unsigned int req_nkdbufs_trace)
 	 * Only allow allocations of up to half the kernel's data range or "sane
 	 * size", whichever is smaller.
 	 */
-	kmem_range_id_t range_id = kmem_needs_data_share_range() ?
-	    KMEM_RANGE_ID_DATA_SHARED : KMEM_RANGE_ID_DATA;
+	kmem_range_id_t range_id = KMEM_RANGE_ID_DATA_SHARED;
 	const uint64_t max_nkdbufs_trace_64 =
 	    MIN(kmem_range_id_size(range_id), sane_size) / 2 /
 	    sizeof(kd_buf);
@@ -2471,7 +2471,10 @@ _read_trace_events_internal(struct kd_dest *dest, size_t event_count,
 		_clear_oldest_lostevents();
 	}
 
-	uint64_t barrier_min = kd_control_trace.kdc_oldest_time;
+	uint64_t initial_barrier_min = kd_control_trace.kdc_oldest_time;
+	uint64_t barrier_min = initial_barrier_min;
+	uint64_t found_lost_time = 0;
+	uint64_t latest_time = 0;
 
 	while (event_count && !out_of_events) {
 		kd_buf *tempbuf = kd_buffer_trace.kdcopybuf;
@@ -2500,11 +2503,12 @@ _read_trace_events_internal(struct kd_dest *dest, size_t event_count,
 					store->kds_lostevents = false;
 					lostevents = true;
 					uint64_t lost_time = store->kds_records[0].timestamp;
-					if (kd_control_trace.kdc_oldest_time < lost_time) {
+					found_lost_time = lost_time;
+					if (barrier_min < lost_time) {
 						// This time is now the oldest that can be read to
 						// ensure an event stream with no gaps from this point
 						// forward.
-						kd_control_trace.kdc_oldest_time = barrier_min = lost_time;
+						barrier_min = lost_time;
 						lostcpu = cpu;
 					}
 					continue;
@@ -2612,24 +2616,34 @@ _read_trace_events_internal(struct kd_dest *dest, size_t event_count,
 		}
 
 		if (used_count > 0) {
-			/*
-			 * Remember the latest timestamp of events that we've merged so we
-			 * don't think we've lost events later.
-			 */
-			uint64_t latest_time = tempbuf[used_count - 1].timestamp;
-			if (kd_control_trace.kdc_oldest_time < latest_time) {
-				kd_control_trace.kdc_oldest_time = latest_time;
-			}
+			// Remember the latest timestamp of events that we've merged so we
+			// don't think we've lost events later.
+			latest_time = tempbuf[used_count - 1].timestamp;
 
 			int error = _send_events(dest, kd_buffer_trace.kdcopybuf, used_count);
 			if (error != 0) {
 				// XXX Why zero this when some events may have been written?
 				*events_written = 0;
+				os_log(OS_LOG_DEFAULT, "kdebug: events failed to copy out: %d",
+				    error);
 				return error;
 			}
 			event_count -= used_count;
 			*events_written += used_count;
 		}
+	}
+	if (*events_written <= 1) {
+		os_log(OS_LOG_DEFAULT,
+		    "kdebug: few events copied out, between %llu and %llu, lost at %llu",
+		    initial_barrier_min, barrier_max, found_lost_time);
+	}
+	// Update the oldest time available to the latest event timestamp copied out.
+	if (latest_time != 0) {
+		int intrs_en = kdebug_storage_lock(&kd_control_trace);
+		if (latest_time > kd_control_trace.kdc_oldest_time) {
+			kd_control_trace.kdc_oldest_time = latest_time;
+		}
+		kdebug_storage_unlock(&kd_control_trace, intrs_en);
 	}
 	return 0;
 }
@@ -2651,11 +2665,9 @@ _read_trace_events(struct kd_dest *dest, size_t event_count, size_t *events_writ
 	}
 	thread_set_eager_preempt(current_thread());
 
-	/*
-	 * Capture the current time.  Only sort events that have occured
-	 * before now.  Since the IOPs are being flushed here, it is possible
-	 * that events occur on the AP while running live tracing.
-	 */
+	// Capture the current time.  Only sort events that have occured
+	// before now.  Since the IOPs are being flushed here, it is possible
+	// that events occur on the AP while running live tracing.
 	uint64_t barrier_max = kdebug_timestamp() & KDBG_TIMESTAMP_MASK;
 
 	// Disable wrap so storage units cannot be stolen while inspecting events.

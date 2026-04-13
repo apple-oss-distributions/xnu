@@ -33,6 +33,7 @@
 #include <sys/coalition.h>
 #include <sys/spawn_internal.h>
 #include <sys/wait.h>
+#include <mach-o/dyld.h>
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.rm"),
     T_META_RADAR_COMPONENT_NAME("xnu"),

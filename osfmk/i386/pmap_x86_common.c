@@ -1276,6 +1276,9 @@ done2:
 	if (ptelocked) {
 		PTE_LOCK_UNLOCK(pte);
 	}
+	if (delpage_pm_obj) {
+		pmap_ledger_debit(pmap, task_ledgers.tkm_private, PAGE_SIZE);
+	}
 	PMAP_UNLOCK_SHARED(pmap);
 
 	if (pvh_e != PV_HASHED_ENTRY_NULL) {
@@ -1296,7 +1299,6 @@ done2:
 		VM_PAGE_FREE(m);
 		vm_object_unlock(delpage_pm_obj);
 		OSAddAtomic(-1, &inuse_ptepages_count);
-		PMAP_ZINFO_PFREE(pmap, PAGE_SIZE);
 	}
 
 	kr = KERN_SUCCESS;
@@ -2702,15 +2704,6 @@ void
 pmap_trim(__unused pmap_t grand, __unused pmap_t subord, __unused addr64_t vstart, __unused uint64_t size)
 {
 	return;
-}
-
-__dead2
-void
-pmap_ledger_verify_size(size_t size)
-{
-	panic("%s: unsupported, "
-	    "size=%lu",
-	    __func__, size);
 }
 
 __dead2

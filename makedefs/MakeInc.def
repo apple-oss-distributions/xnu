@@ -31,7 +31,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
 SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T6041 T8101 T8103 T8112 T8122 T8132 T8142 VMAPPLE
 
-SPTM_ENABLED_SOCS_MacOSX = t8112 t6020 t8122 t6030 t6031 t8132 t6041 t8142
+SPTM_ENABLED_SOCS_MacOSX = t6000 t8112 t6020 t8122 t6030 t6031 t8132 t6041 t8142
 EXCLAVES_ENABLED_SOCS_MacOSX = t8142
 
 
@@ -98,24 +98,27 @@ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=a
 # Deployment target flag
 #
 ifeq ($(PLATFORM),MacOSX)
-    DEPLOYMENT_TARGET_FLAGS = -mmacosx-version-min=$(SDKVERSION) -DXNU_TARGET_OS_OSX
+    DEPLOYMENT_TARGET_FLAGS = -mmacosx-version-min=$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS = -Wl,-macosx_version_min,$(SDKVERSION)
 else ifeq ($(PLATFORM),DriverKit)
-    DEPLOYMENT_TARGET_FLAGS = -target apple-driverkit$(SDKVERSION) -DXNU_TARGET_OS_OSX
+    DEPLOYMENT_TARGET_FLAGS = -target apple-driverkit$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS = -Wl,-target,apple-driverkit$(SDKVERSION)
 else ifeq ($(PLATFORM),WatchOS)
-    DEPLOYMENT_TARGET_FLAGS = -mwatchos-version-min=$(SDKVERSION) -DXNU_TARGET_OS_WATCH
+    DEPLOYMENT_TARGET_FLAGS = -mwatchos-version-min=$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS =
 else ifeq ($(PLATFORM),tvOS)
-    DEPLOYMENT_TARGET_FLAGS = -mtvos-version-min=$(SDKVERSION) -DXNU_TARGET_OS_TV
+    DEPLOYMENT_TARGET_FLAGS = -mtvos-version-min=$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS =
 else ifeq ($(PLATFORM),AppleTVOS)
-    DEPLOYMENT_TARGET_FLAGS = -mtvos-version-min=$(SDKVERSION) -DXNU_TARGET_OS_TV
+    DEPLOYMENT_TARGET_FLAGS = -mtvos-version-min=$(SDKVERSION)
 else ifeq ($(PLATFORM),BridgeOS)
-    DEPLOYMENT_TARGET_FLAGS = -mbridgeos-version-min=$(SDKVERSION) -DXNU_TARGET_OS_BRIDGE
+    DEPLOYMENT_TARGET_FLAGS = -mbridgeos-version-min=$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS =
+else ifeq ($(PLATFORM),XROS)
+    DEPLOYMENT_TARGET_FLAGS = -target unknown-apple-xros$(SDKVERSION)
+    DEPLOYMENT_LINKER_FLAGS = -Wl,-target,unknown-apple-xros$(SDKVERSION)
 else ifneq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS),$(PLATFORM)),)
-    DEPLOYMENT_TARGET_FLAGS = -miphoneos-version-min=$(SDKVERSION) -DXNU_TARGET_OS_IOS
+    DEPLOYMENT_TARGET_FLAGS = -miphoneos-version-min=$(SDKVERSION)
     DEPLOYMENT_LINKER_FLAGS = -Wl,-ios_version_min,$(SDKVERSION)
 else ifneq ($(filter $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
     DEPLOYMENT_TARGET_FLAGS =
@@ -125,8 +128,26 @@ else
     DEPLOYMENT_LINKER_FLAGS =
 endif
 
+ifeq ($(PLATFORM_FOR_CONFIG),MacOSX)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_OSX
+else ifeq ($(PLATFORM_FOR_CONFIG),DriverKit)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_OSX
+else ifeq ($(PLATFORM_FOR_CONFIG),WatchOS)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_WATCH
+else ifeq ($(PLATFORM_FOR_CONFIG),tvOS)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_TV
+else ifeq ($(PLATFORM_FOR_CONFIG),AppleTVOS)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_TV
+else ifeq ($(PLATFORM_FOR_CONFIG),BridgeOS)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_BRIDGE
+else ifeq ($(PLATFORM_FOR_CONFIG),XROS)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_XR
+else ifneq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS),$(PLATFORM_FOR_CONFIG)),)
+    DEPLOYMENT_TARGET_FLAGS += -DXNU_TARGET_OS_IOS
+endif
 
-DEPLOYMENT_TARGET_DEFINES = -DXNU_PLATFORM_$(PLATFORM)
+
+DEPLOYMENT_TARGET_DEFINES = -DXNU_PLATFORM_$(PLATFORM_FOR_CONFIG)
 
 
 #
@@ -190,6 +211,7 @@ WARNFLAGS_STD := \
 	-Wno-missing-variable-declarations \
 	-Wno-packed \
 	-Wno-padded \
+	-Wno-ms-bitfield-padding \
 	-Wno-partial-availability \
 	-Wno-reserved-id-macro \
 	-Wno-shift-sign-overflow \
@@ -204,12 +226,11 @@ WARNFLAGS_STD := \
 	-Wno-packed \
 	-Wno-cast-function-type-strict \
 	-Wno-incompatible-function-pointer-types-strict \
-	-Wno-four-char-constants
+	-Wno-four-char-constants \
+	-Wno-allocator-wrappers
 
 # Avoid lock-step changes between compiler submissions and xnu.
 WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-unknown-warning-option
-
-# When a new clang has new warnings disable them here until the kernel is fixed.
 
 WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-anon-enum-enum-conversion
 
@@ -230,6 +251,23 @@ WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-deprecated-volatile
 WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-incompatible-function-pointer-types-strict
 
 WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-cast-function-type-strict
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-bounds-safety-legacy-checks-enabled
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-nrvo
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-unterminated-string-initialization
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-unnecessary-virtual-specifier
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-global-constructors
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-uninitialized-const-pointer
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) -Wno-sometimes-uninitialized
+
+WARNFLAGS_STD := $(WARNFLAGS_STD) \
+	-Wno-quoted-include-in-framework-header
 
 WARNFLAGS_STD := $(WARNFLAGS_STD) \
 	-Wno-declaration-after-statement
@@ -509,7 +547,7 @@ ifeq ($(CURRENT_ARCH_CONFIG_LC),x86_64)
 	BOUND_CHECKS_SOFT := 0
 endif # x86_64
 
-# if BOUND_CHECKS_SOFT is enabled, ensure that BOUND_CHECKS is enabled as well
+# When BOUND_CHECKS_SOFT is enabled, ensure that BOUND_CHECKS is enabled as well
 ifneq ($(BOUND_CHECKS_SOFT),0)
     ifeq ($(BOUND_CHECKS),0)
         BOUND_CHECKS := 1
@@ -1168,7 +1206,6 @@ ifeq ($(XNU_CONFIG_TIGHTBEAM),1)
   endif # TIGHTBEAM_IN_SDK
 endif
 
-
 #
 # DTrace support
 #
@@ -1218,6 +1255,8 @@ MIGKSFLAGS = \
 MIGKUFLAGS = \
 	-DMACH_KERNEL_PRIVATE \
 	-DKERNEL_USER=1 \
+	-DEXC_SERVER_AUDITTOKEN=1 \
+	-DMACH_EXC_SERVER_AUDITTOKEN=1 \
 	-maxonstack 1024
 
 # Support for LLVM Profile Guided Optimization (PGO)
@@ -1284,6 +1323,21 @@ LDFLAGS_KERNEL_LTO =
 LDFLAGS_NOSTRIP_FLAG =
 LDFLAGS_KERNEL_STRIP_LTO =
 CFLAGS_NOLTO_FLAG =
+endif
+
+ifneq ($(SAVE_OPT_RECORD),)
+ifeq ($(USE_LTO),1)
+REMARKS_FLAGS = -Wl,-mllvm,--lto-pass-remarks-filter="$(SAVE_OPT_RECORD)" \
+                -Wl,-mllvm,--lto-pass-remarks-output=lto_remarks.opt.yaml \
+                -Wl,-mllvm,--lto-pass-remarks-format=yaml
+LDFLAGS_KERNEL_LTO += $(REMARKS_FLAGS)
+LDFLAGS_KERNEL_GEN += $(REMARKS_FLAGS)
+else
+REMARKS_FLAGS = -foptimization-record-passes="$(SAVE_OPT_RECORD)" \
+                -fsave-optimization-record=yaml
+CFLAGS_GEN += $(REMARKS_FLAGS)
+CXXFLAGS_GEN += $(REMARKS_FLAGS)
+endif
 endif
 
 #

@@ -955,9 +955,9 @@ set_recommended_cluster(char cluster_char)
 
 	buff[0] = cluster_char;
 
-	int ret = sysctlbyname("kern.sched_task_set_cluster_type", NULL, NULL, buff, 1);
+	int ret = sysctlbyname("kern.sched_task_set_pset_type", NULL, NULL, buff, 1);
 	if (ret != 0) {
-		perror("kern.sched_task_set_cluster_type");
+		perror("kern.sched_task_set_pset_type");
 	}
 
 	return ret;

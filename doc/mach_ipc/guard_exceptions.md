@@ -192,8 +192,8 @@ policy for this process.
 - **Target meaning**: always zero,
 - **Payload meaning**: violator port name.
 
-This exception is thrown when the `service_port_defense_enabled` bootarg is set and a
-process copyin a service port receive right from process other than launchd.
+This exception is thrown when a process copyin a service port receive right
+from process other than launchd.
 
 ### `kGUARD_EXC_UNGUARDED` 0x00000008
 
@@ -487,23 +487,14 @@ and the server, and a disagreement here is a programming mistake.
 
 This guard is only enabled on development kernels at this time.
 
-### `kGUARD_EXC_SERVICE_PORT_VIOLATION_NON_FATAL` 0x00100001
+### `kGUARD_EXC_MOVE_WEAK_REPLY_PORT` 0x00100004
 
 - **ReportCrash Name**: N/A,
-- **Target meaning**: the type of service port defense violation,
-- **Payload meaning**: violator port name if we have it, zero otherwise.
-
-This is the non fatal version of `kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL`, which is
-used when the `service_port_defense_enabled` bootarg is not set.
-
-### `kGUARD_EXC_MOVE_PROVISIONAL_REPLY_PORT` 0x00100004
-
-- **ReportCrash Name**: N/A,
-- **Target meaning**: the mach port name of the provisional reply port,
+- **Target meaning**: the mach port name of the weak reply port,
 - **Payload meaning**: always zero.
 
 This exception is thrown when a process opted for enhanced security v2 moves
-the receive right of a provisional reply port out of its ipc space.
+the receive right of a weak reply port out of its ipc space.
 
 ### `kGUARD_EXC_REPLY_PORT_SINGLE_SO_RIGHT` 0x00100005
 
@@ -515,6 +506,45 @@ This exception is thrown when a process attempts to create more than
 one single send-once right for a reply port. Reply ports are not allowed
 to extend more than one single send-once right at any given moment.
 
+### `kGUARD_EXC_INVALID_NOTIFICATION_PORT` 0x00100006
+
+- **ReportCrash Name**: N/A,
+- **Target meaning**: port name
+- **Payload meaning**: the IOT_ port type of the notification port
+
+This exception is thrown when a process attempts to register for a notification
+(such as port-destroyed, dead-name, or no-senders) using a port type that is
+not allowed to receive notifications.
+
+This is usually a programming mistake where the wrong port type was used when
+requesting notifications via `mach_port_request_notification()`.
+
+### `kGUARD_EXC_CV_NOTIFICATION_PORT_REQ` 0x00100008
+
+- **ReportCrash Name**: N/A,
+- **Target meaning**: port name
+- **Payload meaning**: the IOT_ port type of the notification port
+
+This exception is thrown when a containment vessel process attempts to register
+for a notification (such as port-destroyed, dead-name, or no-senders) without
+using the `IOT_NOTIFICATION_PORT` port type.
+
+Containment vessels are hardened processes that must use `IOT_NOTIFICATION_PORT`
+for all notification registrations to enforce strict security policies. This is
+usually a programming mistake where a containment vessel used a regular port
+type instead of `IOT_NOTIFICATION_PORT` when requesting notifications via
+`mach_port_request_notification()`.
+
+### `kGUARD_EXC_MACH_EXC_THREAD_SET_STATE` 0x00100007
+
+- **ReportCrash Name**: N/A,
+- **Target meaning**: The thread state flavor being set,
+- **Payload meaning**: The pid of the process which replied to the mach exception
+(0 if audit token was not present)
+
+This exception is thrown when a process attempts to set the thread state
+of another process via a reply to a mach exception without proper
+entitlements or debugging permissions.
 
 ### `kGUARD_EXC_MOD_REFS_NON_FATAL` 0x00200000
 
@@ -524,7 +554,6 @@ to extend more than one single send-once right at any given moment.
 
 This is the same as `kGUARD_EXC_MOD_REFS`, except that this is delivered as a
 soft error.
-
 
 ### `kGUARD_EXC_IMMOVABLE_NON_FATAL` 0x00400000
 

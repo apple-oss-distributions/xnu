@@ -1,0 +1,160 @@
+.\"
+.\" Copyright (c) 2025 Apple Inc.  All rights reserved.
+.\"
+.\" @APPLE_LICENSE_HEADER_START@
+.\"
+.\" This file contains Original Code and/or Modifications of Original Code
+.\" as defined in and that are subject to the Apple Public Source License
+.\" Version 2.0 (the 'License'). You may not use this file except in
+.\" compliance with the License. Please obtain a copy of the License at
+.\" http://www.opensource.apple.com/apsl/ and read it before using this
+.\" file.
+.\"
+.\" The Original Code and all software distributed under the License are
+.\" distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+.\" EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+.\" INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+.\" Please see the License for the specific language governing rights and
+.\" limitations under the License.
+.\"
+.\" @APPLE_LICENSE_HEADER_END@
+.\"
+.Dd October 22, 2025
+.Dt OPENAT_AUTHENTICATED_NP 2
+.Os Darwin
+.Sh NAME
+.Nm openat_authenticated_np
+.Nd open files with authenticated volume verification
+.Sh SYNOPSIS
+.Fd #include <fcntl.h>
+.Ft int
+.Fo openat_authenticated_np
+.Fa "int fd"
+.Fa "const char *path"
+.Fa "int flags"
+.Fa "int authfd"
+.Fc
+.Sh DESCRIPTION
+The
+.Fn openat_authenticated_np
+function is a non-portable extension to the standard
+.Xr openat 2
+system call that provides authenticated volume verification capabilities.
+.Pp
+.Fn openat_authenticated_np
+opens a file specified by
+.Fa path
+relative to the directory
+.Fa fd ,
+ensuring it resides within an authenticated volume.
+The optional
+.Fa authfd
+parameter, when provided, ensures that the target file resides in the same authenticated volume as the file referenced by that file descriptor.
+.Pp
+The
+.Fa flags
+parameter has the same meaning as in
+.Xr openat 2 ,
+with the restriction that file creation is not supported.
+If
+.Dv O_CREAT
+is specified in
+.Fa flags ,
+the function will fail with
+.Er EINVAL .
+.Pp
+If
+.Fa fd
+is
+.Dv AT_FDCWD ,
+the current working directory is used and the behavior is similar to
+.Xr open 2 .
+.Pp
+If
+.Fa authfd
+is
+.Dv AUTH_OPEN_NOAUTHFD ,
+no authentication file descriptor is used and the function operates without volume authentication constraints.
+Otherwise,
+.Fa authfd
+must be a valid file descriptor that serves as the authentication reference for volume verification.
+.Sh RETURN VALUES
+Upon successful completion,
+.Fn openat_authenticated_np
+returns a non-negative file descriptor.
+Otherwise, it returns -1 and sets
+.Va errno
+to indicate the error.
+.Sh ERRORS
+In addition to the errors returned by
+.Xr openat 2 ,
+.Fn openat_authenticated_np
+may fail with:
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Dv O_CREAT
+was specified in
+.Fa flags .
+.It Bq Er EBADF
+.Fa authfd
+is not
+.Dv AUTH_OPEN_NOAUTHFD
+and is not a valid file descriptor.
+.It Bq Er EPERM
+The calling process does not have permission to perform authenticated volume access.
+.It Bq Er ENOTSUP
+The underlying file system does not support authenticated volume verification.
+.El
+.Sh EXAMPLES
+Open a file ensuring it resides in the same authenticated volume as another file:
+.Bd -literal -offset indent
+int dirfd = open("/some/directory", O_RDONLY);
+int authfd = open("/path/to/auth/file", O_RDONLY);
+int fd = openat_authenticated_np(dirfd, "filename",
+                                O_RDONLY, authfd);
+if (fd == -1) {
+    perror("openat_authenticated_np");
+    exit(1);
+}
+close(authfd);
+close(dirfd);
+.Ed
+.Pp
+Open a file without volume authentication constraints:
+.Bd -literal -offset indent
+int dirfd = open("/some/directory", O_RDONLY);
+int fd = openat_authenticated_np(dirfd, "filename",
+                                O_RDONLY, AUTH_OPEN_NOAUTHFD);
+if (fd == -1) {
+    perror("openat_authenticated_np");
+    exit(1);
+}
+close(dirfd);
+.Ed
+.Sh COMPATIBILITY
+This function is a non-portable Apple extension and is not available on other operating systems.
+Code using this function should include appropriate conditional compilation directives for portability.
+.Pp
+The
+.Dv _DARWIN_C_SOURCE
+feature test macro must be defined to access the authentication constants.
+.Sh SEE ALSO
+.Xr open 2 ,
+.Xr openat 2 ,
+.Xr close 2 ,
+.Xr fcntl 2
+.Sh HISTORY
+The
+.Fn openat_authenticated_np
+function was introduced in macOS 13.0 to provide authenticated file access capabilities for system frameworks requiring volume authentication verification.
+.Sh NOTES
+This function is primarily intended for use by system frameworks and applications that need authenticated volume verification.
+Most applications should use the standard
+.Xr open 2
+and
+.Xr openat 2
+functions unless specific authentication features are required.
+.Pp
+The function operates in read-only mode for authentication purposes and does not support file creation.
+Applications should create files using standard functions and then open them with authentication if needed.

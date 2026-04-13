@@ -64,7 +64,7 @@ typedef test_result_t (*test_fn_t)(
 	mach_vm_address_t start,
 	mach_vm_size_t size);
 
-/* single entry */
+/* single entry, null object */
 
 static inline vm_config_t *
 configure_single_entry_1(void)
@@ -110,6 +110,75 @@ configure_single_entry_4(void)
 		END_ENTRIES
 	};
 	return make_vm_config("single entry > middle pages", templates,
+	           DEFAULT_PARTIAL_ENTRY_SIZE / 2, -(DEFAULT_PARTIAL_ENTRY_SIZE / 2));
+}
+
+/* single entry, non-null object */
+
+static inline vm_config_t *
+configure_single_entry_nonnull_1(void)
+{
+	/* one entry, tested address range is the entire entry */
+	vm_object_template_t object_templates[] = {
+		vm_object_template(.fill_pattern = {Fill, 0x1234567890abcdef}),
+		END_OBJECTS
+	};
+	vm_entry_template_t templates[] = {
+		vm_entry_template(.object = &object_templates[0]),
+		END_ENTRIES
+	};
+	return make_vm_config("single entry > entire entry, nonnull object",
+	           templates, object_templates);
+}
+
+static inline vm_config_t *
+configure_single_entry_nonnull_2(void)
+{
+	/* one entry, tested address range includes only the first part of it */
+	vm_object_template_t object_templates[] = {
+		vm_object_template(.fill_pattern = {Fill, 0x1234567890abcdef}),
+		END_OBJECTS
+	};
+	vm_entry_template_t templates[] = {
+		vm_entry_template(.object = &object_templates[0]),
+		END_ENTRIES
+	};
+	return make_vm_config("single entry > first pages, nonnull object",
+	           templates, object_templates,
+	           0, -DEFAULT_PARTIAL_ENTRY_SIZE);
+}
+
+static inline vm_config_t *
+configure_single_entry_nonnull_3(void)
+{
+	/* one entry, tested address range includes only the last part of it */
+	vm_object_template_t object_templates[] = {
+		vm_object_template(.fill_pattern = {Fill, 0x1234567890abcdef}),
+		END_OBJECTS
+	};
+	vm_entry_template_t templates[] = {
+		vm_entry_template(.object = &object_templates[0]),
+		END_ENTRIES
+	};
+	return make_vm_config("single entry > last pages, nonnull object",
+	           templates, object_templates,
+	           DEFAULT_PARTIAL_ENTRY_SIZE, 0);
+}
+
+static inline vm_config_t *
+configure_single_entry_nonnull_4(void)
+{
+	/* one entry, tested address range includes only the middle part of it */
+	vm_object_template_t object_templates[] = {
+		vm_object_template(.fill_pattern = {Fill, 0x1234567890abcdef}),
+		END_OBJECTS
+	};
+	vm_entry_template_t templates[] = {
+		vm_entry_template(.object = &object_templates[0]),
+		END_ENTRIES
+	};
+	return make_vm_config("single entry > middle pages, nonnull object",
+	           templates, object_templates,
 	           DEFAULT_PARTIAL_ENTRY_SIZE / 2, -(DEFAULT_PARTIAL_ENTRY_SIZE / 2));
 }
 
@@ -591,16 +660,20 @@ configure_shared_entry_x1000(void)
 	/*
 	 * Many entries, all shared.
 	 * The address range covers all entries.
+	 * Each entry is xnu PAGE_SIZE bytes to accommodate Rosetta Intel on ARM.
 	 */
 	vm_object_template_t object_templates[] = {
-		vm_object_template(.size = PAGE_SIZE),
+		vm_object_template(.size = xnu_vm_page_size()),
 		END_OBJECTS
 	};
 
 	const unsigned count = 1000;  /* 1000 shared entries */
 	vm_entry_template_t *templates = calloc(sizeof(templates[0]), count + 1);  /* ... plus 1 END_ENTRIES entry */
 	for (unsigned i = 0; i < count; i++) {
-		templates[i] = vm_entry_template(.share_mode = SM_SHARED, .object = &object_templates[0], .size = PAGE_SIZE);
+		templates[i] = vm_entry_template(
+			.share_mode = SM_SHARED,
+			.object = &object_templates[0],
+			.size = xnu_vm_page_size());
 	}
 	templates[count] = END_ENTRIES;
 	vm_config_t *result = make_vm_config("sharing > 1000 shared entries", templates, object_templates);
@@ -1580,6 +1653,11 @@ typedef struct {
 	test_fn_t single_entry_3;
 	test_fn_t single_entry_4;
 
+	test_fn_t single_entry_nonnull_1;
+	test_fn_t single_entry_nonnull_2;
+	test_fn_t single_entry_nonnull_3;
+	test_fn_t single_entry_nonnull_4;
+
 	test_fn_t multiple_entries_1;
 	test_fn_t multiple_entries_2;
 	test_fn_t multiple_entries_3;
@@ -1709,7 +1787,7 @@ test_is_unimplemented(
  * https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment#Determine-Whether-Your-App-Is-Running-as-a-Translated-Binary
  */
 static bool
-isRosetta()
+isRosetta(void)
 {
 #if KERNEL
 	return false;
@@ -1722,23 +1800,6 @@ isRosetta()
 	}
 	return false;
 #endif
-}
-
-/*
- * Return true if the task map's page size is less than the VM page size.
- * (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT)
- * for example, Rosetta Intel on ARM
- */
-static inline bool
-task_page_size_less_than_vm_page_size(void)
-{
-	size_t map_page_size = PAGE_SIZE;
-	uint32_t vm_page_size = 0;
-	size_t len = sizeof(vm_page_size);
-	int err = sysctlbyname("vm.pagesize", &vm_page_size, &len, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "sysctlbyname('vm.pagesize')");
-	T_QUIET; T_ASSERT_GE(len, sizeof(vm_page_size), "sysctl result size");
-	return map_page_size < vm_page_size;
 }
 
 extern void
@@ -1783,6 +1844,12 @@ run_vm_tests(
 	                configure_##testname, tests->testname);         \
 	    }                                                           \
 	})
+
+	/* single vm map entry and parts thereof, no holes, nonnull object */
+	RUN_TEST(single_entry_nonnull_1);
+	RUN_TEST(single_entry_nonnull_2);
+	RUN_TEST(single_entry_nonnull_3);
+	RUN_TEST(single_entry_nonnull_4);
 
 	/* single vm map entry and parts thereof, no holes */
 	RUN_TEST(single_entry_1);

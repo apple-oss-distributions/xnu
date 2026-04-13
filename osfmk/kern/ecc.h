@@ -29,45 +29,26 @@
 #pragma once
 
 #include <mach/kern_return.h>
-#include <stdint.h>
-#include <sys/cdefs.h>
 #include <mach/vm_types.h>
+#include <stddef.h>
+#include <sys/cdefs.h>
 
 __BEGIN_DECLS
 
 #ifdef XNU_KERNEL_PRIVATE
-extern ppnum_t *ecc_bad_pages;
-extern uint32_t ecc_bad_pages_count;
+extern const ppnum_t *ecc_bad_pages;
+extern size_t ecc_bad_pages_count;
 
 /* Counts for sysctls*/
 extern uint32_t vm_ecc_db_pages_count;
 extern uint32_t vm_ecc_zero_pages_count;
 extern uint32_t vm_ecc_panic_pages_count;
 extern uint32_t vm_ecc_max_db_pages;
-#endif
-
-/* Old ECC logging mechanism */
-
-#define ECC_EVENT_INFO_DATA_ENTRIES     8
-struct ecc_event {
-	uint8_t         id;     // ID of memory (e.g. L2C), platform-specific
-	uint8_t         count;  // Of uint64_t's used, starting at index 0
-	uint64_t        data[ECC_EVENT_INFO_DATA_ENTRIES] __attribute__((aligned(8))); // Event-specific data
-};
-
-#ifdef KERNEL_PRIVATE
-extern kern_return_t    ecc_log_record_event(const struct ecc_event *ev);
-#endif
-
-#ifdef XNU_KERNEL_PRIVATE
-#include <mach/vm_param.h>
 
 #define ECC_PANIC_PAGE_MAGIC 0xEC
 #define ECC_PANIC_PAGE_SIGN ((1ULL << 63) | (ECC_PANIC_PAGE_MAGIC))
 #define ECC_PANIC_PAGE_MASK ((1ULL << 63) | (PAGE_MASK))
-extern kern_return_t    ecc_log_get_next_event(struct ecc_event *ev);
-extern uint32_t         ecc_log_get_correction_count(void);
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 
 #define ECC_TESTING (DEVELOPMENT || DEBUG)
 
@@ -87,8 +68,8 @@ __options_decl(ecc_flags_t, uint32_t, {
 	ECC_IS_TEST_ERROR               = 0x00000004,
 	/* Do not trigger a CA report, just record to the DB (for testing purposes) */
 	ECC_DB_ONLY                     = 0x00000008,
-	/* Filter out the given address from the DB*/
-	ECC_REMOVE_ADDR                     = 0x00000010
+	/* Remove the address from the DB. */
+	ECC_REMOVE_ADDR                 = 0x00000010
 });
 
 /**
@@ -178,7 +159,7 @@ typedef struct {
 	/* MemCache one bit error bit offset of first one bit error with in half cache line. */
 	uint32_t bit_off_within_hcl;
 } mcc_ecc_event_t;
-_Static_assert(sizeof(mcc_ecc_event_t) == 10 * sizeof(uint32_t), "ecc_event_t size must be updated in memory_error_notification.defs");
+_Static_assert(sizeof(mcc_ecc_event_t) == 10 * sizeof(uint32_t), "mcc_ecc_event_t size must be updated in memory_error_notification.defs");
 
 #if KERNEL_PRIVATE
 
@@ -236,5 +217,25 @@ kern_return_t
 mcc_log_memory_error(mcc_ecc_event_t event);
 
 #endif /* KERNEL_PRIVATE */
+
+/**
+ * Old ECC logging mechanism.
+ */
+
+#define ECC_EVENT_INFO_DATA_ENTRIES     8
+struct ecc_event {
+	uint8_t         id;     // ID of memory (e.g. L2C), platform-specific
+	uint8_t         count;  // Of uint64_t's used, starting at index 0
+	uint64_t        data[ECC_EVENT_INFO_DATA_ENTRIES] __attribute__((aligned(8))); // Event-specific data
+};
+
+#ifdef KERNEL_PRIVATE
+extern kern_return_t    ecc_log_record_event(const struct ecc_event *ev);
+#endif
+
+#ifdef XNU_KERNEL_PRIVATE
+extern kern_return_t    ecc_log_get_next_event(struct ecc_event *ev);
+extern uint32_t         ecc_log_get_correction_count(void);
+#endif
 
 __END_DECLS

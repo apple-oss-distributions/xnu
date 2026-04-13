@@ -58,6 +58,7 @@ extern unsigned int memorystatus_frozen_processes_max;
 extern unsigned int memorystatus_frozen_shared_mb;
 extern unsigned int memorystatus_frozen_shared_mb_max;
 extern unsigned int memorystatus_freeze_shared_mb_per_process_max; /* Max. MB allowed per process to be freezer-eligible. */
+extern boolean_t    memorystatus_freeze_shared_memory; /* Whether to freeze shared memory */
 extern unsigned int memorystatus_freeze_private_shared_pages_ratio; /* Ratio of private:shared pages for a process to be freezer-eligible. */
 extern unsigned int memorystatus_thaw_count; /* # of processes that have been thawed in the current interval. */
 extern unsigned int memorystatus_refreeze_eligible_count; /* # of processes currently thawed i.e. have state on disk & in-memory */
@@ -88,7 +89,22 @@ extern int memorystatus_entitled_max_task_footprint_mb;
 #define FREEZE_DAILY_MB_MAX_DEFAULT       2048
 #define FREEZE_DEGRADATION_BUDGET_THRESHOLD     25 //degraded perf. when the daily budget left falls below this threshold percentage
 
+/*
+ * System-wide frozen shared memory limit, expressed as a percentage of 'max_task_footprint_mb'.
+ */
 #define MAX_FROZEN_SHARED_MB_PERCENT 10
+
+/*
+ * Per-process frozen shared memory limit, expressed as a percentage of the system-wide frozen shared memory limit.
+ * e.g. "25" means that if any single process holds more than 25% of the total system-wide frozen shared memory allowance,
+ * that process will not be frozen.
+ */
+#if XNU_TARGET_OS_WATCH
+#define MAX_FROZEN_SHARED_MB_PER_PROCESS_PERCENT 33
+#else
+#define MAX_FROZEN_SHARED_MB_PER_PROCESS_PERCENT 25
+#endif
+
 #define MAX_FROZEN_PROCESS_DEMOTIONS_DEFAULT 2
 #define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED_DEFAULT 4
 #define MIN_THAW_DEMOTION_THRESHOLD_DEFAULT  5

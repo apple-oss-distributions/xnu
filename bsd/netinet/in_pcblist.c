@@ -484,6 +484,36 @@ done:
 }
 
 static void
+inpcb_log_get_if_ports_used(const struct socket *so, const struct inpcb *inp, const ifnet_t ifp,
+    const char *msg)
+{
+	char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+	char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+	char pname[MAXCOMLEN + 1] = {};
+
+	proc_name(so->last_pid, pname, sizeof(pname));
+
+	if ((inp->inp_vflag & INP_IPV4) != 0) {
+		inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
+		    lbuf, sizeof(lbuf));
+		inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
+		    fbuf, sizeof(fbuf));
+	} else {
+		inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
+		    lbuf, sizeof(lbuf));
+		inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
+		    fbuf, sizeof(fbuf));
+	}
+
+	os_log(wake_packet_log_handle,
+	    "inpcb_get_if_ports_used: %s %s %s:%u %s:%u ifp %s proc %s:%d",
+	    msg != NULL ? msg : "",
+	    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
+	    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
+	    ifp->if_xname, pname, so->last_pid);
+}
+
+static void
 inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
     bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)) bitfield, struct inpcbinfo *pcbinfo)
 {
@@ -494,6 +524,7 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 	bool recvanyifonly, extbgidleok;
 	bool activeonly;
 	bool anytcpstateok;
+	bool boundif;
 
 	if (ifp == NULL) {
 		return;
@@ -505,6 +536,8 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 	extbgidleok = ((flags & IFNET_GET_LOCAL_PORTS_EXTBGIDLEONLY) != 0);
 	activeonly = ((flags & IFNET_GET_LOCAL_PORTS_ACTIVEONLY) != 0);
 	anytcpstateok = ((flags & IFNET_GET_LOCAL_PORTS_ANYTCPSTATEOK) != 0);
+	boundif = (flags & IFNET_GET_LOCAL_PORTS_BOUNDIF) != 0 ||
+	    (ports_used_include_boundif != 0);
 
 	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	gencnt = pcbinfo->ipi_gencnt;
@@ -589,39 +622,23 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			continue;
 		}
 
+		/*
+		 * If bound to an address:
+		 * - either inp_last_outifp matches as set by in_pcbbind
+		 * - or the boundif flags is requested and the interface matches
+		 */
 		if (!iswildcard &&
-		    !(inp->inp_last_outifp == NULL || ifp == inp->inp_last_outifp)) {
+		    !(inp->inp_last_outifp == NULL || ifp == inp->inp_last_outifp) &&
+		    !(boundif && ifp == inp->inp_boundifp)) {
 			continue;
 		}
 
 		if (!iswildcard && (ifp->if_eflags & IFEF_AWDL) != 0) {
 			if (inp->inp_route.ro_rt == NULL ||
 			    (inp->inp_route.ro_rt->rt_flags & (RTF_UP | RTF_CONDEMNED)) != RTF_UP) {
-#if DEBUG || DEVELOPMENT
-				char lbuf[MAX_IPv6_STR_LEN + 6] = {};
-				char fbuf[MAX_IPv6_STR_LEN + 6] = {};
-				char pname[MAXCOMLEN + 1];
-
-				proc_name(so->last_pid, pname, sizeof(pname));
-
-				if (protocol == PF_INET) {
-					inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
-					    lbuf, sizeof(lbuf));
-					inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
-					    fbuf, sizeof(fbuf));
-				} else {
-					inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
-					    lbuf, sizeof(lbuf));
-					inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
-					    fbuf, sizeof(fbuf));
+				if (if_ports_used_verbose > 0) {
+					inpcb_log_get_if_ports_used(so, inp, ifp, "route is down");
 				}
-
-				os_log(wake_packet_log_handle,
-				    "inpcb_get_if_ports_used: route is down %s %s:%u %s:%u ifp %s proc %s:%d",
-				    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
-				    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
-				    ifp->if_xname, pname, so->last_pid);
-#endif /* DEBUG || DEVELOPMENT */
 				continue;
 			}
 		}
@@ -693,34 +710,9 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			}
 		}
 
-#if DEBUG || DEVELOPMENT
-		if ((so->so_options & SO_NOWAKEFROMSLEEP) && !nowakeok) {
-			char lbuf[MAX_IPv6_STR_LEN + 6] = {};
-			char fbuf[MAX_IPv6_STR_LEN + 6] = {};
-			char pname[MAXCOMLEN + 1];
-
-			proc_name(so->last_pid, pname, sizeof(pname));
-
-			if (protocol == PF_INET) {
-				inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
-				    lbuf, sizeof(lbuf));
-				inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
-				    fbuf, sizeof(fbuf));
-			} else {
-				inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
-				    lbuf, sizeof(lbuf));
-				inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
-				    fbuf, sizeof(fbuf));
-			}
-
-			os_log(wake_packet_log_handle,
-			    "inpcb_get_if_ports_used: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
-			    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
-			    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
-			    ifp->if_xname, pname, so->last_pid);
+		if (if_ports_used_verbose > 1 && (so->so_options & SO_NOWAKEFROMSLEEP) && !nowakeok) {
+			inpcb_log_get_if_ports_used(so, inp, ifp, "no wake from sleep");
 		}
-#endif /* DEBUG || DEVELOPMENT */
-
 
 		/*
 		 * When the socket has "no wake from sleep" option, do not set the port in the bitmap

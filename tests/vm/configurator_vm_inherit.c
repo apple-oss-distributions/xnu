@@ -104,6 +104,11 @@ T_DECL(vm_inherit,
 		.single_entry_3 = successful_vm_inherit,
 		.single_entry_4 = successful_vm_inherit,
 
+		.single_entry_nonnull_1 = successful_vm_inherit,
+		.single_entry_nonnull_2 = successful_vm_inherit,
+		.single_entry_nonnull_3 = successful_vm_inherit,
+		.single_entry_nonnull_4 = successful_vm_inherit,
+
 		.multiple_entries_1 = successful_vm_inherit,
 		.multiple_entries_2 = successful_vm_inherit,
 		.multiple_entries_3 = successful_vm_inherit,

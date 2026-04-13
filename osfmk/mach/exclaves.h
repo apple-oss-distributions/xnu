@@ -39,6 +39,8 @@
 #endif /* defined(KERNEL) */
 
 
+#define EXCLAVES_DAEMON_NOTIFICATIONS 1
+
 __BEGIN_DECLS
 
 typedef uint64_t exclaves_id_t;
@@ -63,6 +65,7 @@ OS_ENUM(exclaves_sensor_status, uint32_t,
     EXCLAVES_SENSOR_STATUS_DENIED = 2,
     EXCLAVES_SENSOR_STATUS_CONTROL = 3,
     EXCLAVES_SENSOR_STATUS_PENDING = 4,
+    EXCLAVES_SENSOR_STATUS_EXPIRED = 5,
     );
 
 OS_CLOSED_OPTIONS(exclaves_buffer_perm, uint32_t,
@@ -180,6 +183,23 @@ OS_CLOSED_OPTIONS(exclaves_requirement, uint64_t,
     EXCLAVES_R_EXCLAVEKIT   = 0x1000,
 
     );
+
+/*
+ * a description of the service's worker threads' QoS properties
+ */
+typedef uint64_t exclaves_aoe_sched_cat_t;
+
+/*!
+ * @struct exclaves_aoe_service_info_t
+ *
+ * @brief
+ * User representation of an AOE service
+ */
+typedef struct exclaves_aoe_service_info {
+	uint64_t id;
+	exclaves_aoe_sched_cat_t sc;
+	uint8_t nworkers;
+} exclaves_aoe_service_info_t;
 
 #if !defined(KERNEL)
 
@@ -356,6 +376,9 @@ exclaves_inbound_buffer_copyin(mach_port_t inbound_buffer_port,
  * @function exclaves_named_buffer_create
  *
  * @abstract
+ * DEPRECATED! use exclaves_outbound_buffer_create() or
+ * exclaves_inbound_buffer_create() instead.
+ *
  * Setup access by xnu to a pre-defined named exclaves shared memory buffer
  * and return a mach port for it.
  *
@@ -385,6 +408,8 @@ exclaves_named_buffer_create(mach_port_t port, exclaves_id_t buffer_id,
  * @function exclaves_named_buffer_copyin
  *
  * @abstract
+ * DEPRECATED! use exclaves_inbound_buffer_copyin() instead.
+ *
  * Copy from specified userspace buffer into previously setup named exclaves
  * shared memory buffer.
  *
@@ -412,6 +437,8 @@ exclaves_named_buffer_copyin(mach_port_t named_buffer_port,
  * @function exclaves_named_buffer_copyout
  *
  * @abstract
+ * DEPRECATED! use exclaves_outbound_buffer_copyout() instead.
+ *
  * Copy out to specified userspace buffer from previously setup named exclaves
  * shared memory buffer.
  *
@@ -468,15 +495,15 @@ exclaves_boot(mach_port_t port, exclaves_boot_stage_t boot_stage);
  * String name of buffer to operate on.
  *
  * @param size
- * Size of requested named buffer.
+ * Size of requested audio buffer.
  *
  * @param audio_buffer_port
  * Out parameter filled in with mach port name for the newly created named
  * buffer object, must be mach_port_deallocate()d to tear down the access to
  * the named buffer.
  *
- * Audio buffers are distiguished from general named buffers as shared memory
- * is arbitrated by the EIC.
+ * Audio buffers are distiguished from general shared buffers as access to the
+ * contents of the shared memory is arbitrated by the EIC.
  *
  * @result
  * KERN_SUCCESS or mach system call error code.
@@ -527,7 +554,6 @@ exclaves_audio_buffer_copyout(mach_port_t audio_buffer_port,
     mach_vm_address_t dst_buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
     mach_vm_size_t size2, mach_vm_size_t offset2);
 
-
 /*!
  * @function exclaves_audio_buffer_copyout_with_status
  *
@@ -561,7 +587,7 @@ exclaves_audio_buffer_copyout(mach_port_t audio_buffer_port,
  * Offset in shared memory buffer to start copy at.
  *
  * @param status
- * Out parameter filled in with the sensor status if the copyout succeeds.
+ * Out parameter filled in with the sensor status if this call returns success.
  *
  * @result
  * KERN_SUCCESS or mach system call error code.
@@ -572,6 +598,86 @@ exclaves_audio_buffer_copyout_with_status(mach_port_t audio_buffer_port,
     mach_vm_address_t dst_buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
     mach_vm_size_t size2, mach_vm_size_t offset2,
     exclaves_sensor_status_t *status);
+
+/*!
+ * @function exclaves_arbitrated_buffer_create
+ *
+ * @abstract
+ * Setup access by xnu to a pre-defined named exclaves arbitrated shared memory
+ * buffer and return a mach port for it.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param buffer_name
+ * String name of buffer to operate on.
+ *
+ * @param size
+ * Size of requested arbitrated buffer.
+ *
+ * @param arbitrated_buffer_port
+ * Out parameter filled in with mach port name for the newly created arbitrated
+ * buffer object, must be mach_port_deallocate()d to tear down the access to
+ * the arbitrated buffer.
+ *
+ * Arbitrated buffers are distiguished from general shared buffers as access to
+ * the contents of the shared memory is arbitrated by the EIC.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4), visionos(26.4))
+kern_return_t
+exclaves_arbitrated_buffer_create(mach_port_t port, const char * buffer_name,
+    mach_vm_size_t size, mach_port_t *arbitrated_buffer_port);
+
+/*!
+ * @function exclaves_arbitrated_buffer_copyout
+ *
+ * @abstract
+ * Copy out to specified userspace buffer from previously setup named exclaves
+ * arbitrated shared memory buffer.
+ *
+ * Arbitrated buffers are arbitrated via the EIC and this call will return
+ * a status other than EXCLAVES_SENSOR_STATUS_ALLOWED when access to the sensor
+ * associated with the arbitrated buffer is not granted, in which case the
+ * specified output buffer range will be zeroed instead.
+ *
+ * The additional parameters provided are passed along to the EIC to make an
+ * arbitration decision specific to the type of the named arbitrated buffer.
+ *
+ * @param arbitrated_buffer_port
+ * An arbitrated buffer port name returned from
+ * exclaves_arbitrated_buffer_create()
+ *
+ * @param dst_buffer
+ * Pointer to userspace buffer to copy out from arbitrated buffer.
+ *
+ * @param size
+ * Number of bytes to copy (<= size of specified userspace buffer).
+ *
+ * @param offset
+ * Offset in shared memory buffer to start copy at.
+ *
+ * @param param1
+ * Additional buffer-type-specific parameter to pass along to the EIC.
+ *
+ * @param param2
+ * Additional buffer-type-specific parameter to pass along to the EIC.
+ *
+ * @param status
+ * Out parameter filled in with the sensor status if this call returns success.
+ * If status is not EXCLAVES_SENSOR_STATUS_ALLOWED, the userspace buffer was
+ * zeroed instead.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4), visionos(26.4))
+kern_return_t
+exclaves_arbitrated_buffer_copyout(mach_port_t arbitrated_buffer_port,
+    mach_vm_address_t dst_buffer, mach_vm_size_t size, mach_vm_size_t offset,
+    uint64_t param1, uint64_t param2, exclaves_sensor_status_t *status);
 
 /*!
  * @function exclaves_sensor_create
@@ -764,7 +870,62 @@ kern_return_t
 exclaves_notification_create(mach_port_t port, const char *name, uint64_t *notification_id);
 
 /*!
+ * @function exclaves_daemon_notification_register
+ *
+ * @abstract
+ * Allows launchd to register a Darwin Notification.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param conclave_name
+ * The daemon's conclave name string.
+ *
+ * @param notification_name
+ * The notification identifier string.
+ *
+ * @param send_right
+ * Mach port send right that the kernel will use to send notifications to.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4), xros(26.4))
+kern_return_t
+exclaves_daemon_notification_register(mach_port_t port, const char *conclave_name,
+    const char *notification_name, mach_port_name_t send_right);
+
+/*!
+ * @function exclaves_daemon_notification_deregister
+ *
+ * @abstract
+ * Allows launchd to deregister a Darwin Notification.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param conclave_name
+ * The daemon's conclave name string.
+ *
+ * @param notification_name
+ * The notification identifier string.
+ *
+ * @param send_right
+ * Mach port to stop sending notifications to.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(26.4), ios(26.4), tvos(26.4), watchos(26.4), xros(26.4))
+kern_return_t
+exclaves_daemon_notification_deregister(mach_port_t port, const char *conclave_name,
+    const char *notification_name, mach_port_name_t send_right);
+
+/*!
  * @function exclaves_aoe_setup
+ *
+ * Use of exclaves_aoe_enumerate_and_setup_services preferred;
+ * this function included for legacy AOEd compatibility.
  *
  * @abstract
  * Discover the number of threads this always-on conclave supports.
@@ -786,6 +947,48 @@ kern_return_t
 exclaves_aoe_setup(mach_port_t port, uint8_t *num_message, uint8_t *num_worker);
 
 /*!
+ * @function exclaves_aoe_enumerate_and_setup_services
+ *
+ * @abstract
+ * Discover the number of services this always-on conclave contains.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param num_services
+ * Returns the number of services
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), xros(3.0))
+kern_return_t
+exclaves_aoe_enumerate_and_setup_services(mach_port_t port, uint8_t *num_services);
+
+/*!
+ * @function exclaves_aoe_get_all_service_infos
+ *
+ * @abstract
+ * Discover information about each service within this always-on conclave.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param sinfos
+ * Returns an exclaves_aoe_service_info_t for all services
+ *
+ * @param sinfos_size
+ * The size of the sinfos buffer
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), xros(3.0))
+kern_return_t
+exclaves_aoe_get_all_service_infos(mach_port_t port, exclaves_aoe_service_info_t *sinfos,
+    mach_vm_size_t sinfos_size);
+
+/*!
  * @function exclaves_aoe_work_loop
  *
  * @abstract
@@ -802,6 +1005,25 @@ kern_return_t
 exclaves_aoe_work_loop(mach_port_t port);
 
 /*!
+ * @function exclaves_aoe_work_loop
+ *
+ * @abstract
+ * Enter the always-on exclaves worker run loop. This function never returns.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param service_id
+ * The id of the AOE endpoint this worker thread will serve.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), xros(3.0))
+kern_return_t
+exclaves_aoe_work_loop_with_service_id(mach_port_t port, uint64_t service_id);
+
+/*!
  * @function exclaves_aoe_message_loop
  *
  * @abstract
@@ -816,6 +1038,25 @@ exclaves_aoe_work_loop(mach_port_t port);
 SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), xros(3.0))
 kern_return_t
 exclaves_aoe_message_loop(mach_port_t port);
+
+/*!
+ * @function exclaves_aoe_message_loop
+ *
+ * @abstract
+ * Enter the always-on exclaves message loop. This function never returns.
+ *
+ * @param port
+ * Reserved, must be MACH_PORT_NULL for now.
+ *
+ * @param service_id
+ * The id of the AOE endpoint this message thread will serve.
+ *
+ * @result
+ * KERN_SUCCESS or mach system call error code.
+ */
+SPI_AVAILABLE(macos(16.0), ios(19.0), tvos(19.0), watchos(12.0), xros(3.0))
+kern_return_t
+exclaves_aoe_message_loop_with_service_id(mach_port_t port, uint64_t service_id);
 
 #else /* defined(KERNEL) */
 
@@ -1073,53 +1314,22 @@ exclaves_sensor_tick_rate(uint64_t rate_hz);
 kern_return_t
 exclaves_display_healthcheck_rate(uint64_t ns);
 
-#endif /* defined(KERNEL) */
-
-#if defined(MACH_KERNEL_PRIVATE)
-
-/* -------------------------------------------------------------------------- */
-
-/* Internal kernel interface */
-
 /*!
- * @function exclaves_indicator_metrics_report
+ * @function exclaves_get_status
  *
  * @abstract
- * Get ExclaveIndicatorController metrics and report them to CoreAnalytics
+ * Return the current running status of exclaves. This function will block until
+ * exclaves has booted, failed to boot, or are known to be not available.
+ *
+ * @result
+ * The status of exclaves.
  */
-extern void
-exclaves_indicator_metrics_report(void);
+exclaves_status_t
+exclaves_get_status(void);
 
-extern kern_return_t
-exclaves_thread_terminate(thread_t thread);
-
-extern bool
-exclaves_booted(void);
-
-extern size_t
-exclaves_ipc_buffer_count(void);
-
-OS_ENUM(exclaves_clock_type, uint8_t,
-    EXCLAVES_CLOCK_ABSOLUTE = 0,
-    EXCLAVES_CLOCK_CONTINUOUS = 1,
-    );
-
-extern void
-exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset);
-
-typedef struct {
-	void *ipcb;
-	unsigned long scid;
-	uint64_t usecnt;
-} exclaves_ctx_t;
-
-extern void
-exclaves_early_init(void);
-
-#endif /* defined(MACH_KERNEL_PRIVATE) */
+#endif /* defined(KERNEL) */
 
 /* -------------------------------------------------------------------------- */
-
 /* Private interface between Libsyscall and xnu */
 
 OS_ENUM(exclaves_ctl_op, uint8_t,
@@ -1141,6 +1351,14 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
     EXCLAVES_CTL_OP_AOE_MESSAGE_LOOP = 16,
     EXCLAVES_CTL_OP_AOE_WORK_LOOP = 17,
     EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME = 18,
+    EXCLAVES_CTL_OP_ARBITRATED_BUFFER_CREATE = 19,
+    EXCLAVES_CTL_OP_ARBITRATED_BUFFER_COPYOUT = 20,
+    EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_REGISTER = 21,
+    EXCLAVES_CTL_OP_DAEMON_NOTIFICATION_DEREGISTER = 22,
+    EXCLAVES_CTL_OP_AOE_ENUMERATE_AND_SETUP_SERVICES = 23,
+    EXCLAVES_CTL_OP_AOE_GET_ALL_SERVICE_INFOS = 24,
+    EXCLAVES_CTL_OP_AOE_MESSAGE_LOOP_WITH_SERVICE_ID = 25,
+    EXCLAVES_CTL_OP_AOE_WORK_LOOP_WITH_SERVICE_ID = 26,
     EXCLAVES_CTL_OP_LAST,
     );
 #define EXCLAVES_CTL_FLAGS_MASK (0xfffffful)
@@ -1164,6 +1382,17 @@ typedef struct exclaves_resource_user {
 	exclaves_id_t         r_id;
 	mach_port_name_t      r_port;
 } exclaves_resouce_user_t;
+
+/*!
+ * @struct exclaves_daemon_notification
+ *
+ * Syscall interface for daemon notification registration/deregistration
+ */
+typedef struct __attribute__((packed)) exclaves_daemon_notification {
+	char                  conclave_name[MAXCONCLAVENAME];
+	char                  notification_name[MAXCONCLAVENAME];
+	mach_port_name_t      send_right;
+} exclaves_daemon_notification_t;
 
 /*!
  * @struct exclaves_indicator_deadline
@@ -1190,28 +1419,9 @@ _exclaves_ctl_trap(mach_port_name_t name, uint32_t operation_and_flags,
 
 #endif /* !defined(KERNEL) */
 
-/* -------------------------------------------------------------------------- */
-
-/* Sysctl interface */
-
-#if defined(KERNEL)
-
-/*!
- * @function exclaves_get_status
- *
- * @abstract
- * Return the current running status of exclaves. This function will block until
- * exclaves has booted, failed to boot, or are known to be not available.
- *
- * @result
- * The status of exclaves.
- */
-exclaves_status_t
-exclaves_get_status(void);
-
-#endif /* defined(KERNEL) */
-
 #if defined(XNU_KERNEL_PRIVATE)
+/* -------------------------------------------------------------------------- */
+/* Internal kernel interface */
 
 /*!
  * @function exclaves_get_boot_stage
@@ -1256,6 +1466,57 @@ kern_return_t
 exclaves_boot_wait(exclaves_boot_stage_t);
 /* END IGNORE CODESTYLE */
 
+/* Check whether Exclave inspection got initialized */
+extern bool
+exclaves_inspection_is_initialized(void);
+
+#endif /* defined(XNU_KERNEL_PRIVATE) */
+
+#if defined(MACH_KERNEL_PRIVATE)
+/* -------------------------------------------------------------------------- */
+/* Mach kernel private interface */
+
+typedef struct {
+	void *ipcb;
+	unsigned long scid;
+	uint64_t usecnt;
+} exclaves_ctx_t;
+
+extern kern_return_t
+exclaves_thread_terminate(thread_t thread);
+
+extern size_t
+exclaves_ipc_buffer_count(void);
+
+OS_ENUM(exclaves_clock_type, uint8_t,
+    EXCLAVES_CLOCK_ABSOLUTE = 0,
+    EXCLAVES_CLOCK_CONTINUOUS = 1,
+    );
+
+extern void
+exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset);
+
+extern void
+exclaves_early_init(void);
+
+/*!
+ * @function exclaves_indicator_metrics_report
+ *
+ * @abstract
+ * Get ExclaveIndicatorController metrics and report them to CoreAnalytics
+ */
+extern void
+exclaves_indicator_metrics_report(void);
+
+/*!
+ * @function exclaves_indicator_min_on_time_deadlines
+ * @abstract Returns the minimum on time deadlines for various sensors
+ * @param deadlines out parameter filled with indicator deadlines
+ */
+extern kern_return_t
+exclaves_indicator_min_on_time_deadlines(
+	struct exclaves_indicator_deadlines *deadlines);
+
 /*
  * Identifies exclaves privilege checks.
  */
@@ -1283,16 +1544,21 @@ exclaves_has_priv_vnode(void *vnode, int64_t off, exclaves_priv_t priv);
 /* Return index of last xnu frame before secure world. Valid frame index is
  * always in range <0, nframes-1>. When frame is not found, return nframes
  * value. */
-uint32_t exclaves_stack_offset(const uintptr_t *out_addr, size_t nframes,
+extern uint32_t
+exclaves_stack_offset(const uintptr_t *out_addr, size_t nframes,
     bool slid_addresses);
 
-/* Check whether Exclave inspection got initialized */
-extern bool exclaves_inspection_is_initialized(void);
 
 /* Send a watchdog panic request to the exclaves scheduler */
-extern kern_return_t exclaves_scheduler_request_watchdog_panic(void);
+extern kern_return_t
+exclaves_scheduler_request_watchdog_panic(void);
 
-#endif /* defined(XNU_KERNEL_PRIVATE) */
+/* Panic if a th_exclaves_state flag is set when attempting return to userspace */
+__attribute__((noreturn))
+extern void
+exclaves_assert_invalid_th_exclaves_state(void);
+
+#endif /* defined(MACH_KERNEL_PRIVATE) */
 
 __END_DECLS
 

@@ -47,7 +47,9 @@ extern "C++" {
 #if __has_ptrcheck
 #define os_is_ptr_like(P) (__builtin_classify_type(P) == 5)
 #else  /* __has_ptrcheck */
-#define os_is_ptr_like(P) (sizeof(P) == sizeof(void *))
+#define os_is_ptr_like(P) \
+	/* NOLINTNEXTLINE(bugprone-sizeof-expression) */ \
+	(sizeof(P) == sizeof(void *))
 #endif /* __has_ptrcheck */
 
 /*!

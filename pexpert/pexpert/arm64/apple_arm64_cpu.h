@@ -49,7 +49,17 @@ __enum_closed_decl(arm64_core_type_t, unsigned int, {
 static inline arm64_core_type_t
 arm64_core_type(void)
 {
+#ifdef __arm64__
 	return (arm64_core_type_t)((__builtin_arm_rsr64("MPIDR_EL1") >> MPIDR_CORETYPE_SHIFT) & MPIDR_CORETYPE_MASK);
+#else
+	/**
+	 * This header file is indirectly included by the SPTM userspace testing
+	 * system which can get built and run on non-arm64 systems. In that case,
+	 * just return a hardcoded value to avoid issues with
+	 * `__builtin_arm_rsr64()` not existing.
+	 */
+	return P_CORE;
+#endif /* __arm64__ */
 }
 
 /*

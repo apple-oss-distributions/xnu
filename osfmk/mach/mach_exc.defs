@@ -91,6 +91,10 @@ routine		mach_exception_raise(
  ;
  ServerAuditToken atoken: audit_token_t
 #endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
+#endif
 			);
 
 routine		mach_exception_raise_state(
@@ -107,6 +111,10 @@ routine		mach_exception_raise_state(
 #if MACH_EXC_SERVER_AUDITTOKEN
  ;
  ServerAuditToken atoken: audit_token_t
+#endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
 #endif
 			);
 
@@ -127,6 +135,10 @@ routine		mach_exception_raise_state_identity(
  ;
  ServerAuditToken atoken: audit_token_t
 #endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
+#endif
 			);
 
 #if MACH_EXC_SERVER_TASKIDTOKEN || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER)
@@ -143,6 +155,10 @@ routine		mach_exception_raise_identity_protected(
 #if MACH_EXC_SERVER_AUDITTOKEN
  ;
  ServerAuditToken atoken: audit_token_t
+#endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
 #endif
 			);
 #else
@@ -163,13 +179,17 @@ routine		mach_exception_raise_backtrace(
  ;
  ServerAuditToken atoken: audit_token_t
 #endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
+#endif
 			);
 #else
 	skip;
 #endif /* MACH_EXC_SERVER_BACKTRACE */
 
 /*
- * Same as identity_protected above, but also handles an in/out thread_state_t. 
+ * Same as identity_protected above, but also handles an in/out thread_state_t.
  */
 #if MACH_EXC_SERVER_TASKIDTOKEN_STATE || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER)
 routine		mach_exception_raise_state_identity_protected(
@@ -188,6 +208,10 @@ routine		mach_exception_raise_state_identity_protected(
 #if MACH_EXC_SERVER_AUDITTOKEN
  ;
  ServerAuditToken atoken: audit_token_t
+#endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
 #endif
 			);
 #else  /* MACH_EXC_SERVER_TASKIDTOKEN_STATE  || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER) */

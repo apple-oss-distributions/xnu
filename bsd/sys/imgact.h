@@ -132,7 +132,7 @@ struct image_params {
 	uint64_t ip_dyld_fsid;
 	uint64_t ip_dyld_fsobjid;
 	uint64_t ip_inherited_jop_pid;
-	unsigned int    ip_simulator_binary;    /* simulator binary flags */
+	unsigned int    ip_flags2;              /* extended image flags */
 };
 
 /*
@@ -161,12 +161,14 @@ struct image_params {
 #define IMGPF_ALT_ROSETTA       0x20000000      /* load alternative rosetta runtime */
 #define IMGPF_NOJOP             0x80000000
 
+#if __x86_64__
 /*
  * Simulator binary flags
  */
-#define IMGPF_SB_DEFAULT         0               /* Default value, did not check if it is a simulator binary */
-#define IMGPF_SB_TRUE            1               /* Binary is a simulator binary */
-#define IMGPF_SB_FALSE           2               /* Binary is not a simulator binary */
-
+#define IMGPF2_SB_MASK                          0x00000003      /* Space for IMGPF2_SB tristate */
+#define IMGPF2_SB_DEFAULT                       0x00000000      /* Default value, did not check if it is a simulator binary */
+#define IMGPF2_SB_TRUE                          0x00000001      /* Binary is a simulator binary */
+#define IMGPF2_SB_FALSE                         0x00000002      /* Binary is not a simulator binary */
+#endif /* __x86_64__ */
 
 #endif  /* !_SYS_IMGACT */

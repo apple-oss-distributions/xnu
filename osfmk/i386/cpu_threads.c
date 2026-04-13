@@ -491,7 +491,7 @@ x86_set_logical_topology(x86_lcpu_t *lcpu, int pnum, int lnum)
 
 	lcpu->cpu_num = lnum;
 	lcpu->pnum = pnum;
-	lcpu->master = (lnum == master_cpu);
+	lcpu->master = (lnum == boot_cpu_id);
 	lcpu->primary = (lnum % topoParms.nLThreadsPerPackage) == 0;
 
 	lcpu->lnum = lnum % topoParms.nLThreadsPerCore;
@@ -952,7 +952,7 @@ cpu_thread_init(void)
 	 * If we're the boot processor, we do all of the initialization of
 	 * the CPU topology infrastructure.
 	 */
-	if (my_cpu == master_cpu && !initialized) {
+	if (my_cpu == boot_cpu_id && !initialized) {
 		simple_lock_init(&x86_topo_lock, 0);
 
 		/*

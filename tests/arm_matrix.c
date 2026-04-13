@@ -596,6 +596,43 @@ T_DECL(sme_max_svl_b_sysctl,
 }
 
 static void
+hexdump_side_by_side(const uint8_t *buf1, const uint8_t *buf2, size_t size)
+{
+	const size_t bytes_per_line = 16;
+
+	T_LOG("  Offset   buf1                                             buf2");
+	T_LOG("  -------- ------------------------------------------------ ------------------------------------------------");
+
+	for (size_t offset = 0; offset < size; offset += bytes_per_line) {
+		size_t line_bytes = (size - offset < bytes_per_line) ? (size - offset) : bytes_per_line;
+
+		bool has_diff = false;
+		for (size_t i = 0; i < line_bytes; i++) {
+			if (buf1[offset + i] != buf2[offset + i]) {
+				has_diff = true;
+				break;
+			}
+		}
+
+		char buf1_hex[3 * bytes_per_line + 1] = {0};
+		char buf2_hex[3 * bytes_per_line + 1] = {0};
+
+		for (size_t i = 0; i < line_bytes; i++) {
+			snprintf(buf1_hex + i * 3, 4, "%02x ", buf1[offset + i]);
+			snprintf(buf2_hex + i * 3, 4, "%02x ", buf2[offset + i]);
+		}
+
+		// Pad with spaces if line is short
+		for (size_t i = line_bytes; i < bytes_per_line; i++) {
+			snprintf(buf1_hex + i * 3, 4, "   ");
+			snprintf(buf2_hex + i * 3, 4, "   ");
+		}
+
+		T_LOG("%c %08zx %-48s %-48s", has_diff ? '*' : ' ', offset, buf1_hex, buf2_hex);
+	}
+}
+
+static void
 dup_and_check_matrix_state(const struct arm_matrix_operations *ops)
 {
 	if (!ops->is_available()) {
@@ -617,6 +654,11 @@ dup_and_check_matrix_state(const struct arm_matrix_operations *ops)
 		ops->stop();
 
 		int cmp = memcmp(d_in, d_out, size);
+		if (cmp) {
+			T_LOG("cmp = %d", cmp);
+			hexdump_side_by_side(d_in, d_out, size);
+		}
+
 		free(d_out);
 		free(d_in);
 		exit(cmp);

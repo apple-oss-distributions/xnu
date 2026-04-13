@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2025 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -155,7 +155,6 @@
 #define MAP_32BIT       0x8000          /* Return virtual addresses <4G only */
 #endif /* defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500 */
 
-
 /*
  * Flags used to support translated processes.
  */
@@ -236,26 +235,6 @@
 #define MINCORE_ANONYMOUS       0x80     /* Page belongs to an anonymous object */
 #endif  /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
-#ifdef PRIVATE
-
-/*
- * Crypt ID for decryption flow
- */
-#define CRYPTID_NO_ENCRYPTION     0         /* File is unencrypted */
-#define CRYPTID_APP_ENCRYPTION    1         /* App binary is encrypted */
-#define CRYPTID_MODEL_ENCRYPTION  2         /* ML Model is encrypted */
-
-/*
- * Model encryption header
- */
-typedef struct {
-	__uint64_t version;
-	__uint64_t originalSize;
-	__uint64_t reserved[4];
-} model_encryption_header_t;
-
-#endif /* #ifdef PRIVATE */
-
 
 #ifndef KERNEL
 
@@ -290,41 +269,12 @@ int     mincore(const void *, size_t, char *);
 int     minherit(void *, size_t, int);
 #endif
 
-#ifdef PRIVATE
-int mremap_encrypted(void *, size_t, __uint32_t, __uint32_t, __uint32_t);
-#endif
-
 __END_DECLS
 
-#else   /* KERNEL */
-#ifdef XNU_KERNEL_PRIVATE
-void pshm_cache_init(void);     /* for bsd_init() */
-
-/*
- * XXX routine exported by posix_shm.c, but never used there, only used in
- * XXX kern_mman.c in the implementation of mmap().
- */
-struct mmap_args;
-struct fileproc;
-int pshm_mmap(
-	struct proc       *p,
-	vm_map_offset_t    user_addr,
-	vm_map_size_t      user_size,
-	int                prot,
-	int                flags,
-	struct fileproc   *fp,
-	off_t              file_pos,
-	off_t              pageoff,
-	user_addr_t       *retval);
-
-
-/* Really need to overhaul struct fileops to avoid this... */
-struct pshmnode;
-struct stat;
-int pshm_stat(struct pshmnode *pnode, void *ub, int isstat64);
-struct fileproc;
-int pshm_truncate(struct proc *p, struct fileproc *fp, int fd, off_t length, int32_t *retval);
-
-#endif /* XNU_KERNEL_PRIVATE */
 #endif /* KERNEL */
+
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
+#include <sys/mman_private.h>
+#endif /* defined(PRIVATE) && !defined(MODULES_SUPPORTED) */
+
 #endif /* !_SYS_MMAN_H_ */

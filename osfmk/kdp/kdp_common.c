@@ -40,6 +40,7 @@
 extern unsigned int not_in_kdp;
 extern void bcopy_phys(addr64_t, addr64_t, vm_size_t);
 #if HAS_MTE
+#include <arm64/mte.h>
 extern void bcopy_phys_with_options(addr64_t from, addr64_t to, vm_size_t nbytes, int options);
 #endif /* HAS_MTE */
 extern pmap_paddr_t kdp_vtophys(pmap_t pmap, addr64_t va);
@@ -125,7 +126,13 @@ kdp_traverse_mappings(
 	size_t effective_page_mask;
 	size_t task_page_size = kdp_vm_map_get_page_size(map, &effective_page_mask);
 
-	// Iterate vm map
+	/*
+	 * Iterate the vm map. This is safe to do because user_dump_init confirmed
+	 * the interlock is not held. However, we do not know whether any entry
+	 * locks might be held, so we can only safely look at a select few fields
+	 * of entries. To look at others, we must first successfully call
+	 * kdp_vm_entry_lock_is_acquired_exclusive.
+	 */
 	for (entry = vm_map_first_entry(map); ret == KERN_SUCCESS && entry != NULL && entry != vm_map_to_entry(map); entry = entry->vme_next) {
 		// Found a region, iterate over pages in the region
 		for (vcur = entry->vme_start; ret == KERN_SUCCESS && vcur < entry->vme_end; vcur += task_page_size) {

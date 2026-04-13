@@ -12,6 +12,7 @@
 
 #include <darwintest.h>
 #include "sched/sched_test_utils.h"
+#include "test_utils.h"
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.mach_eventlink"));
 
@@ -249,8 +250,14 @@ test_eventlink_wait_then_signal_loop(void *arg)
 		kr = mach_eventlink_signal_wait_until(eventlink_port, &count, 0, MELSW_OPTION_NONE,
 		    KERN_CLOCK_MACH_ABSOLUTE_TIME, 0);
 
-		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_signal_wait_until");
-		T_QUIET; T_EXPECT_EQ(count, (uint64_t)(i + 1), "mach_eventlink_wait_until returned correct count value");
+		if (kr != KERN_SUCCESS) {
+			T_ASSERT_MACH_SUCCESS(kr,
+			    "mach_eventlink_signal_wait_until");
+		}
+		if (count != (uint64_t)(i + 1)) {
+			T_EXPECT_EQ(count, (uint64_t)(i + 1),
+			    "mach_eventlink_wait_until returned correct count value");
+		}
 	}
 
 	/* Signal the eventlink to wakeup other side */
@@ -839,7 +846,7 @@ set_realtime(pthread_t thread, uint64_t interval_nanos)
 	pol.preemptible = 0; /* Ignored by OS */
 	kr = thread_policy_set(target_thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t) &pol,
 	    THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)");
+	T_ASSERT_MACH_SUCCESS(kr, "thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)");
 }
 
 
@@ -854,10 +861,19 @@ test_suspend_resume_thread(void *arg)
 	mach_port_t suspend_resume_other_thread_port = (mach_port_t) (uintptr_t)arg;
 	kern_return_t kr1 = KERN_SUCCESS, kr2 = KERN_SUCCESS;
 
-	while (!os_atomic_load(&suspend_resume_thread_stop, relaxed) && kr1 == KERN_SUCCESS && kr2 == KERN_SUCCESS) {
+	while (!os_atomic_load(&suspend_resume_thread_stop, relaxed)
+	    && kr1 == KERN_SUCCESS && kr2 == KERN_SUCCESS) {
 		kr1 = thread_suspend(suspend_resume_other_thread_port);
 		kr2 = thread_resume(suspend_resume_other_thread_port);
 		count++;
+
+		if (count % 100 == 0) {
+			/*
+			 * A tight loop may entirely prevent forward progress
+			 * for the targeted thread.  Back off a bit.
+			 */
+			usleep(100);
+		}
 	}
 
 	T_LOG("thread suspend/resume count: %llu", count);
@@ -869,6 +885,36 @@ test_suspend_resume_thread(void *arg)
 	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "semaphore_signal(g_sem_done)");
 
 	return NULL;
+}
+
+static void
+log_handoff_sysctl(void)
+{
+	if (!is_development_kernel()) {
+		/* kern.direct_handoff does not exist on release kernel */
+		return;
+	}
+
+	int direct_handoff = 0;
+	size_t size = sizeof(direct_handoff);
+	T_QUIET; T_ASSERT_POSIX_ZERO(sysctlbyname("kern.direct_handoff", &direct_handoff,
+	    &size, NULL, 0), "sysctlbyname kern.direct_handoff");
+	T_LOG("kern.direct_handoff: %d", direct_handoff);
+}
+
+static uint64_t
+handoff_success_count_sysctl(void)
+{
+	if (!is_development_kernel()) {
+		/* kern.mach_eventlink_handoff_success_count does not exist on release kernel */
+		return 0;
+	}
+	uint64_t success_count = 0;
+	size_t size = sizeof(success_count);
+	T_QUIET; T_ASSERT_POSIX_ZERO(sysctlbyname("kern.mach_eventlink_handoff_success_count",
+	    &success_count,
+	    &size, NULL, 0), "sysctlbyname kern.mach_eventlink_handoff_success_count");
+	return success_count;
 }
 
 /*
@@ -887,11 +933,13 @@ T_DECL(test_eventlink_wait_signal_suspend_loop, "eventlink wait_signal + thread_
 	mach_port_t self = mach_thread_self();
 	uint64_t count = 0;
 	int i;
-	uint64_t handoffs_start, handoffs_end;
 
-	size_t handoffs_start_size = sizeof(handoffs_start);
-	kr = sysctlbyname("kern.mach_eventlink_handoff_success_count", &handoffs_start, &handoffs_start_size, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(kr, "sysctlbyname(kern.mach_eventlink_handoff_success_count)");
+	bool development = is_development_kernel();
+	T_LOG("kern.development: %d", development);
+
+	log_handoff_sysctl();
+
+	uint64_t handoffs_start = handoff_success_count_sysctl();;
 	T_LOG("handoffs_start: %llu", handoffs_start);
 
 	kr = semaphore_create(mach_task_self(), &g_sem_done, SYNC_POLICY_FIFO, 0);
@@ -912,7 +960,8 @@ T_DECL(test_eventlink_wait_signal_suspend_loop, "eventlink wait_signal + thread_
 	set_realtime(pthread_self(), DEFAULT_INTERVAL_NS);
 	set_realtime(pthread, DEFAULT_INTERVAL_NS);
 
-	suspend_thread = thread_create_for_test(test_suspend_resume_thread, (void *)(uintptr_t)suspend_resume_other_thread_port);
+	suspend_thread = thread_create_for_test(test_suspend_resume_thread,
+	    (void *)(uintptr_t)suspend_resume_other_thread_port);
 
 	/* Associate thread and wait_signal the eventlink */
 	kr = mach_eventlink_associate(port_pair[1], self, 0, 0, 0, 0, MELA_OPTION_NONE);
@@ -923,8 +972,14 @@ T_DECL(test_eventlink_wait_signal_suspend_loop, "eventlink wait_signal + thread_
 		kr = mach_eventlink_signal_wait_until(port_pair[1], &count, 0, MELSW_OPTION_NONE,
 		    KERN_CLOCK_MACH_ABSOLUTE_TIME, 0);
 
-		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "main thread: mach_eventlink_signal_wait_until");
-		T_QUIET; T_EXPECT_EQ(count, (uint64_t)(i + 1), "main thread: mach_eventlink_signal_wait_until returned correct count value");
+		if (kr != KERN_SUCCESS) {
+			T_ASSERT_MACH_SUCCESS(kr,
+			    "main thread: mach_eventlink_signal_wait_until");
+		}
+		if (count != (uint64_t)(i + 1)) {
+			T_EXPECT_EQ(count, (uint64_t)(i + 1),
+			    "main thread: mach_eventlink_signal_wait_until returned correct count value");
+		}
 	}
 
 	os_atomic_store(&suspend_resume_thread_stop, true, relaxed);
@@ -939,13 +994,13 @@ T_DECL(test_eventlink_wait_signal_suspend_loop, "eventlink wait_signal + thread_
 	kr = semaphore_destroy(mach_task_self(), g_sem_done);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "semaphore_destroy");
 
-	size_t handoffs_end_size = sizeof(handoffs_end);
-	kr = sysctlbyname("kern.mach_eventlink_handoff_success_count", &handoffs_end, &handoffs_end_size, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(kr, "sysctlbyname(kern.mach_eventlink_handoff_success_count)");
+	uint64_t handoffs_end = handoff_success_count_sysctl();
 	T_LOG("handoffs_end: %llu", handoffs_end);
 
-	T_QUIET; T_ASSERT_GE(handoffs_end, handoffs_start, "kern.mach_eventlink_handoff_success_count did not overflow");
-	const uint64_t successful_handoffs = handoffs_end - handoffs_start;
-	const uint64_t min_handoffs = MAX(2 * g_loop_iterations, 2) - 2;
-	T_EXPECT_GE(successful_handoffs, min_handoffs, "found at least %llu handoffs", min_handoffs);
+	if (development) {
+		T_QUIET; T_ASSERT_GE(handoffs_end, handoffs_start, "kern.mach_eventlink_handoff_success_count did not overflow");
+		const uint64_t successful_handoffs = handoffs_end - handoffs_start;
+		const uint64_t min_handoffs = MAX(2 * g_loop_iterations, 2) - 2;
+		T_EXPECT_GE(successful_handoffs, min_handoffs, "found at least %llu handoffs", min_handoffs);
+	}
 }

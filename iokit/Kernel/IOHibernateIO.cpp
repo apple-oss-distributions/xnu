@@ -339,7 +339,7 @@ IOMemoryDescriptorWriteFromPhysical(IOMemoryDescriptor * md,
 	addr64_t srcAddr = bytes;
 	IOByteCount remaining;
 
-	remaining = length = min(length, md->getLength() - offset);
+	remaining = length = IOMin(length, md->getLength() - offset);
 	while (remaining) { // (process another target segment?)
 		addr64_t    dstAddr64;
 		IOByteCount dstLen;
@@ -378,7 +378,7 @@ IOMemoryDescriptorReadToPhysical(IOMemoryDescriptor * md,
 	addr64_t dstAddr = bytes;
 	IOByteCount remaining;
 
-	remaining = length = min(length, md->getLength() - offset);
+	remaining = length = IOMin(length, md->getLength() - offset);
 	while (remaining) { // (process another target segment?)
 		addr64_t    srcAddr64;
 		IOByteCount dstLen;
@@ -1743,14 +1743,6 @@ hibernate_write_image(void)
 	wiredPagesClear     = 0;
 	svPageCount         = 0;
 	zvPageCount         = 0;
-
-#if DEVELOPMENT || DEBUG
-	// Enable panic injection on the entry path.
-	// The panic must occur after boot-image is set but before the image is written.
-	if ((panic_test_case & PANIC_TEST_CASE_HIBERNATION_ENTRY) && (panic_test_failure_mode & PANIC_TEST_FAILURE_MODE_PANIC)) {
-		panic("injected panic on hibernation entry");
-	}
-#endif
 
 	if (!vars->fileVars
 	    || !vars->fileVars->pollers

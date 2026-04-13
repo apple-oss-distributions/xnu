@@ -94,6 +94,7 @@ static const char * const err_codes_kern[] = {
 	"(os/kern) missing kernel collection",
 	"(os/kern) invalid kernel collection",	/* 55 */
 	"(os/kern) result not found",
+	"(os/kern) access to unmapped guard-object slot attempted",
 };
 
 static const char * const err_codes_unix[] = {

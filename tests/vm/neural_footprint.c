@@ -670,9 +670,9 @@ T_DECL(check_neural_total_ledger,
 	T_ASSERT_POSIX_SUCCESS(ret, "proc_pid_rusage");
 	T_EXPECT_EQ(ru.ri_lifetime_max_neural_footprint,
 	    neural_total_after,
-	    "Neural max footprint is equal to 4 x vm_size (in pages): %llu = %llu",
+	    "Neural max interval footprint is equal to current neural total: %llu = %llu",
 	    ru.ri_lifetime_max_neural_footprint / vm_kernel_page_size,
-	    4 * vm_size / vm_kernel_page_size);
+	    neural_total_after / vm_kernel_page_size);
 	T_EXPECT_EQ(ru.ri_interval_max_neural_footprint,
 	    neural_total_after,
 	    "Neural max interval footprint is equal to current neural total: %llu = %llu",

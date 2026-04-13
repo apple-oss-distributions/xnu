@@ -123,11 +123,15 @@ struct proc_delegated_signal_info {
  * Security config.
  * These flags are currently folded inside pbi_flags, but per-feature policies should
  * likely move elsewhere.
+ *
+ * Warning: There is no further room for these policy flags in pbi_flags, additional
+ *          flags will require some re-work of where these are stored.
  */
 #define PROC_FLAG_SEC_ENABLED                   0x04000000
 #define PROC_FLAG_SEC_BYPASS_ENABLED            0x08000000
 #define PROC_FLAG_HARDENED_HEAP_ENABLED         0x10000000
 #define PROC_FLAG_TPRO_ENABLED                  0x20000000
+#define PROC_FLAG_SCRIPT_RESTRICTIONS_ENABLED   0x40000000
 #define PROC_FLAG_GUARD_OBJECTS_ENABLED                 0x80000000
 
 /* keep in sync with KQ_* in sys/eventvar.h */

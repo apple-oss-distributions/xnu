@@ -22,6 +22,94 @@ XNU runs on x86_64 and ARM64 for both single processor and multi-processor confi
 
 ## How to Build XNU
 
+### Prerequisites for External Developers
+
+If you are building XNU outside of Apple's internal development environment, you will need to set up additional dependencies first.
+
+#### Download and Install Xcode
+
+Ensure you have the Xcode installed that is aligned with the OS version you want to build (for example, Xcode 15.4 for MacOS 15.4). Download from:
+* App Store, or
+* https://developer.apple.com/download/all/ (requires Apple Developer account)
+
+To select a specific version of Xcode:
+
+```sh
+sudo xcode-select -s path/to/Xcode.app/Contents/Developer
+xcrun -sdk macosx -show-sdk-path
+```
+
+#### Download and Install the Kernel Debug Kit (KDK)
+
+**This step is required for building on Apple silicon.** If you are building only for Intel, you can skip this step.
+
+1. Download the KDK from https://developer.apple.com/download/all/ (requires Apple Developer account)
+2. Search for "Kernel Debug Kit" and download the package matching your exact macOS version (you can find this in Settings > General > About)
+3. Install the package. It will be installed to `/Library/Developer/KDKs/KDK_{ver}_{build}.kdk`
+4. Save the path for later use:
+
+```sh
+export KDK=/Library/Developer/KDKs/KDK_{ver}_{build}.kdk
+```
+
+#### Download and Build XNU Dependencies
+
+The following dependencies must be built and installed before building XNU:
+
+- DTrace (this is optional)
+- AvailabilityVersions
+- libdispatch
+- xnu headers
+
+The versions you need can be downloaded from https://opensource.apple.com/releases/
+
+##### Build CTF Tools from dtrace
+
+```sh
+tar zxf dtrace-{version}.tar.gz
+cd dtrace-{version}
+xcodebuild install -sdk macosx -target ctfconvert \
+  -target ctfdump -target ctfmerge \
+  ARCHS='x86_64 arm64' VALID_ARCHS='x86_64 arm64' DSTROOT=$PWD/dst
+export TOOLCHAIN=$(cd $(xcrun -sdk macosx -show-sdk-platform-path)/../../Toolchains/XcodeDefault.xctoolchain && pwd)
+sudo ditto "$PWD/dst/$TOOLCHAIN" "$TOOLCHAIN"
+cd ..
+```
+
+##### Install AvailabilityVersions
+
+```sh
+tar zxf AvailabilityVersions-{version}.tar.gz
+cd AvailabilityVersions-{version}
+make install
+sudo ditto "$PWD/dst/usr/local/libexec" \
+  "$(xcrun -sdk macosx -show-sdk-path)/usr/local/libexec"
+cd ..
+```
+
+##### Install XNU Headers
+
+```sh
+tar zxf xnu-{version}.tar.gz
+cd xnu-{version}
+make SDKROOT=macosx ARCH_CONFIGS="X86_64 ARM64" installhdrs
+sudo ditto "$PWD/BUILD/dst" "$(xcrun -sdk macosx -show-sdk-path)"
+cd ..
+```
+
+##### Build libfirehose from libdispatch
+
+```sh
+tar zxf libdispatch-{version}.tar.gz
+cd libdispatch-{version}
+xcodebuild install -sdk macosx ARCHS='x86_64 arm64e' \
+  VALID_ARCHS='x86_64 arm64e' -target libfirehose_kernel \
+  PRODUCT_NAME=firehose_kernel DSTROOT=$PWD/dst
+sudo ditto "$PWD/dst/usr/local" \
+  "$(xcrun -sdk macosx -show-sdk-path)/usr/local"
+cd ..
+```
+
 ### Building a `DEVELOPMENT` Kernel
 
 The xnu make system can build kernel based on `KERNEL_CONFIGS` & `ARCH_CONFIGS` variables as arguments.
@@ -37,6 +125,8 @@ Where:
 * `<variant>`: can be `debug`, `development`, `release`, `profile` and configures compilation flags and asserts throughout kernel code.
 * `<arch>`: can be valid arch to build for. (E.g. `X86_64`)
 
+#### For Internal Developers
+
 To build a kernel for the same architecture as running OS, just type
 
 ```text
@@ -49,6 +139,38 @@ Additionally, there is support for configuring architectures through `ARCH_CONFI
 make SDKROOT=macosx.internal ARCH_CONFIGS=X86_64 KERNEL_CONFIGS=DEVELOPMENT
 make SDKROOT=macosx.internal ARCH_CONFIGS=X86_64 KERNEL_CONFIGS="RELEASE DEVELOPMENT DEBUG"
 ```
+
+#### For External Developers
+
+##### Building for Intel Macs
+
+```sh
+cd xnu-{version}
+make SDKROOT=macosx ARCH_CONFIGS=X86_64 KERNEL_CONFIGS=RELEASE
+```
+
+##### Building for Apple Silicon Macs
+
+```sh
+cd xnu-{version}
+make SDKROOT=macosx KDKROOT=${KDK} \
+  TARGET_CONFIGS="RELEASE ARM64 {PLATFORM}"
+```
+
+The `{PLATFORM}` should be set based on your machine. A table of platform and associated Mac Models can be found at the end of this document.
+
+Example for MacBookAir10,1:
+
+```sh
+make SDKROOT=macosx KDKROOT=${KDK} TARGET_CONFIGS="RELEASE ARM64 T8101"
+```
+
+##### Build Options
+
+* Speed up link: add `BUILD_LTO=0`
+* Build development kernel: replace `RELEASE` with `DEVELOPMENT`
+* Colorful output: add `LOGCOLORS=y`
+* Concise output: add `CONCISE=1`
 
 > Note: By default, the architecture is set to the build machine's architecture, and the default kernel config is set to build for `DEVELOPMENT`.
 
@@ -77,7 +199,7 @@ Remember to replace `DEVELOPMENT` and `ARM64` with the appropriate build and pla
 > This setting allows you to e.g. selectively turn on debugging code that is guarded by a preprocessor macro. Example usage...
 >
 > ```text
-> make SDKROOT=macosx.internal PRODUCT_CONFIGS=j314s 
+> make SDKROOT=macosx.internal PRODUCT_CONFIGS=j314s
 > EXTRA_CFLAGS='-DKERNEL_STACK_MULTIPLIER=2'
 > ```
 
@@ -107,6 +229,7 @@ make ARCH_CONFIGS="X86_64" exporthdrs all
 * $ make BOUND_CHECKS=0  # disable -fbound-attributes for this build
 * $ make REMOTEBUILD=user@remotehost # perform build on remote host
 * $ make BUILD_CODE_COVERAGE=1 # build with support for collecting code coverage information
+* $ make SAVE_OPT_RECORD=".*" # save compiler (linker if BUILD_LTO) optimization record, for analysis by a tool like optview
 
 The XNU build system can optionally output color-formatted build output. To enable this, you can either
 set the `XNU_LOGCOLORS` environment variable to `y`, or you can pass `LOGCOLORS=y` to the make command.
@@ -157,6 +280,8 @@ To build a kernelcache you can use the following mechanisms:
 
 ## Booting a KernelCache on a Target machine
 
+### For Internal Developers
+
 The development kernel and iBoot supports configuring boot arguments so that we can safely boot into test kernel and, if things go wrong, safely fall back to previously used kernelcache.
 Following are the steps to get such a setup:
 
@@ -188,6 +313,153 @@ Following are the steps to get such a setup:
 
    The `--nextonly` flag specifies that use the `boot.plist` configs only for one boot.
    So if the kernel panic's you can easily power reboot and recover back to original kernel.
+
+### For External Developers
+
+**SECURITY WARNING:** Installing a custom kernel requires lowering the system security settings. On Intel Macs, you must disable System Integrity Protection (SIP), set Secure Boot to "No Security," and disable the authenticated root volume. On Apple Silicon Macs, you must set the security policy to "Reduced Security" and further downgrade to "Permissive" via Recovery Mode. Failure to do this will result in a system that fails to boot.
+
+**Note:** Building a kernel cache MUST be done on the device where you will boot the custom kernel.
+
+**Note:** Installing a kernel could potentially render your system un-bootable, so testing in a VM is highly recommended.
+
+#### Intel Mac: Install and Run
+
+After building, you should have a new kernel at `{xnu}/BUILD/obj/kernel[.development]`.
+
+##### 1. Build the Kernel Cache
+
+```sh
+cd xnu-{version}
+kmutil create -a x86_64 -Z -n boot sys \
+  -B BUILD/BootKernelExtensions.kc \
+  -S BUILD/SystemKernelExtensions.kc \
+  -k BUILD/obj/kernel \
+  --elide-identifier com.apple.driver.AppleIntelTGLGraphicsFramebuffer
+```
+
+**Note:** The AppleIntelTGLGraphicsFramebuffer driver will not link against the open source XNU kernel.
+
+##### 2. Mount a live view of the filesystem
+
+```sh
+mkdir BUILD/mnt
+sudo mount -o nobrowse -t apfs /dev/diskMsN $PWD/BUILD/mnt
+```
+
+**Note:** `diskMsN` can be found by running `mount`, looking for the root mount's device, and removing the last "s" segment. For example, if root is `/dev/disk1s2s3`, mount `/dev/disk1s2`.
+
+##### 3. Install the kernel and KCs
+
+```sh
+sudo ditto BUILD/BootKernelExtensions.kc "$PWD/BUILD/mnt/System/Library/KernelCollections/BootKernelExtensions.kc.development"
+sudo ditto BUILD/SystemKernelExtensions.kc "$PWD/BUILD/mnt/System/Library/KernelCollections/SystemKernelExtensions.kc.development"
+sudo ditto BUILD/obj/kernel "$PWD/BUILD/mnt/System/Library/Kernels/kernel.development"
+```
+
+**Note:** "development" can be replaced with any short string (e.g., "usr"). Using a suffix allows maintaining a fallback for system recovery.
+
+##### 4. Bless the new KCs
+
+```sh
+sudo bless --folder $PWD/BUILD/mnt/System/Library/CoreServices \
+  --bootefi --create-snapshot
+```
+
+##### 5. Set boot-args to select the new KC
+
+```sh
+sudo nvram boot-args="kcsuffix=development wlan.skywalk.enable=0"
+```
+
+**Note:** The `wlan.skywalk.enable=0` boot-arg is necessary to disable Skywalk in the WLAN driver, as Skywalk is not part of the open source kernel. If you encounter Skywalk-related panics, you may also need to add `dk=0` to disable DriverKit drivers.
+
+##### 6. Reboot!
+
+**Important Notes:**
+* Due to missing network (Skywalk) and power management (XCPM) functionality, some features like sleep/wake will not work
+* If your machine becomes un-bootable, boot into Recovery Mode (hold Option during boot, then press Cmd-R) and set `nvram boot-args="kcsuffix=release"`
+* The filenames are important - the booter loads `BootKernelExtensions.kc[.suffix]`, and kernelmanagerd mmaps the corresponding `SystemKernelExtensions.kc[.suffix]`
+* The boot and system KCs must be generated together (system KC links against boot KC). Mis-matched KCs will cause a panic
+* For serial output during boot, add boot-args: `serial=3 -v`
+
+#### Apple Silicon Mac: Install and Run
+
+After building, you should have a new kernel at `{xnu}/BUILD/obj/kernel[.development].{platform}` (e.g., `kernel.development.t8101`).
+
+##### 1. Build the Kernel Cache
+
+```sh
+cd xnu-{version}
+kmutil create -a arm64e -z -V development -n boot \
+  -B BUILD/OpenSource.kc \
+  -k BUILD/obj/kernel.development.t8101 \
+  -r /System/Library/Extensions \
+  -r /System/Library/DriverExtensions \
+  -x \
+  $(kmutil inspect -V release --no-header \
+    | grep -v "SEPHiber" | awk '{print " -b "$1; }')
+```
+
+**Notes:**
+* This command uses a nested `kmutil inspect` to gather the list of drivers in your current KC
+* The `grep` command filters out the SEP hibernation driver (won't link with open source kernel)
+* The KC filename doesn't matter on Apple silicon (unlike Intel). Here it's called `OpenSource.kc`
+* Replace `-V development` with `-V release` if you built the release kernel (keep `-V release` in the inner `kmutil inspect`)
+
+##### 2. Boot into Recovery Mode
+
+1. Shutdown the computer
+2. Power on by clicking the power button, then **hold** the power button until you see "Loading startup options..."
+3. Select "Options" and then "Continue"
+4. From the "Utilities" menu, select "Terminal"
+
+##### 3. Disable SIP and set boot-args (one-time operation)
+
+From the Recovery mode terminal:
+
+```sh
+csrutil disable
+# Follow prompts and enter your password
+
+bputil -a
+# This enables custom boot-args to be sent to the kernel
+```
+
+##### 4. Reboot to main OS and set boot-args
+
+From the Terminal in the main OS:
+
+```sh
+sudo nvram boot-args="wlan.skywalk.enable=0 dk=0"
+```
+
+**Note:** `dk=0` disables DriverKit.
+
+##### 5. Boot back into Recovery Mode (see step 2)
+
+##### 6. Install the new KC
+
+From the Recovery mode terminal:
+
+```sh
+cd /Volumes/Macintosh\ HD/path/to/xnu
+# Replace "Macintosh HD" with your disk name and add the path to xnu source
+# Example: cd /Volumes/Macintosh\ HD/Users/jeremy/sw/xnu-{version}
+
+kmutil configure-boot -v /Volumes/Macintosh\ HD -c BUILD/OpenSource.kc
+# Replace "Macintosh HD" with your disk name
+```
+
+##### 7. Reboot!
+
+**Important Notes:**
+* Due to missing functionality, hibernate and Rosetta (x86_64 apps) will not work
+* You do not need to disable the Authenticated Root Volume to boot a custom kernel on Apple silicon
+* If un-bootable, boot into Recovery Mode and upgrade Security to "Reduced Security" or "Full Security"
+* Boot-args to control which kernel/KC boots do not work on Apple silicon
+* Booting a new kernel/KC always requires Recovery Mode and `kmutil configure-boot`
+* Security settings only need to be changed the first time you boot a custom KC
+* **CAVEAT:** `kmutil configure-boot` only works on the first macOS volume. If you have multiple bootable volumes, you can only boot a custom kernel on the first installation
 
 
 ## Creating tags and cscope
@@ -509,3 +781,40 @@ See the README in that directory for their usage, or use the built-in LLDB help 
 (lldb) help showcurrentstacks
 ```
 
+
+## Platform to Mac Model Mappings
+
+### T6000
+* Mac13,1 Mac13,2
+* MacBookPro18,1 MacBookPro18,2 MacBookPro18,3 MacBookPro18,4
+* Macmini10,1
+
+### T6020
+* Mac14,5 Mac14,6 Mac14,8 Mac14,9 Mac14,10 Mac14,12 Mac14,13 Mac14,14
+
+### T6030
+* Mac15,6 Mac15,7
+
+### T6031
+* Mac15,8 Mac15,9 Mac15,10 Mac15,11 Mac15,14
+
+### T6041
+* Mac16,5 Mac16,6 Mac16,7 Mac16,8 Mac16,9 Mac16,11
+
+### T8103
+* iMac21,1 iMac21,2
+* MacBookAir10,1
+* MacBookPro17,1
+* Macmini9,1
+
+### T8112
+* Mac14,2 Mac14,3 Mac14,7 Mac14,15
+
+### T8122
+* Mac15,3 Mac15,4 Mac15,5 Mac15,12 Mac15,13
+
+### T8132
+* Mac16,1 Mac16,2 Mac16,3 Mac16,10 Mac16,12 Mac16,13
+
+### T8142
+* Mac17,2 Mac17,3 Mac17,4

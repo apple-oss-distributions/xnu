@@ -796,8 +796,8 @@ remove_notify_count(devnode_t *dnp)
 * The argument is the 'cookie' they were given when they created the node
 * this function is exported.. see devfs.h
 ***********************************************************************/
-void
-devfs_remove(void *dirent_p)
+static void
+devfs_remove_safe(void *dirent_p)
 {
 	devnode_t * dnp = ((devdirent_t *)dirent_p)->de_dnp;
 	devnode_t * dnp2;
@@ -896,6 +896,14 @@ out:
 	}
 
 	return;
+}
+
+void
+devfs_remove(void *dirent_p)
+{
+	if (dirent_p) {
+		devfs_remove_safe(dirent_p);
+	}
 }
 
 

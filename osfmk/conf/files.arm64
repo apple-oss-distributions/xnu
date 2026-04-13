@@ -1,3 +1,4 @@
+OPTIONS/config_ecc_logging	optional config_ecc_logging
 OPTIONS/fb			optional fb
 
 OPTIONS/debug			optional debug
@@ -102,8 +103,9 @@ osfmk/OPTIONS/hi_res_clock	optional hi_res_clock
 
 # Kernel performance monitoring
 osfmk/arm64/monotonic_arm64.c           optional config_cpu_counters
+osfmk/arm64/cpc_arm64.c                 optional config_cpu_counters
 osfmk/arm64/cpc_arm64_events.c          optional config_cpu_counters
-osfmk/arm64/kpc.c		                optional config_cpu_counters
+osfmk/arm64/kpc.c                       optional config_cpu_counters
 
 osfmk/arm64/platform_tests.c			optional config_xnupost
 osfmk/arm64/platform_tests_asm.s		optional config_xnupost
@@ -117,5 +119,12 @@ osfmk/arm64/vm_mte_compress.c   standard
 osfmk/arm64/sme.c		standard
 osfmk/arm64/static_if.c	standard
 osfmk/arm64/corecrypto/sha256_compress_arm64.s	standard
+osfmk/arm64/x86_64_compat.c	standard
 
 osfmk/arm/counter.c	standard
+
+# ECC Support
+osfmk/kern/ecc_init.c		standard
+osfmk/kern/ecc_logging.c	optional config_ecc_logging
+
+osfmk/kern/memory_error_logging.c	standard

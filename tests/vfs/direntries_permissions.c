@@ -76,8 +76,6 @@ cleanup(void)
 	}
 }
 
-#if 0
-
 T_DECL(direntries_permissions_no_owner,
     "Directory write permission should give full control of directory contents")
 {
@@ -115,8 +113,6 @@ T_DECL(direntries_permissions_no_owner,
 	/* Rename dir1 -> dir2 */
 	T_ASSERT_POSIX_SUCCESS(rename(dir1, dir2), "Renaming %s -> %s", dir1, dir2);
 }
-
-#endif /* 0 */
 
 T_DECL(direntries_permissions_no_write,
     "Directory without write permissions should not be renamed")

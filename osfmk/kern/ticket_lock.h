@@ -41,7 +41,7 @@
 #ifndef __ASSEMBLER__
 
 __BEGIN_DECLS
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 #ifdef MACH_KERNEL_PRIVATE
 
@@ -156,6 +156,7 @@ typedef struct {
 
 #endif /* !MACH_KERNEL_PRIVATE */
 #if MACH_KERNEL_PRIVATE
+__exported_push_hidden
 
 #if !LCK_GRP_USE_ARG
 #define hw_lck_ticket_init(lck, grp)             hw_lck_ticket_init(lck)
@@ -242,6 +243,32 @@ extern void hw_lck_ticket_unlock(
 extern void hw_lck_ticket_unlock_nopreempt(
 	hw_lck_ticket_t        *tlock);
 
+/*
+ * /!\ Advanced dangerous interface /!\
+ *
+ * hw_lck_ticket_unlock_after_lookup*() is an advanced interface
+ * that requires precise understanding of when it is safe to use.
+ *
+ * It doesn't have a release barrier which is sometimes useful
+ * in very precise scenarios where the work done under the lock
+ * is read-only and the only value that needs to be ordered with
+ * unlock is what is passed as the "value" parameter.
+ *
+ * Any other state loaded during the critical section that doesn't
+ * lead via dependency to construct "value" will not be ordered
+ * by the lock.
+ *
+ * This function use should be justified and documented with caution,
+ * the risk of misuse is significant.
+ */
+extern void hw_lck_ticket_unlock_after_lookup(
+	hw_lck_ticket_t        *tlock,
+	lck_dep_value_t         value);
+
+extern void hw_lck_ticket_unlock_after_lookup_nopreempt(
+	hw_lck_ticket_t        *tlock,
+	lck_dep_value_t         value);
+
 
 /* reserve/wait */
 
@@ -281,6 +308,7 @@ extern void hw_lck_ticket_lock_wait_pv(
 	hw_lck_ticket_t         *tlock,
 	uint8_t                  value);
 
+__exported_pop
 #endif /* MACH_KERNEL_PRIVATE */
 #if XNU_KERNEL_PRIVATE
 
@@ -330,7 +358,7 @@ extern __exported void lck_ticket_assert_not_owned(
 #define LCK_TICKET_ASSERT_NOT_OWNED(tlock) \
 	MACH_ASSERT_DO(lck_ticket_assert_not_owned(tlock))
 
-#pragma GCC visibility pop
+__exported_pop
 __END_DECLS
 
 #endif /* __ASSEMBLER__ */

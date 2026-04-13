@@ -266,8 +266,8 @@ struct rt_addrinfo {
 	struct  sockaddr *rti_info[RTAX_MAX];
 };
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <net/route_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* _NET_ROUTE_H_ */

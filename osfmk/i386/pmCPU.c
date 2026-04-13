@@ -267,7 +267,7 @@ pmCPUHalt(uint32_t reason)
 			 * - by calling the fast init routine for a slave, or
 			 * - by returning if we're the master processor.
 			 */
-			if (cpup->cpu_number != master_cpu) {
+			if (cpup->cpu_number != boot_cpu_id) {
 				i386_init_slave_fast();
 				panic("init_slave_fast returned");
 			}

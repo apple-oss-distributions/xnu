@@ -27,6 +27,6 @@
 #include "log_internal.h"
 
 bool log_queue_log(log_payload_t, const void *, bool);
-void log_queue_set_max_slots(size_t);
+void log_queue_set_available_slots(size_t);
 
 #endif /* log_queue */

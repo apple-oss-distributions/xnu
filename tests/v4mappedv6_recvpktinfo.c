@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -40,6 +40,13 @@
 #include <netdb.h>
 #include <semaphore.h>
 #include <darwintest.h>
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("yuanshan_zhang")
+	);
 
 #define LOGSOCKOPT(x) {                                                         \
     int __retv = (x);                                                           \

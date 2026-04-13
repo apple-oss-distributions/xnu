@@ -125,10 +125,6 @@ extern void proc_set_thread_policy(thread_t thread, int category, int flavor, in
 extern void proc_set_thread_policy_ext(thread_t thread, int category, int flavor, int value, int value2);
 extern int  proc_get_thread_policy(thread_t thread, int category, int flavor);
 
-/* For use when you don't already hold a reference on the target thread */
-extern void proc_set_thread_policy_with_tid(task_t task, uint64_t tid, int category, int flavor, int value);
-
-
 /* Functions used by kern_resource.c */
 extern boolean_t thread_has_qos_policy(thread_t thread);
 extern kern_return_t thread_remove_qos_policy(thread_t thread);

@@ -32,13 +32,14 @@
 #include <arm/misc_protos.h>
 #include <arm/cpu_data_internal.h>
 #include <arm/cpu_internal.h>
-#include "mocks/mock_cpu.h"
+#include "mocks/osfmk/mock_cpu.h"
 
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.debugger_xcall_test"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RADAR_COMPONENT_VERSION("debugging"),
+	T_META_RUN_CONCURRENTLY(true)
 	);
 
 

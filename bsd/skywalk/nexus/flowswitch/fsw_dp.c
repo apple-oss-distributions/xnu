@@ -634,9 +634,14 @@ copy_packet_from_dev(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 		 * that came up from the compat driver, or because it
 		 * originated on the native driver; copy to destination.
 		 */
-		fsw->fsw_pkt_copy_from_pkt(NR_RX, dph, 0, sph,
+		err = fsw->fsw_pkt_copy_from_pkt(NR_RX, dph, 0, sph,
 		    (spkt->pkt_headroom + spkt->pkt_l2_len), dlen, do_cksum_rx,
 		    iphlen, 0, FALSE);
+		/*
+		 * Can currently only fail with NR_TX and copysum == TRUE which does
+		 * extra validation of params which could be from userland.
+		 */
+		ASSERT(err == 0);
 	}
 
 #if DEBUG || DEVELOPMENT
@@ -1442,9 +1447,14 @@ convert_native_pktq_to_mbufs(struct nx_flowswitch *fsw, struct pktq *pktq,
 			do_cksum_rx = FALSE;
 		}
 
-		fsw->fsw_pkt_copy_to_mbuf(NR_RX, SK_PKT2PH(pkt),
+		error = fsw->fsw_pkt_copy_to_mbuf(NR_RX, SK_PKT2PH(pkt),
 		    pkt->pkt_headroom, m, 0, len, do_cksum_rx,
 		    llhlen + iphlen);
+		/*
+		 * Can currently only fail with NR_TX and copysum == TRUE which does
+		 * extra validation of params which could be from userland.
+		 */
+		ASSERT(error == 0);
 
 		FSW_STATS_INC(FSW_STATS_RX_COPY_PKT2MBUF);
 		if (do_cksum_rx) {
@@ -1795,9 +1805,9 @@ dp_flow_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 
 	/* if flow was (or is going to be) marked as nonviable, drop it */
 	if (__improbable(fe->fe_want_nonviable ||
-	    (fe->fe_flags & FLOWENTF_NONVIABLE) != 0)) {
-		SK_DF(SK_VERB_FSW_DP | SK_VERB_FLOW, "flow %p non-viable",
-		    SK_KVA(fe));
+	    (fe->fe_flags & (FLOWENTF_NONVIABLE | FLOWENTF_DISABLED)) != 0)) {
+		SK_DF(SK_VERB_FSW_DP | SK_VERB_FLOW, "flow %p non-viable or disabled (flags=0x%x)",
+		    SK_KVA(fe), fe->fe_flags);
 		return false;
 	}
 	return true;
@@ -1845,8 +1855,13 @@ dp_flow_rx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	if (__improbable(!dp_flow_rx_route_process(fsw, fe))) {
 		SK_ERR("Rx route bad");
 		fsw_snoop_and_dequeue(fe, &dropped_pkts, rx_pkts, true);
-		FSW_STATS_ADD(FSW_STATS_RX_FLOW_NONVIABLE, n_pkts);
-		reason = DROP_REASON_FSW_FLOW_NONVIABLE;
+		if ((fe->fe_flags & FLOWENTF_DISABLED) != 0) {
+			FSW_STATS_ADD(FSW_STATS_RX_FLOW_DISABLED, n_pkts);
+			reason = DROP_REASON_FSW_FLOW_DISABLED;
+		} else {
+			FSW_STATS_ADD(FSW_STATS_RX_FLOW_NONVIABLE, n_pkts);
+			reason = DROP_REASON_FSW_FLOW_NONVIABLE;
+		}
 		line = __LINE__;
 		goto done;
 	}
@@ -2097,11 +2112,20 @@ rx_flow_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
 }
 
 static void
-dp_rx_process_low_power_wake(struct nx_flowswitch *fsw, struct flow_entry *fe)
+dp_rx_process_low_power_wake(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __kern_packet *pkt)
 {
+	/*
+	 * Let the BSD stack handles its flows and packets for unknown flows
+	 */
 	if (fe->fe_port_reservation == NULL || (fe->fe_flags & FLOWENTF_EXTRL_PORT) != 0) {
 		return;
 	}
+	/*
+	 * We need to generate a wake packet event to powerlog in both cases
+	 * As soon we exit LPW the function if_is_lpw_enabled() returns false
+	 */
+	if_ports_used_match_pkt(fsw->fsw_ifp, pkt);
+
 	if (fe->fe_key.fk_proto == IPPROTO_TCP && (fe->fe_flags & FLOWENTF_CONNECTION_IDLE)) {
 		os_log(wake_packet_log_handle, "dp_rx_process_low_power_wake LPW TCP connection idle");
 
@@ -2116,14 +2140,13 @@ dp_rx_process_low_power_wake(struct nx_flowswitch *fsw, struct flow_entry *fe)
 }
 
 static inline void
-dp_rx_process_wake_packet(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __kern_packet *pkt)
+dp_rx_process_wake_packet(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 {
 	/*
 	 * We only care about wake packets of flows that belong the flow switch
 	 * as wake packets for the host stack are handled by the host input
 	 * function
 	 */
-
 #if (DEBUG || DEVELOPMENT)
 	/* For testing only */
 	if (__improbable(fsw->fsw_ifp->if_xflags & IFXF_MARK_WAKE_PKT)) {
@@ -2140,15 +2163,6 @@ dp_rx_process_wake_packet(struct nx_flowswitch *fsw, struct flow_entry *fe, stru
 
 	if (__improbable(pkt->pkt_pflags & PKT_F_WAKE_PKT)) {
 		if_ports_used_match_pkt(fsw->fsw_ifp, pkt);
-
-		/*
-		 * When a packet is received in LPW mode for an idle TCP connection, the connection
-		 * is aborted immediately with a RST so the peer drops the connection at once
-		 */
-		if (if_is_lpw_enabled(fsw->fsw_ifp)) {
-			pkt->pkt_pflags |= __PKT_F_LPW;
-			dp_rx_process_low_power_wake(fsw, fe);
-		}
 	}
 }
 
@@ -2166,6 +2180,7 @@ _fsw_receive(struct nx_flowswitch *fsw, struct pktq *pktq)
 	uint64_t thread_id;
 	struct mbufq host_mq;
 	struct ifnet *ifp;
+	bool io_pm_is_lpw_mode = is_net_lpw_mode();
 
 	mbufq_init(&host_mq);
 	KPKTQ_INIT(&host_pkts);
@@ -2231,7 +2246,18 @@ _fsw_receive(struct nx_flowswitch *fsw, struct pktq *pktq)
 			continue;
 		}
 
-		dp_rx_process_wake_packet(fsw, fe, pkt);
+		/*
+		 * When a packet is received in LPW mode for an idle TCP connection, the connection
+		 * is aborted immediately with a RST so the peer drops the connection at once
+		 */
+		if (__improbable(io_pm_is_lpw_mode)) {
+			pkt->pkt_pflags |= __PKT_F_LPW;
+			if (if_is_lpw_enabled(fsw->fsw_ifp)) {
+				dp_rx_process_low_power_wake(fsw, fe, pkt);
+			}
+		} else {
+			dp_rx_process_wake_packet(fsw, pkt);
+		}
 
 		rx_flow_batch_packets(&fes, fe, pkt, thread_id);
 		prev_fe = fe;
@@ -2635,11 +2661,12 @@ dp_copy_to_dev_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	err = mbuf_allocpacket(MBUF_DONTWAIT,
 	    (fsw->fsw_frame_headroom + spkt->pkt_length), &one, &m);
 #if (DEVELOPMENT || DEBUG)
-	if (m != NULL) {
-		_FSW_INJECT_ERROR(11, m, NULL, m_freem, m);
+	if (err == 0) {
+		_FSW_INJECT_ERROR(11, err, ENOBUFS, m_freem, m);
 	}
 #endif /* DEVELOPMENT || DEBUG */
-	if (__improbable(m == NULL)) {
+	if (__improbable(err != 0)) {
+		m = NULL; // In case we got here via INJECT_ERROR above
 		FSW_STATS_INC(FSW_STATS_DROP_NOMEM_MBUF);
 		err = ENOBUFS;
 		goto done;
@@ -2648,6 +2675,8 @@ dp_copy_to_dev_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	MD_BUFLET_ADDR_ABS_DLEN(dpkt, bdaddr, bdlen, bdlim, bdoff);
 	if (fsw->fsw_frame_headroom > bdlim) {
 		SK_ERR("not enough space in buffer for headroom");
+		m_freem(m);
+		m = NULL;
 		err = EINVAL;
 		goto done;
 	}
@@ -2657,11 +2686,14 @@ dp_copy_to_dev_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	dpkt->pkt_pflags |= PKT_F_MBUF_DATA;
 
 	/* packet copy into mbuf */
-	fsw->fsw_pkt_copy_to_mbuf(NR_TX, SK_PTR_ENCODE(spkt,
+	err = fsw->fsw_pkt_copy_to_mbuf(NR_TX, SK_PTR_ENCODE(spkt,
 	    METADATA_TYPE(spkt), METADATA_SUBTYPE(spkt)), 0, m,
 	    fsw->fsw_frame_headroom, spkt->pkt_length,
 	    PACKET_HAS_PARTIAL_CHECKSUM(spkt),
 	    spkt->pkt_csum_tx_start_off);
+	if (err != 0) {
+		goto done;
+	}
 	FSW_STATS_INC(FSW_STATS_TX_COPY_PKT2MBUF);
 
 	/* header copy into dpkt buffer for classification */
@@ -2670,8 +2702,13 @@ dp_copy_to_dev_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	kern_packet_t dph = SK_PTR_ENCODE(dpkt,
 	    METADATA_TYPE(dpkt), METADATA_SUBTYPE(dpkt));
 	uint32_t copy_len = MIN(spkt->pkt_length, bdlim - dpkt->pkt_headroom);
-	fsw->fsw_pkt_copy_from_pkt(NR_TX, dph, dpkt->pkt_headroom,
+	err = fsw->fsw_pkt_copy_from_pkt(NR_TX, dph, dpkt->pkt_headroom,
 	    sph, spkt->pkt_headroom, copy_len, FALSE, 0, 0, 0);
+	/*
+	 * Can currently only fail with NR_TX and copysum == TRUE which does
+	 * extra validation of params which could be from userland.
+	 */
+	ASSERT(err == 0);
 	if (copy_len < spkt->pkt_length) {
 		dpkt->pkt_pflags |= PKT_F_TRUNCATED;
 	}
@@ -2692,6 +2729,8 @@ static int
 dp_copy_to_dev_pkt(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
     struct __kern_packet *dpkt)
 {
+	int err;
+
 	struct ifnet *ifp = fsw->fsw_ifp;
 	uint16_t headroom = fsw->fsw_frame_headroom + ifp->if_tx_headroom;
 
@@ -2708,12 +2747,17 @@ dp_copy_to_dev_pkt(struct nx_flowswitch *fsw, struct __kern_packet *spkt,
 	    METADATA_TYPE(spkt), METADATA_SUBTYPE(spkt));
 	kern_packet_t dph = SK_PTR_ENCODE(dpkt,
 	    METADATA_TYPE(dpkt), METADATA_SUBTYPE(dpkt));
-	fsw->fsw_pkt_copy_from_pkt(NR_TX, dph,
+	err = fsw->fsw_pkt_copy_from_pkt(NR_TX, dph,
 	    dpkt->pkt_headroom, sph, spkt->pkt_headroom,
 	    spkt->pkt_length, PACKET_HAS_PARTIAL_CHECKSUM(spkt),
 	    (spkt->pkt_csum_tx_start_off - spkt->pkt_headroom),
 	    (spkt->pkt_csum_tx_stuff_off - spkt->pkt_headroom),
 	    (spkt->pkt_csum_flags & PACKET_CSUM_ZERO_INVERT));
+
+	if (err != 0) {
+		SK_ERR("copy_from_pkt failed %u", spkt->pkt_csum_tx_stuff_off - spkt->pkt_headroom);
+		return err;
+	}
 
 	FSW_STATS_INC(FSW_STATS_TX_COPY_PKT2PKT);
 
@@ -3329,10 +3373,16 @@ dp_flow_tx_process(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	}
 	if (__improbable(!dp_flow_tx_route_process(fsw, fe))) {
 		SK_RDERR(5, "Tx route bad");
-		FSW_STATS_ADD(FSW_STATS_TX_FLOW_NONVIABLE,
-		    KPKTQ_LEN(&fe->fe_tx_pktq));
+		if ((fe->fe_flags & FLOWENTF_DISABLED) != 0) {
+			FSW_STATS_ADD(FSW_STATS_TX_FLOW_DISABLED,
+			    KPKTQ_LEN(&fe->fe_tx_pktq));
+			reason = DROP_REASON_FSW_FLOW_DISABLED;
+		} else {
+			FSW_STATS_ADD(FSW_STATS_TX_FLOW_NONVIABLE,
+			    KPKTQ_LEN(&fe->fe_tx_pktq));
+			reason = DROP_REASON_FSW_FLOW_NONVIABLE;
+		}
 		KPKTQ_CONCAT(&dropped_pkts, &fe->fe_tx_pktq);
-		reason = DROP_REASON_FSW_FLOW_NONVIABLE;
 		line = __LINE__;
 		goto done;
 	}
@@ -3911,7 +3961,7 @@ do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
 			partial += htons(tcp_hlen + IPPROTO_TCP + payload_sz);
 			partial += pseudo_hdr_csum;
 			ADDCARRY(partial);
-			tcp->th_sum = ~(uint16_t)partial;
+			tcp->th_sum = (unsigned short)(~(uint16_t)partial);
 		} else {
 			ASSERT(af == AF_INET6);
 			ip6 = (struct ip6_hdr *)(baddr0 + pkt->pkt_headroom);
@@ -3932,7 +3982,7 @@ do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
 			partial += htonl(tcp_hlen + IPPROTO_TCP + payload_sz);
 			partial += pseudo_hdr_csum;
 			ADDCARRY(partial);
-			tcp->th_sum = ~(uint16_t)partial;
+			tcp->th_sum = (unsigned short)(~(uint16_t)partial);
 		}
 		tcp_seq += payload_sz;
 		METADATA_ADJUST_LEN(pkt, total_hlen, headroom);

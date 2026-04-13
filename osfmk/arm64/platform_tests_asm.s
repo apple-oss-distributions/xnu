@@ -27,6 +27,7 @@
  */
 
 #include <arm64/asm.h>
+#include <arm64/static_if_asm.h>
 #include <pexpert/arm64/board_config.h>
 
 .macro SAVE_CALLEE_REGISTERS
@@ -260,3 +261,59 @@ LEXT(arm64_bti_test_func_with_pac_landing_pad)
 #endif /* BTI_ENFORCED */
 
 
+
+	.globl EXT(arm64_static_if_asm_test_key_true)
+LEXT(arm64_static_if_asm_test_key_true)
+	ARM64_PROLOG
+	mov	x0, #0
+	STATIC_BRANCH_IF_ENABLED(static_if_test_key_true, 1f)
+	b	2f
+1:
+	add	x0, x0, #1
+2:
+	STATIC_BRANCH_IF_DISABLED(static_if_test_key_true, 3f)
+	add	x0, x0, #1
+3:
+	ret
+
+	.globl EXT(arm64_static_if_asm_test_key_false)
+LEXT(arm64_static_if_asm_test_key_false)
+	ARM64_PROLOG
+	mov	x0, #0
+	STATIC_BRANCH_IF_ENABLED(static_if_test_key_false, 1f)
+	b	2f
+1:
+	add	x0, x0, #1
+2:
+	STATIC_BRANCH_IF_DISABLED(static_if_test_key_false, 3f)
+	add	x0, x0, #1
+3:
+	ret
+
+	.globl EXT(arm64_static_if_asm_test_key_true_to_false)
+LEXT(arm64_static_if_asm_test_key_true_to_false)
+	ARM64_PROLOG
+	mov	x0, #0
+	STATIC_BRANCH_IF_ENABLED(static_if_test_key_true_to_false, 1f)
+	b	2f
+1:
+	add	x0, x0, #1
+2:
+	STATIC_BRANCH_IF_DISABLED(static_if_test_key_true_to_false, 3f)
+	add	x0, x0, #1
+3:
+	ret
+
+	.globl EXT(arm64_static_if_asm_test_key_false_to_true)
+LEXT(arm64_static_if_asm_test_key_false_to_true)
+	ARM64_PROLOG
+	mov	x0, #0
+	STATIC_BRANCH_IF_ENABLED(static_if_test_key_false_to_true, 1f)
+	b	2f
+1:
+	add	x0, x0, #1
+2:
+	STATIC_BRANCH_IF_DISABLED(static_if_test_key_false_to_true, 3f)
+	add	x0, x0, #1
+3:
+	ret

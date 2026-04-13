@@ -53,7 +53,7 @@
 #  PERF_DBG_DEV    =[ PERF_DBG_BASE lock_stats config_iotrace ]
 #  PERF_DBG_DEBUG = [ PERF_DBG_BASE lock_stats config_iotrace ]
 #  PARAVIRT_BASE =  [ config_pv_ticket ]
-#  MACH_BASE =      [ mach config_kext_basement config_mca config_vmx config_mtrr config_lapic config_telemetry importance_inheritance config_atm config_coalitions hypervisor config_iosched config_sysdiagnose config_mach_bridge_send_time copyout_shim phys_write_acct config_user_notification config_service_port_info config_voucher_deprecated PARAVIRT_BASE config_ledger_interval_max ]
+#  MACH_BASE =      [ mach config_kext_basement config_mca config_vmx config_mtrr config_lapic config_telemetry importance_inheritance config_atm config_coalitions hypervisor config_iosched config_sysdiagnose config_mach_bridge_send_time copyout_shim phys_write_acct config_user_notification config_service_port_info config_voucher_deprecated PARAVIRT_BASE ]
 #  MACH_RELEASE =   [ MACH_BASE ]
 #  MACH_DEV =       [ MACH_BASE importance_trace config_task_suspend_stats ]
 #  MACH_DEBUG =     [ MACH_BASE importance_trace importance_debug config_task_suspend_stats ]

@@ -37,7 +37,12 @@
 
 T_DECL(mte_api_test,
     "Test the API exposed in mte.h work in user space",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    /*
+     * This test can only run if we decided to enable MTE at boot.
+     * This is not always the case on MTE-supported hardware: for example
+     * due to rdar://135805819 KASAN variants force MTE off.
+     */
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_SOC_SPECIFIC)
 {
 	void *address;

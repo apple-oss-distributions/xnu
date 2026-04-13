@@ -1019,10 +1019,10 @@ tcp_output(struct tcpcb *tp)
 	uint64_t pacing_tx_time;
 	struct inpcb *__single inp = tp->t_inpcb;
 	struct socket *__single so = inp->inp_socket;
-	int32_t len, recwin, sendwin, off;
+	int32_t len = 0, recwin = 0, sendwin = 0, off = 0;
 	uint32_t max_len = 0;
-	uint16_t flags;
-	int error;
+	uint16_t flags = 0;
+	int error = 0;
 	mbuf_ref_t m;
 	struct ip *ip = NULL;
 	struct ip6_hdr *ip6 = NULL;
@@ -1152,8 +1152,6 @@ again:
 	rt = inp->inp_route.ro_rt;
 	if (rt != NULL && ROUTE_UNUSABLE(&tp->t_inpcb->inp_route)) {
 		struct ifnet *ifp;
-		struct in_ifaddr *ia = NULL;
-		struct in6_ifaddr *ia6 = NULL;
 		int found_srcaddr = 0;
 
 		/* disable multipages at the socket */
@@ -1165,14 +1163,16 @@ again:
 		soif2kcl(so, FALSE);
 
 		if (isipv6) {
-			ia6 = ifa_foraddr6(&inp->in6p_laddr);
+			struct in6_ifaddr *ia6 = ifa_foraddr6(&inp->in6p_laddr);
 			if (ia6 != NULL) {
 				found_srcaddr = 1;
+				ifa_remref(&ia6->ia_ifa);
 			}
 		} else {
-			ia = ifa_foraddr(inp->inp_laddr.s_addr);
+			struct in_ifaddr *ia = ifa_foraddr(inp->inp_laddr.s_addr);
 			if (ia != NULL) {
 				found_srcaddr = 1;
+				ifa_remref(&ia->ia_ifa);
 			}
 		}
 
@@ -1187,12 +1187,10 @@ again:
 			}
 
 			/*
-			 * Set retransmit  timer if it wasn't set,
 			 * reset Persist timer and shift register as the
 			 * advertised peer window may not be valid anymore
 			 */
 			if (tp->t_timer[TCPT_REXMT] == 0) {
-				tcp_set_rto(tp);
 				if (tp->t_timer[TCPT_PERSIST] != 0) {
 					tp->t_timer[TCPT_PERSIST] = 0;
 					tp->t_persist_stop = 0;
@@ -1209,18 +1207,10 @@ again:
 			if (so->so_flags & SOF_NOADDRAVAIL) {
 				tcp_drop(tp, EADDRNOTAVAIL);
 				return EADDRNOTAVAIL;
-			} else {
-				TCP_LOG_OUTPUT(tp, "no source address silently ignored");
-				tcp_check_timer_state(tp);
-				return 0; /* silently ignore, keep data in socket: address may be back */
 			}
-		}
-		if (ia != NULL) {
-			ifa_remref(&ia->ia_ifa);
-		}
 
-		if (ia6 != NULL) {
-			ifa_remref(&ia6->ia_ifa);
+			error = EADDRNOTAVAIL;
+			goto out;
 		}
 
 		/*
@@ -3492,7 +3482,11 @@ out:
 		}
 		TCP_PKTLIST_CLEAR(tp);
 
-		if (error == ENOBUFS) {
+		switch (error) {
+		case ENOBUFS:
+		case EADDRNOTAVAIL:
+		case EHOSTUNREACH:
+		case ENETDOWN:
 			/*
 			 * Set retransmit timer if not currently set
 			 * when we failed to send a segment that can be
@@ -3504,6 +3498,10 @@ out:
 			    so->so_snd.sb_cc > 0)) {
 				tcp_set_rto(tp);
 			}
+			break;
+		}
+
+		if (error == ENOBUFS) {
 			tp->snd_cwnd = tp->t_maxseg;
 			tp->t_bytes_acked = 0;
 			tcp_check_timer_state(tp);

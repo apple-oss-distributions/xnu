@@ -84,7 +84,7 @@ _kernelrpc_mach_vm_deallocate_trap(struct _kernelrpc_mach_vm_deallocate_args *ar
 	int rv = MACH_SEND_INVALID_DEST;
 
 	if (task) {
-		rv = mach_vm_deallocate(task->map, args->address, args->size);
+		rv = mach_vm_deallocate_external(task->map, args->address, args->size);
 	}
 
 	return rv;
@@ -465,10 +465,18 @@ _kernelrpc_mach_port_request_notification_trap(
 		// We need to make ith_knote NULL as ipc_object_copyout() uses
 		// thread-argument-passing and its value should not be garbage
 		current_thread()->ith_knote = ITH_KNOTE_NULL;
+		/* May be an immovable right */
 		rv = ipc_object_copyout(task->itk_space, previous,
-		    MACH_MSG_TYPE_PORT_SEND_ONCE, IPC_OBJECT_COPYOUT_FLAGS_NONE,
+		    MACH_MSG_TYPE_PORT_SEND_ONCE, IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND,
 		    NULL, &previous_name);
-		if (rv != KERN_SUCCESS) {
+		if (rv == KERN_INVALID_CAPABILITY) {
+			previous_name = MACH_PORT_DEAD;
+		} else if (rv != KERN_SUCCESS) {
+			if (rv == KERN_RESOURCE_SHORTAGE) {
+				rv = MACH_MSG_IPC_KERNEL;
+			} else {
+				rv = MACH_MSG_IPC_SPACE;
+			}
 			goto done;
 		}
 	}
@@ -785,16 +793,19 @@ mach_vm_reclaim_update_kernel_accounting_trap(
 	if (task == TASK_NULL) {
 		return MACH_SEND_INVALID_DEST;
 	}
-	if (args->bytes_reclaimed_out == USER_ADDR_NULL) {
+	if (args->bytes_reclaimed_out == USER_ADDR_NULL ||
+	    args->next_deadline_out == USER_ADDR_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 #if CONFIG_DEFERRED_RECLAIM
 	mach_error_t err;
 	uint64_t bytes_reclaimed;
+	uint64_t next_deadline_abs;
 	err = vm_deferred_reclamation_update_accounting_internal(
-		task, &bytes_reclaimed);
+		task, &bytes_reclaimed, &next_deadline_abs);
 	if (!err) {
-		mach_copyout(&bytes_reclaimed, (user_addr_t)args->bytes_reclaimed_out, sizeof(bytes_reclaimed));
+		mach_copyout(&bytes_reclaimed, args->bytes_reclaimed_out, sizeof(bytes_reclaimed));
+		mach_copyout(&next_deadline_abs, args->next_deadline_out, sizeof(next_deadline_abs));
 	}
 	return err;
 #else /* !CONFIG_DEFERRED_RECLAIM */

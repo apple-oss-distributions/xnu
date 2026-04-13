@@ -53,6 +53,7 @@
 #include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/flowswitch/flow/flow_var.h>
 #include <skywalk/nexus/flowswitch/fsw_var.h>
 #include <skywalk/nexus/netif/nx_netif.h>
 #include <skywalk/nexus/netif/nx_netif_compat.h>
@@ -2240,6 +2241,35 @@ fsw_fold_stats(struct nx_flowswitch *fsw,
 		/* NOTREACHED */
 		__builtin_unreachable();
 	}
+}
+
+int
+fsw_get_rx_steering_rules(struct nx_flowswitch *fsw,
+    struct ifnet_rx_steering_rule *__counted_by(buffer_count) rules_buffer, uint32_t buffer_count, uint32_t *count_out)
+{
+	__block uint32_t count = 0;
+
+	if (fsw == NULL || count_out == NULL) {
+		return EINVAL;
+	}
+	if (buffer_count == 0 || rules_buffer == NULL) {
+		return EINVAL;
+	}
+
+	*count_out = 0;
+
+	FSW_RLOCK(fsw);
+	flow_mgr_foreach_flow(fsw->fsw_flow_mgr, ^(struct flow_entry *fe) {
+		if ((fe->fe_flags & FLOWENTF_RX_STEERING) && count < buffer_count) {
+		        rules_buffer[count].identifier = fe->fe_flowid;
+		        convert_flowkey_to_inet_td(&fe->fe_key, &rules_buffer[count].descriptor);
+		        count++;
+		}
+	});
+	FSW_RUNLOCK(fsw);
+
+	*count_out = count;
+	return 0;
 }
 
 boolean_t

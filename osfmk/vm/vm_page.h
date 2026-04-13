@@ -234,6 +234,7 @@ __enum_closed_decl(vm_memory_class_t, uint8_t, {
  */
 
 #define VM_PAGE_NULL            ((vm_page_t) 0)
+#define VM_PAGE_PRIMED          ((vm_page_t) ~0)
 
 __enum_closed_decl(vm_page_q_state_t, uint8_t, {
 	VM_PAGE_NOT_ON_Q                = 0,    /* page is not present on any queue, nor is it wired... mainly a transient state */
@@ -255,8 +256,11 @@ __enum_closed_decl(vm_page_q_state_t, uint8_t, {
 	VM_PAGE_ON_INACTIVE_INTERNAL_Q  = 11,   /* page is on the inactive internal queue a.k.a.  anonymous queue */
 	VM_PAGE_ON_INACTIVE_EXTERNAL_Q  = 12,   /* page in on the inactive external queue a.k.a.  file backed queue */
 	VM_PAGE_ON_INACTIVE_CLEANED_Q   = 13,   /* page has been cleaned to a backing file and is ready to be stolen */
+	VM_PAGE_IS_IOPL_WIRED           = 14,   /* page has been wired for an I/O UPL; object lock must be held when transitioning into/out of this state. */
+	VM_PAGE_NUM_Q_STATES
 });
-#define VM_PAGE_Q_STATE_LAST_VALID_VALUE  13    /* we currently use 4 bits for the state... don't let this go beyond 15 */
+
+_Static_assert(VM_PAGE_NUM_Q_STATES <= 16, "Too many vm_page_q_state_t values to fit in 4-bit vmp_q_state field");
 
 __enum_closed_decl(vm_page_specialq_t, uint8_t, {
 	VM_PAGE_SPECIAL_Q_EMPTY         = 0,
@@ -327,7 +331,6 @@ struct vm_page {
 		                                            /* be reused ahead of other pages (P) */
 		uint8_t                 vmp_reference:1;    /* page has been used (P) */
 		uint8_t                 vmp_realtime:1;     /* page used by realtime thread (P) */
-		uint8_t                 vmp_iopl_wired:1;   /* page has been wired for I/O UPL (O&P) */
 #if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
 		uint8_t                 vmp_unmodified_ro:1;/* Tracks if an anonymous page is modified after a decompression (O&P).*/
 #else
@@ -338,6 +341,7 @@ struct vm_page {
 #else
 		uint8_t                 __vmp_reserved2:1;
 #endif
+		uint8_t                 __vmp_reserved3:1;
 	};
 
 	/*
@@ -430,6 +434,7 @@ extern uint32_t         vm_pages_count;
 #if XNU_VM_HAS_LINEAR_PAGES_ARRAY
 extern ppnum_t          vm_pages_first_pnum;
 #endif /* XNU_VM_HAS_LINEAR_PAGES_ARRAY */
+
 
 /**
  * Internal accessor which returns the raw vm_pages pointer.
@@ -609,12 +614,7 @@ extern unsigned int     vm_clump_mask, vm_clump_shift;
 #define VM_PAGE_PACKED_ALIGNED          __attribute__((aligned(VM_PAGE_PACKED_PTR_ALIGNMENT)))
 #define VM_PAGE_PACKED_PTR_BITS         31
 #define VM_PAGE_PACKED_PTR_SHIFT        6
-#ifndef __BUILDING_XNU_LIB_UNITTEST__
 #define VM_PAGE_PACKED_PTR_BASE         ((uintptr_t)VM_MIN_KERNEL_AND_KEXT_ADDRESS)
-#else
-extern uintptr_t mock_page_ptr_base;
-#define VM_PAGE_PACKED_PTR_BASE         (mock_page_ptr_base)
-#endif
 #define VM_PAGE_PACKED_FROM_ARRAY       0x80000000
 
 static inline vm_page_packed_t
@@ -648,7 +648,9 @@ vm_page_unpack_ptr(uintptr_t p)
 #define VM_PAGE_PACK_PTR(p)     vm_page_pack_ptr((uintptr_t)(p))
 #define VM_PAGE_UNPACK_PTR(p)   vm_page_unpack_ptr((uintptr_t)(p))
 
-#define VM_OBJECT_PACK(o)       ((vm_page_object_t)VM_PACK_POINTER((uintptr_t)(o), VM_PAGE_PACKED_PTR))
+#define VM_OBJECT_PACK(o)       (VM_ASSERT_POINTER_PACKABLE((uintptr_t)(o), VM_PAGE_PACKED_PTR), \
+	                        (vm_page_object_t)VM_PACK_POINTER((uintptr_t)(o), VM_PAGE_PACKED_PTR))
+
 #define VM_OBJECT_UNPACK(p)     ((vm_object_t)VM_UNPACK_POINTER(p, VM_PAGE_PACKED_PTR))
 
 #define VM_PAGE_OBJECT(p)       VM_OBJECT_UNPACK((p)->vmp_object)
@@ -1061,7 +1063,8 @@ typedef struct vm_locks_array {
 } vm_locks_array_t;
 
 
-#define VM_PAGE_WIRED(m)        ((m)->vmp_q_state == VM_PAGE_IS_WIRED)
+#define VM_PAGE_WIRED(m)        (((m)->vmp_q_state == VM_PAGE_IS_WIRED) || ((m)->vmp_q_state == VM_PAGE_IS_IOPL_WIRED))
+#define VM_PAGE_IOPL_WIRED(m)   ((m)->vmp_q_state == VM_PAGE_IS_IOPL_WIRED)
 #define NEXT_PAGE(m)            ((m)->vmp_snext)
 #define NEXT_PAGE_PTR(m)        (&(m)->vmp_snext)
 
@@ -1529,10 +1532,8 @@ extern unsigned int     vm_page_pageable_internal_count;
 extern unsigned int     vm_page_pageable_external_count;
 extern
 unsigned int    vm_page_xpmapped_external_count;        /* How many pages are mapped executable? */
-extern
-unsigned int    vm_page_external_count; /* How many pages are file-backed? */
-extern
-unsigned int    vm_page_internal_count; /* How many pages are anonymous? */
+SCALABLE_COUNTER_DECLARE(vm_page_external_count);       /* How many pages are file-backed? */
+SCALABLE_COUNTER_DECLARE(vm_page_internal_count);       /* How many pages are file-backed? */
 extern
 unsigned int    vm_page_wire_count;             /* How many pages are wired? */
 extern
@@ -1568,16 +1569,21 @@ extern
 unsigned int    vm_page_speculative_used;
 #endif
 
-extern
-unsigned int    vm_page_purgeable_count;/* How many pages are purgeable now ? */
-extern
-unsigned int    vm_page_purgeable_wired_count;/* How many purgeable pages are wired now ? */
-extern
-uint64_t        vm_page_purged_count;   /* How many pages got purged so far ? */
+SCALABLE_COUNTER_DECLARE(vm_page_purgeable_count);      /* How many pages are purgeable now ? */
+SCALABLE_COUNTER_DECLARE(vm_page_purgeable_wired_count);/* How many purgeable pages are wired now ? */
+extern uint64_t        vm_page_purged_count;            /* How many pages got purged so far ? */
 
 extern
 _Atomic unsigned int vm_page_swapped_count;
 /* How many pages are swapped to disk? */
+
+extern
+_Atomic uint64_t vm_page_swap_count;
+/* How many pages of compressed data are present in the swapfile? */
+
+extern
+_Atomic unsigned int vm_page_shared_region_count;
+/* How many resident pages are backed by a shared region pager? */
 
 extern unsigned int     vm_page_free_wanted;
 /* how many threads are waiting for memory */
@@ -1597,8 +1603,6 @@ extern const ppnum_t    vm_page_guard_addr;
 
 
 extern boolean_t        vm_page_deactivate_hint;
-
-extern int              vm_compressor_mode;
 
 #if __x86_64__
 /*
@@ -1636,6 +1640,17 @@ extern ppnum_t          max_valid_low_ppnum;
  * Denotes that the caller never wants @c vm_page_grab_options() to call
  * @c VM_PAGE_WAIT(), even if the thread is privileged.
  *
+ * @const VM_PAGE_GRAB_VM_PRIV
+ * The caller thread is VM privileged.
+ *
+ * @const VM_PAGE_GRAB_PRIME
+ * The caller doesn't expect to receive a VM page, it just means for the per-cpu
+ * queues to be primed. @c VM_PAGE_PRIMED will be returned if priming was
+ * successful.
+ *
+ * @const VM_PAGE_GRAB_ZERO_FILL
+ * Grab a zero filled page (or zero fill the page returned)
+ *
  * @const VM_PAGE_GRAB_SECLUDED
  * The caller is eligible to the secluded pool.
  */
@@ -1646,26 +1661,23 @@ extern ppnum_t          max_valid_low_ppnum;
  *
  * @const VM_PAGE_GRAB_ALLOW_TAG_STORAGE
  * The grabbed page can be a claimed tag storage page.
- *
- * @const VM_PAGE_GRAB_WIREABLE
- * The grabbed page will likely be wired.
- * This flag makes the caller ineligible to claim tag storage pages.
- * Currently unused.
  */
-#endif /* HAS_MTE */
+#endif
 __enum_decl(vm_grab_options_t, uint32_t, {
-	VM_PAGE_GRAB_OPTIONS_NONE               = 0x00000000,
-	VM_PAGE_GRAB_Q_LOCK_HELD                = 0x00000001,
-	VM_PAGE_GRAB_NOPAGEWAIT                 = 0x00000002,
+	VM_PAGE_GRAB_OPTIONS_NONE       = 0x00000000,
+	VM_PAGE_GRAB_Q_LOCK_HELD        = 0x00000001,
+	VM_PAGE_GRAB_NOPAGEWAIT         = 0x00000002,
+	VM_PAGE_GRAB_VM_PRIV            = 0x00000004,
+	VM_PAGE_GRAB_PRIME              = 0x00000008,
+	VM_PAGE_GRAB_ZERO_FILL          = 0x00000010,
 
 	/* architecture/platform-specific flags */
 #if CONFIG_SECLUDED_MEMORY
-	VM_PAGE_GRAB_SECLUDED                   = 0x00010000,
+	VM_PAGE_GRAB_SECLUDED           = 0x00010000,
 #endif /* CONFIG_SECLUDED_MEMORY */
 #if HAS_MTE
 	VM_PAGE_GRAB_MTE                = 0x00020000,
 	VM_PAGE_GRAB_ALLOW_TAG_STORAGE  = 0x00040000,
-	VM_PAGE_GRAB_WIREABLE           = 0x00080000,
 #endif /* HAS_MTE */
 });
 
@@ -1700,7 +1712,7 @@ extern void vm_pressure_response(void);
 	        vm_page_pageable_external_count + \
 	        vm_page_free_count +              \
 	        VM_PAGE_SECLUDED_COUNT_OVER_TARGET() + \
-	        (VM_DYNAMIC_PAGING_ENABLED() ? 0 : vm_page_purgeable_count) \
+	        (VM_DYNAMIC_PAGING_ENABLED() ? 0 : (uint32_t)counter_load(&vm_page_purgeable_count)) \
 	        )
 
 #else /* CONFIG_JETSAM */

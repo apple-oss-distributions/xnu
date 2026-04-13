@@ -33,43 +33,71 @@
 
 #if XNU_KERNEL_PRIVATE
 
-#include <sys/types.h>
 #include <machine/static_if.h>
-#include <arm64/mte.h>
 
 __BEGIN_DECLS
 
+#if DEVELOPMENT || DEBUG || KASAN
+/*
+ * Boot-args.
+ *
+ * - -disable_mte: legacy big hammer that disables MTE entirely. It is understood and
+ *                 honored by both iBoot and SPTM.
+ *
+ * - mte_config:   allows to setup an explicit MTE configuration for XNU. The configuration
+ *                 allows to toggle USER/KERNEL DEFAULT/PURE_DATA configurations.
+ *                 The bitmask is an _explicit_ configuration that overrides the
+ *                 default one. E.g. mte_config=0x0004 will boot the kernel with only
+ *                 userspace MTE enabled.
+ *
+ * - mte_debug:    set of tunables that can be turned on to test either experimental
+ *                 features or further debugging features.
+ */
+
+/*
+ * mte_config=xxx boot-arg allows to set a specific MTE enablement configuration.
+ * It allows to toggle whether user/kernel default/data tagging is enabled.
+ */
 __options_closed_decl(mte_config_t, uint16_t, {
-	/* Disable MTE */
-	MTE_DISABLE                       = 0x0000,         /* Disable MTE tag checking */
-	MTE_KERNEL_ENABLE                 = 0x0001,         /* Enable MTE tag checking in the kernel */
-	MTE_KERNEL_ENABLE_PURE_DATA       = 0x0002,         /* Extend MTE tag checking to pure data in the kernel */
-	MTE_USER_ENABLE                   = 0x0004,         /* Enable MTE tag checking in userspace */
-	MTE_USER_FORCE_ENABLE_ALL         = 0x0040,         /* Force enable MTE on every userland process */
-	MTE_DEBUG_TCO_STATE               = 0x0080,         /* Enable TCO debugging */
-	MTE_PANIC_ON_NON_CANONICAL_PARAM  = 0x0100,         /* Panic whenever a non canonical address is passed to APIs expecting otherwise */
-	MTE_PANIC_ON_ASYNC_FAULT          = 0x0200,         /* Panic whenever a tag check fault is detected in an async path */
+	MTE_ENABLE_KERNEL                 = 0x0001,         /* Enable MTE tag checking in the kernel */
+	MTE_ENABLE_KERNEL_PURE_DATA       = 0x0002,         /* Extend MTE tag checking to pure data in the kernel */
+	MTE_ENABLE_USER                   = 0x0004,         /* Enable MTE tag checking in userspace */
+	MTE_ENABLE_USER_PURE_DATA         = 0x0008          /* Enable MTE tag checking to pure data in userspace */
 });
 
-#if DEVELOPMENT || DEBUG
+#define MTE_CONFIG_DEFAULT                      (MTE_ENABLE_KERNEL | MTE_ENABLE_USER | MTE_ENABLE_KERNEL_PURE_DATA | MTE_ENABLE_USER_PURE_DATA)
+#define MTE_CONFIG_DISABLE_ALL                  (0)
 
-/* We keep this for retro-compatibility with code, should be cleaned up */
-extern bool is_mte_enabled;
-
-#define MTE_CONFIG_DEFAULT      (MTE_KERNEL_ENABLE | MTE_USER_ENABLE)
-
+/* Default configuration for both DEVELOPMENT and RELEASE */
 STATIC_IF_KEY_DECLARE_TRUE(mte_config_kern_enabled);
-STATIC_IF_KEY_DECLARE_FALSE(mte_config_kern_data_enabled);
+STATIC_IF_KEY_DECLARE_TRUE(mte_config_kern_data_enabled);
 STATIC_IF_KEY_DECLARE_TRUE(mte_config_user_enabled);
-STATIC_IF_KEY_DECLARE_FALSE(mte_config_user_data_enabled);
+STATIC_IF_KEY_DECLARE_TRUE(mte_config_user_data_enabled);
+
+#define mte_kern_enabled()                      probable_static_if(mte_config_kern_enabled)
+#define mte_kern_data_enabled()                 probable_static_if(mte_config_kern_data_enabled)
+#define mte_user_enabled()                      probable_static_if(mte_config_user_enabled)
+#define mte_user_data_enabled()                 probable_static_if(mte_config_user_data_enabled)
+
+/*
+ * mte_debug=xxx boot-arg allows to enable a number of runtime debugging
+ * options for MTE.
+ */
+__options_closed_decl(mte_debug_config_t, uint16_t, {
+	MTE_USER_FORCE_ENABLE_ALL         = 0x0001,         /* Force enable MTE on every userland process */
+	MTE_DEBUG_TCO_STATE               = 0x0002,         /* Enable TCO debugging */
+	MTE_PANIC_ON_NON_CANONICAL_PARAM  = 0x0004,         /* Panic whenever a non canonical address is passed to APIs expecting otherwise */
+	MTE_PANIC_ON_ASYNC_FAULT          = 0x0008,         /* Panic whenever a tag check fault is detected in an async path */
+});
+
+#define MTE_DEBUG_DEFAULT               (0)
+#define MTE_DEBUG_DISABLE_ALL           (0)
+
 STATIC_IF_KEY_DECLARE_FALSE(mte_config_force_all_enabled);
 STATIC_IF_KEY_DECLARE_FALSE(mte_debug_tco_state);
 STATIC_IF_KEY_DECLARE_FALSE(mte_panic_on_non_canonical);
 STATIC_IF_KEY_DECLARE_FALSE(mte_panic_on_async_fault);
 
-#define mte_kern_enabled()               probable_static_if(mte_config_kern_enabled)
-#define mte_kern_data_enabled()          improbable_static_if(mte_config_kern_data_enabled)
-#define mte_user_enabled()               probable_static_if(mte_config_user_enabled)
 #define mte_force_all_enabled()          improbable_static_if(mte_config_force_all_enabled)
 /*
  * PSTATE.TCO sounds mellow, but can be evil. Tag Check Override is meant to be
@@ -99,15 +127,32 @@ STATIC_IF_KEY_DECLARE_FALSE(mte_panic_on_async_fault);
  * victim task.
  */
 #define mte_panic_on_async_fault()        improbable_static_if(mte_panic_on_async_fault)
+
 #else /* DEVELOPMENT || DEBUG */
-#define mte_kern_enabled()                (true)
-#define mte_kern_data_enabled()           (false)
-#define mte_user_enabled()                (true)
-#define mte_force_all_enabled()           (false)
-#define mte_debug_tco_state()             (false)
-#define mte_panic_on_non_canonical()      (false)
-#define mte_panic_on_async_fault()        (false)
-#endif /* DEVELOPMENT || DEBUG */
+#define MTE_CONFIG_ON_RELEASE(name, state)              \
+	static inline bool                          \
+	name(void) {                                \
+	    return (state);                         \
+	}
+
+MTE_CONFIG_ON_RELEASE(mte_kern_enabled, true)
+MTE_CONFIG_ON_RELEASE(mte_kern_data_enabled, true)
+MTE_CONFIG_ON_RELEASE(mte_user_enabled, true)
+MTE_CONFIG_ON_RELEASE(mte_user_data_enabled, true)
+
+#endif /* DEVELOPMENT || DEBUG || KASAN */
+
+/*
+ * While we could theoretically boot with user MTE enabled and kernel MTE (tagging)
+ * disabled, we are never really going to, so let's save some distasteful codegen across
+ * the board.
+ */
+#define mte_enabled()                           (mte_kern_enabled())
+
+#ifndef MTE_EXCLUDE_MASK_T
+#define MTE_EXCLUDE_MASK_T
+typedef uint64_t mte_exclude_mask_t;
+#endif /* MTE_EXCLUDE_MASK_T */
 
 /*
  * Generate a random tag out of default best effort exclude mask.
@@ -169,7 +214,6 @@ extern void mte_report_non_canonical_address(caddr_t address, vm_map_t map, cons
 
 /* MTE exceptions */
 extern void mte_guard_ast(thread_t thread, mach_exception_data_type_t code, mach_exception_data_type_t subcode);
-extern void mte_synthesize_async_tag_check_fault(thread_t thread, vm_map_t map);
 
 
 #endif /* XNU_KERNEL_PRIVATE */

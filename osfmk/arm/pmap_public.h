@@ -28,6 +28,10 @@
 #ifndef _ARM_PMAP_PUBLIC_H_
 #define _ARM_PMAP_PUBLIC_H_
 
+#if CONFIG_SPTM
+/* On SPTM systems, rely on the SPTM-specific header. */
+#include <arm64/sptm/pmap_public.h>
+#else
 
 #include <stddef.h>
 #include <mach/kern_return.h>
@@ -44,5 +48,7 @@ typedef uint32_t pmap_paddr_t __kernel_ptr_semantics; /* physical address (not p
 
 
 __END_DECLS
+
+#endif /* CONFIG_SPTM */
 
 #endif /* _ARM_PMAP_PUBLIC_H_ */

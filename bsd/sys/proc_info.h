@@ -859,8 +859,8 @@ struct channel_fdinfo {
 
 __END_DECLS
 
-#ifdef  PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <sys/proc_info_private.h>
-#endif
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /*_SYS_PROC_INFO_H */

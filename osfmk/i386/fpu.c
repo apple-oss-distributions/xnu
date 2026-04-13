@@ -489,7 +489,7 @@ init_fpu(void)
 	fpu_capability = fpu_default = FP;
 
 	static boolean_t is_avx512_enabled = TRUE;
-	if (cpu_number() == master_cpu) {
+	if (cpu_number() == boot_cpu_id) {
 		if (cpuid_leaf7_features() & CPUID_LEAF7_FEATURE_AVX512F) {
 			PE_parse_boot_argn("avx512", &is_avx512_enabled, sizeof(boolean_t));
 			kprintf("AVX512 supported %s\n",
@@ -538,7 +538,7 @@ init_fpu(void)
 		}
 	}
 
-	if (cpu_number() == master_cpu) {
+	if (cpu_number() == boot_cpu_id) {
 		kprintf("fpu_state: %s, state_size: %d\n",
 		    xstate_name[fpu_capability],
 		    fp_state_size(fpu_capability));

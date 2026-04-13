@@ -109,8 +109,6 @@
 #include <kern/task.h>
 #include <kern/telemetry.h>
 #include <kern/waitq.h>
-#include <kern/sched_hygiene.h>
-#include <kern/sched_prim.h>
 #include <kern/mpsc_queue.h>
 #include <kern/debug.h>
 
@@ -461,7 +459,7 @@ readv_uio(struct proc *p, int fd,
 
 	error = copyin_user_iovec_array(user_iovp,
 	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-	    iovcnt, iovp);
+	    iovcnt, iovp, iovcnt);
 
 	if (error) {
 		goto out;
@@ -780,7 +778,7 @@ writev_uio(struct proc *p, int fd,
 
 	error = copyin_user_iovec_array(user_iovp,
 	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-	    iovcnt, iovp);
+	    iovcnt, iovp, iovcnt);
 
 	if (error) {
 		goto out;
@@ -2259,26 +2257,24 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 #pragma unused(p)
 #endif
 	int rval, pid, len, error;
-#ifdef LEDGER_DEBUG
-	struct ledger_limit_args lla;
-#endif
 	task_t task;
 	proc_t proc;
 
 	/* Finish copying in the necessary args before taking the proc lock */
 	error = 0;
 	len = 0;
-	if (args->cmd == LEDGER_ENTRY_INFO || args->cmd == LEDGER_ENTRY_INFO_V2) {
+
+	switch (args->cmd) {
+	case LEDGER_INFO:
+		break;
+	case LEDGER_ENTRY_INFO:
+	case LEDGER_ENTRY_INFO_V2:
 		error = copyin(args->arg3, (char *)&len, sizeof(len));
-	} else if (args->cmd == LEDGER_TEMPLATE_INFO) {
+		break;
+	case LEDGER_TEMPLATE_INFO:
 		error = copyin(args->arg2, (char *)&len, sizeof(len));
-	} else if (args->cmd == LEDGER_LIMIT)
-#ifdef LEDGER_DEBUG
-	{ error = copyin(args->arg2, (char *)&lla, sizeof(lla));}
-#else
-	{ return EINVAL; }
-#endif
-	else if ((args->cmd < 0) || (args->cmd > LEDGER_MAX_CMD)) {
+		break;
+	default:
 		return EINVAL;
 	}
 
@@ -2309,16 +2305,6 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 	}
 
 	switch (args->cmd) {
-#ifdef LEDGER_DEBUG
-	case LEDGER_LIMIT: {
-		if (!kauth_cred_issuser(kauth_cred_get())) {
-			rval = EPERM;
-		}
-		rval = ledger_limit(task, &lla);
-		proc_rele(proc);
-		break;
-	}
-#endif
 	case LEDGER_INFO: {
 		struct ledger_info info = {};
 
@@ -2390,7 +2376,16 @@ telemetry(__unused struct proc *p, struct telemetry_args *args, __unused int32_t
 		error = ENOTSUP;
 		break;
 	case TELEMETRY_CMD_PMI_SETUP:
-		error = telemetry_pmi_setup((enum telemetry_pmi)args->deadline, args->interval);
+		error = telemetry_pmi_setup((telemetry_pmi_t)args->deadline, args->interval);
+		break;
+	case TELEMETRY_CMD_PAGEIN_SETUP:
+		error = telemetry_pagein_setup(args->deadline, args->interval);
+		break;
+	case TELEMETRY_CMD_PAGEIN_READ:
+		error = telemetry_pagein_read((unsigned int *)retval, args->deadline, args->interval);
+		break;
+	case TELEMETRY_CMD_MEMORY_USAGE_SETUP:
+		error = telemetry_memory_usage_setup(args->deadline, args->interval);
 		break;
 #endif /* CONFIG_TELEMETRY */
 	case TELEMETRY_CMD_VOUCHER_NAME:
@@ -2652,21 +2647,29 @@ SYSCTL_PROC(_kern, OID_AUTO, mpsc_test_pingpong, CTLTYPE_QUAD | CTLFLAG_RW | CTL
 
 /* Telemetry, microstackshots */
 
+#if CONFIG_TELEMETRY
+
 SYSCTL_NODE(_kern, OID_AUTO, microstackshot, CTLFLAG_RD | CTLFLAG_LOCKED, 0,
     "microstackshot info");
 
-#if defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES)
+extern uint32_t telemetry_buffer_size;
+SYSCTL_UINT(_kern_microstackshot, OID_AUTO, buffer_size, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &telemetry_buffer_size, 0, "buffer capacity for microstackshots (bytes)");
 
-extern uint64_t mt_microstackshot_period;
+#if CONFIG_CPU_COUNTERS
+
+extern uint64_t microstackshot_pmi_period;
 SYSCTL_QUAD(_kern_microstackshot, OID_AUTO, pmi_sample_period,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &mt_microstackshot_period,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &microstackshot_pmi_period,
     "PMI sampling rate");
-extern unsigned int mt_microstackshot_ctr;
+extern unsigned int microstackshot_pmi_counter;
 SYSCTL_UINT(_kern_microstackshot, OID_AUTO, pmi_sample_counter,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &mt_microstackshot_ctr, 0,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &microstackshot_pmi_counter, 0,
     "PMI counter");
 
-#endif /* defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES) */
+#endif /* CONFIG_CPU_COUNTERS */
+
+#endif /* CONFIG_TELEMETRY */
 
 /*Remote Time api*/
 SYSCTL_NODE(_machdep, OID_AUTO, remotetime, CTLFLAG_RD | CTLFLAG_LOCKED, 0, "Remote time api");
@@ -2763,225 +2766,6 @@ SYSCTL_PROC(_machdep_remotetime, OID_AUTO, conversion_params,
 #endif /* CONFIG_MACH_BRIDGE_RECV_TIME */
 
 #if DEVELOPMENT || DEBUG
-
-#include <pexpert/pexpert.h>
-extern int32_t sysctl_get_bound_cpuid(void);
-extern kern_return_t sysctl_thread_bind_cpuid(int32_t cpuid);
-static int
-sysctl_kern_sched_thread_bind_cpu SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-
-	/*
-	 * DO NOT remove this bootarg guard or make this non-development.
-	 * This kind of binding should only be used for tests and
-	 * experiments in a custom configuration, never shipping code.
-	 */
-
-	if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
-		return ENOENT;
-	}
-
-	int32_t cpuid = sysctl_get_bound_cpuid();
-
-	int32_t new_value;
-	int changed;
-	int error = sysctl_io_number(req, cpuid, sizeof(cpuid), &new_value, &changed);
-	if (error) {
-		return error;
-	}
-
-	if (changed) {
-		kern_return_t kr = sysctl_thread_bind_cpuid(new_value);
-
-		if (kr == KERN_NOT_SUPPORTED) {
-			return ENOTSUP;
-		}
-
-		if (kr == KERN_INVALID_VALUE) {
-			return ERANGE;
-		}
-	}
-
-	return error;
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cpu, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_sched_thread_bind_cpu, "I", "");
-
-#if __AMP__
-
-errno_t mach_to_bsd_errno(kern_return_t mach_err);
-
-extern char sysctl_get_bound_cluster_type(void);
-static int
-sysctl_kern_sched_thread_bind_cluster_type SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char buff[4];
-
-	if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
-		return ENOENT;
-	}
-
-	int error = SYSCTL_IN(req, buff, 1);
-	if (error) {
-		return error;
-	}
-	char cluster_type = buff[0];
-
-	if (!req->newptr) {
-		goto out;
-	}
-
-	kern_return_t kr = thread_soft_bind_cluster_type(current_thread(), cluster_type);
-	if (kr != KERN_SUCCESS) {
-		return mach_to_bsd_errno(kr);
-	}
-
-out:
-	buff[0] = sysctl_get_bound_cluster_type();
-
-	return SYSCTL_OUT(req, buff, 1);
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cluster_type, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_sched_thread_bind_cluster_type, "A", "");
-
-extern char sysctl_get_task_cluster_type(void);
-extern kern_return_t sysctl_task_set_cluster_type(char cluster_type);
-static int
-sysctl_kern_sched_task_set_cluster_type SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char buff[4];
-
-	if (!PE_parse_boot_argn("enable_skstsct", NULL, 0)) {
-		return ENOENT;
-	}
-
-	int error = SYSCTL_IN(req, buff, 1);
-	if (error) {
-		return error;
-	}
-	char cluster_type = buff[0];
-
-	if (!req->newptr) {
-		goto out;
-	}
-
-	kern_return_t kr = sysctl_task_set_cluster_type(cluster_type);
-	if (kr != KERN_SUCCESS) {
-		return mach_to_bsd_errno(kr);
-	}
-
-out:
-	cluster_type = sysctl_get_task_cluster_type();
-	buff[0] = cluster_type;
-
-	return SYSCTL_OUT(req, buff, 1);
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_task_set_cluster_type, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_sched_task_set_cluster_type, "A", "");
-
-extern kern_return_t thread_soft_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
-extern uint32_t thread_bound_cluster_id(thread_t);
-static int
-sysctl_kern_sched_thread_bind_cluster_id SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
-		return ENOENT;
-	}
-
-	thread_t self = current_thread();
-	int32_t cluster_id = thread_bound_cluster_id(self);
-	int32_t new_value;
-	int changed;
-	int error = sysctl_io_number(req, cluster_id, sizeof(cluster_id), &new_value, &changed);
-	if (error) {
-		return error;
-	}
-
-	if (changed) {
-		/*
-		 * Note, this binds the thread to the cluster without passing the
-		 * THREAD_BIND_ELIGIBLE_ONLY option, which means we won't check
-		 * whether the thread is otherwise eligible to run on that cluster--
-		 * we will send it there regardless.
-		 */
-		kern_return_t kr = thread_soft_bind_cluster_id(self, new_value, 0);
-		if (kr == KERN_INVALID_VALUE) {
-			return ERANGE;
-		}
-
-		if (kr != KERN_SUCCESS) {
-			return EINVAL;
-		}
-	}
-
-	return error;
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cluster_id, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_sched_thread_bind_cluster_id, "I", "");
-
-#if CONFIG_SCHED_EDGE
-
-extern int sched_edge_migrate_ipi_immediate;
-SYSCTL_INT(_kern, OID_AUTO, sched_edge_migrate_ipi_immediate, CTLFLAG_RW | CTLFLAG_LOCKED, &sched_edge_migrate_ipi_immediate, 0, "Edge Scheduler uses immediate IPIs for migration event based on execution latency");
-
-#endif /* CONFIG_SCHED_EDGE */
-
-#endif /* __AMP__ */
-
-#if DEVELOPMENT || DEBUG
-extern int timeouts_are_fatal;
-EXPERIMENT_FACTOR_INT(timeouts_are_fatal, &timeouts_are_fatal, 0, 1,
-    "Do timeouts panic or emit telemetry (0: telemetry, 1: panic)");
-#endif
-
-#if SCHED_HYGIENE_DEBUG
-
-SYSCTL_QUAD(_kern, OID_AUTO, interrupt_masked_threshold_mt, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_LEGACY_EXPERIMENT,
-    &interrupt_masked_timeout,
-    "Interrupt masked duration after which a tracepoint is emitted or the device panics (in mach timebase units)");
-
-SYSCTL_INT(_kern, OID_AUTO, interrupt_masked_debug_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &interrupt_masked_debug_mode, 0,
-    "Enable interrupt masked tracing or panic (0: off, 1: trace, 2: panic)");
-
-SYSCTL_QUAD(_kern, OID_AUTO, sched_preemption_disable_threshold_mt, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_LEGACY_EXPERIMENT,
-    &sched_preemption_disable_threshold_mt,
-    "Preemption disablement duration after which a tracepoint is emitted or the device panics (in mach timebase units)");
-
-SYSCTL_INT(_kern, OID_AUTO, sched_preemption_disable_debug_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &sched_preemption_disable_debug_mode, 0,
-    "Enable preemption disablement tracing or panic (0: off, 1: trace, 2: panic)");
-
-static int
-sysctl_sched_preemption_disable_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
-{
-	extern unsigned int preemption_disable_get_max_durations(uint64_t *durations, size_t count);
-	extern void preemption_disable_reset_max_durations(void);
-
-	uint64_t stats[MAX_CPUS]; // maximum per CPU
-
-	unsigned int ncpus = preemption_disable_get_max_durations(stats, MAX_CPUS);
-	if (req->newlen > 0) {
-		/* Reset when attempting to write to the sysctl. */
-		preemption_disable_reset_max_durations();
-	}
-
-	return sysctl_io_opaque(req, stats, ncpus * sizeof(uint64_t), NULL);
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_preemption_disable_stats,
-    CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_sched_preemption_disable_stats, "I", "Preemption disablement statistics");
-
-#endif /* SCHED_HYGIENE_DEBUG */
 
 /* used for testing by exception_tests */
 extern uint32_t ipc_control_port_options;
@@ -3090,136 +2874,6 @@ SYSCTL_PROC(_kern, OID_AUTO, preoslog, CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOC
     0, 0, sysctl_kern_debug_get_preoslog, "-", "");
 
 #if DEVELOPMENT || DEBUG
-extern void sysctl_task_set_no_smt(char no_smt);
-extern char sysctl_task_get_no_smt(void);
-
-static int
-sysctl_kern_sched_task_set_no_smt SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char buff[4];
-
-	int error = SYSCTL_IN(req, buff, 1);
-	if (error) {
-		return error;
-	}
-	char no_smt = buff[0];
-
-	if (!req->newptr) {
-		goto out;
-	}
-
-	sysctl_task_set_no_smt(no_smt);
-out:
-	no_smt = sysctl_task_get_no_smt();
-	buff[0] = no_smt;
-
-	return SYSCTL_OUT(req, buff, 1);
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_task_set_no_smt, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
-    0, 0, sysctl_kern_sched_task_set_no_smt, "A", "");
-
-#if CONFIG_SCHED_SMT
-static int
-sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
-{
-	int new_value, changed;
-	int old_value = thread_get_no_smt() ? 1 : 0;
-	int error = sysctl_io_number(req, old_value, sizeof(int), &new_value, &changed);
-
-	if (changed) {
-		thread_set_no_smt(!!new_value);
-	}
-
-	return error;
-}
-#else /* CONFIG_SCHED_SMT */
-static int
-sysctl_kern_sched_thread_set_no_smt(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, __unused struct sysctl_req *req)
-{
-	return 0;
-}
-#endif /* CONFIG_SCHED_SMT*/
-
-SYSCTL_PROC(_kern, OID_AUTO, sched_thread_set_no_smt,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
-    0, 0, sysctl_kern_sched_thread_set_no_smt, "I", "");
-
-#if CONFIG_SCHED_RT_ALLOW
-
-#if DEVELOPMENT || DEBUG
-#define RT_ALLOW_CTLFLAGS CTLFLAG_RW
-#else
-#define RT_ALLOW_CTLFLAGS CTLFLAG_RD
-#endif /* DEVELOPMENT || DEBUG */
-
-static int
-sysctl_kern_rt_allow_limit_percent(__unused struct sysctl_oid *oidp,
-    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
-{
-	extern uint8_t rt_allow_limit_percent;
-
-	int new_value = 0;
-	int old_value = rt_allow_limit_percent;
-	int changed = 0;
-
-	int error = sysctl_io_number(req, old_value, sizeof(old_value),
-	    &new_value, &changed);
-	if (error != 0) {
-		return error;
-	}
-
-	/* Only accept a percentage between 1 and 99 inclusive. */
-	if (changed) {
-		if (new_value >= 100 || new_value <= 0) {
-			return EINVAL;
-		}
-
-		rt_allow_limit_percent = (uint8_t)new_value;
-	}
-
-	return 0;
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, rt_allow_limit_percent,
-    RT_ALLOW_CTLFLAGS | CTLTYPE_INT | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_rt_allow_limit_percent, "I", "");
-
-static int
-sysctl_kern_rt_allow_limit_interval_ms(__unused struct sysctl_oid *oidp,
-    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
-{
-	extern uint16_t rt_allow_limit_interval_ms;
-
-	uint64_t new_value = 0;
-	uint64_t old_value = rt_allow_limit_interval_ms;
-	int changed = 0;
-
-	int error = sysctl_io_number(req, old_value, sizeof(old_value),
-	    &new_value, &changed);
-	if (error != 0) {
-		return error;
-	}
-
-	/* Value is in ns. Must be at least 1ms. */
-	if (changed) {
-		if (new_value < 1 || new_value > UINT16_MAX) {
-			return EINVAL;
-		}
-
-		rt_allow_limit_interval_ms = (uint16_t)new_value;
-	}
-
-	return 0;
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, rt_allow_limit_interval_ms,
-    RT_ALLOW_CTLFLAGS | CTLTYPE_QUAD | CTLFLAG_LOCKED,
-    0, 0, sysctl_kern_rt_allow_limit_interval_ms, "Q", "");
-
-#endif /* CONFIG_SCHED_RT_ALLOW */
-
 
 static int
 sysctl_kern_task_set_filter_msg_flag SYSCTL_HANDLER_ARGS

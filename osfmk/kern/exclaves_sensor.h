@@ -38,44 +38,136 @@
 __BEGIN_DECLS
 
 /*!
- * @function exclaves_sensor_copy
+ * @enum exclaves_device_type
+ *
+ * @brief
+ * Identifier for an exclaves device with sensors
+ */
+OS_ENUM(exclaves_device_type, uint16_t,
+    EXCLAVES_DEVICE_BUILTIN = 0,
+    /* update max if more devices added */
+    EXCLAVES_DEVICE_MAX = 1,
+    );
+
+
+/* -------------------------------------------------------------------------- */
+/* Resource ID macros (keep in sync with ECB xnu_proxy_resources.h)           */
+
+/*
+ * Resource identifier
+ *
+ * | Flag (32 bits) | ID (32 bits) |
+ */
+
+#define RESOURCE_ID_MAKE(flag, id, offset) \
+    ((uint64_t)(flag) << (offset) | ((uint64_t)(id) << (offset) >> (offset)))
+#define RESOURCE_ID_GET_ID(id, offset) \
+    ((uint64_t)(id) << (offset) >> (offset))
+#define RESOURCE_ID_GET_FLAG(id, offset) \
+    ((uint64_t)(id) >> (offset))
+
+/*
+ * Sensor identifier
+ *
+ * | Device Identifier (32 bits) | Sensor Type (32 bits) |
+ */
+#define SENSOR_ID_MAKE(device_id, sensor_id) \
+    (RESOURCE_ID_MAKE(device_id, sensor_id, 32))
+#define SENSOR_ID_GET_SENSOR(id) \
+    (RESOURCE_ID_GET_ID(id, 32))
+#define SENSOR_ID_GET_DEVICE(id) \
+    (RESOURCE_ID_GET_FLAG(id, 32))
+
+/*
+ * Arbitrated Buffer identifier
+ *
+ *  | device id (16 bits) | sensor id (8 bits) | buffer id (8 bits) | endpoint (32 bits) |
+ */
+#define ARBITRATED_BUFFER_MEMORY_ID_MAKE(endpoint, device_id, sensor_id, buffer_id) \
+    ((((uint64_t)(device_id) & 0xFFFFU) << 48) | \
+    (((uint64_t) (sensor_id) & 0x00FFU) << 40) | \
+    (((uint64_t) (buffer_id) & 0x00FFU) << 32) | \
+    (((uint64_t) (endpoint)  & 0xFFFFFFFFUL)))
+#define ARBITRATED_BUFFER_MEMORY_ID_GET_ENDPOINT(rid) \
+    ((uint64_t)(uint32_t)((rid)      ))
+#define ARBITRATED_BUFFER_MEMORY_ID_GET_BUFFER(rid) \
+    ((uint64_t)(uint8_t) ((rid) >> 32))
+#define ARBITRATED_BUFFER_MEMORY_ID_GET_SENSOR(rid) \
+    ((uint64_t)(uint8_t) ((rid) >> 40))
+#define ARBITRATED_BUFFER_MEMORY_ID_GET_DEVICE(rid) \
+    ((uint64_t)(uint16_t)((rid) >> 48))
+
+/* -------------------------------------------------------------------------- */
+
+/* Sensor operations on sensor resource ids */
+
+kern_return_t
+exclaves_sensor_id_init(uint64_t sensor_id);
+
+kern_return_t
+exclaves_sensor_id_start(uint64_t sensor_id, uint64_t flags,
+    exclaves_sensor_status_t *status);
+
+kern_return_t
+exclaves_sensor_id_stop(uint64_t sensor_id, uint64_t flags,
+    exclaves_sensor_status_t *status);
+
+kern_return_t
+exclaves_sensor_id_status(uint64_t sensor_id, uint64_t flags,
+    exclaves_sensor_status_t *status);
+
+/*!
+ * @function exclaves_sensor_buffer_id_copy
  *
  * @abstract
- * Allow a copy from an aribtrated audio memory segment
+ * Request arbitrated copy from the EIC for the specified arbitrated memory
+ * buffer resource id
  *
- * @param buffer
- * Identifies which arbitrated memory buffer to operate on
+ * @param resource_id
+ * The resource identifier of the arbitrated memory buffer to copy
  *
- * @param size1
- * The length in bytes of the data to be copied
+ * @param size
+ * The length in bytes to copy
  *
- * @param offset1
- * Offset in bytes of the data to be copied
+ * @param offset
+ * Start copy offset in the arbitrated buffer.
  *
- * @param size2
- * The length in bytes of the data to be copied
+ * @param param1
+ * Additional EIC parameter for copy
  *
- * @param offset2
- * Offset in bytes of the data to be copied
+ * @param param2
+ * Additional EIC parameter for copy
  *
- * @param sensor_status
+ * @param status
  * Out parameter filled with the sensor status.
+ *
+ * @param second_range
+ * Out parameter filled with a boolean indicating whether a second memory range
+ * [offset2, offset2 + size2] := [param2, param2 + param1] should be copied
+ * out in addition to the first range [offset, offset + size].
  *
  * @result
  * KERN_SUCCESS or mach system call error code.
  */
 kern_return_t
-exclaves_sensor_copy(uint32_t buffer, uint64_t size1,
-    uint64_t offset1, uint64_t size2, uint64_t offset2,
-    exclaves_sensor_status_t *sensor_status);
+exclaves_sensor_buffer_id_copy(uint64_t resource_id, uint64_t size,
+    uint64_t offset, uint64_t param1, uint64_t param2,
+    exclaves_sensor_status_t *status, bool *second_range);
 
 /*!
- * Returns the minimum on time deadlines for various sensors
- * @param deadlines out parameter filled with indicator deadlines
+ * @function exclaves_sensor_buffer_id_endpoint
+ *
+ * @abstract
+ * Return endpoint id for the specified arbitrated memory buffer resource id
+ *
+ * @param resource_id
+ * The resource identifier of the arbitrated memory buffer
+ *
+ * @result
+ * Endpoint id.
  */
-kern_return_t
-exclaves_indicator_min_on_time_deadlines(struct exclaves_indicator_deadlines *deadlines);
-
+uint64_t
+exclaves_sensor_buffer_id_endpoint(uint64_t resource_id);
 
 __END_DECLS
 

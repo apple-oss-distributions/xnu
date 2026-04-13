@@ -1486,11 +1486,15 @@ uio_restore(uio_t uio, uio_t snapshot_uio)
 }
 
 int
-copyin_user_iovec_array(user_addr_t uaddr, int spacetype, int count, struct user_iovec *dst)
+copyin_user_iovec_array(user_addr_t uaddr, int spacetype, int count, struct user_iovec *dst, int capacity)
 {
 	size_t size_of_iovec = (spacetype == UIO_USERSPACE64 ? sizeof(struct user64_iovec) : sizeof(struct user32_iovec));
 	int error;
 	int i;
+
+	if (count < 0 || capacity < 0 || count > UIO_MAXIOV || count > capacity) {
+		return EINVAL;
+	}
 
 	// copyin to the front of "dst", without regard for putting records in the right places
 	error = copyin(uaddr, dst, count * size_of_iovec);

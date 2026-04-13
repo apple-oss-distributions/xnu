@@ -310,7 +310,7 @@ def iterate_dimension(results, dim = 0):
         yield [new_results, name]
 
 # Print the results of a test that has two parameters (for example a test of start/size)
-# If overrides!=None, use any non-SUCCESS return values from override in place of the other results.
+# When overrides!=None, use any non-SUCCESS return values from override in place of the other results.
 def print_results_2D(results, formatter, overrides=None):
     # complain if results and override have different dimensions
     if overrides:
@@ -404,7 +404,7 @@ def print_results_4D(results, formatter):
             one_2d_result.append(repl_result)
             matrix.append(result.ret)
         if matrix == prev_matrix:
-            # if the return codes are the same everywhere, we will print successive tables only once
+            # In the case the return codes are the same everywhere, we will print successive tables only once
             # note that this assumes that the sets of 2D labels are the same everywhere, and doesn't check that assumption
             iterable[-1][0].append(k)
         else:
@@ -419,7 +419,7 @@ def print_results_4D(results, formatter):
 
 # Print the results of a test that has two parameters
 # (for example a test of addr only, or size only)
-# If overrides!=None, use any non-SUCCESS return values from override in place of the other results.
+# When overrides!=None, use any non-SUCCESS return values from override in place of the other results.
 def print_results_1D(results, formatter, overrides=None):
     # complain if results and overrides have different dimensions
     if overrides:

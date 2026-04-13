@@ -39,6 +39,7 @@
 #include <libkern/coreanalytics/coreanalytics.h>
 #include <vm/vm_log.h>
 #include <vm/vm_page.h>
+#include <vm/vm_analytics_xnu.h>
 #include <vm/vm_compressor_internal.h>
 #if HAS_MTE
 #include <vm/vm_mteinfo_internal.h>
@@ -50,18 +51,40 @@
 
 #include "vm_compressor_backing_store_internal.h"
 
-void vm_analytics_tick(void *arg0, void *arg1);
+#define DAILY_ANALYTICS_PERIOD_HOURS (24ULL)
+#define HOURLY_ANALYTICS_PERIOD_HOURS (1ULL)
 
-#define ANALYTICS_PERIOD_HOURS (24ULL)
-
-static thread_call_t vm_analytics_thread_call;
+thread_call_t vm_analytics_daily_thread_call;
 
 CA_EVENT(vm_swapusage,
     CA_INT, max_alloced,
     CA_INT, max_used,
     CA_INT, trial_deployment_id,
     CA_STATIC_STRING(CA_UUID_LEN), trial_treatment_id,
-    CA_STATIC_STRING(CA_UUID_LEN), trial_experiment_id);
+    CA_STATIC_STRING(CA_UUID_LEN), trial_experiment_id,
+
+    CA_BOOL, freezer_active,
+    CA_BOOL, swap_active,
+    CA_BOOL, app_swap_active,
+    CA_BOOL, scavenger_active,
+
+    CA_INT, ripeness_threshold_s,
+
+    /* Swapouts */
+    CA_INT, freezer_swapouts_b,
+    CA_INT, scavenger_swapouts_b,
+    CA_INT, regular_swapouts_b,
+    CA_INT, donated_swapouts_b,
+    CA_INT, darkwake_swapouts_b,
+    CA_INT, total_swapouts_b,
+
+    /* Swapins */
+    CA_INT, freezer_swapins_b,
+    CA_INT, scavenger_swapins_b,
+    CA_INT, regular_swapins_b,
+    CA_INT, donated_swapins_b,
+    CA_INT, darkwake_swapins_b,
+    CA_INT, total_swapins_b);
 
 CA_EVENT(mlock_failures,
     CA_INT, over_global_limit,
@@ -79,6 +102,12 @@ extern uuid_string_t trial_treatment_id;
 extern uuid_string_t trial_experiment_id;
 extern int trial_deployment_id;
 
+static struct vm_pageout_vminfo pgout_info_last = {};
+static uint64_t swapouts_last = 0, swapins_last = 0;
+#if CONFIG_JETSAM
+extern bool memorystatus_swap_all_apps;
+#endif
+
 static void
 add_trial_uuids(char *treatment_id, char *experiment_id)
 {
@@ -89,15 +118,49 @@ add_trial_uuids(char *treatment_id, char *experiment_id)
 static void
 report_vm_swapusage(void)
 {
+	uint64_t tmp;
 	uint64_t max_alloced, max_used;
 	ca_event_t event = CA_EVENT_ALLOCATE(vm_swapusage);
-	CA_EVENT_TYPE(vm_swapusage) * e = event->data;
+	CA_EVENT_TYPE(vm_swapusage) * data = event->data;
 
 	vm_swap_reset_max_segs_tracking(&max_alloced, &max_used);
-	e->max_alloced = max_alloced;
-	e->max_used = max_used;
-	add_trial_uuids(e->trial_treatment_id, e->trial_experiment_id);
-	e->trial_deployment_id = trial_deployment_id;
+	data->max_alloced = max_alloced;
+	data->max_used = max_used;
+	add_trial_uuids(data->trial_treatment_id, data->trial_experiment_id);
+	data->trial_deployment_id = trial_deployment_id;
+
+	data->freezer_active = VM_CONFIG_FREEZER_SWAP_IS_ACTIVE;
+	data->swap_active = VM_CONFIG_SWAP_IS_ACTIVE;
+	data->scavenger_active = VM_CONFIG_SCAVENGER_SWAP_IS_ACTIVE;
+#if CONFIG_JETSAM
+	data->app_swap_active = memorystatus_swap_all_apps;
+#else
+	data->app_swap_active = false;
+#endif
+
+	data->ripeness_threshold_s = c_segment_ripeness_age_s;
+
+	data->freezer_swapouts_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_freezer_swapouts) - counter_load(&pgout_info_last.vm_freezer_swapouts));
+	data->scavenger_swapouts_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_scavenger_swapouts) - counter_load(&pgout_info_last.vm_scavenger_swapouts));
+	data->regular_swapouts_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_regular_swapouts) - counter_load(&pgout_info_last.vm_regular_swapouts));
+	data->donated_swapouts_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_donate_swapouts) - counter_load(&pgout_info_last.vm_donate_swapouts));
+	data->darkwake_swapouts_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_darkwake_swapouts) - counter_load(&pgout_info_last.vm_darkwake_swapouts));
+
+	tmp = counter_load(&vm_statistics_swapouts);
+	data->total_swapouts_b = ptoa_64(tmp - swapouts_last);
+	swapouts_last = tmp;
+
+	data->freezer_swapins_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_freezer_swapins) - counter_load(&pgout_info_last.vm_freezer_swapins));
+	data->scavenger_swapins_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_scavenger_swapins) - counter_load(&pgout_info_last.vm_scavenger_swapins));
+	data->regular_swapins_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_regular_swapins) - counter_load(&pgout_info_last.vm_regular_swapins));
+	data->donated_swapins_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_donate_swapins) - counter_load(&pgout_info_last.vm_donate_swapins));
+	data->darkwake_swapins_b = ptoa_64(counter_load(&vm_pageout_vminfo.vm_darkwake_swapins) - counter_load(&pgout_info_last.vm_darkwake_swapins));
+
+	tmp = counter_load(&vm_statistics_swapins);
+	data->total_swapins_b = ptoa_64(tmp - swapins_last);
+	swapins_last = tmp;
+
+	pgout_info_last = vm_pageout_vminfo;
 	CA_EVENT_SEND(event);
 }
 
@@ -118,7 +181,6 @@ report_mlock_failures(void)
 	CA_EVENT_SEND(event);
 }
 
-#if XNU_TARGET_OS_WATCH
 CA_EVENT(compressor_age,
     CA_INT, hour1,
     CA_INT, hour6,
@@ -130,6 +192,16 @@ CA_EVENT(compressor_age,
     CA_INT, trial_deployment_id,
     CA_STATIC_STRING(CA_UUID_LEN), trial_treatment_id,
     CA_STATIC_STRING(CA_UUID_LEN), trial_experiment_id);
+
+/**
+ * Controls whether compressor age telemetry is reported.
+ * Can be disabled via sysctl vm.compressor.report_age.
+ */
+#if XNU_TARGET_OS_WATCH
+int c_report_age_enabled = 1;
+#else /* XNU_TARGET_OS_OSX */
+int c_report_age_enabled = 0;
+#endif /* !XNU_TARGET_OS_OSX */
 
 /**
  * Compressor age bucket descriptor.
@@ -154,8 +226,13 @@ typedef struct {
 static void
 report_compressor_age(void)
 {
+	/* Check if reporting is disabled via sysctl. */
+	if (!c_report_age_enabled) {
+		return;
+	}
+
 	/* If the compressor is not configured, do nothing and return early. */
-	if (vm_compressor_mode == VM_PAGER_NOT_CONFIGURED) {
+	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
 		vm_log("%s: vm_compressor_mode == VM_PAGER_NOT_CONFIGURED, returning early", __func__);
 		return;
 	}
@@ -179,7 +256,7 @@ report_compressor_age(void)
 		c_segment_t c_seg = (c_segment_t) queue_first(c_queues[q]);
 		while (!queue_end(c_queues[q], (queue_entry_t) c_seg)) {
 			for (unsigned b = 0; b < ARRAY_SIZE(c_buckets); b++) {
-				uint32_t creation_ts = c_seg->c_creation_ts;
+				clock_sec_t creation_ts = c_seg->c_creation_ts;
 				clock_get_system_nanotime(&now, &nsec);
 				clock_sec_t age = now - creation_ts;
 				if ((age >= c_buckets[b].lower) &&
@@ -207,7 +284,6 @@ report_compressor_age(void)
 	e->trial_deployment_id = trial_deployment_id;
 	CA_EVENT_SEND(event);
 }
-#endif /* XNU_TARGET_OS_WATCH */
 
 
 extern uint64_t max_mem;
@@ -246,13 +322,13 @@ report_accounting_health(void)
 }
 
 static void
-schedule_analytics_thread_call(void)
+schedule_daily_analytics_thread_call(void)
 {
-	static const uint64_t analytics_period_ns = ANALYTICS_PERIOD_HOURS * 60 * 60 * NSEC_PER_SEC;
+	static const uint64_t analytics_period_ns = DAILY_ANALYTICS_PERIOD_HOURS * 60 * 60 * NSEC_PER_SEC;
 	uint64_t analytics_period_absolutetime;
 	nanoseconds_to_absolutetime(analytics_period_ns, &analytics_period_absolutetime);
 
-	thread_call_enter_delayed(vm_analytics_thread_call, analytics_period_absolutetime + mach_absolute_time());
+	thread_call_enter_delayed(vm_analytics_daily_thread_call, analytics_period_absolutetime + mach_absolute_time());
 }
 
 /*
@@ -260,27 +336,25 @@ schedule_analytics_thread_call(void)
  * It's called once every ANALYTICS_PERIOD_HOURS hours.
  */
 void
-vm_analytics_tick(void *arg0, void *arg1)
+vm_analytics_daily_tick(void *arg0, void *arg1)
 {
 #pragma unused(arg0, arg1)
 	report_vm_swapusage();
 	report_mlock_failures();
-#if XNU_TARGET_OS_WATCH
 	report_compressor_age();
-#endif /* XNU_TARGET_OS_WATCH */
 	report_accounting_health();
 #if CONFIG_EXCLAVES
 	exclaves_memory_report_accounting();
 	exclaves_indicator_metrics_report();
 #endif /* CONFIG_EXCLAVES */
-	schedule_analytics_thread_call();
+	schedule_daily_analytics_thread_call();
 }
 
 static void
 vm_analytics_init(void)
 {
-	vm_analytics_thread_call = thread_call_allocate_with_options(vm_analytics_tick, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
-	schedule_analytics_thread_call();
+	vm_analytics_daily_thread_call = thread_call_allocate_with_options(vm_analytics_daily_tick, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	schedule_daily_analytics_thread_call();
 }
 
 STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, vm_analytics_init);

@@ -79,13 +79,10 @@ __enum_decl(exec_security_mitigation_entitlement_t, uint8_t, {
 #if HAS_MTE
 	CHECKED_ALLOCATIONS,
 /*
- * For performance reasons, userland allocators are not required to tag pure data regions. This is
- * mostly a libmalloc xzone concept, which has separated zones for pointer-containing vs pure-data
- * allocations. We consider the former more "security-interesting" and therefore focus our
- * protection on them. This allows to save on performance, although for certain processes we
- * can swallow the trade-off (both in stability and perf) and enable the extra feature.
+ * We provide a negative entitlement for 1P binaries to opt out from the default
+ * enablement of data tagging enablement.
  */
-	CHECKED_ALLOCATIONS_PURE_DATA,
+	CHECKED_ALLOCATIONS_DISABLE_PURE_DATA,
 /*
  * Certain first-party actors (such as WCP and BlastDoor) are modeled untrustworthy, and should never
  * be allowed to receive untagged aliases to tagged memory from other actors. This entitlement (and a
@@ -100,6 +97,22 @@ __enum_decl(exec_security_mitigation_entitlement_t, uint8_t, {
 	CHECKED_ALLOCATIONS_SOFT_MODE,
 #endif /* HAS_MTE */
 /*
+ * Script-Restrictions.
+ *
+ * This mitigation indicates we should restrict script usage in this process. This currently implies
+ * preventing JavaScriptCore from being used, but could be adapted for other use cases.
+ */
+	SCRIPT_RESTRICTIONS,
+/*
+ * Containment Vessels (IPC restrictions)
+ *
+ * Certain first-party sandboxed processes on the system, such as BlastDoors and WCP, represent sensitive
+ * attack surface. We therefore apply specific, stricter security policy to these processes in
+ * various contexts. This entitlement serves for such binaries to self-identify for the specific
+ * use case of stricter IPC security policies.
+ */
+	IPC_CONTAINMENT_VESSEL,
+/*
  * Guard objects.
  *
  * This mitigation indicates that userland and kernel VM allocations may not be replaced with guard
@@ -109,10 +122,16 @@ __enum_decl(exec_security_mitigation_entitlement_t, uint8_t, {
 });
 
 /*
- * Version number for enhanced security
+ * Version number for enhanced security.
  * Currently stored with 3 bits in `hardened_process_version`
+ *
+ * The following entitlements set the hardened process version.
+ *
+ * First, we look for the string entitlement, and use that if it exists.
+ * If it is not, we look for the integer entitlement.
  */
 #define HARDENED_PROCESS_VERSION "com.apple.security.hardened-process.enhanced-security-version"
+#define HARDENED_PROCESS_VERSION_STRING "com.apple.security.hardened-process.enhanced-security-version-string"
 
 __enum_decl(hardened_process_version_t, uint8_t, {
 	/* Not hardened process */

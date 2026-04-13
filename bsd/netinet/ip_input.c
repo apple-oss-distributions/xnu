@@ -136,6 +136,8 @@
 
 #include <os/log.h>
 
+extern void log_hexdump(os_log_t log_handle, void *__sized_by(len) data, size_t len);
+
 extern struct inpcbinfo ripcbinfo;
 
 #define DBG_LAYER_BEG           NETDBG_CODE(DBG_NETIP, 0)
@@ -613,32 +615,41 @@ inaddr_hashlookup(uint32_t key)
 	return &in_ifaddrhashtbl[inaddr_hashval(key)];
 }
 
-extern void log_hexdump(os_log_t log_handle, void *__sized_by(len) data, size_t len);
-
 static void
 log_wake_ip_mbuf(struct ifnet *ifp, struct mbuf *m)
 {
 	char buffer[64];
 	size_t buflen = MIN(mbuf_pkthdr_len(m), sizeof(buffer));
 
-	os_log(wake_packet_log_handle, "wake IP packet from %s len %d if_is_lpw_enabled: %d",
-	    ifp->if_xname, m_pktlen(m), if_is_lpw_enabled(ifp));
+	os_log(wake_packet_log_handle, "LPW IP packet from %s len %d wakepkt: %d",
+	    ifp->if_xname, m_pktlen(m), (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT));
 	if (mbuf_copydata(m, 0, buflen, buffer) == 0) {
 		log_hexdump(wake_packet_log_handle, buffer, buflen);
 	}
 }
 
 static void
-ip_proto_process_wake_packet(struct mbuf *m)
+ip_proto_process_lpw_packet(struct mbuf *m)
 {
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	struct ip *ip = mtod(m, struct ip *);
 
-	if (if_is_lpw_enabled(ifp)) {
-		if (net_wake_pkt_debug > 0) {
-			log_wake_ip_mbuf(ifp, m);
-		}
-		if_exit_lpw(ifp, "IP packet");
+	/*
+	 * Do nothing for protocol that can handle LPW mode
+	 */
+	switch (ip->ip_p) {
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+		return;
+	default:
+		break;
 	}
+
+	if (net_wake_pkt_debug > 0) {
+		log_wake_ip_mbuf(ifp, m);
+	}
+	if_ports_used_match_mbuf(ifp, PF_INET, m);
+	if_exit_lpw(ifp, "IP packet");
 }
 
 __private_extern__ void
@@ -712,10 +723,10 @@ ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
 	}
 
 	/*
-	 * Check if need to switch to full wake mode -- TCP knows about idle connections
+	 * Check if need to switch to full wake mode -- only TCP knows about idle connections
 	 */
-	if (__improbable(ip->ip_p != IPPROTO_TCP && (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) != 0)) {
-		ip_proto_process_wake_packet(m);
+	if (__improbable(if_is_lpw_enabled(m->m_pkthdr.rcvif))) {
+		ip_proto_process_lpw_packet(m);
 	}
 
 	/*

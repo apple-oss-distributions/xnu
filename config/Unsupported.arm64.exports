@@ -14,9 +14,8 @@ _kpc_reserve_pm_counters
 _kpc_release_pm_counters
 _kpc_pm_acknowledge
 _kpc_get_running
-_kpc_set_running
+_kpc_set_running:_kpc_set_running_external
 _kpc_get_cpu_counters
-_kpc_get_shadow_counters
 _kpc_get_config
 _kpc_set_config:_kpc_set_config_external
 _vm_map:_vm_map_external

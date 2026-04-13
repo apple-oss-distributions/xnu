@@ -27,8 +27,3 @@ T_DECL(kmem_basic, "General kmem test", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("kmem_basic", 0), "kmem_basic");
 }
-
-T_DECL(kmem_guard_obj, "Kmem test guard objects", T_META_TAG_VM_PREFERRED)
-{
-	T_EXPECT_EQ(1ull, run_sysctl_test("kmem_guard_obj", 0), "kmem_guard_obj");
-}

@@ -127,7 +127,7 @@ void vm_deferred_reclamation_task_suspend(task_t task);
  * Perform Garbage Collection on all reclaim rings
  */
 void vm_deferred_reclamation_gc(vm_deferred_reclamation_gc_action_t action,
-    mach_vm_size_t *total_bytes_reclaimed_out,
+    size_t *total_bytes_reclaimed_out,
     vm_deferred_reclamation_options_t options);
 
 /*

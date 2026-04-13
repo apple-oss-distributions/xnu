@@ -55,10 +55,9 @@
 #include <i386/misc_protos.h>
 #include <kern/timer_queue.h>
 #include <vm/vm_map_xnu.h>
-#include <kern/monotonic.h>
-#include <kern/kpc.h>
 #include <architecture/i386/pio.h>
 #include <i386/cpu_data.h>
+#include <machine/machine_cpc.h>
 #if DEBUG
 #define DBG(x...)       kprintf("DBG: " x)
 #else
@@ -563,7 +562,7 @@ register_cpu(
 	this_cpu_datap->cpu_phys_number = lapic_id;
 
 #if CONFIG_CPU_COUNTERS
-	kpc_register_cpu(this_cpu_datap);
+	cpc_cpu_transition(CPC_CPU_INIT, this_cpu_datap);
 #endif /* CONFIG_CPU_COUNTERS */
 
 	if (!boot_cpu) {

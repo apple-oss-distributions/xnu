@@ -106,8 +106,18 @@ skt_utunloop_xfer_slots(int kq,
 	uint64_t slotcount, bytecount;
 	uint64_t prevslotcount, prevbytecount;
 	struct timeval prevtime;
+	channel_attr_t chattr;
 
 	gettimeofday(&prevtime, NULL);
+	chattr = os_channel_attr_create();
+	assert(chattr != NULL);
+	error = os_channel_read_attr(rxchannel, chattr);
+	assert(error == 0);
+
+	uint64_t upp;
+	error = os_channel_attr_get(chattr, CHANNEL_ATTR_USER_PACKET_POOL, &upp);
+	assert(error == 0);
+	os_channel_attr_destroy(chattr);
 
 	rxring = os_channel_rx_ring(rxchannel, rxindex +
 	    os_channel_ring_id(rxchannel, CHANNEL_FIRST_RX_RING));
@@ -284,14 +294,57 @@ skt_utunloop_xfer_slots(int kq,
 			txslot = os_channel_get_next_slot(txring, txprev, &txprop);
 			assert(txslot);
 
-			assert(txprop.sp_len >= rxprop.sp_len);
-			memcpy((void *)txprop.sp_buf_ptr,
-			    (void *)rxprop.sp_buf_ptr, rxprop.sp_len);
-			txprop.sp_len = rxprop.sp_len;
-			os_channel_set_slot_properties(txring, txslot, &txprop);
+			if (!upp) {
+				assert(txprop.sp_len >= rxprop.sp_len);
+				memcpy((void *)txprop.sp_buf_ptr,
+				    (void *)rxprop.sp_buf_ptr, rxprop.sp_len);
+				txprop.sp_len = rxprop.sp_len;
+				os_channel_set_slot_properties(txring, txslot, &txprop);
+				bytecount += txprop.sp_len;
+			} else {
+				packet_t pkt_tx = 0, pkt_rx = 0;
+				buflet_t bflt_tx, bflt_rx;
+				char *baddr_tx, *baddr_rx;
+				uint16_t bdlim_tx, bdoff_rx, pkt_len_rx;
+
+				pkt_rx = os_channel_slot_get_packet(rxring, rxslot);
+				error = os_channel_slot_detach_packet(rxring, rxslot, pkt_rx);
+				SKTC_ASSERT_ERR(error == 0);
+
+
+				bflt_rx = os_packet_get_next_buflet(pkt_rx, NULL);
+				assert(bflt_rx != NULL);
+				bdoff_rx = os_buflet_get_data_offset(bflt_rx);
+				baddr_rx = os_buflet_get_object_address(bflt_rx) + bdoff_rx;
+				pkt_len_rx = os_packet_get_data_length(pkt_rx);
+
+
+				error = os_channel_packet_alloc(txchannel, &pkt_tx); SKTC_ASSERT_ERR(error == 0);
+				bflt_tx = os_packet_get_next_buflet(pkt_tx, NULL);
+				assert(bflt_tx != NULL);
+				error = os_buflet_set_data_offset(bflt_tx, 0);
+				SKTC_ASSERT_ERR(error == 0);
+
+
+
+				bdlim_tx = os_buflet_get_data_limit(bflt_tx);
+				assert(bdlim_tx >= pkt_len_rx);
+				baddr_tx = os_buflet_get_object_address(bflt_tx);
+				assert(baddr_tx != NULL);
+
+				memcpy(baddr_tx, baddr_rx, pkt_len_rx);
+				error = os_channel_packet_free(rxchannel, pkt_rx);
+				SKTC_ASSERT_ERR(error == 0);
+
+				error = os_buflet_set_data_length(bflt_tx, pkt_len_rx);
+				SKTC_ASSERT_ERR(error == 0);
+				os_packet_finalize(pkt_tx);
+				error = os_channel_slot_attach_packet(txring, txslot, pkt_tx);
+				SKTC_ASSERT_ERR(error == 0);
+				bytecount += pkt_len_rx;
+			}
 
 			slotcount += 1;
-			bytecount += txprop.sp_len;
 
 			rxprev = rxslot;
 			txprev = txslot;
@@ -835,7 +888,8 @@ dotraffic(void *(*sourcefunc)(void *), void *(*sinkfunc)(void *),
 
 
 static void
-skt_tunloop_common(bool doutun, bool enable_netif, bool enable_channel, bool udp, bool udpduplex, bool tcp, bool tcpduplex, bool dualstream)
+skt_tunloop_common(bool doutun, bool enable_netif, bool enable_channel, bool udp,
+    bool udpduplex, bool tcp, bool tcpduplex, bool dualstream, bool enable_upp)
 {
 	int error;
 	int utun1, utun2;
@@ -873,6 +927,7 @@ skt_tunloop_common(bool doutun, bool enable_netif, bool enable_channel, bool udp
 	sktu_if_type_t type = doutun ? SKTU_IFT_UTUN : SKTU_IFT_IPSEC;
 	sktu_if_flag_t flags = enable_netif ? SKTU_IFF_ENABLE_NETIF : 0;
 	flags |= enable_channel ? SKTU_IFF_ENABLE_CHANNEL : 0;
+	flags |= enable_upp ? SKTU_IFF_ENABLE_UPP : 0;
 	utun1 = sktu_create_interface(type, flags);
 	utun2 = sktu_create_interface(type, flags);
 
@@ -902,8 +957,8 @@ skt_tunloop_common(bool doutun, bool enable_netif, bool enable_channel, bool udp
 		sktu_create_sa(keysock, ifname2, 12346, &addr1, &addr2);
 	}
 
-	g_channel1 = sktu_create_interface_channel(type, utun1);
-	g_channel2 = sktu_create_interface_channel(type, utun2);
+	g_channel1 = sktu_create_interface_channel(type, utun1, enable_upp);
+	g_channel2 = sktu_create_interface_channel(type, utun2, enable_upp);
 
 	T_LOG("Created %s and %s\n", ifname1, ifname2);
 
@@ -1017,7 +1072,7 @@ static int
 skt_utunloopy4u1_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
-	skt_tunloop_common(true, true, true, true, false, false, false, false);
+	skt_tunloop_common(true, true, true, true, false, false, false, false, false);
 	return 0;
 }
 
@@ -1026,7 +1081,7 @@ skt_utunloopy4u2_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
 	g_assert_stalls21 = true;
-	skt_tunloop_common(true, true, true, true, true, false, false, false);
+	skt_tunloop_common(true, true, true, true, true, false, false, false, false);
 	return 0;
 }
 
@@ -1034,7 +1089,7 @@ static int
 skt_utunloopy4t1_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
-	skt_tunloop_common(true, true, true, false, false, true, false, false);
+	skt_tunloop_common(true, true, true, false, false, true, false, false, false);
 	return 0;
 }
 
@@ -1043,14 +1098,48 @@ skt_utunloopy4t2_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
 	g_assert_stalls21 = true;
-	skt_tunloop_common(true, true, true, false, false, true, true, false);
+	skt_tunloop_common(true, true, true, false, false, true, true, false, false);
 	return 0;
 }
 
 static int
 skt_utunloopy1000_main(int argc, char *argv[])
 {
-	skt_tunloop_common(true, true, true, false, false, false, false, false);
+	skt_tunloop_common(true, true, true, false, false, false, false, false, false);
+	return 0;
+}
+
+static int
+skt_utunloopy4u1upp_main(int argc, char *argv[])
+{
+	g_assert_stalls12 = true;
+	skt_tunloop_common(true, true, true, true, false, false, false, false, true);
+	return 0;
+}
+
+static int
+skt_utunloopy4u2upp_main(int argc, char *argv[])
+{
+	g_assert_stalls12 = true;
+	g_assert_stalls21 = true;
+	skt_tunloop_common(true, true, true, true, true, false, false, false, true);
+	return 0;
+}
+
+static int
+skt_utunloopy4t1upp_main(int argc, char *argv[])
+{
+	g_assert_stalls12 = true;
+	skt_tunloop_common(true, true, true, false, false, true, false, false, true);
+	return 0;
+}
+
+static int
+skt_utunloopy4t2upp_main(int argc, char *argv[])
+{
+	g_assert_stalls12 = true;
+	g_assert_stalls21 = true;
+	skt_tunloop_common(true, true, true, false, false, true, true, false, true);
 	return 0;
 }
 
@@ -1084,13 +1173,37 @@ struct skywalk_test skt_utunloopy1000 = {
 	skt_utunloopy1000_main,
 };
 
+struct skywalk_test skt_utunloopy4u1upp = {
+	"utunloopy4u1upp", "open 2 utuns with netif and floods ipv4 udp packets in one direction upp enabled",
+	SK_FEATURE_SKYWALK | SK_FEATURE_NEXUS_KERNEL_PIPE,
+	skt_utunloopy4u1upp_main,
+};
+
+struct skywalk_test skt_utunloopy4u2upp = {
+	"utunloopy4u2upp", "open 2 utuns with netif and floods ipv4 udp packets in two directions upp enabled",
+	SK_FEATURE_SKYWALK | SK_FEATURE_NEXUS_KERNEL_PIPE,
+	skt_utunloopy4u2upp_main,
+};
+
+struct skywalk_test skt_utunloopy4t1upp = {
+	"utunloopy4t1upp", "open 2 utuns with netif and floods ipv4 tcp packets in one direction upp enabled",
+	SK_FEATURE_SKYWALK | SK_FEATURE_NEXUS_KERNEL_PIPE,
+	skt_utunloopy4t1upp_main,
+};
+
+struct skywalk_test skt_utunloopy4t2upp = {
+	"utunloopy4t2upp", "open 2 utuns with netif and floods ipv4 tcp packets in two directions upp enabled",
+	SK_FEATURE_SKYWALK | SK_FEATURE_NEXUS_KERNEL_PIPE,
+	skt_utunloopy4t2upp_main,
+};
+
 /****************************************************************/
 
 static int
 skt_ipsecloopy4u1_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
-	skt_tunloop_common(false, true, true, true, false, false, false, false);
+	skt_tunloop_common(false, true, true, true, false, false, false, false, false);
 	return 0;
 }
 
@@ -1099,7 +1212,7 @@ skt_ipsecloopy4u2_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
 	g_assert_stalls21 = true;
-	skt_tunloop_common(false, true, true, true, true, false, false, false);
+	skt_tunloop_common(false, true, true, true, true, false, false, false, false);
 	return 0;
 }
 
@@ -1107,7 +1220,7 @@ static int
 skt_ipsecloopy4t1_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
-	skt_tunloop_common(false, true, true, false, false, true, false, false);
+	skt_tunloop_common(false, true, true, false, false, true, false, false, false);
 	return 0;
 }
 
@@ -1116,14 +1229,14 @@ skt_ipsecloopy4t2_main(int argc, char *argv[])
 {
 	g_assert_stalls12 = true;
 	g_assert_stalls21 = true;
-	skt_tunloop_common(false, true, true, false, false, true, true, false);
+	skt_tunloop_common(false, true, true, false, false, true, true, false, false);
 	return 0;
 }
 
 static int
 skt_ipsecloopy1000_main(int argc, char *argv[])
 {
-	skt_tunloop_common(false, true, true, false, false, false, false, false);
+	skt_tunloop_common(false, true, true, false, false, false, false, false, false);
 	return 0;
 }
 

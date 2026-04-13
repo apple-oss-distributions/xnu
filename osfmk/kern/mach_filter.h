@@ -81,7 +81,7 @@ __END_DECLS
 #if XNU_KERNEL_PRIVATE
 extern struct mach_msg_filter_callbacks mach_msg_filter_callbacks;
 
-static inline bool __pure2
+__static_testable __mockable inline bool __pure2
 mach_msg_filter_at_least(unsigned int version)
 {
 	if (version == 0) {

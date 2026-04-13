@@ -192,7 +192,7 @@ vm_mte_test_tag_storage_for_vm_tag(int64_t in, int64_t *out)
 	}
 
 done:
-	mach_vm_deallocate(current_map(), addr, PAGE_SIZE);
+	mach_vm_deallocate_kernel(current_map(), addr, PAGE_SIZE);
 	return ret;
 }
 SYSCTL_TEST_REGISTER(vm_mte_tag_storage_for_vm_tag, vm_mte_test_tag_storage_for_vm_tag);

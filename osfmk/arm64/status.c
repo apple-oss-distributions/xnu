@@ -58,7 +58,7 @@ typedef struct arm_vfpv2_state arm_vfpv2_state_t;
  * Forward definitions
  */
 void thread_set_child(thread_t child, int pid);
-static void free_debug_state(thread_t thread);
+static void free_thread_debug_state(thread_t thread);
 user_addr_t thread_get_sigreturn_token(thread_t thread);
 uint32_t thread_get_sigreturn_diversifier(thread_t thread);
 
@@ -753,6 +753,11 @@ machine_thread_state_convert_to_user(
 
 	if (kernel_signed_lr) {
 		ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR;
+	}
+
+	if (thread->machine.arm_machine_flags &
+	    ARM_MACHINE_THREAD_PRESERVE_X18_SAVE) {
+		ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_CUSTOM_X18_ABI;
 	}
 
 
@@ -1723,7 +1728,7 @@ machine_thread_set_state(thread_t               thread,
 		}
 
 		if (!enabled) {
-			free_debug_state(thread);
+			free_thread_debug_state(thread);
 		} else {
 			arm_debug_state32_t *thread_state = find_or_allocate_debug_state32(thread);
 
@@ -1796,7 +1801,7 @@ machine_thread_set_state(thread_t               thread,
 		}
 
 		if (!enabled) {
-			free_debug_state(thread);
+			free_thread_debug_state(thread);
 		} else {
 			arm_debug_state32_t * thread_state = find_or_allocate_debug_state32(thread);
 
@@ -1872,7 +1877,7 @@ machine_thread_set_state(thread_t               thread,
 		}
 
 		if (!enabled) {
-			free_debug_state(thread);
+			free_thread_debug_state(thread);
 		} else {
 			arm_debug_state64_t *thread_state = find_or_allocate_debug_state64(thread);
 
@@ -2062,7 +2067,7 @@ machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
  * Routine: machine_thread_state_initialize
  *
  */
-void
+__mockable void
 machine_thread_state_initialize(thread_t thread)
 {
 	arm_context_t *context = thread->machine.contextData;
@@ -2238,6 +2243,31 @@ find_debug_state64(thread_t thread)
 os_refgrp_decl(static, dbg_refgrp, "arm_debug_state", NULL);
 
 /**
+ *  Allocates and initializes a new 64-bit debug state. Cannot fail.
+ */
+arm_debug_state_t *
+allocate_debug_state64(void)
+{
+	arm_debug_state_t *debug_state = zalloc_flags(ads_zone,
+	    Z_WAITOK | Z_NOFAIL | Z_ZERO);
+	debug_state->dsh.flavor = ARM_DEBUG_STATE64;
+	debug_state->dsh.count = ARM_DEBUG_STATE64_COUNT;
+	os_ref_init(&debug_state->ref, &dbg_refgrp);
+	return debug_state;
+}
+
+/**
+ *  Frees a previously allocated arm_debug_state_t.
+ */
+void
+free_debug_state(arm_debug_state_t *debug_state)
+{
+	if (os_ref_release(&debug_state->ref) == 0) {
+		zfree(ads_zone, debug_state);
+	}
+}
+
+/**
  *  Finds the debug state for the given 64 bit thread, allocating one if it
  *  does not exist.
  *
@@ -2252,12 +2282,8 @@ find_or_allocate_debug_state64(thread_t thread)
 {
 	arm_debug_state64_t *thread_state = find_debug_state64(thread);
 	if (thread != NULL && thread_state == NULL) {
-		thread->machine.DebugData = zalloc_flags(ads_zone,
-		    Z_WAITOK | Z_NOFAIL);
-		bzero(thread->machine.DebugData, sizeof *(thread->machine.DebugData));
-		thread->machine.DebugData->dsh.flavor = ARM_DEBUG_STATE64;
-		thread->machine.DebugData->dsh.count = ARM_DEBUG_STATE64_COUNT;
-		os_ref_init(&thread->machine.DebugData->ref, &dbg_refgrp);
+		/* rdar://161442632 */
+		thread->machine.DebugData = allocate_debug_state64();
 		thread_state = find_debug_state64(thread);
 	}
 	return thread_state;
@@ -2278,6 +2304,7 @@ find_or_allocate_debug_state32(thread_t thread)
 {
 	arm_debug_state32_t *thread_state = find_debug_state32(thread);
 	if (thread != NULL && thread_state == NULL) {
+		/* rdar://161442632 */
 		thread->machine.DebugData = zalloc_flags(ads_zone,
 		    Z_WAITOK | Z_NOFAIL);
 		bzero(thread->machine.DebugData, sizeof *(thread->machine.DebugData));
@@ -2295,15 +2322,12 @@ find_or_allocate_debug_state32(thread_t thread)
  *  @param thread thread to free the debug state of
  */
 static inline void
-free_debug_state(thread_t thread)
+free_thread_debug_state(thread_t thread)
 {
 	if (thread != NULL && thread->machine.DebugData != NULL) {
 		arm_debug_state_t *pTmp = thread->machine.DebugData;
 		thread->machine.DebugData = NULL;
-
-		if (os_ref_release(&pTmp->ref) == 0) {
-			zfree(ads_zone, pTmp);
-		}
+		free_debug_state(pTmp);
 	}
 }
 

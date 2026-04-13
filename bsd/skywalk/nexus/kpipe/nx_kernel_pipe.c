@@ -63,6 +63,7 @@
 #define NX_KPIPE_BUFSIZE        (2 * 1024)
 #define NX_KPIPE_MINBUFSIZE     64
 #define NX_KPIPE_MAXBUFSIZE     (16 * 1024)
+#define NX_KPIPE_AFRINGSIZE     128
 
 static int nx_kpipe_na_txsync(struct __kern_channel_ring *, struct proc *,
     uint32_t);
@@ -179,7 +180,7 @@ struct nxdom nx_kpipe_dom_s = {
 	.nxdom_capabilities = {
 		.nb_def = NXPCAP_USER_CHANNEL,
 		.nb_min = NXPCAP_USER_CHANNEL,
-		.nb_max = NXPCAP_USER_CHANNEL,
+		.nb_max = NXPCAP_USER_CHANNEL | NXPCAP_USER_PACKET_POOL,
 	},
 	.nxdom_qmap = {
 		.nb_def = NEXUS_QMAP_TYPE_INVALID,
@@ -333,15 +334,6 @@ nx_kpipe_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 		goto done;
 	}
 
-	/*
-	 * XXX: user packet pool is not supported for kernel pipe for now.
-	 */
-	if (chr->cr_mode & CHMODE_USER_PACKET_POOL) {
-		SK_ERR("User Packet pool mode not supported for kpipe");
-		err = ENOTSUP;
-		goto done;
-	}
-
 	if (chr->cr_mode & CHMODE_EVENT_RING) {
 		SK_ERR("event ring is not supported for kpipe");
 		err = ENOTSUP;
@@ -483,7 +475,13 @@ static int
 nx_kpipe_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
     const struct nxprov_params *nxp, struct nxprov_adjusted_params *adj)
 {
-#pragma unused(nxdom_prov, nxp, adj)
+#pragma unused(nxdom_prov, nxp)
+
+	if (*(adj->adj_caps) & NXPCAP_USER_PACKET_POOL) {
+		*(adj->adj_alloc_slots) = *(adj->adj_free_slots) =
+		    NX_KPIPE_AFRINGSIZE;
+	}
+
 	return 0;
 }
 
@@ -494,6 +492,12 @@ nx_kpipe_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
     uint32_t pp_region_config_flags)
 {
 	struct nxdom *nxdom = nxdom_prov->nxdom_prov_dom;
+
+	if (nxp0->nxp_capabilities & NXPCAP_USER_PACKET_POOL) {
+		/* USD regions need to be writable to support user packet pool */
+		srp[SKMEM_REGION_TXAUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
+		srp[SKMEM_REGION_RXFUSD].srp_cflags &= ~SKMEM_REGION_CR_UREADONLY;
+	}
 
 	return nxprov_params_adjust(nxdom_prov, req, nxp0, nxp, srp,
 	           nxdom, nxdom, nxdom, pp_region_config_flags,
@@ -750,6 +754,14 @@ nx_kpipe_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 	na_set_nrings(na, NR_RX, nxp->nxp_rx_rings);
 	na_set_nslots(na, NR_TX, nxp->nxp_tx_slots);
 	na_set_nslots(na, NR_RX, nxp->nxp_rx_slots);
+
+	if (nxp->nxp_capabilities & NXPCAP_USER_PACKET_POOL) {
+		na_set_nrings(na, NR_A, 1);
+		na_set_nslots(na, NR_A, NX_KPIPE_AFRINGSIZE);
+
+		os_atomic_or(&na->na_flags, NAF_USER_PKT_POOL, relaxed);
+	}
+
 	/*
 	 * Verify upper bounds; the parameters must have already been
 	 * validated by nxdom_prov_params() by the time we get here.

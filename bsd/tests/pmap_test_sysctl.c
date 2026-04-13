@@ -30,7 +30,12 @@
 
 extern kern_return_t test_pmap_enter_disconnect(unsigned int);
 extern kern_return_t test_pmap_compress_remove(unsigned int);
+extern kern_return_t test_pmap_protect_remove(unsigned int);
+extern kern_return_t test_pmap_query_remove(unsigned int);
 extern kern_return_t test_pmap_exec_remove(unsigned int);
+extern kern_return_t test_pmap_exec_remove_4k(unsigned int);
+extern kern_return_t test_pmap_enter_remove(unsigned int);
+extern kern_return_t test_pmap_enter_remove_4k(unsigned int);
 extern kern_return_t test_pmap_nesting(unsigned int);
 extern kern_return_t test_pmap_iommu_disconnect(void);
 extern kern_return_t test_pmap_extended(void);
@@ -75,6 +80,38 @@ SYSCTL_PROC(_kern, OID_AUTO, pmap_compress_remove_test,
     0, 0, sysctl_test_pmap_compress_remove, "I", "");
 
 static int
+sysctl_test_pmap_protect_remove(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_protect_remove(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_protect_remove_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_protect_remove, "I", "");
+
+static int
+sysctl_test_pmap_query_remove(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_query_remove(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_query_remove_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_query_remove, "I", "");
+
+static int
 sysctl_test_pmap_exec_remove(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
 	unsigned int num_loops;
@@ -89,6 +126,54 @@ sysctl_test_pmap_exec_remove(__unused struct sysctl_oid *oidp, __unused void *ar
 SYSCTL_PROC(_kern, OID_AUTO, pmap_exec_remove_test,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_test_pmap_exec_remove, "I", "");
+
+static int
+sysctl_test_pmap_exec_remove_4k(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_exec_remove_4k(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_exec_remove_test_4k,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_exec_remove_4k, "I", "");
+
+static int
+sysctl_test_pmap_enter_remove(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_enter_remove(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_enter_remove_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_enter_remove, "I", "");
+
+static int
+sysctl_test_pmap_enter_remove_4k(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_enter_remove_4k(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_enter_remove_test_4k,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_enter_remove_4k, "I", "");
 
 static int
 sysctl_test_pmap_nesting(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)

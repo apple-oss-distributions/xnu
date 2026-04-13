@@ -79,6 +79,18 @@ bool os_log_encoded_metadata(firehose_tracepoint_id_u, uint64_t, const void *, s
 bool os_log_encoded_signpost(firehose_stream_t, firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
 bool os_log_encoded_log(firehose_stream_t, firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
 
+typedef enum {
+	// Request the default capacity for the underlying log buffers.
+	LOG_BUFFERING_CAPACITY_DEFAULT,
+	// Request the maximum capacity for the underlying log buffers.
+	LOG_BUFFERING_CAPACITY_MAX,
+} os_log_buffering_capacity_t;
+
+/*
+ * Adjust the buffering capacity for logging based on the specified type.
+ */
+void os_log_adjust_buffering_capacity(os_log_buffering_capacity_t type);
+
 __END_DECLS
 
 #endif // __os_log_private_h

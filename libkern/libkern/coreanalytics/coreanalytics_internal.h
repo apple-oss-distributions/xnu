@@ -25,6 +25,9 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+
+#pragma once
+
 #ifdef XNU_KERNEL_PRIVATE
 #ifndef _COREANALYTICS_H
 

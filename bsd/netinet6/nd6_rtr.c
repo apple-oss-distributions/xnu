@@ -1077,6 +1077,10 @@ defrouter_addreq(struct nd_defrouter *new, struct nd_route_info *rti, boolean_t 
 			nd6log(info, "%s\n", ip6_sprintf(&new->rtaddr_mapped));
 			nd6log(info, "%s\n", ip6_sprintf(&new->rtaddr_mapped));
 		}
+
+		if (tmp_ia6 != NULL) {
+			ifa_remref(&tmp_ia6->ia_ifa);
+		}
 	}
 
 	err = rtrequest_scoped(RTM_ADD, SA(&key), SA(&gate), SA(&mask),

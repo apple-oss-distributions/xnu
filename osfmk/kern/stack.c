@@ -49,6 +49,10 @@
 
 #include <san/kasan.h>
 
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
+
 /*
  *	We allocate stacks from generic kernel VM.
  *
@@ -85,12 +89,56 @@ struct stack_cache {
 };
 static struct stack_cache PERCPU_DATA(stack_cache);
 
-/*
- *	The next field is at the base of the stack,
- *	so the low end is left unsullied.
- */
-#define stack_next(stack)       \
-	(*((vm_offset_t *)((stack) + kernel_stack_size) - 1))
+static inline vm_offset_t *
+stack_get_next_ptr(vm_offset_t stack)
+{
+	/*
+	 *	The next field is at the base of the stack,
+	 *	so the low end is left unsullied.
+	 */
+	return (vm_offset_t *)((stack) + kernel_stack_size) - 1;
+}
+
+#if __has_feature(ptrauth_calls)
+static inline uint64_t
+stack_next_ptr_discriminator(vm_offset_t containing_stack)
+{
+	/* diversify by both type and location */
+	return ptrauth_blend_discriminator(
+		(void *)containing_stack,
+		ptrauth_string_discriminator("stack.next"));
+}
+#endif /* __has_feature(ptrauth_calls) */
+
+static inline void
+stack_set_next(vm_offset_t stack, vm_offset_t stack_next)
+{
+	vm_offset_t *next_ptr = stack_get_next_ptr(stack);
+
+#if __has_feature(ptrauth_calls)
+	*next_ptr = (vm_offset_t)ptrauth_sign_unauthenticated(
+		(void *)stack_next,
+		ptrauth_key_process_independent_data,
+		stack_next_ptr_discriminator(stack));
+#else
+	*next_ptr = stack_next;
+#endif
+}
+
+static inline vm_offset_t
+stack_get_next(vm_offset_t stack)
+{
+	vm_offset_t *next_ptr = stack_get_next_ptr(stack);
+
+#if __has_feature(ptrauth_calls)
+	return (vm_offset_t)ptrauth_auth_data(
+		(void *)*next_ptr,
+		ptrauth_key_process_independent_data,
+		stack_next_ptr_discriminator(stack));
+#else
+	return *next_ptr;
+#endif
+}
 
 static inline vm_offset_t
 roundup_pow2(vm_offset_t size)
@@ -143,14 +191,14 @@ stack_alloc_internal(void)
 	vm_offset_t     stack = 0;
 	spl_t           s;
 	kma_flags_t     flags = KMA_NOFAIL | KMA_GUARD_FIRST | KMA_GUARD_LAST |
-	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN;
+	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
 
 	s = splsched();
 	stack_lock();
 	stack_allocs++;
 	stack = stack_free_list;
 	if (stack != 0) {
-		stack_free_list = stack_next(stack);
+		stack_free_list = stack_get_next(stack);
 		stack_free_count--;
 	} else {
 		if (++stack_total > stack_hiwat) {
@@ -239,12 +287,12 @@ stack_free_stack(
 	s = splsched();
 	cache = PERCPU_GET(stack_cache);
 	if (cache->count < STACK_CACHE_SIZE) {
-		stack_next(stack) = cache->free;
+		stack_set_next(stack, cache->free);
 		cache->free = stack;
 		cache->count++;
 	} else {
 		stack_lock();
-		stack_next(stack) = stack_free_list;
+		stack_set_next(stack, stack_free_list);
 		stack_free_list = stack;
 		if (++stack_free_count > stack_free_hiwat) {
 			stack_free_hiwat = stack_free_count;
@@ -275,14 +323,14 @@ stack_alloc_try(
 	cache = PERCPU_GET(stack_cache);
 	stack = cache->free;
 	if (stack != 0) {
-		cache->free = stack_next(stack);
+		cache->free = stack_get_next(stack);
 		cache->count--;
 	} else {
 		if (stack_free_list != 0) {
 			stack_lock();
 			stack = stack_free_list;
 			if (stack != 0) {
-				stack_free_list = stack_next(stack);
+				stack_free_list = stack_get_next(stack);
 				stack_free_count--;
 				stack_free_delta--;
 			}
@@ -322,7 +370,7 @@ stack_collect(void)
 
 		while (stack_free_count > target) {
 			stack = stack_free_list;
-			stack_free_list = stack_next(stack);
+			stack_free_list = stack_get_next(stack);
 			stack_free_count--; stack_total--;
 			stack_unlock();
 			splx(s);
@@ -399,46 +447,6 @@ stack_privilege(
 	__unused thread_t       thread)
 {
 	/* OBSOLETE */
-}
-
-/*
- * Return info on stack usage for threads in a specific processor set
- */
-kern_return_t
-processor_set_stack_usage(
-	processor_set_t pset,
-	unsigned int    *totalp,
-	vm_size_t       *spacep,
-	vm_size_t       *residentp,
-	vm_size_t       *maxusagep,
-	vm_offset_t     *maxstackp)
-{
-#if DEVELOPMENT || DEBUG
-	unsigned int total = 0;
-	thread_t thread;
-
-	if (pset == PROCESSOR_SET_NULL || pset != sched_boot_pset) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	lck_mtx_lock(&tasks_threads_lock);
-
-	queue_iterate(&threads, thread, thread_t, threads) {
-		total += (thread->kernel_stack != 0);
-	}
-
-	lck_mtx_unlock(&tasks_threads_lock);
-
-	*totalp = total;
-	*residentp = *spacep = total * round_page(kernel_stack_size);
-	*maxusagep = 0;
-	*maxstackp = 0;
-	return KERN_SUCCESS;
-
-#else
-#pragma unused(pset, totalp, spacep, residentp, maxusagep, maxstackp)
-	return KERN_NOT_SUPPORTED;
-#endif /* DEVELOPMENT || DEBUG */
 }
 
 __mockable vm_offset_t

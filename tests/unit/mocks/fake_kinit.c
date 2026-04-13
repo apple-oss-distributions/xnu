@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include "mocks/fake_kinit.h"
 #include <arm/cpu_data_internal.h> // for BootArgs
 #include <pexpert/pexpert.h>  // for PE_state
 #include <pexpert/boot.h>  // for bootargs
@@ -34,8 +35,12 @@
 #include <vm/vm_page_internal.h> // for vm_set_page_size
 #include <kern/clock.h> // for clock_config
 #include <vm/pmap.h>
+#include <sys/queue.h> // for TAILQ macros
 
 #include "std_safe.h"
+#include "mocks/mock_mem.h"
+#include "mocks/osfmk/unit_test_utils.h"
+
 
 // This define is supposed to come from the .CFLAGS parsing. if it's not, something is wrong with the Makefile
 #ifndef __BUILDING_XNU_LIB_UNITTEST__
@@ -49,12 +54,14 @@ extern void vm_mem_bootstrap(void);
 extern void waitq_bootstrap(void);
 // can't include IOKit/IOKitDebug.h since it's a C++ file
 extern void IOTrackingInit(void);
-extern void mock_mem_init_vm_objects(void);
+
+extern void kernel_startup_initialize_only(startup_subsystem_id_t sysid);
 
 extern lck_grp_t * IOLockGroup;
 extern IOLock * sKextLoggingLock;
 extern bitmap_t * asid_bitmap;
 extern zone_t pmap_zone;
+extern const struct page_table_attr * const native_pt_attr;
 
 void
 fake_pmap_init(void)
@@ -64,11 +71,14 @@ fake_pmap_init(void)
 
 	static uint64_t asid_bits = 0;
 	asid_bitmap = &asid_bits;
+
+	// from pmap_bootstrap()
+	kernel_pmap->pmap_pt_attr = native_pt_attr;
 }
 
 
 void
-fake_init_bootargs(void)
+fake_init_bootargs(uint32_t __unused step_id)
 {
 	// see PE_boot_args()
 	static boot_args ba;
@@ -78,21 +88,24 @@ fake_init_bootargs(void)
 }
 
 void
-fake_kernel_bootstrap(void)
+fake_kernel_bootstrap(uint32_t __unused step_id)
 {
+	kernel_startup_bootstrap(); // runs up to STARTUP_SUB_LOCKS
+
 	mem_size = 0x0000000080000000ULL; // 2 GB
 	max_mem = mem_size;
 	scale_setup();
 
 	vm_set_page_size(); // called from arm_init() -> arm_vm_init()
-	vm_mem_bootstrap();
+	vm_mem_bootstrap(); // runs up to STARTUP_SUB_ZALLOC
+	// zalloc is now available to use
 	fake_pmap_init();
 	clock_config();
 }
 
 
 void
-fake_iokit_init(void)
+fake_iokit_init(uint32_t __unused step_id)
 {
 	// these are needed for static initializations in iokit to not crash
 	IOLockGroup = lck_grp_alloc_init("IOKit", LCK_GRP_ATTR_NULL);
@@ -102,18 +115,196 @@ fake_iokit_init(void)
 	sKextLoggingLock = IOLockAlloc();
 }
 
+// -------------------- fake_kinit() test-facing API ---------------------
+
+#define MAX_STARTUP_SUB (STARTUP_SUB_EARLY_BOOT + 1)
+#define MAX_STEPS_COUNT (100)
+struct {
+	TAILQ_HEAD(, fki_step) fkp_steps;
+
+	// for every STARTUP_* keep a null-terminated list of function names that should be skipped.
+	// This is kept separately from the steps list so that it possible to control any STARTUP_* step.
+	const char **fkp_startup_skip_func_names[MAX_STARTUP_SUB];
+	bool fkp_edit_allowed;
+
+	// pool of step objects so that we don't need to malloc them
+	struct {
+		struct fki_step fkpp_pool[MAX_STEPS_COUNT];
+		uint32_t fkpp_next_avail;
+	} fpk_steps_pool;
+} g_fki_plan = {
+	.fkp_steps = TAILQ_HEAD_INITIALIZER(g_fki_plan.fkp_steps),
+	.fkp_startup_skip_func_names = {},
+	.fkp_edit_allowed = true,
+};
+
+void
+fki_plan_append(fki_step_t new_step)
+{
+	assert(g_fki_plan.fkp_edit_allowed);
+	assert(new_step != NULL);
+	TAILQ_INSERT_TAIL(&g_fki_plan.fkp_steps, new_step, fki_link);
+}
+
+void
+fki_plan_insert_after(fki_step_t after_step, fki_step_t new_step)
+{
+	assert(g_fki_plan.fkp_edit_allowed);
+	assert(new_step != NULL);
+	assert(after_step != NULL);
+	TAILQ_INSERT_AFTER(&g_fki_plan.fkp_steps, after_step, new_step, fki_link);
+}
+
+void
+fki_plan_insert_before(fki_step_t before_step, fki_step_t new_step)
+{
+	assert(g_fki_plan.fkp_edit_allowed);
+	assert(new_step != NULL);
+	assert(before_step != NULL);
+	TAILQ_INSERT_BEFORE(before_step, new_step, fki_link);
+}
+
+void
+fki_plan_remove(fki_step_t step_to_remove)
+{
+	assert(g_fki_plan.fkp_edit_allowed);
+	assert(step_to_remove != NULL);
+	TAILQ_REMOVE(&g_fki_plan.fkp_steps, step_to_remove, fki_link);
+}
+
+static fki_step_t
+fki_plan_alloc_step(void)
+{
+	assert3u(g_fki_plan.fpk_steps_pool.fkpp_next_avail, <, MAX_STEPS_COUNT - 1);
+	return &g_fki_plan.fpk_steps_pool.fkpp_pool[g_fki_plan.fpk_steps_pool.fkpp_next_avail++];
+}
+
+fki_step_t
+fki_plan_make_func_step(fki_step_id_t step_id, void (*func)(uint32_t))
+{
+	fki_step_t step = fki_plan_alloc_step();
+	step->fki_step_id = step_id;
+	step->fki_func = func;
+	return step;
+}
+
+fki_step_t
+fki_plan_make_startup_step(startup_subsystem_id_t subsys_id)
+{
+	fki_step_t step = fki_plan_alloc_step();
+	step->fki_step_id = FKI_STARTUP_SUB;
+	step->fki_subsys_id = subsys_id;
+	return step;
+}
+
+void
+fki_plan_append_func_step(fki_step_id_t step_id, void (*func)(uint32_t))
+{
+	fki_plan_append(fki_plan_make_func_step(step_id, func));
+}
+
+void
+fki_plan_append_startup_step(startup_subsystem_id_t subsys_id)
+{
+	fki_plan_append(fki_plan_make_startup_step(subsys_id));
+}
+
+fki_step_t
+fki_plan_first_step(void)
+{
+	return TAILQ_FIRST(&g_fki_plan.fkp_steps);
+}
+
+fki_step_t
+fki_plan_find_step(bool (^predicate)(fki_step_t step))
+{
+	fki_step_t step;
+	TAILQ_FOREACH(step, &g_fki_plan.fkp_steps, fki_link) {
+		if (predicate(step)) {
+			return step;
+		}
+	}
+	// failure to find the expected plan step indicate something wrong about the assumptions made by the test
+	raw_printf("fake_kinit step not found\n");
+	abort();
+}
+
+void
+_fki_plan_set_startup_skip_func_names(startup_subsystem_id_t subsys_id, const char **skip_func_names)
+{
+	assert(g_fki_plan.fkp_edit_allowed);
+	assert(subsys_id >= 0 && subsys_id < MAX_STARTUP_SUB);
+	g_fki_plan.fkp_startup_skip_func_names[subsys_id] = skip_func_names;
+}
+
+__attribute__((optnone, noinline)) bool
+fki_is_skipped_func_name(startup_subsystem_id_t subsys_id, const char* func_name)
+{
+	if (subsys_id < 0 || subsys_id >= MAX_STARTUP_SUB) {
+		return false;
+	}
+	const char **skip_funcs_names = g_fki_plan.fkp_startup_skip_func_names[subsys_id];
+	if (skip_funcs_names == NULL) {
+		return false;
+	}
+	for (int i = 0; skip_funcs_names[i] != NULL; ++i) {
+		if (strcmp(func_name, skip_funcs_names[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+
+__attribute__((weak)) void
+_fki_edit_plan_hook(void)
+{
+	// Do nothing. test can override this using FAKE_KINIT_CUSTOMIZE_PLAN().
+	// A non-weak symbol in the executable will override this weak symbol.
+}
+
+static void
+fki_plan_run(void)
+{
+	fki_step_t step;
+	TAILQ_FOREACH(step, &g_fki_plan.fkp_steps, fki_link) {
+		if (step->fki_step_id != FKI_STARTUP_SUB) {
+			step->fki_func(step->fki_step_id);
+		} else {
+			kernel_startup_initialize_only(step->fki_subsys_id);
+		}
+	}
+}
+
+
 // This is the first function that is called before any initialization in libkernel.
 // It's made to be first by the order of object files in the linker command line in Makefile
+// libdarwintest runs each test-case in a separate processes, so this function will be called
+// for in every process started.
 __attribute__((constructor)) void
 fake_kinit(void)
 {
-	fake_init_bootargs();
-	kernel_startup_bootstrap();
-	fake_kernel_bootstrap();
-	fake_iokit_init();
+	// setup default plan
+	fki_plan_append_func_step(FKI_FUNC_MOCK_MEM, mock_mem_init_all);
+	fki_plan_append_func_step(FKI_FUNC_BOOTARGS, fake_init_bootargs);
+	fki_plan_append_func_step(FKI_FUNC_BOOTSTRAP, fake_kernel_bootstrap);
 
-	kernel_startup_initialize_only(STARTUP_SUB_MACH_IPC);
-	kernel_startup_initialize_only(STARTUP_SUB_SYSCTL);
+	fki_plan_append_func_step(FKI_FUNC_IOKIT, fake_iokit_init);
 
-	mock_mem_init_vm_objects();
+	fki_plan_append_startup_step(STARTUP_SUB_PERCPU);
+	fki_plan_append_startup_step(STARTUP_SUB_MACH_IPC);
+	fki_plan_append_startup_step(STARTUP_SUB_SYSCTL);
+
+	// unittests don't support creating submaps in kernel_map
+	fki_plan_set_startup_skip_func_names(STARTUP_SUB_MACH_IPC, "ipc_init");
+	// kernel map is not maintained in unit-test
+	fki_plan_set_startup_skip_func_names(STARTUP_SUB_KMEM, "kmem_range_init");
+	// smr not supported in user-mode
+	fki_plan_set_startup_skip_func_names(STARTUP_SUB_ZALLOC, "kauth_cred_init");
+
+	// Allow the test code to customize the plan
+	_fki_edit_plan_hook();
+	g_fki_plan.fkp_edit_allowed = false;
+
+	fki_plan_run();
 }

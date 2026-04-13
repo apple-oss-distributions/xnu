@@ -474,7 +474,7 @@ interrupt(x86_saved_state_t *state)
 		}
 	}
 
-	if (cnum == master_cpu) {
+	if (cnum == boot_cpu_id) {
 		entropy_collect();
 	}
 

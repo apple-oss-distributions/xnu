@@ -241,11 +241,11 @@ struct if_data64 {
 #pragma pack()
 #endif /* DRIVERKIT */
 
-#if defined(DRIVERKIT) || defined(PRIVATE) || defined(DRIVERKIT_PRIVATE)
+#if defined(DRIVERKIT) || (defined(PRIVATE) && !defined(MODULES_SUPPORTED)) || defined(DRIVERKIT_PRIVATE)
 #include <net/if_var_status.h>
 #else
 struct ifnet_interface_advisory;
-#endif /* defined(DRIVERKIT) || defined(PRIVATE) || defined(DRIVERKIT_PRIVATE) */
+#endif /* defined(DRIVERKIT) || (defined(PRIVATE) && !defined(MODULES_SUPPORTED)) || defined(DRIVERKIT_PRIVATE) */
 
 #ifndef DRIVERKIT
 
@@ -266,8 +266,8 @@ __private_extern__ int uuid_get_ethernet(u_int8_t * __counted_by(ETHER_ADDR_LEN)
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* DRIVERKIT */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <net/if_var_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* !_NET_IF_VAR_H_ */

@@ -106,6 +106,7 @@ __BEGIN_DECLS
 
 #pragma mark - VM map basics
 
+#ifndef XNU_KERNEL_PRIVATE
 /*!
  * @function vm_map_create()
  *
@@ -129,20 +130,17 @@ __BEGIN_DECLS
  * - the @c current_map() (or a given task map),
  * - the @c kernel_map (which is the kernel's own map) or one of its submaps.
  *
- #ifdef XNU_KERNEL_PRIVATE
- * Inside XNU, using @c vm_map_create_options() is preferred.
- *
- #endif XNU_KERNEL_PRIVATE
  * @param pmap          the physical map to associated with this map
  * @param min_off       the lower address bound of this map
  * @param max_off       the upper address bound of this map
- * @param pageable      whether the map will support paging.
+ * @param pageable      unused
  */
 extern vm_map_t         vm_map_create(
 	pmap_t                  pmap,
 	vm_map_offset_t         min_off,
 	vm_map_offset_t         max_off,
 	boolean_t               pageable);
+#endif /* !defined(XNU_KERNEL_PRIVATE) */
 
 
 /*!
@@ -281,15 +279,7 @@ extern vm_map_offset_t  vm_map_trunc_page_mask(
 
 
 /*!
- * @function vm_map_disable_hole_optimization()
- *
- * @brief
- * Disables hole list optimization
- *
- * @discussion
- * This function disables the hole list optimization and deallocates all
- * associated resources.
- *
+ * Obsolete
  * @param map           the map to disable hole list for.
  */
 extern void vm_map_disable_hole_optimization(

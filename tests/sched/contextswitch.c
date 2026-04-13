@@ -30,7 +30,7 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("scheduler"));
 
-#define MAX_THREADS     32
+#define MAX_THREADS     65
 #define SPIN_SECS       6
 #define THR_SPINNER_PRI 63
 #define THR_MANAGER_PRI 62
@@ -72,7 +72,6 @@ static pthread_t
 make_thread(uint32_t thread_id, uint32_t priority, bool fixpri,
     void *(*start_routine)(void *))
 {
-	int rv;
 	pthread_t new_thread;
 	struct sched_param param = { .sched_priority = (int)priority };
 	pthread_attr_t attr;
@@ -92,6 +91,7 @@ make_thread(uint32_t thread_id, uint32_t priority, bool fixpri,
 
 	T_ASSERT_POSIX_ZERO(pthread_attr_destroy(&attr), "pthread_attr_destroy");
 
+	assert(thread_id < MAX_THREADS);
 	threads[thread_id].thread = new_thread;
 
 	return new_thread;
@@ -190,8 +190,8 @@ record_perfcontrol_stats(const char *sysctlname, const char *units, const char *
 	T_PERF(info, data, units, info);
 }
 
-/* Disable the test on MacOS for now */
-T_DECL(perf_csw, "context switch performance", T_META_TAG_PERF, T_META_CHECK_LEAKS(false), T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
+/* Disable the test on Intel for now */
+T_DECL(perf_csw, "context switch performance", T_META_TAG_PERF, T_META_CHECK_LEAKS(false), T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE, T_META_ENABLED(TARGET_CPU_ARM64))
 {
 #if !defined(__arm64__)
 	T_SKIP("Not supported on Intel platforms");
@@ -218,6 +218,10 @@ T_DECL(perf_csw, "context switch performance", T_META_TAG_PERF, T_META_CHECK_LEA
 	g_numcpus = (uint32_t)dt_ncpu();
 	printf("hw.ncpu: %d\n", g_numcpus);
 	uint32_t n_spinners = g_numcpus - 1;
+
+	/* Test creates n_spinners + 1 threads, make sure that fits in the threads array */
+	n_spinners = (n_spinners < (MAX_THREADS - 1) ? (n_spinners) : (MAX_THREADS - 1));
+	printf("n_spinners: %d\n", n_spinners);
 
 	int mt_supported = 0;
 	size_t mt_supported_size = sizeof(mt_supported);

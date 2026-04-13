@@ -33,7 +33,10 @@
 #include <mach/notify.h>
 
 #include <kern/assert.h>
+#include <kern/backtrace.h>
 #include <kern/exc_guard.h>
+#include <kern/kcdata.h>
+#include <kern/telemetry.h>
 #include <kern/ipc_kobject.h>
 #include <kern/ipc_tt.h>
 #include <kern/kern_types.h>
@@ -43,6 +46,8 @@
 
 #include <vm/vm_map_xnu.h> /* current_map() */
 #include <vm/vm_protos.h> /* current_proc() */
+
+#include <kdp/kdp_dyld.h> /* dyld_all_image_infos structures */
 
 #include <ipc/ipc_policy.h>
 #include <ipc/ipc_service_port.h>
@@ -74,13 +79,6 @@ static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", false);
 #endif /* DEVELOPMENT || DEBUG */
 #endif /* IPC_HAS_LEGACY_MACH_MSG_TRAP */
 
-/* a boot-arg to enable/disable OOL port array restrictions */
-#if XNU_TARGET_OS_XR
-TUNABLE(bool, ool_port_array_enforced, "ool_port_array_enforced", false);
-#else
-TUNABLE(bool, ool_port_array_enforced, "ool_port_array_enforced", true);
-#endif /* XNU_TARGET_OS_XR */
-
 /* Note: Consider Developer Mode when changing the default. */
 TUNABLE(ipc_control_port_options_t, ipc_control_port_options,
     "ipc_control_port_options",
@@ -91,21 +89,25 @@ TUNABLE(ipc_control_port_options_t, ipc_control_port_options,
 #endif
     ICP_OPTIONS_PINNED_3P_SOFT);
 
-TUNABLE(bool, service_port_defense_enabled, "-service_port_defense_enabled", true);
-
 /* The bootarg to disable ALL ipc policy violation telemetry */
 TUNABLE(bool, ipcpv_telemetry_enabled, "-ipcpv_telemetry_enabled", true);
-
-/*
- * bootargs for reply port semantics on bootstrap ports
- */
-TUNABLE(bool, bootstrap_port_telemetry_enabled, "-bootstrap_port_telemetry_enabled", true);
-TUNABLE(bool, bootstrap_port_enforcement_enabled, "-bootstrap_port_enforcement_enabled", true);
 
 /* Enables reply port/voucher/persona debugging code */
 TUNABLE(bool, enforce_strict_reply, "-enforce_strict_reply", false);
 
+/* At-desk toggle for OOL port array restrictions */
+TUNABLE(bool, ool_port_array_enforced, "ool_port_array_enforced", true);
+
+TUNABLE(bool, cv_notif_port_required_enforced, "cv_notif_port_required_enforced", false);
+
 #pragma mark policy options
+
+inline bool
+ip_has_reply_port_semantics(ipc_port_t port)
+{
+	return port->ip_enforce_reply_semantics ||
+	       ipc_policy(port)->pol_enforce_reply_semantics;
+}
 
 ipc_space_policy_t
 ipc_policy_for_task(task_t task)
@@ -123,10 +125,12 @@ ipc_policy_for_task(task_t task)
 	ro_flags = task_ro_flags_get(task);
 	if (ro_flags & TFRO_PLATFORM) {
 		policy |= IPC_SPACE_POLICY_PLATFORM;
-		policy |= IPC_POLICY_ENHANCED_V2;
+		policy |= IPC_POLICY_ENHANCED_VMAX;
 	}
 
-	if (task_get_platform_restrictions_version(task) >= 2) {
+	if (task_get_platform_restrictions_version(task) >= 3) {
+		policy |= IPC_POLICY_ENHANCED_V3;
+	} else if (task_get_platform_restrictions_version(task) == 2) {
 		policy |= IPC_POLICY_ENHANCED_V2;
 	} else if (task_get_platform_restrictions_version(task) == 1) {
 		policy |= IPC_POLICY_ENHANCED_V1;
@@ -141,6 +145,10 @@ ipc_policy_for_task(task_t task)
 		policy |= IPC_SPACE_POLICY_OPTED_OUT;
 	}
 #endif /* XNU_TARGET_OS_OSX */
+
+	if (task_has_ipc_containment_vessel(task)) {
+		policy |= IPC_SPACE_POLICY_CONTAINED;
+	}
 
 	/*
 	 * policy modifiers
@@ -213,6 +221,7 @@ ipc_current_msg_options(
 		verify_policy_enum(ENHANCED_V0);
 		verify_policy_enum(ENHANCED_V1);
 		verify_policy_enum(ENHANCED_V2);
+		verify_policy_enum(ENHANCED_V3);
 		verify_policy_enum(ENHANCED_VERSION_MASK);
 		verify_policy_enum(MASK);
 
@@ -260,7 +269,7 @@ ipc_preflight_msg_option64(mach_msg_option64_t opts)
 
 #pragma mark helpers
 
-bool
+__mockable bool
 ipc_should_apply_policy(
 	const ipc_space_policy_t current_policy,
 	const ipc_space_policy_t requested_level)
@@ -270,6 +279,11 @@ ipc_should_apply_policy(
 	    (current_policy & IPC_SPACE_POLICY_OPTED_OUT) ||
 	    (current_policy & IPC_SPACE_POLICY_TRANSLATED)) {
 		return false;
+	}
+
+	/* Containment vessels take precedent */
+	if (requested_level & IPC_SPACE_POLICY_CONTAINED) {
+		return current_policy & IPC_SPACE_POLICY_CONTAINED;
 	}
 
 	/* Check versioning for applying platform restrictions policy */
@@ -415,205 +429,106 @@ ipc_policy_allow_legacy_send_trap(
 
 
 #endif /* IPC_HAS_LEGACY_MACH_MSG_TRAP */
+
 #pragma mark ipc policy telemetry
 
+#define IPC_POLICY_BACKTRACE_FRAME_COUNT 10
 /*
- * As CA framework replies on successfully allocating zalloc memory,
- * we maintain a small buffer that gets flushed when full. This helps us avoid taking spinlocks when working with CA.
+ * process UUID data: 52 byte
+ * dyld UUID data: max dylibs 4 x 52 byte
+ * backtrace: 10 frame x 8 bytes per frame
  */
-#define IPC_POLICY_VIOLATIONS_RB_SIZE         2
+#define IPC_POLICY_BACKTRACE_AND_SYM_LEN 340
+#define IPC_POLICY_HEX_ADDR_STR_LEN 19 /* "0x" + 16 hex digits + null */
+#define IPC_POLICY_UUID_STR_LEN 37     /* "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" + null */
 
-/*
- * Stripped down version of service port's string name. This is to avoid overwhelming CA's dynamic memory allocation.
- */
-#define CA_MACH_SERVICE_PORT_NAME_LEN         86
-
-struct ipc_policy_violations_rb_entry {
-	char proc_name[CA_PROCNAME_LEN];
-	char service_name[CA_MACH_SERVICE_PORT_NAME_LEN];
-	char team_id[CA_TEAMID_MAX_LEN];
-	char signing_id[CA_SIGNINGID_MAX_LEN];
-	ipc_policy_violation_id_t violation_id;
-	int  sw_platform;
-	int  aux_data;
-	int  sdk;
-};
-struct ipc_policy_violations_rb_entry ipc_policy_violations_rb[IPC_POLICY_VIOLATIONS_RB_SIZE];
-static uint8_t ipc_policy_violations_rb_index = 0;
-
-#if DEBUG || DEVELOPMENT
-/* sysctl debug.ipcpv_telemetry_count */
-_Atomic unsigned int ipcpv_telemetry_count = 0;
-#endif
-
-LCK_GRP_DECLARE(ipc_telemetry_lock_grp, "ipc_telemetry_lock_grp");
-LCK_TICKET_DECLARE(ipc_telemetry_lock, &ipc_telemetry_lock_grp);
-
-/*
- * Telemetry: report back the process name violating ipc policy. Note that this event can be used to report
- * any type of ipc violation through a ipc_policy_violation_id_t. It is named reply_port_semantics_violations
- * because we are reusing an existing event.
- */
-CA_EVENT(reply_port_semantics_violations,
+CA_EVENT(ipc_sec_policy_violation,
     CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name,
     CA_STATIC_STRING(CA_MACH_SERVICE_PORT_NAME_LEN), service_name,
     CA_STATIC_STRING(CA_TEAMID_MAX_LEN), team_id,
     CA_STATIC_STRING(CA_SIGNINGID_MAX_LEN), signing_id,
-    CA_INT, reply_port_semantics_violation,
-    CA_INT, msgh_id); /* for aux_data, keeping the legacy name msgh_id to avoid CA shenanigan */
+    CA_INT, ipc_sec_policy_violation_id,
+    CA_INT, aux_data,
+    CA_STATIC_STRING(IPC_POLICY_BACKTRACE_AND_SYM_LEN), user_backtrace,
+    CA_STATIC_STRING(IPC_POLICY_HEX_ADDR_STR_LEN), shared_cache_base,
+    CA_STATIC_STRING(IPC_POLICY_HEX_ADDR_STR_LEN), shared_cache_slide,
+    CA_STATIC_STRING(IPC_POLICY_UUID_STR_LEN), shared_cache_uuid,
+    CA_STATIC_STRING(IPC_POLICY_HEX_ADDR_STR_LEN), main_exec_load_addr,
+    CA_STATIC_STRING(IPC_POLICY_HEX_ADDR_STR_LEN), main_exec_slide,
+    CA_STATIC_STRING(IPC_POLICY_UUID_STR_LEN), main_exec_uuid);
 
 static void
-send_telemetry(
-	const struct ipc_policy_violations_rb_entry *entry)
+ipc_sec_commit_policy_violation_to_ca(
+	ipc_sec_policy_t violation_id,
+	const char proc_name[CA_PROCNAME_LEN],
+	const char service_name[CA_MACH_SERVICE_PORT_NAME_LEN],
+	const char team_id[CA_TEAMID_MAX_LEN],
+	const char signing_id[CA_SIGNINGID_MAX_LEN],
+	int aux_data,
+	uintptr_t *user_bt_frames,
+	unsigned int user_bt_count,
+	const char *shared_cache_base,
+	const char *shared_cache_slide,
+	const char *shared_cache_uuid,
+	const char *main_exec_load_addr,
+	const char *main_exec_slide,
+	const char *main_exec_uuid)
 {
-	ca_event_t ca_event = CA_EVENT_ALLOCATE_FLAGS(reply_port_semantics_violations, Z_NOWAIT);
-	if (ca_event) {
-		CA_EVENT_TYPE(reply_port_semantics_violations) * event = ca_event->data;
-
-		strlcpy(event->service_name, entry->service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
-		strlcpy(event->proc_name, entry->proc_name, CA_PROCNAME_LEN);
-		strlcpy(event->team_id, entry->team_id, CA_TEAMID_MAX_LEN);
-		strlcpy(event->signing_id, entry->signing_id, CA_SIGNINGID_MAX_LEN);
-		event->reply_port_semantics_violation = entry->violation_id;
-		event->msgh_id = entry->aux_data;
-
-		CA_EVENT_SEND(ca_event);
-	}
-}
-
-/* Routine: flush_ipc_policy_violations_telemetry
- * Conditions:
- *              Assumes ipc_policy_type is valid
- *              Assumes ipc telemetry lock is held.
- *              Unlocks it before returning.
- */
-static void
-flush_ipc_policy_violations_telemetry(void)
-{
-	struct ipc_policy_violations_rb_entry local_rb[IPC_POLICY_VIOLATIONS_RB_SIZE];
-	uint8_t local_rb_index = 0;
-
-	if (__improbable(ipc_policy_violations_rb_index > IPC_POLICY_VIOLATIONS_RB_SIZE)) {
-		panic("Invalid ipc policy violation buffer index %d > %d",
-		    ipc_policy_violations_rb_index, IPC_POLICY_VIOLATIONS_RB_SIZE);
-	}
-
-	/*
-	 * We operate on local copy of telemetry buffer because CA framework relies on successfully
-	 * allocating zalloc memory. It can not do that if we are accessing the shared buffer
-	 * with spin locks held.
-	 */
-	while (local_rb_index != ipc_policy_violations_rb_index) {
-		local_rb[local_rb_index] = ipc_policy_violations_rb[local_rb_index];
-		local_rb_index++;
-	}
-
-	lck_ticket_unlock(&ipc_telemetry_lock);
-
-	while (local_rb_index > 0) {
-		struct ipc_policy_violations_rb_entry *entry = &local_rb[--local_rb_index];
-		send_telemetry(entry);
-	}
-
-	/*
-	 * Finally call out the buffer as empty. This is also a sort of rate limiting mechanisms for the events.
-	 * Events will get dropped until the buffer is not fully flushed.
-	 */
-	lck_ticket_lock(&ipc_telemetry_lock, &ipc_telemetry_lock_grp);
-	ipc_policy_violations_rb_index = 0;
-}
-
-void
-ipc_stash_policy_violations_telemetry(
-	ipc_policy_violation_id_t    violation_id,
-	ipc_port_t                   port,
-	int                          aux_data)
-{
-	if (!ipcpv_telemetry_enabled) {
+	ca_event_t ca_event = CA_EVENT_ALLOCATE_FLAGS(ipc_sec_policy_violation, Z_WAITOK);
+	if (!ca_event) {
+		/* How did this happen?! We passed Z_WAITOK... */
 		return;
 	}
 
-	struct ipc_policy_violations_rb_entry *entry;
-	char *service_name = (char *) "unknown";
-	task_t task = current_task_early();
-	int pid = -1;
+	CA_EVENT_TYPE(ipc_sec_policy_violation) * event = ca_event->data;
 
-#if CONFIG_SERVICE_PORT_INFO
-	if (IP_VALID(port)) {
-		/*
-		 * dest_port lock must be held to avoid race condition
-		 * when accessing ip_splabel rdar://139066947
-		 */
-		struct mach_service_port_info sp_info;
-		ipc_object_label_t label = ip_mq_lock_label_get(port);
-		if (io_state_active(label.io_state)) {
-			if (ip_is_any_service_port_type(label.io_type) ||
-			    ip_is_bootstrap_port_type(label.io_type)) {
-				ipc_service_port_label_get_info(label.iol_service, &sp_info);
-				service_name = sp_info.mspi_string_name;
-			}
-		}
-		ip_mq_unlock_label_put(port, &label);
+	event->ipc_sec_policy_violation_id = violation_id;
+	if (service_name) {
+		strlcpy(event->service_name, service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
 	}
-#endif /* CONFIG_SERVICE_PORT_INFO */
+	if (proc_name) {
+		strlcpy(event->proc_name, proc_name, CA_PROCNAME_LEN);
+	}
+	if (team_id) {
+		strlcpy(event->team_id, team_id, CA_TEAMID_MAX_LEN);
+	}
+	if (signing_id) {
+		strlcpy(event->signing_id, signing_id, CA_SIGNINGID_MAX_LEN);
+	}
+	event->aux_data = aux_data;
 
-	if (task) {
-		pid = task_pid(task);
+	/* Encode user backtrace as raw addresses for CoreAnalytics */
+	size_t offset = 0;
+	for (unsigned int i = 0; i < user_bt_count && offset < sizeof(event->user_backtrace); i++) {
+		offset += snprintf(event->user_backtrace + offset,
+		    sizeof(event->user_backtrace) - offset,
+		    "0x%lx\n", user_bt_frames[i]);
 	}
 
-	if (task) {
-		struct proc_ro *pro = current_thread_ro()->tro_proc_ro;
-		uint32_t platform = pro->p_platform_data.p_platform;
-		uint32_t sdk = pro->p_platform_data.p_sdk;
-		char *proc_name = (char *) "unknown";
-#ifdef MACH_BSD
-		proc_name = proc_name_address(get_bsdtask_info(task));
-#endif /* MACH_BSD */
-		const char *team_id = csproc_get_identity(current_proc());
-		const char *signing_id = csproc_get_teamid(current_proc());
-
-		lck_ticket_lock(&ipc_telemetry_lock, &ipc_telemetry_lock_grp);
-
-		if (ipc_policy_violations_rb_index >= IPC_POLICY_VIOLATIONS_RB_SIZE) {
-			/* Dropping the event since buffer is full. */
-			lck_ticket_unlock(&ipc_telemetry_lock);
-			return;
-		}
-		entry = &ipc_policy_violations_rb[ipc_policy_violations_rb_index++];
-		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
-
-		strlcpy(entry->service_name, service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
-		entry->violation_id = violation_id;
-
-		if (team_id) {
-			strlcpy(entry->team_id, team_id, CA_TEAMID_MAX_LEN);
-		}
-
-		if (signing_id) {
-			strlcpy(entry->signing_id, signing_id, CA_SIGNINGID_MAX_LEN);
-		}
-		entry->aux_data = aux_data;
-		entry->sw_platform = platform;
-		entry->sdk = sdk;
+	/* Copy shared cache base, slide and UUID for symbolication */
+	if (shared_cache_base) {
+		strlcpy(event->shared_cache_base, shared_cache_base, IPC_POLICY_HEX_ADDR_STR_LEN);
+	}
+	if (shared_cache_slide) {
+		strlcpy(event->shared_cache_slide, shared_cache_slide, IPC_POLICY_HEX_ADDR_STR_LEN);
+	}
+	if (shared_cache_uuid) {
+		strlcpy(event->shared_cache_uuid, shared_cache_uuid, IPC_POLICY_UUID_STR_LEN);
 	}
 
-	if (ipc_policy_violations_rb_index == IPC_POLICY_VIOLATIONS_RB_SIZE) {
-		flush_ipc_policy_violations_telemetry();
+	/* Copy main executable load address, slide and UUID for symbolication */
+	if (main_exec_load_addr) {
+		strlcpy(event->main_exec_load_addr, main_exec_load_addr, IPC_POLICY_HEX_ADDR_STR_LEN);
+	}
+	if (main_exec_slide) {
+		strlcpy(event->main_exec_slide, main_exec_slide, IPC_POLICY_HEX_ADDR_STR_LEN);
+	}
+	if (main_exec_uuid) {
+		strlcpy(event->main_exec_uuid, main_exec_uuid, IPC_POLICY_UUID_STR_LEN);
 	}
 
-	lck_ticket_unlock(&ipc_telemetry_lock);
+	CA_EVENT_SEND(ca_event);
 }
-
-#if DEBUG || DEVELOPMENT
-void
-ipc_inc_telemetry_count(void)
-{
-	unsigned int count = os_atomic_load(&ipcpv_telemetry_count, relaxed);
-	if (!os_add_overflow(count, 1, &count)) {
-		os_atomic_store(&ipcpv_telemetry_count, count, relaxed);
-	}
-}
-#endif /* DEBUG || DEVELOPMENT */
 
 /*!
  * @brief
@@ -625,61 +540,66 @@ ipc_inc_telemetry_count(void)
  * @param dest_port     the message remote/dest port
  *
  * @returns
- * - true  if there is a violation in the security policy for this mach msg
- * - false otherwise
+ * - MACH_MSG_SUCCESS if there is no violation in the security policy for this mach msg
+ * - a contextual error code otherwise
  */
-static mach_msg_return_t
+__static_testable mach_msg_return_t
 ipc_validate_local_port(
 	mach_port_t         reply_port,
 	mach_port_t         dest_port,
 	mach_msg_option64_t opts)
 {
+	ipc_sec_policy_t policy_violation = IPC_SEC_POLICY_NONE;
+	uint64_t exc_payload = 0;
+
 	assert(IP_VALID(dest_port));
+
 	/* An empty reply port, or an inactive reply port / dest port violates nothing */
 	if (!IP_VALID(reply_port) || !ip_active(reply_port) || !ip_active(dest_port)) {
 		return MACH_MSG_SUCCESS;
 	}
 
-	if (ip_is_reply_port(reply_port)) {
+	if (!ip_has_reply_port_semantics(dest_port)) {
 		return MACH_MSG_SUCCESS;
 	}
 
-	ipc_space_policy_t pol = ipc_convert_msg_options_to_space(opts);
 	/* skip translated and simulated process */
+	ipc_space_policy_t pol = ipc_convert_msg_options_to_space(opts);
 	if (!ipc_should_apply_policy((pol), IPC_SPACE_POLICY_DEFAULT)) {
 		return MACH_MSG_SUCCESS;
 	}
 
-	/* kobject enforcement */
-	if (ip_is_kobject(dest_port) &&
-	    ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V1)) {
-		mach_port_guard_exception(ip_get_receiver_name(dest_port), 0, kGUARD_EXC_KOBJECT_REPLY_PORT_SEMANTICS);
-		return MACH_SEND_INVALID_REPLY;
-	}
-
-	if (!ipc_policy(dest_port)->pol_enforce_reply_semantics || ip_is_provisional_reply_port(reply_port)) {
-		return MACH_MSG_SUCCESS;
-	}
-
-	/* bootstrap port defense */
-	if (ip_is_bootstrap_port(dest_port) &&
-	    ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V2)) {
-		if (bootstrap_port_telemetry_enabled &&
-		    !ipc_space_has_telemetry_type(current_space(), IS_HAS_BOOTSTRAP_PORT_TELEMETRY)) {
-			ipc_stash_policy_violations_telemetry(IPCPV_BOOTSTRAP_PORT, dest_port, 0);
+	if (ip_is_kobject(dest_port)) {
+		/* kobject enforcement */
+		if (ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V1) &&
+		    !ip_is_reply_port(reply_port)) {
+			policy_violation = IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_KOBJECT;
 		}
-		if (bootstrap_port_enforcement_enabled) {
-			mach_port_guard_exception(ip_get_receiver_name(dest_port), 1, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
-			return MACH_SEND_INVALID_REPLY;
+	} else if (ip_is_bootstrap_port(dest_port)) {
+		/* bootstrap port defense */
+		if (ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V2) &&
+		    !ip_is_reply_port(reply_port) &&
+		    !ip_is_weak_reply_port(reply_port)) {
+			policy_violation = IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_BOOTSTRAP_PORT;
+			exc_payload = 1;
+		}
+	} else {
+		/* regular enforcement */
+		if (!ip_is_reply_port(reply_port) &&
+		    !ip_is_weak_reply_port(reply_port)) {
+			policy_violation = IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_SERVICE_PORT;
 		}
 	}
 
-	/* regular enforcement */
-	if (!ip_is_bootstrap_port(dest_port)) {
-		if (ip_is_strong_service_port(dest_port)) {
-			ipc_stash_policy_violations_telemetry(IPCPV_REPLY_PORT_SEMANTICS_OPTOUT, dest_port, 0);
-		}
-		mach_port_guard_exception(ip_get_receiver_name(dest_port), 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
+	if (policy_violation != IPC_SEC_POLICY_NONE) {
+		ipc_triage_policy_violation_and_expect_deny(
+			policy_violation,
+			current_space(),
+			ip_get_receiver_name(dest_port),
+			exc_payload,
+			IPC_PORT_NULL,
+			0
+			);
 		return MACH_SEND_INVALID_REPLY;
 	}
 
@@ -718,6 +638,22 @@ ipc_validate_kmsg_schema_from_user(
 
 	if (send_uctx->send_dsc_port_count > IPC_KMSG_MAX_OOL_PORT_COUNT) {
 		return MACH_SEND_TOO_LARGE;
+	}
+
+	/*
+	 * Collect telemetry when we notice an especially high inline port descriptor
+	 * count, so we can make data-driven decisions in future about what a sensible
+	 * limit might be.
+	 */
+	if (send_uctx->send_dsc_inline_port_count >= IPC_KMSG_INLINE_PORT_DESCRIPTOR_SOFT_LIMIT) {
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_INLINE_PORT_DESCRIPTORS,
+			current_space(),
+			0,
+			send_uctx->send_dsc_inline_port_count,
+			IP_NULL,
+			send_uctx->send_dsc_inline_port_count
+			);
 	}
 
 	if (os_add_overflow(send_uctx->send_dsc_vm_size,
@@ -759,7 +695,8 @@ ipc_filter_kmsg_header_from_user(
 				goto filtered_msg;
 			}
 			msg_id = msg_id & MACH_BOOTSTRAP_PORT_MSG_ID_MASK;
-			OS_FALLTHROUGH;
+			sblabel = dlabel.iol_bootstrap->ispl_sblabel;
+			break;
 
 		case IOT_SERVICE_PORT:
 		case IOT_WEAK_SERVICE_PORT:
@@ -933,24 +870,30 @@ ipc_validate_kmsg_header_from_user(
 	 *     - there could be no more than ONE single array in a kmsg
 	 */
 	current_policy = ipc_convert_msg_options_to_space(opts);
-	if (ool_port_array_enforced &&
+	if (ipc_sec_is_policy_enforced(IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS) &&
 	    send_uctx->send_dsc_port_arrays_count &&
 	    ipc_should_apply_policy(current_policy, IPC_POLICY_ENHANCED_V2)) {
 		if (!ip_is_port_array_allowed(dest_port)) {
-			mach_port_guard_exception(current_policy,
-			    MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_RIGHT,
-			    ip_type(dest_port)),
-			    kGUARD_EXC_DESCRIPTOR_VIOLATION);
-
+			ipc_triage_policy_violation_and_expect_deny(
+				IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS,
+				NULL,
+				current_policy,
+				MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_RIGHT, ip_type(dest_port)),
+				dest_port,
+				0
+				);
 			return MACH_SEND_INVALID_OPTIONS;
 		}
 
 		if (send_uctx->send_dsc_port_arrays_count > 1) {
-			mach_port_guard_exception(current_policy,
-			    MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_ARRAYS,
-			    send_uctx->send_dsc_port_arrays_count),
-			    kGUARD_EXC_DESCRIPTOR_VIOLATION);
-
+			ipc_triage_policy_violation_and_expect_deny(
+				IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS,
+				NULL,
+				current_policy,
+				MPG_PAYLOAD(MPG_FLAGS_INVALID_OPTIONS_OOL_ARRAYS, send_uctx->send_dsc_port_arrays_count),
+				dest_port,
+				0
+				);
 			return MACH_SEND_INVALID_OPTIONS;
 		}
 	}
@@ -996,18 +939,42 @@ ipc_move_receive_allowed(
 	 * Check for service port before immovability so the task crash
 	 * with reason kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL
 	 */
-	if (service_port_defense_enabled &&
+	if (ipc_sec_is_policy_enforced(IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT) &&
 	    ip_is_strong_service_port(port) &&
 	    !task_is_initproc(space->is_task)) {
-		mach_port_guard_exception(0, name,
-		    kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL);
+		ipc_triage_policy_violation_and_expect_deny(
+			IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT,
+			space,
+			0,
+			name,
+			port,
+			0
+			);
 		return false;
 	}
 
-	if (ip_type(port) == IOT_PROVISIONAL_REPLY_PORT &&
-	    ipc_should_apply_policy(policy, IPC_POLICY_ENHANCED_V2) &&
-	    !ipc_space_has_telemetry_type(space, IS_HAS_MOVE_PRP_TELEMETRY)) {
-		mach_port_guard_exception(name, 0, kGUARD_EXC_MOVE_PROVISIONAL_REPLY_PORT);
+	if (ip_type(port) == IOT_WEAK_REPLY_PORT &&
+	    ipc_should_apply_policy(policy, IPC_POLICY_ENHANCED_V2)) {
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_MOVE_WEAK_REPLY_PORT,
+			space,
+			name,
+			0,
+			port,
+			0
+			);
+	}
+
+	if (ip_type(port) == IOT_PORT &&
+	    ipc_should_apply_policy(policy, IPC_SPACE_POLICY_CONTAINED)) {
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_MOVE_IOT_PORT,
+			space,
+			0,
+			0,
+			port,
+			0
+			);
 	}
 
 	if (ip_is_immovable_receive(port)) {
@@ -1020,7 +987,7 @@ ipc_move_receive_allowed(
 
 #pragma mark send immovability
 
-
+__mockable
 bool
 ipc_should_mark_immovable_send(
 	task_t curr_task,
@@ -1092,6 +1059,7 @@ ip_is_currently_immovable_send(ipc_port_t port)
 	return port_is_immovable_send;
 }
 
+/* requires: nothing locked, port is valid */
 bool
 ipc_can_stash_naked_send(ipc_port_t port)
 {
@@ -1140,15 +1108,15 @@ mach_port_guard_exception(uint32_t target, uint64_t payload, unsigned reason)
 	EXC_GUARD_ENCODE_TARGET(code, target);
 	mach_exception_subcode_t subcode = (uint64_t)payload;
 	thread_t t = current_thread();
-	bool fatal = FALSE;
 
+	bool sticky = false;
 	if (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE &&
 	    (get_threadtask(t)->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
-		fatal = true;
+		sticky = true;
 	} else if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
-		fatal = true;
+		sticky = true;
 	}
-	thread_guard_violation(t, code, subcode, fatal);
+	thread_guard_violation(t, code, subcode, sticky);
 }
 
 void
@@ -1205,6 +1173,126 @@ mach_port_guard_exception_pinned(
 }
 
 /*
+ * Collects dyld symbolication information for a given task for telemetry.
+ *
+ * All output buffers must be pre-initialized (e.g., to empty strings).
+ * This function will only populate them if the information is available.
+ */
+static void
+ipc_sec_collect_dyld_symbolication_info(
+	task_t task,
+	char *shared_cache_base_str,
+	char *shared_cache_slide_str,
+	char *shared_cache_uuid_str,
+	char *main_exec_load_addr_str,
+	char *main_exec_slide_str,
+	char *main_exec_uuid_str)
+{
+	/*
+	 * Read shared cache info from dyld's all_image_infos structure in userspace.
+	 * This is the authoritative source for symbolication, matching what dyld knows.
+	 * We read sharedCacheBaseAddress, sharedCacheSlide, and sharedCacheUUID from
+	 * the same structure where we'll read the UUID array later.
+	 */
+	if (task->all_image_info_addr != 0) {
+		boolean_t task_64bit_addr = task_has_64Bit_addr(task);
+		if (task_64bit_addr) {
+			struct user64_dyld_all_image_infos task_image_infos;
+			if (copyin(task->all_image_info_addr, &task_image_infos,
+			    sizeof(struct user64_dyld_all_image_infos)) == 0) {
+				snprintf(shared_cache_base_str, IPC_POLICY_HEX_ADDR_STR_LEN,
+				    "0x%llx", task_image_infos.sharedCacheBaseAddress);
+				snprintf(shared_cache_slide_str, IPC_POLICY_HEX_ADDR_STR_LEN,
+				    "0x%llx", task_image_infos.sharedCacheSlide);
+				uuid_unparse_upper(task_image_infos.sharedCacheUUID,
+				    shared_cache_uuid_str);
+
+				/* Read main executable info from uuidArray (first entry is main executable) */
+				if (task_image_infos.uuidArray != 0 &&
+				    task_image_infos.uuidArrayCount > 0) {
+					struct user64_dyld_uuid_info main_exec_info;
+					if (copyin(task_image_infos.uuidArray, &main_exec_info,
+					    sizeof(struct user64_dyld_uuid_info)) == 0) {
+						snprintf(main_exec_load_addr_str, IPC_POLICY_HEX_ADDR_STR_LEN,
+						    "0x%llx", main_exec_info.imageLoadAddress);
+						uuid_unparse_upper(main_exec_info.imageUUID, main_exec_uuid_str);
+						/* Main executable slide is implicitly 0 for the load address we get */
+						snprintf(main_exec_slide_str, IPC_POLICY_HEX_ADDR_STR_LEN, "0x0");
+					}
+				}
+			}
+		}
+	}
+}
+
+static void
+ipc_sec_emit_pending_policy_violation_ca_telemetry(
+	ipc_sec_policy_t violation_id,
+	char* affected_service_name,
+	int aux_data
+	)
+{
+	task_t task = current_task_early();
+	if (!task) {
+		return;
+	}
+
+	char* proc_name = (char *) "unknown";
+#ifdef MACH_BSD
+	proc_name = proc_name_address(get_bsdtask_info(task));
+#endif /* MACH_BSD */
+	const char* team_id = csproc_get_identity(current_proc());
+	const char* signing_id = csproc_get_teamid(current_proc());
+
+	/* Collect user backtrace */
+	uintptr_t user_frames[IPC_POLICY_BACKTRACE_FRAME_COUNT];
+	struct backtrace_user_info btinfo = BTUINFO_INIT;
+	unsigned int frame_count = backtrace_user(user_frames, IPC_POLICY_BACKTRACE_FRAME_COUNT, NULL, &btinfo);
+
+	/* If backtrace collection failed, send with empty backtrace */
+	if (btinfo.btui_error != 0) {
+		frame_count = 0;
+	}
+
+	/* Collect shared cache information for symbolication */
+	char shared_cache_base_str[IPC_POLICY_HEX_ADDR_STR_LEN] = "";
+	char shared_cache_slide_str[IPC_POLICY_HEX_ADDR_STR_LEN] = "";
+	char shared_cache_uuid_str[IPC_POLICY_UUID_STR_LEN] = "";
+
+	/* Collect main executable information for symbolication */
+	char main_exec_load_addr_str[IPC_POLICY_HEX_ADDR_STR_LEN] = "";
+	char main_exec_slide_str[IPC_POLICY_HEX_ADDR_STR_LEN] = "";
+	char main_exec_uuid_str[IPC_POLICY_UUID_STR_LEN] = "";
+
+	ipc_sec_collect_dyld_symbolication_info(
+		task,
+		shared_cache_base_str,
+		shared_cache_slide_str,
+		shared_cache_uuid_str,
+		main_exec_load_addr_str,
+		main_exec_slide_str,
+		main_exec_uuid_str
+		);
+
+	ipc_sec_commit_policy_violation_to_ca(
+		violation_id,
+		proc_name,
+		affected_service_name,
+		team_id,
+		signing_id,
+		aux_data,
+		user_frames,
+		frame_count,
+		shared_cache_base_str[0] ? shared_cache_base_str : NULL,
+		shared_cache_slide_str[0] ? shared_cache_slide_str : NULL,
+		shared_cache_uuid_str[0] ? shared_cache_uuid_str : NULL,
+		main_exec_load_addr_str[0] ? main_exec_load_addr_str : NULL,
+		main_exec_slide_str[0] ? main_exec_slide_str : NULL,
+		main_exec_uuid_str[0] ? main_exec_uuid_str : NULL
+		);
+}
+
+/*
  *	Routine:	mach_port_guard_ast
  *	Purpose:
  *		Raises an exception for mach port guard violation.
@@ -1228,6 +1316,57 @@ mach_port_guard_ast(
 	assert(task == current_task());
 	assert(task != kernel_task);
 
+	/* Are we using the unified security policy violation interface? */
+	ipc_sec_policy_in_flight_violation_info_t* in_flight_pv_info = &current_thread()->pending_ipc_sec_policy_violation_info;
+	if (in_flight_pv_info != NULL) {
+		/*
+		 * We're handling an IPC security policy violation.
+		 * Either we're going to emit telemetry, or we'll enforce the violation and kill the process.
+		 */
+		ipc_sec_policy_t policy_type = in_flight_pv_info->violated_policy_type;
+		ipc_sec_policy_config_t* conf = ipc_sec_policy_config_get(policy_type);
+
+		/* And free the backing storage after reading off copies of the fields */
+		char affected_service_name[CA_MACH_SERVICE_PORT_NAME_LEN];
+		/*
+		 * We might not have been able to allocate the buffer for the service name
+		 * while triaging the policy violation, so handle that now.
+		 */
+		if (in_flight_pv_info->affected_service_name == NULL) {
+			strlcpy(affected_service_name, "unknown (alloc failed)", sizeof(affected_service_name));
+		} else {
+			strlcpy(affected_service_name, in_flight_pv_info->affected_service_name, sizeof(affected_service_name));
+			kfree_data(in_flight_pv_info->affected_service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
+		}
+		int ca_aux_data = in_flight_pv_info->ca_aux_data;
+
+		/* And clear the state that stored the in-flight info up to now */
+		current_thread()->pending_ipc_sec_policy_violation_info = (ipc_sec_policy_in_flight_violation_info_t){0};
+
+		/*
+		 * If we're emitting telemetry for an IPC security policy violation,
+		 * we need to query the active telemetry strategy for this violation type.
+		 */
+		if (conf->enforcement_mode == IPC_SEC_POLICY_MODE_TELEMETRY_ONLY) {
+			switch (conf->telemetry_reporting_style) {
+			case IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE:
+				/* Emit immediately */
+				ipc_sec_emit_pending_policy_violation_ca_telemetry(policy_type, affected_service_name, ca_aux_data);
+				/* All done here */
+				return;
+			case IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT:
+				/*
+				 * Simulated crash reports are emitted by the existing logic
+				 * later in this function, nothing to do now.
+				 */
+				break;
+			default:
+				panic("Programming error: enum case not handled.");
+				break;
+			}
+		}
+	}
+
 	if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
 		/*
 		 * Fatal Mach port guards - always delivered synchronously if dev mode is on.
@@ -1235,19 +1374,8 @@ mach_port_guard_ast(
 		 * deliver it synchronously and then kill the process, else kill the process
 		 * and deliver the exception via EXC_CORPSE_NOTIFY.
 		 */
-
-		int flags = PX_DEBUG_NO_HONOR;
-		exception_info_t info = {
-			.os_reason = OS_REASON_GUARD,
-			.exception_type = EXC_GUARD,
-			.mx_code = code,
-			.mx_subcode = subcode,
-		};
-
-		if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-			flags |= PX_PSIGNAL;
-		}
-		exit_with_mach_exception(get_bsdtask_info(task), info, flags);
+		exit_with_fatal_exception_and_notify(get_bsdtask_info(task), OS_REASON_GUARD,
+		    EXC_GUARD, code, subcode, PX_FLAGS_NONE);
 	} else {
 		/*
 		 * Mach port guards controlled by task settings.
@@ -1287,8 +1415,11 @@ mach_port_guard_ast(
 				 * Only generate crash report if synchronous EXC_GUARD wasn't handled,
 				 * but it has to die regardless.
 				 */
+				uint32_t flags = PX_FLAGS_NONE;
+				if (sync_exception_result == KERN_SUCCESS) {
+					flags |= PX_NO_CRASH_REPORT;
+				}
 
-				int flags = PX_DEBUG_NO_HONOR;
 				exception_info_t info = {
 					.os_reason = OS_REASON_GUARD,
 					.exception_type = EXC_GUARD,
@@ -1296,10 +1427,7 @@ mach_port_guard_ast(
 					.mx_subcode = subcode
 				};
 
-				if (sync_exception_result == KERN_SUCCESS) {
-					flags |= PX_PSIGNAL;
-				}
-
+				/* kill the task, unconditionally and fatally */
 				exit_with_mach_exception(get_bsdtask_info(task), info, flags);
 			}
 		} else if (task->task_exc_guard & TASK_EXC_GUARD_MP_CORPSE) {
@@ -1313,14 +1441,51 @@ mach_port_guard_ast(
 
 #pragma mark notification policies
 
+bool
+ipc_port_can_receive_notifications(
+	ipc_space_t             space,
+	ipc_port_t              notify_port)
+{
+	ipc_space_policy_t policy;
+
+	/* NULL notify port has no security restrictions*/
+	if (!IP_VALID(notify_port)) {
+		return true;
+	}
+
+	/* Check if this port type is allowed to receive notifications */
+	if (!ipc_policy(notify_port)->pol_can_receive_notifications) {
+		mach_port_guard_exception(CAST_MACH_PORT_TO_NAME(notify_port),
+		    ip_type(notify_port), kGUARD_EXC_INVALID_NOTIFICATION_PORT);
+		/* TODO: disable after verifying telemetry - rdar://164128769 */
+		// return false;
+	}
+
+	policy = ipc_space_policy(space);
+	if (ipc_should_apply_policy(policy, IPC_SPACE_POLICY_CONTAINED)
+	    && !ip_is_notification_port(notify_port)) {
+		/* contained processes must use notification ports - telemetry for now */
+		ipc_triage_policy_violation_and_expect_continue(
+			IPC_SEC_POLICY_RESTRICT_REGISTER_NON_NOTIFICATION_PORT,
+			space,
+			0,
+			0,
+			notify_port,
+			ip_type(notify_port)
+			);
+	}
+
+	return true;
+}
+
 static bool
 ipc_allow_service_port_register_pd(
 	ipc_port_t              service_port,
 	ipc_port_t              notify_port,
 	uint64_t                *payload)
 {
-	/* boot-arg disables this security policy */
-	if (!service_port_defense_enabled || !IP_VALID(notify_port)) {
+	if (!ipc_sec_is_policy_enforced(IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT) ||
+	    !IP_VALID(notify_port)) {
 		return true;
 	}
 	/* enforce this policy only on service port types */
@@ -1378,6 +1543,32 @@ ipc_allow_register_pd_notification(
 	return KERN_SUCCESS;
 }
 
+#pragma mark voucher restrictions
+
+bool
+ipc_pol_is_user_voucher_command_permitted(mach_voucher_attr_recipe_command_t command)
+{
+	switch (command) {
+	case MACH_VOUCHER_ATTR_COPY:
+	case MACH_VOUCHER_ATTR_REMOVE:
+	case MACH_VOUCHER_ATTR_SEND_PREPROCESS:
+	case MACH_VOUCHER_ATTR_REDEEM:
+	case MACH_VOUCHER_ATTR_USER_DATA_STORE:
+	case MACH_VOUCHER_ATTR_BANK_CREATE:
+	case MACH_VOUCHER_ATTR_BANK_MODIFY_PERSONA:
+#if __BUILDING_XNU_LIB_UNITTEST__
+	/*
+	 * This vector is in the allow-list just for unit tests, so unit
+	 * tests can set up a voucher that should be allowed without performing
+	 * any real business logic.
+	 */
+	case MACH_VOUCHER_ATTR_UNIT_TEST_VECTOR_ALLOWED:
+#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
+		return true;
+	default:
+		return false;
+	}
+}
 
 #pragma mark policy array
 
@@ -1399,12 +1590,6 @@ no_label_free(ipc_object_label_t label)
 	    label.io_type, label.iol_pointer);
 }
 
-/*
- * Denotes a policy which safe value is the argument to PENDING(),
- * but is currently not default and pending validation/prep work.
- */
-#define PENDING(value)          value
-
 __security_const_late
 struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 	[IOT_PORT_SET] = {
@@ -1419,25 +1604,28 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
 		.pol_notif_port_destroy = true,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_SERVICE_PORT] = {
 		.pol_name               = "service port",
-		.pol_movability         = PENDING(IPC_MOVE_POLICY_ONCE_OR_AFTER_PD),
+		.pol_movability         = IPC_MOVE_POLICY_ONCE_OR_AFTER_PD,
 		.pol_movable_send       = true,
 		.pol_label_free         = ipc_service_port_label_dealloc,
-		.pol_enforce_reply_semantics = PENDING(true), /* pending on service port defense cleanup */
+		.pol_enforce_reply_semantics = true,
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
 		.pol_notif_port_destroy = true,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_BOOTSTRAP_PORT] = {
 		.pol_name               = "bootstrap port",
 		.pol_movability         = IPC_MOVE_POLICY_NEVER, /* bootstrap port should never leave launchd */
 		.pol_movable_send       = true,
-		.pol_label_free         = ipc_service_port_label_dealloc,
-		.pol_enforce_reply_semantics = PENDING(true), /* pending on service port defense cleanup */
+		.pol_label_free         = ipc_bootstrap_port_label_dealloc,
+		.pol_enforce_reply_semantics = true,
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_WEAK_SERVICE_PORT] = {
 		.pol_name               = "weak service port",
@@ -1447,6 +1635,7 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
 		.pol_notif_port_destroy = true,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_CONNECTION_PORT] = {
 		.pol_name               = "connection port",
@@ -1456,6 +1645,7 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
 		.pol_notif_port_destroy = true,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_CONNECTION_PORT_WITH_PORT_ARRAY] = {
 		.pol_name               = "conn port with ool port array",
@@ -1464,6 +1654,11 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 		.pol_construct_entitlement = MACH_PORT_CONNECTION_PORT_WITH_PORT_ARRAY,
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
+	},
+	[IOT_NOTIFICATION_PORT] = {
+		.pol_name               = "notification port",
+		.pol_movability         = IPC_MOVE_POLICY_NEVER,
+		.pol_can_receive_notifications = true,
 	},
 	[IOT_EXCEPTION_PORT] = {
 		.pol_name               = "exception port",
@@ -1494,11 +1689,11 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 		.pol_movability         = IPC_MOVE_POLICY_NEVER,
 		.pol_notif_dead_name    = true,
 	},
-	[IOT_PROVISIONAL_REPLY_PORT] = {
-		.pol_name               = "provisional reply port",
+	[IOT_WEAK_REPLY_PORT] = {
+		.pol_name               = "weak reply port",
 		.pol_movability         = IPC_MOVE_POLICY_ALWAYS,
 		.pol_movable_send       = true,
-		.pol_construct_entitlement = MACH_PORT_PROVISIONAL_REPLY_ENTITLEMENT,
+		.pol_construct_entitlement = MACH_PORT_WEAK_REPLY_ENTITLEMENT,
 		.pol_notif_dead_name    = true,
 		.pol_notif_no_senders   = true,
 		.pol_notif_port_destroy = true,
@@ -1506,6 +1701,7 @@ struct ipc_object_policy ipc_policy_array[IOT_UNKNOWN] = {
 
 	[__IKOT_FIRST ... IOT_UNKNOWN - 1] = {
 		.pol_movability         = IPC_MOVE_POLICY_NEVER,
+		.pol_enforce_reply_semantics = true,
 		.pol_notif_dead_name    = true,
 	},
 };
@@ -1514,7 +1710,7 @@ __startup_func
 static void
 ipc_policy_update_from_tunables(void)
 {
-	if (!service_port_defense_enabled) {
+	if (!ipc_sec_is_policy_enforced(IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT)) {
 		ipc_policy_array[IOT_SERVICE_PORT].pol_movability =
 		    IPC_MOVE_POLICY_ALWAYS;
 	}
@@ -1532,12 +1728,12 @@ ipc_policy_construct_entitlement_hardening(void)
 	/* No need to check kobjects because they are always immovable */
 	for (ipc_object_type_t i = 0; i < __IKOT_FIRST; i++) {
 		/*
-		 * IOT_PROVISIONAL_REPLY_PORT is an exception as it used to be
+		 * IOT_WEAK_REPLY_PORT is an exception as it used to be
 		 * movable. For process opted for enhanced security V2,
-		 * kGUARD_EXC_MOVE_PROVISIONAL_REPLY_PORT will be thrown when a
-		 * provisional reply port is being moved.
+		 * kGUARD_EXC_MOVE_WEAK_REPLY_PORT will be thrown when a
+		 * weak reply port is being moved.
 		 */
-		if (i == IOT_PROVISIONAL_REPLY_PORT) {
+		if (i == IOT_WEAK_REPLY_PORT) {
 			continue;
 		}
 		if (ipc_policy_array[i].pol_construct_entitlement) {
@@ -1602,40 +1798,444 @@ ipc_policy_set_defaults(void)
 }
 STARTUP(MACH_IPC, STARTUP_RANK_LAST, ipc_policy_set_defaults);
 
-#pragma mark exception port policy
+#pragma mark infra for handling security policy violations
+
+#if XNU_TARGET_OS_OSX && CONFIG_CSR
+bool
+SIP_is_enabled(void)
+{
+	return csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0;
+}
+#endif /* XNU_TARGET_OS_OSX && CONFIG_CSR */
+
+static bool
+ipc_sec_policy_should_apply_weak_reply_port(void)
+{
+#if XNU_TARGET_OS_OSX && CONFIG_CSR
+	/* Apply policy if SIP is enabled */
+	return SIP_is_enabled();
+#else
+	/* Unconditionally apply policy */
+	return true;
+#endif /* XNU_TARGET_OS_OSX && CONFIG_CSR */
+}
+
+static bool
+ipc_sec_policy_should_apply_cv_notification_port(void)
+{
+	return cv_notif_port_required_enforced;
+}
+
+static bool
+ipc_sec_policy_should_apply_ool_port_array(void)
+{
+	return ool_port_array_enforced;
+}
+
+__security_const_late
+ipc_sec_policy_config_t ipc_sec_policy_array[IPC_SEC_POLICY_COUNT] = {
+	[IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_KOBJECT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+		.associated_guard_exc_code = kGUARD_EXC_KOBJECT_REPLY_PORT_SEMANTICS,
+	},
+	[IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_BOOTSTRAP_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+		.associated_guard_exc_code = kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS,
+	},
+	[IPC_SEC_POLICY_REQUIRE_REPLY_PORT_SEMANTICS_SERVICE_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+		.associated_guard_exc_code = kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS,
+	},
+	[IPC_SEC_POLICY_DISALLOW_CONSTRUCT_WEAK_REPLY_PORT_WITHOUT_ENTITLEMENT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+		.associated_guard_exc_code = kGUARD_EXC_INVALID_MPO_ENTITLEMENT,
+		.maybe_should_apply_cb = ipc_sec_policy_should_apply_weak_reply_port,
+	},
+	[IPC_SEC_POLICY_RESTRICT_MOVE_WEAK_REPLY_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_MOVE_WEAK_REPLY_PORT_TELEMETRY,
+		.associated_guard_exc_code = kGUARD_EXC_MOVE_WEAK_REPLY_PORT,
+	},
+	[IPC_SEC_POLICY_RESTRICT_MOVE_SERVICE_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+		.associated_guard_exc_code = kGUARD_EXC_SERVICE_PORT_VIOLATION_FATAL,
+	},
+	[IPC_SEC_POLICY_RESTRICT_OOL_PORT_ARRAYS] = {
+#if XNU_TARGET_OS_XR
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+#else
+		.enforcement_mode = IPC_SEC_POLICY_MODE_ENFORCEMENT,
+#endif /* XNU_TARGET_OS_XR */
+		.maybe_should_apply_cb = ipc_sec_policy_should_apply_ool_port_array,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_NONE,
+		.associated_guard_exc_code = kGUARD_EXC_DESCRIPTOR_VIOLATION,
+	},
+	[IPC_SEC_POLICY_RESTRICT_INLINE_PORT_DESCRIPTORS] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_EMITTED_INLINE_PORT_DESC_LIMIT,
+	},
+	[IPC_SEC_POLICY_RESTRICT_VOUCHER_RECIPE_SIZE] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_EMITTED_VOUCHER_RECIPE_SIZE_LIMIT,
+	},
+	[IPC_SEC_POLICY_RESTRICT_VOUCHER_OPERATIONS] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_EMITTED_RESTRICTED_VOUCHER_OPERATION,
+	},
+	[IPC_SEC_POLICY_RESTRICT_MOVE_IOT_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_MOVE_IOT_PORT_TELEMETRY,
+	},
+	[IPC_SEC_POLICY_RESTRICT_SERVICE_PORT_FOR_EXCEPTION] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_SERVICE_PORT_EXCEPTION_TELEMETRY,
+	},
+	[IPC_SEC_POLICY_RESTRICT_CONTAINED_EXCEPTION_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_CONTAINED_EXCEPTION_TELEMETRY,
+	},
+	[IPC_SEC_POLICY_RESTRICT_REGISTER_NON_NOTIFICATION_PORT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_NONE,
+		.associated_guard_exc_code = kGUARD_EXC_CV_NOTIFICATION_PORT_REQ,
+		.maybe_should_apply_cb = ipc_sec_policy_should_apply_cv_notification_port,
+	},
+	[IPC_SEC_POLICY_RESTRICT_MACH_EXC_THREAD_SET_STATE] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		// .associated_guard_exc_code = kGUARD_EXC_MACH_EXC_THREAD_SET_STATE,
+		// .telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_MACH_EXC_TSS_TELEMETRY,
+	},
+	[IPC_SEC_POLICY_RESTRICT_EXCEPTION_PORT_NOT_IN_SPACE] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+	},
+	[IPC_SEC_POLICY_DISALLOW_BOOTSTRAP_PORT_FOR_NOTIFICATION] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+	},
+	[IPC_SEC_POLICY_RESTRICT_MESSAGE_QUEUE_SIZE] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+	},
+	[IPC_SEC_POLICY_RESTRICT_PER_PROCESS_MESSAGE_LIMIT] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+	},
+	[IPC_SEC_POLICY_RESTRICT_IMMOVABLE_SEND_RIGHT_CREATION] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_TELEMETRY_ONLY,
+		.telemetry_reporting_style = IPC_TELEMETRY_MECHANISM_CA_WITH_USER_BACKTRACE,
+		.telemetry_rate_limit_mode = IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE,
+		.associated_ipc_space_telemetry_flag = IS_FUSE_HAS_IMMOVABLE_SEND_RIGHT_TELEMETRY,
+	},
+	[IPC_SEC_POLICY_DISALLOW_REPLY_PORT_WITH_MUTIPLE_SO] = {
+		.enforcement_mode = IPC_SEC_POLICY_MODE_DISABLED,
+	},
+};
+
+#if DEVELOPMENT || DEBUG
+/*!
+ * @brief
+ * Auto-detect security policy misconfigurations that specify invalid state.
+ *
+ * @discussion
+ * This validator panics the system at startup if a misconfiguration is detected.
+ */
+__startup_func
+static void
+ipc_sec_policy_configs_validate(void)
+{
+	for (uint32_t i = IPC_SEC_POLICY_NONE + 1; i < IPC_SEC_POLICY_UNKNOWN; i++) {
+		ipc_sec_policy_config_t* conf = ipc_sec_policy_config_get(i);
+		if (conf->enforcement_mode == IPC_SEC_POLICY_MODE_ENFORCEMENT) {
+			/* Enforced policies must configure an associated kGUARD_EXC code */
+			if (conf->associated_guard_exc_code == kGUARD_EXC_NONE) {
+				panic("Expected policy %d to have a mapped kGUARD_EXC code.", i);
+			}
+			/* And the kGUARD_EXC code must be in the fatal range */
+			if (conf->associated_guard_exc_code > MAX_FATAL_kGUARD_EXC_CODE) {
+				panic("Expected policy %d to have a fatal kGUARD_EXC code, but found non-fatal code %d.",
+				    i,
+				    conf->associated_guard_exc_code);
+			}
+		} else if (conf->enforcement_mode == IPC_SEC_POLICY_MODE_TELEMETRY_ONLY) {
+			/* Telemetry-only policies must configure a telemetry mechanism */
+			if (conf->telemetry_reporting_style == IPC_TELEMETRY_MECHANISM_NONE) {
+				panic("Expected telemetry-only policy %d to have a telemetry reporting style configured.", i);
+			}
+			/*
+			 * And they must specify an IPC space flag to prevent overzealous emission.
+			 * Unless the policy has been explicitly configured to disable rate-limiting per IPC space.
+			 */
+			if (conf->telemetry_rate_limit_mode != IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_NONE &&
+			    (conf->associated_ipc_space_telemetry_flag == IS_FUSE_NONE ||
+			    conf->associated_ipc_space_telemetry_flag > IS_FUSE_MAX)) {
+				panic("Expected a valid IPC space telemetry flag for rate-limited policy %d, found %d",
+				    i,
+				    conf->associated_ipc_space_telemetry_flag);
+			}
+			/*
+			 * If configured to emit via simulated crash reports, we need an appropriate
+			 * associated kGUARD_EXC code.
+			 */
+			if (conf->telemetry_reporting_style == IPC_TELEMETRY_MECHANISM_SIMULATED_CRASH_REPORT) {
+				if (conf->associated_guard_exc_code == kGUARD_EXC_NONE) {
+					panic("Expected policy %d to have a mapped kGUARD_EXC code.", i);
+				}
+				/* And the kGUARD_EXC code must be in the non-fatal range */
+				if (conf->associated_guard_exc_code <= MAX_FATAL_kGUARD_EXC_CODE) {
+					panic("Expected policy %d to have a non-fatal kGUARD_EXC code, but found fatal code %d.",
+					    i,
+					    conf->associated_guard_exc_code);
+				}
+			}
+		} else if (conf->enforcement_mode == IPC_SEC_POLICY_MODE_NONE) {
+			/* Ensure the `enforcement_mode` field is always explicitly initialized */
+			panic("You must assign each IPC policy's `enforcement_mode`, IPC_SEC_POLICY_MODE_NONE is not valid.");
+		} else if (conf->enforcement_mode == IPC_SEC_POLICY_MODE_DISABLED) {
+			/* No validations on disabled policies */
+		} else {
+			panic("If you've added a new enforcement mode, update this site to add appropriate validations.");
+		}
+	}
+}
+STARTUP(TUNABLES, STARTUP_RANK_LAST, ipc_sec_policy_configs_validate);
+#endif /* DEVELOPMENT || DEBUG */
+
+ipc_sec_policy_config_t*
+ipc_sec_policy_config_get(ipc_sec_policy_t p)
+{
+	/* If this fails it indicates a programming error. */
+	assert3u(p, <, IPC_SEC_POLICY_UNKNOWN);
+	return &ipc_sec_policy_array[p];
+}
 
 bool
-ipc_is_valid_exception_port(
-	task_t task,
-	ipc_port_t port)
+ipc_sec_is_policy_enforced(ipc_sec_policy_t p)
 {
-	if (task == TASK_NULL && is_ux_handler_port(port)) {
-		return true;
+	ipc_sec_policy_config_t* conf = ipc_sec_policy_config_get(p);
+	bool is_policy_enforced = conf->enforcement_mode == IPC_SEC_POLICY_MODE_ENFORCEMENT;
+	bool has_policy_chosen_to_elide_violation = (conf->maybe_should_apply_cb &&
+	    !conf->maybe_should_apply_cb());
+	return is_policy_enforced && !has_policy_chosen_to_elide_violation;
+}
+
+/*!
+ * @brief
+ * Query what the system and IPC space think about emitting a particular telemetry type.
+ *
+ * @discussion
+ * Note that this contains a test-or-set, so it's a modifying operation.
+ */
+static bool
+_ipc_test_or_set_should_emit_telemetry_for_telemetry_mode_policy_violation(
+	ipc_sec_policy_config_t* policy_config,
+	ipc_space_t maybe_space
+	)
+{
+	/*
+	 * Further qualify whether to emit telemetry.
+	 *
+	 * Don't emit if telemetry is globally disabled.
+	 */
+	bool should_emit = ipcpv_telemetry_enabled;
+
+	/* Don't emit if this policy rate-limits by IPC space and we've already emitted for this space */
+	if (
+		should_emit &&
+		policy_config->telemetry_rate_limit_mode == IPC_SEC_POLICY_TELEMETRY_RATE_LIMIT_ONCE_PER_IPC_SPACE
+		) {
+		/* The IPC space must have been specified */
+		assert3p(maybe_space, !=, IPC_SPACE_NULL);
+		if (ipc_space_test_or_set_telemetry_type(maybe_space, policy_config->associated_ipc_space_telemetry_flag)) {
+			should_emit = false;
+		}
 	}
 
-	if (ip_is_exception_port(port)) {
-		return true;
+	return should_emit;
+}
+
+/*!
+ * @brief
+ * Returns whether we've decided to emit telemetry (and whether we should therefore set up the AST).
+ */
+static bool
+_ipc_triage_telemetry_mode_policy_violation(
+	ipc_sec_policy_config_t* policy_config,
+	ipc_space_t maybe_space,
+	ipc_sec_policy_in_flight_violation_info_t* in_flight_info,
+	ipc_port_t maybe_ca_violating_port,
+	int maybe_ca_aux_data
+	)
+{
+	if (!_ipc_test_or_set_should_emit_telemetry_for_telemetry_mode_policy_violation(policy_config, maybe_space)) {
+		/* Do not emit telemetry despite a violation being detected while in telemetry mode */
+		return false;
 	}
 
 	/*
-	 * rdar://77996387
-	 * Avoid exposing immovable ports send rights (kobjects) to `get_exception_ports`,
-	 * but exception ports to still be set.
+	 * Stash the service port name.
+	 * We must copy it off now, as it's not safe to retain the port till the AST.
 	 */
-	if (!ipc_can_stash_naked_send(port)) {
-		return false;
-	}
-
-	if (ip_is_immovable_receive(port)) {
-		/*
-		 * rdar://153108740
-		 * Temporarily allow service ports until telemetry is clean.
-		 */
-		if (ip_is_strong_service_port(port)) {
-			return true;
+	char* service_name = (char *) "unknown";
+	/*
+	 * We need to allocate some heap storage to store the service name.
+	 * We're on a hot path, though, so we're only able to do this if Z_NOWAIT
+	 * succeeds. In the case for which we're unable to allocate here, just
+	 * don't set a service name pointer, which we'll later detect.
+	 */
+	in_flight_info->affected_service_name = (char*)kalloc_data(CA_MACH_SERVICE_PORT_NAME_LEN, Z_NOWAIT | Z_ZERO);
+	if (in_flight_info->affected_service_name != NULL) {
+#if CONFIG_SERVICE_PORT_INFO
+		if (IP_VALID(maybe_ca_violating_port)) {
+			/*
+			 * dest_port lock must be held to avoid race condition
+			 * when accessing ip_splabel rdar://139066947
+			 */
+			ipc_object_label_t label = ip_mq_lock_label_get(maybe_ca_violating_port);
+			if (io_state_active(label.io_state)) {
+				if (ip_is_any_service_port_type(label.io_type)) {
+					struct mach_service_port_info sp_info;
+					ipc_service_port_label_get_info(label.iol_service, &sp_info);
+					service_name = sp_info.mspi_string_name;
+				} else if (ip_is_bootstrap_port_type(label.io_type)) {
+					struct mach_service_port_info sp_info;
+					ipc_bootstrap_port_label_get_info(label.iol_bootstrap, &sp_info);
+					service_name = sp_info.mspi_string_name;
+				}
+			}
+			ip_mq_unlock_label_put(maybe_ca_violating_port, &label);
 		}
-		return false;
+#endif /* CONFIG_SERVICE_PORT_INFO */
+		strlcpy(in_flight_info->affected_service_name,
+		    service_name,
+		    CA_MACH_SERVICE_PORT_NAME_LEN);
 	}
+	/* And stash the caller-provided aux data that we'll stuff into the telemetry event */
+	in_flight_info->ca_aux_data = maybe_ca_aux_data;
 
 	return true;
+}
+
+ipc_sec_policy_violation_action_t
+ipc_triage_policy_violation(
+	ipc_sec_policy_t policy,
+	ipc_space_t maybe_space,
+	/* Arguments to pipe through to an EXC_GUARD payload */
+	uint32_t maybe_exc_target,
+	uint64_t maybe_exc_payload,
+	/* Arguments to pipe through to a CA payload */
+	ipc_port_t maybe_ca_violating_port,
+	int maybe_ca_aux_data
+	)
+{
+	ipc_sec_policy_violation_action_t action;
+	bool should_setup_ast_handler = false;
+	ipc_sec_policy_config_t* policy_config = ipc_sec_policy_config_get(policy);
+
+	/*
+	 * First up, check in with this policy whether it's currently relevant:
+	 *  - Do nothing for disabled policies
+	 *  - Allow the policy to make a runtime decision on whether it should be applied
+	 */
+	bool is_static_config_disabled = policy_config->enforcement_mode == IPC_SEC_POLICY_MODE_DISABLED;
+	bool has_policy_chosen_to_elide_violation = (policy_config->maybe_should_apply_cb &&
+	    !policy_config->maybe_should_apply_cb());
+	if (is_static_config_disabled || has_policy_chosen_to_elide_violation) {
+		/* Nothing to do, allow the action to continue. */
+		return IPC_SEC_POLICY_VIOLATION_ACTION_CONTINUE;
+	}
+
+	/* Keep track of metadata that will be passed up to the AST, if we decide to raise one */
+	ipc_sec_policy_in_flight_violation_info_t* in_flight_info = &current_thread()->pending_ipc_sec_policy_violation_info;
+
+	if (policy_config->enforcement_mode == IPC_SEC_POLICY_MODE_TELEMETRY_ONLY) {
+		/* Telemetry-only mode */
+		action = IPC_SEC_POLICY_VIOLATION_ACTION_CONTINUE;
+		should_setup_ast_handler = _ipc_triage_telemetry_mode_policy_violation(
+			policy_config,
+			maybe_space,
+			in_flight_info,
+			maybe_ca_violating_port,
+			maybe_ca_aux_data
+			);
+	} else if (policy_config->enforcement_mode == IPC_SEC_POLICY_MODE_ENFORCEMENT) {
+		/* Enforcement mode */
+		action = IPC_SEC_POLICY_VIOLATION_ACTION_DENY;
+		should_setup_ast_handler = true;
+	} else {
+		panic("Programming error? Unrecognized enforcement mode %d", policy_config->enforcement_mode);
+	}
+
+	if (should_setup_ast_handler) {
+		mach_port_guard_exception(maybe_exc_target, maybe_exc_payload, policy_config->associated_guard_exc_code);
+		/* Note we only expect/allow a single pending violation per syscall */
+		in_flight_info->violated_policy_type = policy;
+	} else {
+		/*
+		 * Throw away the pending state we built up.
+		 * (Note particularly that there is one path on the telemetry path that allocates,
+		 *  but this path only runs when should_setup_ast_handler == true, so we have no
+		 *  need to worry about freeing this allocation here.)
+		 */
+	}
+
+	return action;
+}
+
+void
+ipc_triage_policy_violation_and_expect_continue(
+	ipc_sec_policy_t policy,
+	ipc_space_t maybe_space,
+	uint32_t target,
+	uint64_t payload,
+	ipc_port_t maybe_violating_port,
+	int maybe_aux_data
+	)
+{
+	ipc_sec_policy_violation_action_t action = ipc_triage_policy_violation(
+		policy,
+		maybe_space,
+		target,
+		payload,
+		maybe_violating_port,
+		maybe_aux_data
+		);
+	if (action != IPC_SEC_POLICY_VIOLATION_ACTION_CONTINUE) {
+		panic("Expected to continue after handling IPC security policy violation policy %d, but got %d",
+		    policy,
+		    action);
+	}
+}
+
+void
+ipc_triage_policy_violation_and_expect_deny(
+	ipc_sec_policy_t policy,
+	ipc_space_t maybe_space,
+	uint32_t target,
+	uint64_t payload,
+	ipc_port_t maybe_violating_port,
+	int maybe_aux_data
+	)
+{
+	ipc_sec_policy_violation_action_t action = ipc_triage_policy_violation(
+		policy,
+		maybe_space,
+		target,
+		payload,
+		maybe_violating_port,
+		maybe_aux_data
+		);
+	if (action != IPC_SEC_POLICY_VIOLATION_ACTION_DENY) {
+		panic("Expected to deny after handling IPC security policy violation policy %d, but got %d", policy, action);
+	}
 }

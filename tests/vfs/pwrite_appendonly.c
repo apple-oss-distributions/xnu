@@ -115,7 +115,7 @@ T_DECL(pwrite_append, "Validate pwrite to arbitrary offsets should fail on appen
 
 	T_WITH_ERRNO;
 	ret = pwrite(fd, &buf, 16, 8);
-	T_ASSERT_EQ(ret, 16, "Write on file: %s", g_testfile);
+	T_ASSERT_EQ(ret, (ssize_t)16, "Write on file: %s", g_testfile);
 
 	T_WITH_ERRNO;
 	err = ftruncate(fd, 100);

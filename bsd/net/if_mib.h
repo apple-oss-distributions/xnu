@@ -204,8 +204,8 @@ enum {
  * header files if convenient ones already exist.
  */
 
-#ifdef PRIVATE
+#if defined(PRIVATE) && !defined(MODULES_SUPPORTED)
 #include <net/if_mib_private.h>
-#endif /* PRIVATE */
+#endif /* PRIVATE && !MODULES_SUPPORTED */
 
 #endif /* _NET_IF_MIB_H */

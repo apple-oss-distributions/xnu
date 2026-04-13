@@ -32,6 +32,7 @@
 
 #include <sys/cdefs.h>
 #include <vm/vm_fault_xnu.h>
+#include <vm/vm_map_lock_internal.h>
 
 __BEGIN_DECLS
 
@@ -59,37 +60,53 @@ extern vm_fault_return_t vm_fault_page(
 	/* More arguments: */
 	kern_return_t   *error_code,            /* code if page is in error */
 	boolean_t       no_zero_fill,           /* don't fill absent pages */
-	vm_object_fault_info_t fault_info);
+	vm_object_fault_info_t fault_info,
+	vm_map_lock_ctx_t vml_ctx_for_vaddr);
 
 extern void vm_fault_cleanup(
 	vm_object_t     object,
 	vm_page_t       top_page);
 
-extern kern_return_t vm_fault_wire(
-	vm_map_t        map,
-	vm_map_entry_t  entry,
-	vm_prot_t       prot,
-	vm_tag_t        wire_tag,
-	pmap_t          pmap,
-	vm_map_offset_t pmap_addr,
-	ppnum_t         *physpage_p);
+extern kern_return_t vm_fault_wire_resident_pages(
+	vm_map_t                map,
+	vm_map_entry_t          entry,
+	vm_prot_t               prot,
+	vm_tag_t                wire_tag,
+	ppnum_t                *physpage_p,
+	vm_map_lock_ctx_t       ctx);
+
+kern_return_t
+vm_fault_wire_object_pages(
+	vm_map_t                map,
+	vm_object_t             object,
+	vm_object_offset_t      offset,
+	vm_map_size_t           wire_size,
+	vm_tag_t                tag,
+	int                     interruptible);
+
+void
+vm_fault_unwire_object_pages(
+	vm_map_t                map,
+	vm_object_t             object,
+	vm_object_offset_t      start_offset,
+	vm_map_size_t           unwire_size);
 
 extern void vm_fault_unwire(
-	vm_map_t        map,
-	vm_map_entry_t  entry,
-	boolean_t       deallocate,
-	pmap_t          pmap,
-	vm_map_offset_t pmap_addr,
-	vm_map_offset_t end_addr);
+	vm_map_t                map,
+	vm_map_entry_t          entry,
+	bool                    deallocate,
+	pmap_t                  pmap,
+	vm_map_offset_t         pmap_addr,
+	vm_map_offset_t         end_addr);
 
 extern kern_return_t    vm_fault_copy(
+	vm_map_lock_ctx_t       ctx,
 	vm_object_t             src_object,
 	vm_object_offset_t      src_offset,
-	vm_map_size_t           *copy_size,             /* INOUT */
+	vm_map_size_t          *copy_size,             /* INOUT */
+	vm_map_entry_t         *dst_entry,             /* OUT */
 	vm_object_t             dst_object,
 	vm_object_offset_t      dst_offset,
-	vm_map_t                dst_map,
-	vm_map_version_t         *dst_version,
 	int                     interruptible);
 
 extern kern_return_t vm_fault_enter(
@@ -113,6 +130,21 @@ extern kern_return_t vm_pre_fault_with_info(
 	vm_map_offset_t         offset,
 	vm_prot_t               prot,
 	vm_object_fault_info_t  fault_info);
+
+extern kern_return_t vm_map_lookup_object_and_lock_entry(
+	vm_map_t                *var_map,       /* IN/OUT */
+	vm_map_offset_t         vaddr,
+	vm_prot_t               fault_type,
+	vm_object_t             *object,        /* OUT */
+	vm_map_entry_t          *entry,         /* OUT */
+	vm_object_offset_t      *offset,        /* OUT */
+	vm_prot_t               *out_prot,      /* OUT */
+	boolean_t               *wired,         /* OUT */
+	vm_object_fault_info_t  fault_info,     /* OUT */
+	vm_map_t                *real_map,      /* OUT */
+	vm_map_lock_ctx_t        ctx,
+	vm_map_lock_ctx_t        vml_ctx_for_vaddr,
+	bool                     try_lock_entry);
 
 #endif /* MACH_KERNEL_PRIVATE */
 

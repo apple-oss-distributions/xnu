@@ -8,10 +8,13 @@ _open
 _write
 _dup2
 _exit
+_fchmod
+_unlink
 _posix_spawn
 _task_policy_set
 __stack_chk_fail
-# used by pthreads
+_mach_vm_allocate
+# used by pthread
 _mach_vm_deallocate
 # used by tests
 _sleep

@@ -7,22 +7,33 @@ tests=(
 TEST_TARGETS
 )
 
+exit_success=0
+exit_skip=69
+
 s_dir=${0:A:h}
+err_count=0
 for file in ${tests[@]}; do
   file_path=$s_dir/$file
   echo "Running $file_path ..."
   if [[ -f $file_path ]]; then
     $file_path > /dev/null 2>/dev/null
     ret=$?
-    if [[ $ret -eq 0 ]]; then
+    if [[ $ret -eq $exit_success || $ret -eq $exit_skip ]]; then
       print -P "%F{green}*** PASS%f"
     else
       print -P "%F{red}*** FAILED: $file_path%f"
+      ((err_count++))
     fi
   else
     print -P "%F{yellow}*** Missing%f"
-  fi  
+    ((err_count++))
+  fi
 done
+if [[ $err_count -gt 0 ]]; then
+  print -P "%F{red}Failed: $err_count%f"
+  exit 1
+fi  
+exit 0
 '''
 
 def main():

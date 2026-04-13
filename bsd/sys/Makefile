@@ -104,13 +104,13 @@ PRIVATE_DATAFILES = $(sort \
 	kern_sysctl.h \
 	mbuf.h \
 	mem_acct_private.h \
-	mman.h \
+	mman_private.h \
 	monotonic.h \
 	persona.h \
 	preoslog.h \
 	priv.h \
-	proc.h \
 	proc_info_private.h \
+	proc_private.h \
 	proc_uuid_policy.h \
 	process_policy.h \
 	reason.h \
@@ -141,7 +141,7 @@ PRIVATE_DATAFILES = $(sort \
 	priv.h \
 	pgo.h \
 	memory_maintenance.h \
-	commpage.h \
+	commpage_private.h \
 	os_log_coprocessor.h \
 	$(EXTRA_PRIVATE_DATAFILES))
 
@@ -206,6 +206,7 @@ PRIVATE_KERNELFILES = \
 	kern_event_private.h \
 	linker_set.h \
 	mach_swapon.h \
+	mman_private.h \
 	monotonic.h \
 	msgbuf.h \
 	eventvar.h \
@@ -213,6 +214,7 @@ PRIVATE_KERNELFILES = \
 	preoslog.h \
 	proc_info.h \
 	proc_info_private.h \
+	proc_private.h \
 	pthread_shims.h \
 	quota.h \
 	reboot.h \
@@ -246,6 +248,7 @@ PRIVATE_KERNELFILES = \
 	trust_caches.h \
 	code_signing.h \
 	lockdown_mode.h \
+	commpage_private.h
 
 XNU_ONLY_EXPORTS = \
 	bsdtask_info.h \
@@ -292,11 +295,12 @@ EXPORT_MI_DIR = sys
 
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
-	attr_private.h coalition_private.h code_signing.h codesign.h content_protection.h csr.h decmpfs.h dirent_private.h \
-	disk_private.h event_log.h event_private.h fcntl_private.h fsevents.h fsgetpath_private.h guarded.h kas_info.h \
-	kdebug_private.h kern_control_private.h kern_event_private.h kern_memorystatus.h mem_acct_private.h preoslog.h \
-	proc_info_private.h reason.h resource_private.h socket_private.h sockio_private.h stackshot.h sys_domain_private.h \
-	vsock_private.h work_interval.h ${EXTRA_PRIVATE_DATAFILES})
+	attr_private.h coalition.h coalition_private.h code_signing.h codesign.h commpage_private.h content_protection.h \
+	csr.h decmpfs.h dirent_private.h disk_private.h event_log.h event_private.h fcntl_private.h fsevents.h \
+	fsgetpath_private.h guarded.h kas_info.h kdebug_private.h kern_control_private.h kern_event_private.h \
+	kern_memorystatus.h mem_acct_private.h mman_private.h preoslog.h proc_info_private.h proc_private.h reason.h \
+	resource_private.h socket_private.h sockio_private.h stackshot.h sys_domain_private.h vsock_private.h work_interval.h \
+	${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
 INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}

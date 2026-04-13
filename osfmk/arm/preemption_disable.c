@@ -132,8 +132,7 @@ _disable_preemption(void)
 	 * that collection here is not desynced otherwise.
 	 */
 	if (improbable_static_if(sched_debug_preemption_disable)) {
-		if (__improbable(count == 0 &&
-		    sched_preemption_disable_debug_mode)) {
+		if (__improbable(count == 0)) {
 			__attribute__((musttail))
 			return _prepare_preemption_disable_measurement();
 		}
@@ -327,7 +326,8 @@ _prepare_preemption_disable_measurement(void)
 {
 	thread_t thread = current_thread();
 
-	if (thread->machine.int_handler_addr == 0) {
+	if (thread->machine.int_handler_addr == 0 &&
+	    sched_preemption_disable_debug_mode) {
 		/*
 		 * Only prepare a measurement if not currently in an interrupt
 		 * handler.

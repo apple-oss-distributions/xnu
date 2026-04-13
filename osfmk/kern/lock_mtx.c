@@ -124,32 +124,8 @@ __enum_decl(lck_mtx_mode_t, uint32_t, {
 	LCK_MTX_MODE_SLEEPABLE,
 	LCK_MTX_MODE_SPIN,
 	LCK_MTX_MODE_SPIN_ALWAYS,
+	LCK_MTX_MODE_UNLOCK,
 });
-
-__enum_decl(lck_ilk_mode_t, uint32_t, {
-	LCK_ILK_MODE_UNLOCK,
-	LCK_ILK_MODE_DIRECT,
-	LCK_ILK_MODE_FROM_AS,
-});
-
-static inline void
-lck_mtx_mcs_clear(lck_mtx_mcs_t mcs)
-{
-	*mcs = (struct lck_mtx_mcs){ };
-}
-
-static inline lck_mcs_id_t
-lck_mtx_get_mcs_id(void)
-{
-	return lck_mcs_id_current(LCK_MCS_SLOT_0);
-}
-
-__pure2
-static inline lck_mtx_mcs_t
-lck_mtx_get_mcs(lck_mcs_id_t idx)
-{
-	return &lck_mcs_get_other(idx)->mcs_mtx;
-}
 
 
 #pragma mark lck_mtx_t: validation
@@ -326,7 +302,7 @@ lck_mtx_destroy(lck_mtx_t *lck, lck_grp_t *grp)
 	LCK_GRP_ASSERT_ID(grp, lck->lck_mtx_grp);
 	lck->lck_mtx_type = LCK_TYPE_NONE;
 	lck->lck_mtx.data = LCK_MTX_TAG_DESTROYED;
-	lck->lck_mtx_grp      = 0;
+	lck->lck_mtx_grp  = 0;
 	lck_grp_deallocate(grp, &grp->lck_grp_mtxcnt);
 }
 
@@ -356,178 +332,77 @@ static const struct hw_spin_policy lck_mtx_ilk_timeout_policy = {
 	.hwsp_op_timeout        = lck_mtx_ilk_timeout_panic,
 };
 
-static void
-lck_mtx_ilk_lock_cleanup_as_mcs(
-	lck_mtx_t               *lock,
-	lck_mcs_id_t             idx,
-	lck_mtx_mcs_t            mcs,
-	hw_spin_timeout_t        to,
-	hw_spin_state_t         *ss)
-{
-	lck_mtx_mcs_t nnode = NULL;
-	lck_mcs_id_t  pidx  = (lck_mcs_id_t)mcs->lmm_as_prev;
-	bool          was_last;
-
-	/*
-	 *	This is called when the thread made use
-	 *	of the adaptive spin queue and needs
-	 *	to remove itself from it.
-	 */
-
-	/*
-	 *	If the thread is last, set the tail to the node before us.
-	 */
-	was_last = lock_cmpxchg(&lock->lck_mtx.as_tail, idx, pidx, release);
-
-	if (was_last) {
-		/*
-		 *	If @c mcs was last, we need to erase the previous
-		 *	node link to it.
-		 *
-		 *	However, new nodes could have now taken our place
-		 *	and set the previous node's @c lmm_as_next field
-		 *	already, so we must CAS rather than blindly set.
-		 *
-		 *	We know the previous node is stable because
-		 *	we hold the interlock (preventing concurrent
-		 *	removals).
-		 */
-		if (pidx) {
-			os_atomic_cmpxchg(&lck_mtx_get_mcs(pidx)->lmm_as_next,
-			    mcs, nnode, relaxed);
-		}
-	} else {
-		/*
-		 *	If @c mcs wasn't last, then wait to make sure
-		 *	we observe @c lmm_as_next. Once we do, we know
-		 *	the field is stable since we hold the interlock
-		 *	(preventing concurrent dequeues).
-		 *
-		 *	We can then update it to @c mcs next node index
-		 *	(which is also stable for similar reasons).
-		 *
-		 *	Lastly update the previous node @c lmm_as_next
-		 *	field as well to terminate the dequeue.
-		 */
-		while (!hw_spin_wait_until(&mcs->lmm_as_next, nnode, nnode)) {
-			hw_spin_policy_t pol = &lck_mtx_ilk_timeout_policy;
-			hw_spin_should_keep_spinning(lock, pol, to, ss);
-		}
-
-		os_atomic_store(&nnode->lmm_as_prev, pidx, relaxed);
-		if (pidx) {
-			os_atomic_store(&lck_mtx_get_mcs(pidx)->lmm_as_next,
-			    nnode, relaxed);
-		}
-	}
-
-	/*
-	 *	@c mcs's fields are left dangling,
-	 *	it is the responsibilty of the caller
-	 *	to terminate the cleanup.
-	 */
-}
-
 static NOINLINE void
-lck_mtx_ilk_lock_contended(
-	lck_mtx_t              *lock,
-	lck_mtx_state_t         state,
-	lck_ilk_mode_t          mode)
+lck_mtx_ilk_lock_contended(lck_mtx_t *lock, bool for_unlock)
 {
-	hw_spin_policy_t  pol = &lck_mtx_ilk_timeout_policy;
-	hw_spin_timeout_t to  = hw_spin_compute_timeout(pol);
-	hw_spin_state_t   ss  = { };
+	hw_spin_policy_t  pol  = &lck_mtx_ilk_timeout_policy;
+	hw_spin_timeout_t to   = hw_spin_compute_timeout(pol);
+	hw_spin_state_t   ss   = { };
+	lck_mcs_id_t     *link = &lock->lck_mtx.ilk_tail;
+	lck_mcs_mode_t    mode = LCK_MCS_SLEEPABLE;
 
-	lck_mtx_mcs_t     mcs, nnode, pnode;
-	lck_mcs_id_t      idx, pidx;
-	lck_mtx_state_t   nstate;
-	unsigned long     ready;
+	lck_mtx_state_t   state, nstate;
 	uint64_t          spin_start;
+	lck_mcs_node_t    node;
+	lck_mcs_id_t      idx;
 
 	/*
 	 *	Take a spot in the interlock MCS queue,
 	 *	and then spin until we're at the head of it.
 	 */
 
-	idx  = lck_mtx_get_mcs_id();
-	mcs  = &lck_mcs_get_current()->mcs_mtx;
-	if (mode != LCK_MTX_MODE_SPIN) {
+	if (for_unlock) {
 		spin_start = LCK_MTX_ADAPTIVE_SPIN_BEGIN();
 	}
 
-	mcs->lmm_ilk_current = lock;
-	pidx = os_atomic_xchg(&lock->lck_mtx.ilk_tail, idx, release);
-	if (pidx) {
-		pnode = lck_mtx_get_mcs(pidx);
-		os_atomic_store(&pnode->lmm_ilk_next, mcs, relaxed);
-
-		while (!hw_spin_wait_until(&mcs->lmm_ilk_ready, ready, ready)) {
-			hw_spin_should_keep_spinning(lock, pol, to, &ss);
-		}
-	}
-
+	node = lck_mcs_enqueue(link, mode, lock, pol);
+	idx  = lck_mcs_node_id(node);
 
 	/*
 	 *	We're now the first in line, wait for the interlock
 	 *	to look ready and take it.
 	 *
 	 *	We can't just assume the lock is ours for the taking,
-	 *	because the fastpath of lck_mtx_lock_spin{,_always}
-	 *	only look at the mutex "data" and might steal it.
+	 *	because the fastpath of lck_mtx_try_lock()
+	 *	only looks at the mutex "data" and might steal it.
 	 *
-	 *	Also clear the interlock MCS tail if @c mcs is last.
+	 *	Also clear the interlock MCS tail if @c node is last.
 	 */
 	do {
-		while (!hw_spin_wait_until(&lock->lck_mtx.val,
-		    state.val, state.ilocked == 0)) {
+		while (!hw_spin_wait_until_n(LOCK_SNOOP_SPINS_MCS,
+		    &lock->lck_mtx.val, state.val,
+		    state.ilocked == 0)) {
+			lck_mcs_spin_step(node, link, mode, NULL);
 			hw_spin_should_keep_spinning(lock, pol, to, &ss);
 		}
 
 		nstate = state;
 		nstate.ilocked = 1;
 		if (nstate.ilk_tail == idx) {
-			nstate.ilk_tail = 0;
+			nstate.ilk_tail = LCK_MCS_ID_NULL;
 		}
 	} while (!os_atomic_cmpxchg(&lock->lck_mtx, state, nstate, acquire));
 
 
 	/*
 	 *	We now have the interlock, let's cleanup the MCS state.
-	 *
-	 *	First, if there is a node after us, notify that it
-	 *	is at the head of the interlock queue.
-	 *
-	 *	Second, perform the adaptive spin MCS cleanup if needed.
-	 *
-	 *	Lastly, clear the MCS node.
 	 */
-	if (state.ilk_tail != idx) {
-		while (!hw_spin_wait_until(&mcs->lmm_ilk_next, nnode, nnode)) {
-			hw_spin_should_keep_spinning(lock, pol, to, &ss);
-		}
+	lck_mcs_cleanup(node, mode, state.ilk_tail != idx);
 
-		os_atomic_store(&nnode->lmm_ilk_ready, 1, relaxed);
-	}
-
-	if (mode == LCK_ILK_MODE_FROM_AS) {
-		lck_mtx_ilk_lock_cleanup_as_mcs(lock, idx, mcs, to, &ss);
-	}
-	lck_mtx_mcs_clear(mcs);
-
-	if (mode != LCK_MTX_MODE_SPIN) {
+	if (for_unlock) {
 		LCK_MTX_ADAPTIVE_SPIN_END(lock, lock->lck_mtx_grp, spin_start);
 	}
 }
 
 static void
-lck_mtx_ilk_lock_nopreempt(lck_mtx_t *lock, lck_ilk_mode_t mode)
+lck_mtx_ilk_lock_nopreempt(lck_mtx_t *lock, bool for_unlock)
 {
 	lck_mtx_state_t state, nstate;
 
 	os_atomic_rmw_loop(&lock->lck_mtx.val, state.val, nstate.val, acquire, {
 		if (__improbable(state.ilocked || state.ilk_tail)) {
 		        os_atomic_rmw_loop_give_up({
-				return lck_mtx_ilk_lock_contended(lock, state, mode);
+				return lck_mtx_ilk_lock_contended(lock, for_unlock);
 			});
 		}
 
@@ -684,28 +559,21 @@ lck_mtx_ctid_on_core(uint32_t ctid)
 #define LCK_MTX_OWNER_FOR_TRACE(lock) \
 	VM_KERNEL_UNSLIDE_OR_PERM(ctid_get_thread_unsafe((lock)->lck_mtx.data))
 
-static void
-lck_mtx_lock_adaptive_spin(lck_mtx_t *lock, lck_mtx_state_t state)
+static NOINLINE void
+lck_mtx_lock_adaptive_spin(lck_mtx_t *lock)
 {
 	__kdebug_only uintptr_t trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lock);
-	hw_spin_policy_t  pol = &lck_mtx_ilk_timeout_policy;
-	hw_spin_timeout_t to  = hw_spin_compute_timeout(pol);
-	hw_spin_state_t   ss  = { };
-	uint64_t          deadline;
+	hw_spin_policy_t  pol  = &lck_mtx_ilk_timeout_policy;
+	lck_mcs_id_t     *link = &lock->lck_mtx.as_tail;
+	lck_mcs_mode_t    mode = LCK_MCS_SLEEPABLE | LCK_MCS_ABORTABLE;
 
-	lck_mtx_mcs_t     mcs, node;
-	lck_mcs_id_t      idx, pidx, clear_idx;
-	unsigned long     prev;
-	lck_mtx_state_t   nstate;
-	ast_t      *const astp = ast_pending();
-
-	idx  = lck_mtx_get_mcs_id();
-	mcs  = &lck_mcs_get_current()->mcs_mtx;
+	LCK_ADAPTIVE_SPIN_CTX_DECL(ctx);
+	lck_mcs_node_t    node;
+	lck_mcs_id_t      idx;
+	lck_mtx_state_t   state, nstate;
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_START,
 	    trace_lck, LCK_MTX_OWNER_FOR_TRACE(lock), lock->lck_mtx_tsid, 0, 0);
-
-	deadline = ml_get_timebase() + os_atomic_load(&MutexSpin, relaxed) * processor_avail_count;
 
 	/*
 	 *	Take a spot in the adaptive spin queue,
@@ -731,25 +599,12 @@ lck_mtx_lock_adaptive_spin(lck_mtx_t *lock, lck_mtx_state_t state)
 	 *	      between 2 cores only to not have to touch this
 	 *	      cacheline at all.
 	 */
-	pidx = os_atomic_xchg(&lock->lck_mtx.as_tail, idx, release);
-	if (pidx) {
-		node = lck_mtx_get_mcs(pidx);
-		mcs->lmm_as_prev = pidx;
-		os_atomic_store(&node->lmm_as_next, mcs, release);
-
-		while (!hw_spin_wait_until(&mcs->lmm_as_prev, prev,
-		    prev == 0 || (os_atomic_load(astp, relaxed) & AST_URGENT) || (ml_get_timebase() > deadline))) {
-			hw_spin_should_keep_spinning(lock, pol, to, &ss);
-		}
-
-		if (__improbable(prev)) {
-			goto adaptive_spin_fail;
-		}
-
-		clear_idx = 0;
-	} else {
-		clear_idx = idx;
+	lck_adaptive_spin_start(&ctx);
+	node = lck_mcs_enqueue(link, mode, lock, pol);
+	if (__improbable(node == NULL)) {
+		goto adaptive_spin_fail;
 	}
+	idx  = lck_mcs_node_id(node);
 
 	/*
 	 *	We're now first in line.
@@ -758,64 +613,55 @@ lck_mtx_lock_adaptive_spin(lck_mtx_t *lock, lck_mtx_state_t state)
 	 *	for whether (1) the lock has become available,
 	 *	(2) its owner has gone off core, (3) the scheduler
 	 *	wants its CPU back, or (4) we've spun for too long.
+	 *
+	 *	Also clear the interlock MCS tail if @c node is last.
 	 */
-	deadline = ml_get_timebase() + os_atomic_load(&MutexSpin, relaxed);
 
 	for (;;) {
 		state.val = lock_load_exclusive(&lock->lck_mtx.val, acquire);
 
 		if (__probable(!state.ilocked && !state.ilk_tail && !state.owner)) {
-			/*
-			 * 2-core contention: if we can, try to dequeue
-			 * ourselves from the adaptive spin queue
-			 * as part of this CAS in order to avoid
-			 * the cost of lck_mtx_ilk_lock_cleanup_as_mcs()
-			 * and zeroing the mcs node at all.
-			 *
-			 * Because the queue is designed to limit contention,
-			 * using store-exclusive over an armv8.1 LSE atomic
-			 * is actually marginally better (presumably due to
-			 * the better codegen).
-			 */
 			nstate = state;
 			nstate.ilocked = true;
-			if (state.as_tail == clear_idx) {
-				nstate.as_tail = 0;
+			if (state.as_tail == idx) {
+				nstate.as_tail = LCK_MCS_ID_NULL;
 			}
 			if (__probable(lock_store_exclusive(&lock->lck_mtx.val,
 			    state.val, nstate.val, acquire))) {
 				break;
 			}
 		} else {
-			lock_wait_for_event();
+			lck_adaptive_spin_wait_for_event(&ctx);
 		}
 
-		if (__improbable(ml_get_timebase() > deadline ||
-		    (os_atomic_load(astp, relaxed) & AST_URGENT) ||
+		if (__improbable(ctx.expired ||
 		    (!state.ilocked && !state.ilk_tail && state.owner &&
 		    !lck_mtx_ctid_on_core(state.owner)))) {
-			goto adaptive_spin_fail;
+			goto adaptive_spin_fail_dequeue;
 		}
+
+		lck_adaptive_spin_step(&ctx);
+		lck_mcs_spin_step(node, link, mode, &ctx.abort_slot);
 	}
 
 	/*
 	 *	If we're here, we got the lock, we just have to cleanup
 	 *	the MCS nodes and return.
 	 */
-	if (state.as_tail != clear_idx) {
-		lck_mtx_ilk_lock_cleanup_as_mcs(lock, idx, mcs, to, &ss);
-		lck_mtx_mcs_clear(mcs);
-	}
+	lck_mcs_cleanup(node, mode, state.as_tail != idx);
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_END,
 	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(thread),
 	    lock->lck_mtx_tsid, 0, 0);
 	return;
 
+adaptive_spin_fail_dequeue:
+	lck_mcs_dequeue(node, link, LCK_MCS_SLEEPABLE | LCK_MCS_ABORTABLE);
+
 adaptive_spin_fail:
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_END,
 	    trace_lck, LCK_MTX_OWNER_FOR_TRACE(lock), lock->lck_mtx_tsid, 0, 0);
-	return lck_mtx_ilk_lock_contended(lock, state, LCK_ILK_MODE_FROM_AS);
+	return lck_mtx_ilk_lock_contended(lock, false);
 }
 
 static NOINLINE void
@@ -899,10 +745,10 @@ lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, lck_mtx_mode_t mode)
 		if (mode != LCK_MTX_MODE_SPIN_ALWAYS &&
 		    (state.ilocked || state.as_tail || !state.owner ||
 		    lck_mtx_ctid_on_core(state.owner))) {
-			lck_mtx_lock_adaptive_spin(lock, state);
+			lck_mtx_lock_adaptive_spin(lock);
 		} else {
 			direct_wait = true;
-			lck_mtx_ilk_lock_nopreempt(lock, LCK_ILK_MODE_DIRECT);
+			lck_mtx_ilk_lock_nopreempt(lock, false);
 		}
 
 		if (mode == LCK_MTX_MODE_SLEEPABLE) {
@@ -1084,22 +930,34 @@ static __attribute__((always_inline)) bool
 lck_mtx_try_lock_slow_inline(
 	lck_mtx_t              *lock,
 	thread_t                thread,
-	uint32_t                odata,
-	uint32_t                ndata,
+	lck_mtx_state_t         ostate,
+	lck_mtx_state_t         nstate,
 	bool                    spin)
 {
-#pragma unused(lock, thread, odata, ndata)
+#pragma unused(lock, thread, ostate, nstate)
 #if CONFIG_DTRACE
-	if (odata == LCK_MTX_PROFILE) {
-		os_atomic_cmpxchgv(&lock->lck_mtx.data,
-		    odata, ndata | LCK_MTX_PROFILE, &odata, acquire);
+	/*
+	 * The upper 'tail' bits of ostate.val are always 0 and are not really
+	 * checked by these if-statements if spin=false. This is because we
+	 * only ever do a 32-bit CAS on the lock word below and in the caller,
+	 * so the upper bits remain unchanged.
+	 */
+	if (ostate.val == (uint64_t)LCK_MTX_PROFILE) {
+		nstate.profile = true;
+		if (spin) {
+			os_atomic_cmpxchgv(&lock->lck_mtx.val, ostate.val,
+			    nstate.val, &ostate.val, acquire);
+		} else {
+			os_atomic_cmpxchgv(&lock->lck_mtx.data, ostate.data,
+			    nstate.data, &ostate.data, acquire);
+		}
 	}
-	if ((odata & ~LCK_MTX_PROFILE) == 0) {
+	if ((ostate.val & ~(uint64_t)LCK_MTX_PROFILE) == 0) {
 		LCK_MTX_TRY_ACQUIRED(lock, lock->lck_mtx_grp,
-		    spin, odata & LCK_MTX_PROFILE);
+		    spin, ostate.profile);
 		return true;
 	}
-	if (odata & LCK_MTX_PROFILE) {
+	if (ostate.profile) {
 		LCK_MTX_PROF_MISS(lock, lock->lck_mtx_grp, &(int){ 0 });
 	}
 #endif /* CONFIG_DTRACE */
@@ -1119,10 +977,10 @@ static bool
 lck_mtx_try_lock_slow(
 	lck_mtx_t              *lock,
 	thread_t                thread,
-	uint32_t                odata,
-	uint32_t                ndata)
+	lck_mtx_state_t         ostate,
+	lck_mtx_state_t         nstate)
 {
-	return lck_mtx_try_lock_slow_inline(lock, thread, odata, ndata, false);
+	return lck_mtx_try_lock_slow_inline(lock, thread, ostate, nstate, false);
 }
 
 #if CONFIG_DTRACE || LCK_MTX_CHECK_INVARIANTS
@@ -1134,25 +992,25 @@ static bool
 lck_mtx_try_lock_slow_spin(
 	lck_mtx_t              *lock,
 	thread_t                thread,
-	uint32_t                odata,
-	uint32_t                ndata)
+	lck_mtx_state_t         ostate,
+	lck_mtx_state_t         nstate)
 {
-	return lck_mtx_try_lock_slow_inline(lock, thread, odata, ndata, true);
+	return lck_mtx_try_lock_slow_inline(lock, thread, ostate, nstate, true);
 }
 
 static __attribute__((always_inline)) bool
 lck_mtx_try_lock_fastpath(lck_mtx_t *lock, lck_mtx_mode_t mode)
 {
 	thread_t thread = current_thread();
-	uint32_t odata, ndata = thread->ctid;
-	uint32_t take_slowpath = 0;
+	lck_mtx_state_t ostate, nstate = {
+		.data = thread->ctid,
+	};
+	uint64_t take_slowpath = LCK_MTX_SNIFF_DTRACE();
 
-#if CONFIG_DTRACE
-	take_slowpath |= lck_debug_state.lds_value;
-#endif
 	if (mode != LCK_MTX_MODE_SLEEPABLE) {
 		lock_disable_preemption_for_thread(thread);
-		ndata |= LCK_MTX_SPIN_MODE | LCK_MTX_ILOCK;
+		nstate.spin_mode = true;
+		nstate.ilocked = true;
 	}
 
 	/*
@@ -1161,24 +1019,34 @@ lck_mtx_try_lock_fastpath(lck_mtx_t *lock, lck_mtx_mode_t mode)
 	 * than lck_mtx_lock() to take the lock and ignores
 	 * adaptive spin / interlock queues by doing the CAS
 	 * on the 32bit mutex data only.
+	 *
+	 * Spin modes don't do this because adaptive spinners
+	 * can't take the interlock and give up if we steal
+	 * from them which may lead to preemption disabled
+	 * timeouts.
 	 */
-	lock_cmpxchgv(&lock->lck_mtx.data, 0, ndata, &odata, acquire);
+	if (mode == LCK_MTX_MODE_SLEEPABLE) {
+		lock_cmpxchgv(&lock->lck_mtx.data, 0, nstate.data,
+		    &ostate.data, acquire);
+		take_slowpath |= ostate.data;
+	} else {
+		lock_cmpxchgv(&lock->lck_mtx.val, 0, nstate.val,
+		    &ostate.val, acquire);
+		take_slowpath |= ostate.val;
+	}
 
-	take_slowpath |= odata;
 	if (__probable(!take_slowpath)) {
 		return true;
 	}
 
-	if (mode == LCK_MTX_MODE_SPIN_ALWAYS &&
-	    (odata & LCK_MTX_CTID_MASK) &&
-	    !(odata & LCK_MTX_SPIN_MODE)) {
+	if (mode == LCK_MTX_MODE_SPIN_ALWAYS && ostate.owner && !ostate.spin_mode) {
 		__lck_mtx_lock_is_sleepable_panic(lock);
 	}
 
 	if (mode == LCK_MTX_MODE_SLEEPABLE) {
-		return lck_mtx_try_lock_slow(lock, thread, odata, ndata);
+		return lck_mtx_try_lock_slow(lock, thread, ostate, nstate);
 	} else {
-		return lck_mtx_try_lock_slow_spin(lock, thread, odata, ndata);
+		return lck_mtx_try_lock_slow_spin(lock, thread, ostate, nstate);
 	}
 }
 
@@ -1219,7 +1087,7 @@ lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, uint32_t data)
 
 	if ((data & LCK_MTX_SPIN_MODE) == 0) {
 		lock_disable_preemption_for_thread(thread);
-		lck_mtx_ilk_lock_nopreempt(lock, LCK_ILK_MODE_UNLOCK);
+		lck_mtx_ilk_lock_nopreempt(lock, true);
 	}
 
 	/*

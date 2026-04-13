@@ -8,7 +8,15 @@
 #include <arpa/inet.h>
 #include <errno.h>
 
+
 #include "net_test_lib.h"
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("dieter"));
+
 
 static int
 sockv6_open(void)

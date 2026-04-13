@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.private.skywalk.register-kernel-pipe</key>
+	<true/>
+	<key>com.apple.private.network.intcoproc.restricted</key>
+	<true/>
+	<key>com.apple.developer.networking.tcp_ka_offload</key>
+	<true/>
+	<key>com.apple.private.network.qos-marking-policy-override</key>
+	<true/>
+	<key>com.apple.developer.networking.multipath_extended</key>
+	<true/>
+	<key>com.apple.private.network.intcoproc.restricted.development</key>
+	<true/>
+</dict>
+</plist>

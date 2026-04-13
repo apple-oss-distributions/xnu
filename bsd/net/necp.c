@@ -2532,6 +2532,7 @@ necp_policy_result_is_valid(u_int8_t * __sized_by(length)buffer, u_int32_t lengt
 	}
 	case NECP_POLICY_RESULT_SKIP:
 		*is_pass_skip = TRUE;
+		OS_FALLTHROUGH;
 	case NECP_POLICY_RESULT_SOCKET_DIVERT:
 	case NECP_POLICY_RESULT_SOCKET_FILTER: {
 		if (parameter_length >= sizeof(u_int32_t)) {
@@ -3321,18 +3322,20 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 {
 	struct necp_kernel_socket_policy * __single policy = NULL;
 	int policy_i;
-	int policy_count = 0;
-	u_int8_t * __indexable * __indexable tlv_buffer_pointers = NULL;
-	u_int32_t * __indexable tlv_buffer_lengths = NULL;
 	u_int32_t total_tlv_len = 0;
 	u_int8_t * __indexable result_buf = NULL;
-	u_int8_t *result_buf_cursor = result_buf;
+	u_int8_t *result_buf_cursor = NULL;
 	char result_string[MAX_RESULT_STRING_LEN];
 	char proc_name_string[MAXCOMLEN + 1];
 
 	int error_code = 0;
 	bool error_occured = false;
 	u_int32_t response_error = NECP_ERROR_INTERNAL;
+
+#define N_QUICK 256
+	u_int8_t q_cond_buf[N_QUICK];       // Minor optimization
+#define N_QUICK_TLV (256 * 2)
+	u_int8_t q_tlv_buf[N_QUICK_TLV];    // Minor optimization
 
 #define REPORT_ERROR(error) error_occured = true;               \
 	                                                response_error = error;         \
@@ -3347,25 +3350,25 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 		REPORT_ERROR(NECP_ERROR_INTERNAL);
 	}
 
+	if (out_buffer != 0 && out_buffer_length > 0) {
+		// Allow malloc to wait, since the total buffer may be large and we are not holding any locks
+		result_buf = (u_int8_t *)kalloc_data(out_buffer_length, Z_WAITOK | Z_ZERO);
+		if (result_buf == NULL) {
+			NECPLOG(LOG_DEBUG, "Failed to allocate result_buffer (%lu bytes)", out_buffer_length);
+			REPORT_ERROR(NECP_ERROR_INTERNAL);
+		}
+		// TLV starts after the total length bytes.
+		result_buf_cursor = result_buf + sizeof(u_int32_t);
+	} else {
+		NECPLOG0(LOG_DEBUG, "out_buffer is null");
+		REPORT_ERROR(NECP_ERROR_INVALID_TLV);
+	}
+
 	// LOCK
 	lck_rw_lock_shared(&necp_kernel_policy_lock);
 
 	if (necp_debug) {
 		NECPLOG0(LOG_DEBUG, "Gathering policies");
-	}
-
-	policy_count = necp_kernel_application_policies_count;
-
-	tlv_buffer_pointers = kalloc_type(u_int8_t * __indexable, policy_count, M_WAITOK | Z_ZERO);
-	if (tlv_buffer_pointers == NULL) {
-		NECPLOG(LOG_DEBUG, "Failed to allocate tlv_buffer_pointers (%lu bytes)", sizeof(u_int8_t *) * policy_count);
-		UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
-	}
-
-	tlv_buffer_lengths = (u_int32_t *)kalloc_data(sizeof(u_int32_t) * policy_count, Z_NOWAIT | Z_ZERO);
-	if (tlv_buffer_lengths == NULL) {
-		NECPLOG(LOG_DEBUG, "Failed to allocate tlv_buffer_lengths (%lu bytes)", sizeof(u_int32_t) * policy_count);
-		UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
 	}
 
 	for (policy_i = 0; necp_kernel_socket_policies_app_layer_map != NULL && necp_kernel_socket_policies_app_layer_map[policy_i] != NULL; policy_i++) {
@@ -3548,10 +3551,14 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 		total_allocated_bytes += condition_tlv_length;
 
 		u_int8_t * __indexable tlv_buffer;
-		tlv_buffer = (u_int8_t *)kalloc_data(total_allocated_bytes, Z_NOWAIT | Z_ZERO);
-		if (tlv_buffer == NULL) {
-			NECPLOG(LOG_DEBUG, "Failed to allocate tlv_buffer (%u bytes)", total_allocated_bytes);
-			continue;
+		if (total_allocated_bytes <= N_QUICK_TLV) {
+			tlv_buffer = q_tlv_buf;
+		} else {
+			tlv_buffer = (u_int8_t *)kalloc_data(total_allocated_bytes, Z_NOWAIT | Z_ZERO);
+			if (tlv_buffer == NULL) {
+				NECPLOG(LOG_DEBUG, "Failed to allocate tlv_buffer (%u bytes)", total_allocated_bytes);
+				UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
+			}
 		}
 
 		u_int8_t *cursor = tlv_buffer;
@@ -3561,9 +3568,6 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 		cursor = necp_buffer_write_tlv(cursor, NECP_TLV_POLICY_RESULT_STRING, result_string_len, result_string, tlv_buffer, total_allocated_bytes);
 		cursor = necp_buffer_write_tlv(cursor, NECP_TLV_POLICY_OWNER, proc_name_len, proc_name_string, tlv_buffer, total_allocated_bytes);
 
-#define N_QUICK 256
-		u_int8_t q_cond_buf[N_QUICK]; // Minor optimization
-
 		u_int8_t * __indexable cond_buf; // To be used for condition TLVs
 		if (condition_tlv_length <= N_QUICK) {
 			cond_buf = q_cond_buf;
@@ -3571,8 +3575,10 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 			cond_buf = (u_int8_t *)kalloc_data(condition_tlv_length, Z_NOWAIT);
 			if (cond_buf == NULL) {
 				NECPLOG(LOG_DEBUG, "Failed to allocate cond_buffer (%u bytes)", condition_tlv_length);
-				kfree_data(tlv_buffer, total_allocated_bytes);
-				continue;
+				if (tlv_buffer != q_tlv_buf) {
+					kfree_data(tlv_buffer, total_allocated_bytes);
+				}
+				UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
 			}
 		}
 
@@ -3772,41 +3778,41 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 			kfree_data(cond_buf, condition_tlv_length);
 		}
 
-		tlv_buffer_pointers[policy_i] = tlv_buffer;
-		tlv_buffer_lengths[policy_i] = (cursor - tlv_buffer);
-
 		// This is the length of the TLV for NECP_TLV_POLICY_DUMP
 		total_tlv_len += sizeof(u_int8_t) + sizeof(u_int32_t) + (cursor - tlv_buffer);
+
+		// As we accumulate policy data, we see the result buffer is exceeded already, abort.
+		if (out_buffer_length < total_tlv_len + sizeof(u_int32_t)) {
+			NECPLOG(LOG_DEBUG, "out_buffer_length too small (%lu < %lu)", out_buffer_length, total_tlv_len + sizeof(u_int32_t));
+			if (tlv_buffer != q_tlv_buf) {
+				kfree_data(tlv_buffer, total_allocated_bytes);
+			}
+			UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INVALID_TLV);
+		}
+
+		// result cursor out of bound
+		if (result_buf_cursor < result_buf + sizeof(u_int32_t) || result_buf_cursor > result_buf + out_buffer_length) {
+			NECPLOG0(LOG_DEBUG, "result cursor out of bound");
+			if (tlv_buffer != q_tlv_buf) {
+				kfree_data(tlv_buffer, total_allocated_bytes);
+			}
+			UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
+		}
+
+		int tlv_len = cursor - tlv_buffer;
+		result_buf_cursor = necp_buffer_write_tlv(result_buf_cursor, NECP_TLV_POLICY_DUMP, tlv_len, tlv_buffer, result_buf, out_buffer_length);
+		if (tlv_buffer != q_tlv_buf) {
+			kfree_data(tlv_buffer, total_allocated_bytes);
+		}
 	}
 
 	// UNLOCK
 	lck_rw_done(&necp_kernel_policy_lock);
 
 	// Copy out
-	if (out_buffer != 0) {
-		if (out_buffer_length < total_tlv_len + sizeof(u_int32_t)) {
-			NECPLOG(LOG_DEBUG, "out_buffer_length too small (%lu < %lu)", out_buffer_length, total_tlv_len + sizeof(u_int32_t));
-			REPORT_ERROR(NECP_ERROR_INVALID_TLV);
-		}
-
-		// Allow malloc to wait, since the total buffer may be large and we are not holding any locks
-		result_buf = (u_int8_t *)kalloc_data(total_tlv_len + sizeof(u_int32_t), Z_WAITOK | Z_ZERO);
-		if (result_buf == NULL) {
-			NECPLOG(LOG_DEBUG, "Failed to allocate result_buffer (%lu bytes)", total_tlv_len + sizeof(u_int32_t));
-			REPORT_ERROR(NECP_ERROR_INTERNAL);
-		}
-
+	if (!error_occured && result_buf != 0 && out_buffer != 0 && out_buffer_length >= total_tlv_len + sizeof(u_int32_t)) {
 		// Add four bytes for total length at the start
 		memcpy(result_buf, &total_tlv_len, sizeof(u_int32_t));
-
-		// Copy the TLVs
-		result_buf_cursor = result_buf + sizeof(u_int32_t);
-		for (int i = 0; i < policy_count; i++) {
-			if (tlv_buffer_pointers[i] != NULL) {
-				result_buf_cursor = necp_buffer_write_tlv(result_buf_cursor, NECP_TLV_POLICY_DUMP, tlv_buffer_lengths[i], tlv_buffer_pointers[i],
-				    result_buf, total_tlv_len + sizeof(u_int32_t));
-			}
-		}
 
 		int copy_error = copyout(result_buf, out_buffer, total_tlv_len + sizeof(u_int32_t));
 		if (copy_error) {
@@ -3822,23 +3828,11 @@ done:
 	}
 
 	if (result_buf != NULL) {
-		kfree_data(result_buf, total_tlv_len + sizeof(u_int32_t));
+		kfree_data(result_buf, out_buffer_length);
 	}
 
-	if (tlv_buffer_pointers != NULL) {
-		for (int i = 0; i < policy_count; i++) {
-			if (tlv_buffer_pointers[i] != NULL) {
-				kfree_data_addr(tlv_buffer_pointers[i]);
-				tlv_buffer_pointers[i] = NULL;
-			}
-		}
-		kfree_type(u_int8_t * __indexable, policy_count, tlv_buffer_pointers);
-	}
-
-	if (tlv_buffer_lengths != NULL) {
-		kfree_data(tlv_buffer_lengths, sizeof(*tlv_buffer_lengths) * policy_count);
-	}
 #undef N_QUICK
+#undef N_QUICK_TLV
 #undef RESET_COND_BUF
 #undef REPORT_ERROR
 #undef UNLOCK_AND_REPORT_ERROR
@@ -7743,7 +7737,8 @@ necp_check_restricted_multicast_drop(proc_t proc, struct necp_socket_info *info,
 
 	// Enforce for iOS, linked on or after version 14
 	// If the caller set `check_minor_version`, only enforce starting at 14.5
-	if ((platform != PLATFORM_IOS ||
+	// Also enforce for XROS, but for all versions
+	if (platform != PLATFORM_XROS && (platform != PLATFORM_IOS ||
 	    sdk == 0 ||
 	    (sdk >> 16) < 14 ||
 	    (check_minor_version && (sdk >> 16) == 14 && ((sdk >> 8) & 0xff) < 5))) {

@@ -91,6 +91,10 @@ routine		exception_raise(
  ;
  ServerAuditToken atoken: audit_token_t
 #endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
+#endif
 			);
 
 routine		exception_raise_state(
@@ -107,6 +111,10 @@ routine		exception_raise_state(
 #if EXC_SERVER_AUDITTOKEN
  ;
  ServerAuditToken atoken: audit_token_t
+#endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
 #endif
 			);
 
@@ -126,6 +134,10 @@ routine		exception_raise_state_identity(
 #if EXC_SERVER_AUDITTOKEN
  ;
  ServerAuditToken atoken: audit_token_t
+#endif
+#if KERNEL_USER
+ ;
+ UserAuditToken utoken	: audit_token_t
 #endif
 			);
 

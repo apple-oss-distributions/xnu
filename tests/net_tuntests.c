@@ -33,10 +33,11 @@
 
 #include <skywalk/os_skywalk_private.h> // for SK_FEATURE_*
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.net.tun"));
-
 /* Disable all these test until <rdar://problem/49124468> is fixed */
-T_GLOBAL_META(T_META_ENABLED(false));
+T_GLOBAL_META(T_META_NAMESPACE("xnu.net.tun"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("networking"),
+    T_META_ENABLED(false));
 
 #if 0
 #undef T_QUIET

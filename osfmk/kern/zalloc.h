@@ -413,7 +413,7 @@ extern void     zone_require_ro(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
- * @const Z_SET_NOTEARLY
+ * @const Z_SET_NOT_EARLY
  * Using this flag from external allocations APIs (kalloc_type/zalloc)
  * allows the callsite to skip the early (shared) zone for that sizeclass and
  * directly allocated from the requested zone.
@@ -421,11 +421,6 @@ extern void     zone_require_ro(
  * zone only when a given threshold is exceeded. It will also set a flag
  * to indicate that future allocations to the zone should directly go to
  * the zone instead of the shared zone.
- *
- * @const Z_SPRAYQTN
- * This flag tells the VM to allocate from the "spray quarantine" range when
- * it services the allocation. For more details on what allocations qualify
- * to use this flag see @c KMEM_RANGE_ID_SPRAYQTN.
  *
  * @const Z_KALLOC_ARRAY
  * Instead of returning a standard "pointer" return a pointer that encodes
@@ -468,8 +463,8 @@ __options_decl(zalloc_flags_t, uint32_t, {
 
 #if XNU_KERNEL_PRIVATE
 	Z_NOSOFTLIMIT   = 0x0020,
-	Z_SET_NOTEARLY = 0x0040,
-	Z_SPRAYQTN      = 0x0080,
+	Z_SET_NOT_EARLY = 0x0040,
+	/* unused         0x0080, */
 	Z_KALLOC_ARRAY  = 0x0100,
 #if KASAN_CLASSIC
 	Z_FULLSIZE      = 0x0000,
@@ -492,9 +487,6 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_NOWAIT_ZERO          = Z_NOWAIT | Z_ZERO,
 	Z_WAITOK_ZERO          = Z_WAITOK | Z_ZERO,
 	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL,
-#if XNU_KERNEL_PRIVATE
-	Z_WAITOK_ZERO_SPRAYQTN = Z_WAITOK | Z_ZERO | Z_SPRAYQTN,
-#endif
 
 	Z_KPI_MASK             = Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO,
 #if XNU_KERNEL_PRIVATE
@@ -1631,8 +1623,9 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_PMAP,
 	ZONE_ID_VM_MAP,
 	ZONE_ID_VM_MAP_ENTRY,
-	ZONE_ID_VM_MAP_HOLES,
+	ZONE_ID_VM_MAP_NODES,
 	ZONE_ID_VM_MAP_COPY,
+	ZONE_ID_VM_GO_CHUNKS,
 	ZONE_ID_VM_PAGES,
 	ZONE_ID_IPC_PORT,
 	ZONE_ID_IPC_PORT_SET,
@@ -1993,8 +1986,8 @@ EVENT_DECLARE(ZONE_EXHAUSTED, zone_exhausted_cb_t);
  * @const KHEAP_ID_EARLY
  * Indicates zones part of the KHEAP_EARLY heap.
  *
- * @const KHEAP_ID_DATA_BUFFERS
- * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
+ * @const KHEAP_ID_DATA_PRIVATE
+ * Indicates zones part of the KHEAP_DATA_PRIVATE heap.
  *
  * @const KHEAP_ID_DATA_SHARED
  * Indicates zones part of the KHEAP_DATA_SHARED heap.
@@ -2005,7 +1998,7 @@ EVENT_DECLARE(ZONE_EXHAUSTED, zone_exhausted_cb_t);
 __enum_decl(zone_kheap_id_t, uint8_t, {
 	KHEAP_ID_NONE,
 	KHEAP_ID_EARLY,
-	KHEAP_ID_DATA_BUFFERS,
+	KHEAP_ID_DATA_PRIVATE,
 	KHEAP_ID_DATA_SHARED,
 	KHEAP_ID_KT_VAR,
 #define KHEAP_ID_COUNT (KHEAP_ID_KT_VAR + 1)
@@ -2014,14 +2007,14 @@ __enum_decl(zone_kheap_id_t, uint8_t, {
 static inline bool
 zone_is_data_kheap(zone_kheap_id_t kheap_id)
 {
-	return kheap_id == KHEAP_ID_DATA_BUFFERS ||
+	return kheap_id == KHEAP_ID_DATA_PRIVATE ||
 	       kheap_id == KHEAP_ID_DATA_SHARED;
 }
 
 static inline bool
 zone_is_data_buffers_kheap(zone_kheap_id_t kheap_id)
 {
-	return kheap_id == KHEAP_ID_DATA_BUFFERS;
+	return kheap_id == KHEAP_ID_DATA_PRIVATE;
 }
 
 static inline bool

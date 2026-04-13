@@ -33,12 +33,14 @@
 #include <vm/vm_purgeable_internal.h>
 #include <mach/mach_host_server.h>
 #include <IOKit/IOBSD.h>
+#include <vm/vm_fault_internal.h>
 #include <vm/vm_memory_entry_xnu.h>
 #include <vm/vm_map_internal.h>
 #include <vm/memory_object_internal.h>
 #include <vm/vm_protos_internal.h>
 #include <vm/vm_object_internal.h>
 #include <vm/vm_iokit.h>
+#include <vm/vm_map_lock_internal.h>
 
 static void mach_memory_entry_no_senders(ipc_port_t, mach_port_mscount_t);
 
@@ -167,7 +169,7 @@ mach_make_memory_entry_mem_only(
 	unsigned int            access;
 	vm_prot_t               protections;
 	bool                    mask_protections;
-	unsigned int            wimg_mode;
+	uint8_t                 wimg_mode;
 	bool                    use_data_addr;
 	bool                    use_4K_compat;
 	vm_named_entry_t        user_entry __unused = NULL;
@@ -297,7 +299,7 @@ mach_make_memory_entry_named_create(
 	unsigned int            access;
 	vm_prot_t               protections;
 	bool                    mask_protections;
-	unsigned int            wimg_mode;
+	uint8_t                 wimg_mode;
 	bool                    use_data_addr;
 	bool                    use_4K_compat;
 	int                     ledger_flags = 0;
@@ -586,7 +588,49 @@ mach_make_memory_entry_copy(
 	return KERN_SUCCESS;
 }
 
-static kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+mach_make_memory_entry_share_sanitize(
+	vm_map_t                target_map,
+	memory_object_size_ut   size_u,
+	vm_map_offset_ut        offset_u,
+	vm_map_offset_t        *map_start,
+	vm_map_offset_t        *map_end,
+	vm_map_size_t          *map_size,
+	vm_map_offset_t        *offset)
+{
+	kern_return_t           kr;
+
+#if CONFIG_KERNEL_TAGGING
+	if (vm_kernel_map_is_kernel(target_map)) {
+		/* Restrict canonicalization to tagged kernel addresses. */
+		offset_u = vm_sanitize_canonicalize_ut_addr(target_map, offset_u);
+	}
+#endif /* CONFIG_KERNEL_TAGGING */
+
+	/*
+	 * Validate start and end
+	 */
+	kr = vm_sanitize_addr_size(offset_u, size_u,
+	    VM_SANITIZE_CALLER_MACH_MAKE_MEMORY_ENTRY,
+	    target_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+	    map_start, map_end, map_size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
+	}
+	/*
+	 * Validate offset
+	 */
+	kr = vm_sanitize_offset(offset_u, VM_SANITIZE_CALLER_MACH_MAKE_MEMORY_ENTRY,
+	    *map_start, *map_end, offset);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
+	}
+
+	return KERN_SUCCESS;
+}
+
+__static_testable kern_return_t
 mach_make_memory_entry_share(
 	vm_map_t                      target_map,
 	memory_object_size_ut        *size_u,
@@ -613,7 +657,7 @@ mach_make_memory_entry_share(
 	 * in the VM_FLAGS_RETURN_DATA_ADDR/MAP_MEM_USE_DATA_ADDR case.
 	 */
 	vm_object_offset_t      offset_in_page;
-	unsigned int            wimg_mode;
+	uint8_t                 wimg_mode;
 	kern_return_t           kr;
 	vm_map_size_t           map_size;
 	vm_map_offset_t         map_start, map_end, offset;
@@ -627,11 +671,18 @@ mach_make_memory_entry_share(
 		return kr;
 	}
 
+	if (target_map == VM_MAP_NULL) {
+		kr = mach_make_memory_entry_cleanup(KERN_INVALID_TASK, target_map,
+		    size_u, offset_u, permission, user_entry, object_handle);
+		vmlp_api_end(MACH_MAKE_MEMORY_ENTRY_SHARE, kr);
+		return kr;
+	}
+
 	/*
 	 * Sanitize addr and size. Permimssions have been sanitized prior to
 	 * dispatch
 	 */
-	kr = mach_make_memory_entry_generic_sanitize(target_map,
+	kr = mach_make_memory_entry_share_sanitize(target_map,
 	    *size_u,
 	    offset_u,
 	    &map_start,
@@ -650,53 +701,40 @@ mach_make_memory_entry_share(
 	vm_memory_entry_decode_perm(permission, &access, &protections,
 	    &mask_protections, &use_data_addr, &use_4K_compat);
 
-	if (target_map == VM_MAP_NULL) {
-		kr = mach_make_memory_entry_cleanup(KERN_INVALID_TASK, target_map,
-		    size_u, offset_u, permission, user_entry, object_handle);
-		vmlp_api_end(MACH_MAKE_MEMORY_ENTRY_SHARE, kr);
-		return kr;
-	}
-
 	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vmk_flags.vmkf_range_id = kmem_needs_data_share_range() ?
-	    KMEM_RANGE_ID_DATA_SHARED : KMEM_RANGE_ID_DATA;
+	vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA_SHARED;
 
 	parent_copy_entry = VM_MAP_ENTRY_NULL;
 	if (!(permission & MAP_MEM_VM_SHARE)) {
-		vm_map_t tmp_map, real_map;
-		vm_map_version_t version;
-		vm_object_t tmp_object;
-		vm_object_offset_t obj_off;
-		vm_prot_t prot;
-		boolean_t wired;
-		bool contended;
-
-		/* resolve any pending submap copy-on-write... */
 		if (protections & VM_PROT_WRITE) {
+			VM_MAP_LOCK_CTX_DECLARE(ctx);
+			vm_map_t tmp_map, real_map;
+			vm_object_t tmp_object;
+			vm_map_entry_t tmp_entry;
+			vm_object_offset_t obj_off;
+			vm_prot_t prot;
+			boolean_t wired;
+
+			/* resolve any pending submap copy-on-write... */
 			tmp_map = target_map;
-			vm_map_lock_read(tmp_map);
-			kr = vm_map_lookup_and_lock_object(&tmp_map,
+			kr = vm_map_lookup_object_and_lock_entry(&tmp_map,
 			    map_start,
 			    protections | (mask_protections ? VM_PROT_IS_MASK : 0),
-			    OBJECT_LOCK_EXCLUSIVE,
-			    &version,
 			    &tmp_object,
+			    &tmp_entry,
 			    &obj_off,
 			    &prot,
 			    &wired,
 			    NULL,                               /* fault_info */
 			    &real_map,
-			    &contended);
-			if (kr != KERN_SUCCESS) {
-				vm_map_unlock_read(tmp_map);
-			} else {
-				vm_object_unlock(tmp_object);
-				vm_map_unlock_read(tmp_map);
-				if (real_map != tmp_map) {
-					vm_map_unlock_read(real_map);
-				}
+			    ctx,
+			    NULL,
+			    false);
+			if (kr == KERN_SUCCESS) {
+				vm_map_range_sh_unlock(ctx, NULL);
 			}
 		}
+
 		/* ... and carry on */
 
 		/* stop extracting if VM object changes */
@@ -735,17 +773,6 @@ mach_make_memory_entry_share(
 		 */
 		cur_prot = protections;
 		max_prot = protections;
-	}
-	if (target_map->pmap == kernel_pmap) {
-		/*
-		 * Get "reserved" map entries to avoid deadlocking
-		 * on the kernel map or a kernel submap if we
-		 * run out of VM map entries and need to refill that
-		 * zone.
-		 */
-		vmk_flags.vmkf_copy_pageable = FALSE;
-	} else {
-		vmk_flags.vmkf_copy_pageable = TRUE;
 	}
 	vmk_flags.vmkf_copy_same_map = FALSE;
 #if HAS_MTE
@@ -803,7 +830,7 @@ mach_make_memory_entry_share(
 		}
 	}
 
-	if (!(permission & MAP_MEM_VM_SHARE)) {
+	if (!(permission & MAP_MEM_VM_SHARE)) { /* vmkf_copy_single_object case */
 		vm_map_entry_t copy_entry;
 
 		/* limit size to what's actually covered by "copy" */
@@ -1108,7 +1135,14 @@ mach_make_memory_entry_from_parent_entry(
 	} else {
 		object = vm_named_entry_to_vm_object(parent_entry);
 		assert(object != VM_OBJECT_NULL);
-		assert(object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC);
+		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
+			panic("mach_make_memory_entry can't handle SYMMETRIC object");
+			/* This is because the resulting entry may be added to a map with vm_map_enter_mem_object()
+			 * with needs_copy either true or false so the entry we create in the vm_map_copy_t object
+			 * needs to be ready for either case. Allowing an entry with SYMMETRIC object and
+			 * vm_map_enter() with needs_copy=false would create a CoW bypass
+			 */
+		}
 		vm_named_entry_associate_vm_object(
 			user_entry,
 			object,
@@ -1129,9 +1163,6 @@ mach_make_memory_entry_from_parent_entry(
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 
 		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
-		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
-			object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
-		}
 		vm_object_unlock(object);
 	}
 	*size_u = vm_sanitize_wrap_size(user_entry->size -
@@ -1187,6 +1218,8 @@ mach_make_memory_entry_internal(
 
 	parent_entry = mach_memory_entry_from_port(parent_handle);
 	if (parent_entry && parent_entry->is_copy) {
+		/* the parent entry we're trying to duplicate must be a sharable copy and not a CoW copy
+		 * since we might want to eventually add it as is to a map */
 		return mach_make_memory_entry_cleanup(KERN_INVALID_ARGUMENT, target_map,
 		           size_u, offset_u, permission, user_entry, object_handle);
 	}
@@ -1360,6 +1393,58 @@ mach_memory_object_memory_entry_64(
 	    (user_entry->protection & VM_PROT_ALL));
 	user_entry->internal = object->internal;
 	assert(object->internal == internal);
+	if (VM_OBJECT_OWNER(object) != TASK_NULL) {
+		/* all memory in this entry is "owned" */
+		user_entry->is_fully_owned = TRUE;
+	} else if (object && !object->internal) {
+		/* external objects can become "owned" */
+		user_entry->is_fully_owned = TRUE;
+	}
+
+	*entry_handle = user_handle;
+	return KERN_SUCCESS;
+}
+
+/*
+ *	mach_memory_object_control_memory_entry_64
+ *
+ *	Create a named entry backed by the provided memory_object_control.
+ *
+ */
+kern_return_t
+mach_memory_object_control_memory_entry_64(
+	memory_object_control_t control,
+	memory_object_offset_t  offset,
+	memory_object_size_t    size,
+	vm_prot_t               permission,
+	ipc_port_t              *entry_handle)
+{
+	vm_named_entry_t        user_entry;
+	ipc_port_t              user_handle;
+	vm_object_t             object;
+
+	*entry_handle = IPC_PORT_NULL;
+
+	if (control == MEMORY_OBJECT_CONTROL_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	object = memory_object_control_to_vm_object(control);
+	if (object == VM_OBJECT_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	vm_object_reference(object);
+
+	user_entry = mach_memory_entry_allocate(&user_handle);
+	user_entry->size = size;
+	user_entry->offset = offset;
+	user_entry->protection = permission & VM_PROT_ALL;
+	user_entry->access = GET_MAP_MEM(permission);
+	user_entry->is_sub_map = FALSE;
+
+	vm_named_entry_associate_vm_object(user_entry, object, offset, size,
+	    (user_entry->protection & VM_PROT_ALL));
+	user_entry->internal = object->internal;
 	if (VM_OBJECT_OWNER(object) != TASK_NULL) {
 		/* all memory in this entry is "owned" */
 		user_entry->is_fully_owned = TRUE;
@@ -1690,7 +1775,6 @@ mach_memory_entry_ownership(
 		vm_map_entry_t entry;
 
 		copy = mem_entry->backing.copy;
-		named_entry_unlock(mem_entry);
 		for (entry = vm_map_copy_first_entry(copy);
 		    entry != vm_map_copy_to_entry(copy);
 		    entry = entry->vme_next) {
@@ -1720,6 +1804,7 @@ mach_memory_entry_ownership(
 				break;
 			}
 		}
+		named_entry_unlock(mem_entry);
 	} else {
 		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
@@ -2051,6 +2136,21 @@ mach_memory_entry_describe(
 	}
 }
 
+memory_object_size_t
+mach_memory_entry_size(ipc_port_t port)
+{
+	vm_named_entry_t entry;
+
+	assert(ip_type(port) == IKOT_NAMED_ENTRY);
+	entry = mach_memory_entry_from_port(port);
+	assert(entry);
+	if (NULL == entry) {
+		return 0;
+	}
+	return entry->size;
+}
+
+
 /*
  * mach_memory_entry_no_senders:
  *
@@ -2283,3 +2383,56 @@ vm_convert_port_to_copy_object(
 	/* Pull out the copy map object... */
 	return vm_named_entry_to_vm_object(named_entry);
 }
+
+#pragma mark - tests
+#if DEBUG || DEVELOPMENT
+
+/*
+ * Makes sure that tagged kernel addresses are handled
+ * appropriately when creating a memory entry out of them
+ * intended for sharing.
+ *
+ * In particular, tagged addresses due to KASAN should be
+ * canonicalized prior to sanitization.
+ */
+static int
+mach_make_memory_entry_share_kernel_heap_test_run(
+	__unused int64_t in,
+	int64_t *out)
+{
+	kern_return_t kr  = KERN_SUCCESS;
+	vm_offset_t data  = 0;
+	ipc_port_t handle = MACH_PORT_NULL;
+	vm_named_entry_kernel_flags_t vmne_kflags = VM_NAMED_ENTRY_KERNEL_FLAGS_NONE;
+	memory_object_size_t  size = PAGE_SIZE;
+	memory_object_size_ut size_u = vm_sanitize_wrap_size(size);
+
+	kr = kmem_alloc(
+		kernel_map,
+		&data,
+		size,
+		KMA_ZERO | KMA_DATA | KMA_TAG,
+		VM_KERN_MEMORY_KALLOC_DATA);
+	printf("%s: data: %lx\n", __func__, data);
+	assert(data);
+
+	kr = mach_make_memory_entry_share(
+		kernel_map,
+		&size_u,
+		(vm_map_offset_t)data,
+		VM_PROT_DEFAULT, /* need write permission to test vm_map_lookup_object_and_lock_entry() */
+		vmne_kflags,
+		&handle,
+		MACH_PORT_NULL,
+		NULL);
+
+	assert3u(kr, ==, KERN_SUCCESS);
+
+	kmem_free(kernel_map, data, size, KMF_TAG);
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(memory_entry_share_kernel_heap_test,
+    mach_make_memory_entry_share_kernel_heap_test_run);
+
+#endif /* DEBUG || DEVELOPMENT */

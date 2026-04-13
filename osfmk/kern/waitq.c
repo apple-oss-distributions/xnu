@@ -75,6 +75,9 @@
 
 #include <sys/kdebug.h>
 
+/* make sure that WAITQ_TYPED_EVENT64() only changes canonical bits */
+static_assert(VM_KERNEL_POINTER_SIGNIFICANT_BITS < 48);
+
 /*!
  * @const waitq_set_unlink_batch
  *
@@ -750,7 +753,7 @@ waitq_lock_try(waitq_t wq)
 	return rc;
 }
 
-bool
+__mockable bool
 waitq_lock_reserve(waitq_t wq, uint32_t *ticket)
 {
 	return hw_lck_ticket_reserve(&wq.wq_q->waitq_interlock, ticket, &waitq_lck_grp);
@@ -766,7 +769,7 @@ waitq_lock_wait(waitq_t wq, uint32_t ticket)
 #endif
 }
 
-bool
+__mockable bool
 waitq_lock_allow_invalid(waitq_t wq)
 {
 	hw_lock_status_t rc;
@@ -804,6 +807,8 @@ struct waitq_select_args {
 	bool                    is_identified;
 
 	/* output parameters */
+	/* set if there are more threads and WAITQ_CHECK_HAS_MORE is set */
+	bool                    has_more;
 	/* counts all woken threads, may have more threads than on threadq */
 	uint32_t                nthreads;
 	/* preemption is disabled while threadq is non-empty */
@@ -1010,11 +1015,18 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 		if (waitq_same(thread->waitq, waitq) && thread->wait_event == args->event) {
 			/* We found a matching thread! Pull it from the queue. */
 
+			if (args->nthreads == args->max_threads) {
+				assert(args->flags & WAITQ_CHECK_HAS_MORE);
+				args->has_more = true;
+				break;
+			}
+
 			circle_dequeue(&safeq->waitq_queue, &thread->wait_links);
 
 			waitq_select_queue_add(waitq, thread, args);
 
-			if (++args->nthreads >= args->max_threads) {
+			if (++args->nthreads >= args->max_threads &&
+			    (args->flags & WAITQ_CHECK_HAS_MORE) == 0) {
 				break;
 			}
 		} else {
@@ -1064,6 +1076,11 @@ waitq_prioq_iterate_locked(
 	while (!priority_queue_empty(&ts_wq->waitq_prio_queue)) {
 		thread_t thread;
 
+		if (args->nthreads == args->max_threads) {
+			assert(args->flags & WAITQ_CHECK_HAS_MORE);
+			break;
+		}
+
 		thread = priority_queue_remove_max(&ts_wq->waitq_prio_queue,
 		    struct thread, wait_prioq_links);
 
@@ -1089,6 +1106,10 @@ waitq_prioq_iterate_locked(
 		waitq_select_queue_add(waitq, thread, args);
 
 		if (++args->nthreads >= args->max_threads) {
+			if ((args->flags & WAITQ_CHECK_HAS_MORE) &&
+			    !priority_queue_empty(&ts_wq->waitq_prio_queue)) {
+				args->has_more = true;
+			}
 			break;
 		}
 	}
@@ -1410,7 +1431,7 @@ waitq_assert_wait64_locked(waitq_t waitq,
 	return wait_result;
 }
 
-bool
+__mockable bool
 waitq_pull_thread_locked(waitq_t waitq, thread_t thread)
 {
 	struct waitq *safeq;
@@ -1459,7 +1480,7 @@ waitq_pull_thread_locked(waitq_t waitq, thread_t thread)
 }
 
 
-void
+__mockable void
 waitq_clear_promotion_locked(waitq_t waitq, thread_t thread)
 {
 	spl_t s = 0;
@@ -1535,7 +1556,7 @@ waitq_wakeup64_nthreads_locked(
 		waitq_select_queue_flush(waitq, &args);
 	}
 
-	return args.nthreads;
+	return args.nthreads + args.has_more;
 }
 
 kern_return_t
@@ -1570,7 +1591,8 @@ __mockable thread_t
 waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
-	waitq_wakeup_flags_t    flags)
+	waitq_wakeup_flags_t    flags,
+	bool                   *has_more)
 {
 	struct waitq_select_args args = {
 		.event = wake_event,
@@ -1580,6 +1602,7 @@ waitq_wakeup64_identify_locked(
 		.is_identified = true,
 	};
 
+	assert(!has_more == !(flags & WAITQ_CHECK_HAS_MORE));
 	assert(waitq_held(waitq));
 
 	do_waitq_select_n_locked(waitq, &args);
@@ -1593,6 +1616,9 @@ waitq_wakeup64_identify_locked(
 		ml_set_interrupts_enabled(true);
 	}
 
+	if (has_more) {
+		*has_more = args.has_more;
+	}
 	if (args.nthreads > 0) {
 		thread_t thread = cqe_dequeue_head(&args.threadq, struct thread, wait_links);
 
@@ -1652,7 +1678,7 @@ waitq_resume_and_bind_identified_thread(
 	enable_preemption(); // balance disable upon pulling thread
 }
 
-kern_return_t
+__mockable kern_return_t
 waitq_wakeup64_thread_and_unlock(
 	struct waitq           *waitq,
 	event64_t              event,
@@ -1836,7 +1862,7 @@ waitq_set_unlink_all_locked(struct waitq_set *wqset, waitq_link_list_t *free_l)
 	}
 }
 
-void
+__mockable void
 waitq_clear_prepost_locked(struct waitq *waitq)
 {
 	assert(waitq_type(waitq) == WQT_PORT);
@@ -2370,7 +2396,7 @@ waitq_wakeup64_one(
 	return count ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
-kern_return_t
+__mockable kern_return_t
 waitq_wakeup64_thread(
 	struct waitq           *waitq,
 	event64_t               event,
@@ -2409,7 +2435,7 @@ waitq_wakeup64_identify(
 	waitq_lock(waitq);
 
 	thread_t thread = waitq_wakeup64_identify_locked(waitq, wake_event,
-	    flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
+	    flags | waitq_flags_splx(spl) | WAITQ_UNLOCK, NULL);
 	/* waitq is unlocked, thread is not go-ed yet */
 	/* preemption disabled if thread non-null */
 	/* splx is handled */

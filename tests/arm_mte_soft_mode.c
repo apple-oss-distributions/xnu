@@ -35,13 +35,17 @@
 #include "arm_mte_utilities.h"
 #include "test_utils.h"
 
+T_GLOBAL_META(
+	XNU_T_META_SOC_SPECIFIC
+	);
+
 /*
  * This binary is code signed with the signing ID com.apple.internal.arm_mte_soft_mode_test.
  * On internal builds, AMFI contains this ID on the MTE soft mode list.
  */
 T_DECL(mte_soft_mode_enabled,
     "Test that soft mode is enabled on binaries in the AMFI soft mode list",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_MTE2", 1),
+    T_META_REQUIRES_SYSCTL_EQ("kern.is_mte_enabled", 1),
     XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,
     XNU_T_META_SOC_SPECIFIC,
     T_META_ENABLED(false) /* rdar://142784868 */)

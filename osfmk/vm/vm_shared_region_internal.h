@@ -73,6 +73,7 @@ extern kern_return_t vm_shared_region_start_address(
 	struct vm_shared_region *shared_region,
 	mach_vm_offset_t        *start_address);
 extern void vm_shared_region_undo_mappings(
+	struct vm_shared_region *shared_region,
 	vm_map_t sr_map,
 	mach_vm_offset_t sr_base_address,
 	struct _sr_file_mappings *srf_mappings,

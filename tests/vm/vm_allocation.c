@@ -2533,7 +2533,7 @@ test_write_on_partially_unwritable_range()
 	mach_msg_type_number_t buffer_size = (mach_msg_type_number_t)get_buffer_size();
 
 	/*  For sizes < msg_ool_size_small,
-	 *  vm_map_copy_overwrite_nested() uses
+	 *  vm_map_copy_overwrite_impl() uses
 	 *  vm_map_copyout_kernel_buffer() to read in the memory,
 	 *  returning different errors, see 8217123. */
 	kern_return_t kr_expected = (buffer_size < vm_page_size * 2) ? KERN_INVALID_ADDRESS : KERN_PROTECTION_FAILURE;
@@ -2980,7 +2980,7 @@ test_copy_dest_on_partially_unwritable_range()
 	mach_msg_type_number_t size = (mach_msg_type_number_t)get_buffer_size();
 
 	/*  For sizes < msg_ool_size_small,
-	 *  vm_map_copy_overwrite_nested() uses
+	 *  vm_map_copy_overwrite_impl() uses
 	 *  vm_map_copyout_kernel_buffer() to read in the memory,
 	 *  returning different errors, see 8217123. */
 	kern_return_t kr_expected = (size < vm_page_size * 2) ? KERN_INVALID_ADDRESS : KERN_PROTECTION_FAILURE;
@@ -3010,7 +3010,7 @@ test_copy_source_on_partially_unreadable_range()
 	mach_msg_type_number_t size = (mach_msg_type_number_t)get_buffer_size();
 
 	/*  For sizes < msg_ool_size_small,
-	 *  vm_map_copy_overwrite_nested() uses
+	 *  vm_map_copy_overwrite_impl() uses
 	 *  vm_map_copyout_kernel_buffer() to read in the memory,
 	 *  returning different errors, see 8217123. */
 	kern_return_t kr_expected = (size < vm_page_size * 2) ? KERN_INVALID_ADDRESS : KERN_PROTECTION_FAILURE;
@@ -3352,7 +3352,7 @@ void
 test_vmcopy_fresh_source()
 {
 	mach_vm_size_t size = get_vm_size();
-	mach_vm_address_t src, dst;
+	mach_vm_address_t src = 0, dst = 0;
 
 	if (get_vmcopy_post_action() == VMCOPY_MODIFY_SHARED_COPIED) {
 		/* No shared/copied region to modify so just return. */
@@ -3381,7 +3381,7 @@ void
 test_vmcopy_shared_source()
 {
 	mach_vm_size_t size = get_vm_size();
-	mach_vm_address_t src, dst, shared;
+	mach_vm_address_t src = 0, dst = 0, shared;
 	int action = get_vmcopy_post_action();
 	int pid, status;
 
@@ -3435,7 +3435,7 @@ void
 test_vmcopy_copied_from_source()
 {
 	mach_vm_size_t size = get_vm_size();
-	mach_vm_address_t src, dst, copied;
+	mach_vm_address_t src = 0, dst = 0, copied = 0;
 
 	assert_allocate_success(&copied, size, TRUE);
 	write_region(copied, 0);
@@ -3462,7 +3462,7 @@ void
 test_vmcopy_copied_to_source()
 {
 	mach_vm_size_t size = get_vm_size();
-	mach_vm_address_t src, dst, copied;
+	mach_vm_address_t src = 0, dst = 0, copied = 0;
 
 	assert_allocate_success(&src, size, TRUE);
 	write_region(src, 0);
@@ -3489,7 +3489,7 @@ void
 test_vmcopy_trueshared_source()
 {
 	mach_vm_size_t size   = get_vm_size();
-	mach_vm_address_t src = 0x0, dst, shared;
+	mach_vm_address_t src = 0x0, dst = 0x0, shared = 0x0;
 	vm_prot_t cur_protect = (VM_PROT_READ | VM_PROT_WRITE);
 	vm_prot_t max_protect = (VM_PROT_READ | VM_PROT_WRITE);
 	mem_entry_name_port_t mem_obj;
@@ -3522,7 +3522,7 @@ void
 test_vmcopy_private_aliased_source()
 {
 	mach_vm_size_t size   = get_vm_size();
-	mach_vm_address_t src = 0x0, dst, shared;
+	mach_vm_address_t src = 0x0, dst = 0x0, shared = 0x0;
 	vm_prot_t cur_protect = (VM_PROT_READ | VM_PROT_WRITE);
 	vm_prot_t max_protect = (VM_PROT_READ | VM_PROT_WRITE);
 

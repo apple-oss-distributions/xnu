@@ -257,12 +257,12 @@ before the final component, an error is
 returned
 .
 .It FSOPT_RESOLVE_BENEATH
-If this bit is set,
-.Fn setattrlistat
-and
-.Fa path
-does not reside in the hierarchy beneath the starting directory,
-an error is returned.
+If this bit is set, path resolution must not escape the directory associated
+with the file descriptor.
+.
+.It FSOPT_UNIQUE
+If this bit is set, the path lookup will fail if the target file has multiple
+hard links.
 .
 .El
 .
@@ -420,6 +420,10 @@ nor a file descriptor associated with a directory.
 if FSOPT_RESOLVE_BENEATH was passed and
 .Fa path
 does not reside in the directory hierarchy beneath the starting directory.
+.It Bq Er ENOTCAPABLE
+if FSOPT_UNIQUE was passed and
+.Fa path
+has multiple hard links.
 .El
 .Pp
 .

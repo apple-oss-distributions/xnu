@@ -1,6 +1,7 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  */
+
 #include <stdio.h>
 #include <errno.h>
 #include <stdio.h>
@@ -18,6 +19,13 @@
 #include <netinet/ip6.h>
 #include <sys/sysctl.h>
 #include <darwintest.h>
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_OWNER("rpaulo")
+	);
 
 /*
  * Tests that filling up the socket buffer doesn't cause

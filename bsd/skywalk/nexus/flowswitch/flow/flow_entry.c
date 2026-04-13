@@ -309,7 +309,7 @@ flow_entry_set_demux_patterns(struct flow_entry *fe, struct nx_flow_req *req)
 	}
 }
 
-static int
+int
 convert_flowkey_to_inet_td(struct flow_key *key,
     struct ifnet_traffic_descriptor_inet *td)
 {
@@ -515,6 +515,9 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	}
 	if (req->nfr_flags & NXFLOWREQF_CONNECTION_IDLE) {
 		fe->fe_flags |= FLOWENTF_CONNECTION_IDLE;
+	}
+	if (req->nfr_flags & NXFLOWREQF_DISABLED) {
+		os_atomic_or(&fe->fe_flags, FLOWENTF_DISABLED, relaxed);
 	}
 	fe->fe_port_reservation = req->nfr_port_reservation;
 	req->nfr_port_reservation = NULL;

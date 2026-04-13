@@ -82,6 +82,7 @@
 #include <netkey/keydb.h>
 #include <netkey/key.h>
 #include <netkey/keysock.h>
+#include <netkey/keysock_private.h>
 #include <netkey/key_debug.h>
 #include <net/sockaddr_utils.h>
 
@@ -97,6 +98,8 @@ static int key_sendup0(struct rawcb *, struct mbuf *, int);
 struct pfkeystat pfkeystat;
 
 static struct domain *keydomain = NULL;
+
+static uint64_t key_cb_gencnt;
 
 static LCK_GRP_DECLARE(pfkey_stat_mutex_grp, "pfkey_stat");
 LCK_MTX_DECLARE(pfkey_stat_mutex, &pfkey_stat_mutex_grp);
@@ -411,6 +414,7 @@ key_attach(struct socket *so, int proto, struct proc *p)
 		key_cb.key_count++;
 	}
 	key_cb.any_count++;
+	kp->kp_raw.rcb_gencnt = ++key_cb_gencnt;
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
 
@@ -458,6 +462,7 @@ key_detach(struct socket *so)
 		key_cb.key_count--;
 	}
 	key_cb.any_count--;
+	kp->kp_raw.rcb_gencnt = ++key_cb_gencnt;
 	socket_unlock(so, 0);
 	key_freereg(so);
 	socket_lock(so, 0);
@@ -543,8 +548,22 @@ static struct pr_usrreqs key_usrreqs = {
 	.pru_soreceive =        soreceive,
 };
 
+#ifndef ROUNDUP64
+#define ROUNDUP64(x) P2ROUNDUP((x), sizeof (u_int64_t))
+#endif
+
+#ifndef ADVANCE64
+#define ADVANCE64(p, n) (void*)((char *)(p) + ROUNDUP64(n))
+#endif
+
+static int key_pcblist SYSCTL_HANDLER_ARGS;
+
 /* sysctl */
 SYSCTL_NODE(_net, PF_KEY, key, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "Key Family");
+
+SYSCTL_PROC(_net_key, OID_AUTO, pcblist,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+    key_pcblist, "S,xsocket_n", "");
 
 /*
  * Definitions of protocols supported in the KEY domain.
@@ -572,6 +591,122 @@ struct domain keydomain_s = {
 	.dom_init =             key_dinit,
 	.dom_maxrtkey =         sizeof(struct key_cb),
 };
+
+static int
+key_pcblist SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int error = 0;
+	uint64_t n;
+	struct xrtsockgen xsg;
+	void *buf = NULL;
+	size_t item_size = ROUNDUP64(sizeof(struct xkeysockpcb)) +
+	    ROUNDUP64(sizeof(struct xsocket_n)) +
+	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
+	    ROUNDUP64(sizeof(struct xsockstat_n));
+	struct rawcb *rp;
+
+	buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
+
+	n = key_cb.any_count;
+
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = 2 * sizeof(struct xrtsockgen) + (size_t) ((n + n / 8) * item_size);
+		goto done;
+	}
+	if (req->newptr != USER_ADDR_NULL) {
+		error = EPERM;
+		goto done;
+	}
+	bzero(&xsg, sizeof(xsg));
+	xsg.xg_len = sizeof(xsg);
+	xsg.xg_count = n;
+	xsg.xg_gencnt = key_cb_gencnt;
+	xsg.xg_sogen = so_gencnt;
+	error = SYSCTL_OUT(req, &xsg, sizeof(xsg));
+	if (error != 0) {
+		goto done;
+	}
+	/*
+	 * We are done if there is no pcb
+	 */
+	if (n == 0) {
+		goto done;
+	}
+	lck_mtx_lock(&raw_mtx);
+	LIST_FOREACH(rp, &rawcb_list, list) {
+		struct xkeysockpcb *xkp = (struct xkeysockpcb *)buf;
+		struct xsocket_n *xso = (struct xsocket_n *)
+		    ADVANCE64(xkp, sizeof(*xkp));
+		struct xsockbuf_n *xsbrcv = (struct xsockbuf_n *)
+		    ADVANCE64(xso, sizeof(*xso));
+		struct xsockbuf_n *xsbsnd = (struct xsockbuf_n *)
+		    ADVANCE64(xsbrcv, sizeof(*xsbrcv));
+		struct xsockstat_n *xsostats = (struct xsockstat_n *)
+		    ADVANCE64(xsbsnd, sizeof(*xsbsnd));
+
+		if (rp->rcb_proto.sp_family != PF_KEY) {
+			continue;
+		}
+
+		/* Skip newer sockets  */
+		if (rp->rcb_gencnt > xsg.xg_gencnt) {
+			continue;
+		}
+
+		xkp->xkp_len = sizeof(struct xkeysockpcb);
+		xkp->xkp_kind = XSO_KEYPCB;
+		xkp->xkp_family = PF_KEY;
+		xkp->xkp_protocol = rp->rcb_proto.sp_protocol;
+		xkp->xkp_gencnt = rp->rcb_gencnt;
+		if (rp->rcb_faddr) {
+			struct sockaddr *dst __single = &xkp->xkp_faddr;
+			SOCKADDR_COPY(rp->rcb_faddr, dst,
+			    rp->rcb_faddr->sa_len);
+		}
+		if (rp->rcb_laddr) {
+			struct sockaddr *dst __single = &xkp->xkp_laddr;
+			SOCKADDR_COPY(rp->rcb_laddr, dst,
+			    rp->rcb_laddr->sa_len);
+		}
+		sotoxsocket_n(rp->rcb_socket, xso);
+		sbtoxsockbuf_n(rp->rcb_socket != NULL ?
+		    &rp->rcb_socket->so_rcv : NULL, xsbrcv);
+		sbtoxsockbuf_n(rp->rcb_socket != NULL ?
+		    &rp->rcb_socket->so_snd : NULL, xsbsnd);
+		sbtoxsockstat_n(rp->rcb_socket, xsostats);
+
+		error = SYSCTL_OUT(req, buf, item_size);
+		if (error != 0) {
+			break;
+		}
+	}
+
+	if (error == 0) {
+		/*
+		 * Give the user an updated idea of our state.
+		 * If the generation differs from what we told
+		 * her before, she knows that something happened
+		 * while we were processing this request, and it
+		 * might be necessary to retry.
+		 */
+		bzero(&xsg, sizeof(xsg));
+		xsg.xg_len = sizeof(xsg);
+		xsg.xg_count = n;
+		xsg.xg_gencnt = key_cb_gencnt;
+		xsg.xg_sogen = so_gencnt;
+		error = SYSCTL_OUT(req, &xsg, sizeof(xsg));
+		if (error) {
+			goto done;
+		}
+	}
+
+	lck_mtx_unlock(&raw_mtx);
+
+done:
+	kfree_data_sized_by(buf, item_size);
+	return error;
+}
 
 static void
 key_dinit(struct domain *dp)

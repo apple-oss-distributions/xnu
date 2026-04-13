@@ -117,6 +117,86 @@ def ShowIfconfigDlil(cmd_args=None) :
         print(GetIfaddrs(Cast(dlil_ifnet, 'ifnet *')))
 # EndMacro: ifconfig_dlil
 
+#Macro: printin6addr
+@lldb_command('printin6addr')
+def PrintIn6Addr(cmd_args=None):
+    """ Print an IPv6 address from a struct in6_addr pointer
+        Usage: printin6addr <in6_addr *>
+    """
+    if cmd_args is None or len(cmd_args) == 0:
+        print("Missing argument: provide a pointer to struct in6_addr")
+        print("Usage: printin6addr <in6_addr *>")
+        return
+
+    in6_addr_ptr = kern.GetValueFromAddress(cmd_args[0], 'struct in6_addr *')
+    addr_string = GetIn6AddrAsString(in6_addr_ptr.__u6_addr.__u6_addr8)
+    print(addr_string)
+# EndMacro: printin6addr
+
+#Macro: printndopt
+@lldb_command('printndopt')
+def PrintNdOpt(cmd_args=None):
+    """ Print a Neighbor Discovery option header (struct nd_opt_hdr)
+        Usage: printndopt <nd_opt_hdr *>
+
+        Displays the option type, length, and link-layer address data if present
+    """
+    if cmd_args is None or len(cmd_args) == 0:
+        print("Missing argument: provide a pointer to struct nd_opt_hdr")
+        print("Usage: printndopt <nd_opt_hdr *>")
+        return
+
+    nd_opt = kern.GetValueFromAddress(cmd_args[0], 'struct nd_opt_hdr *')
+
+    if not nd_opt or unsigned(nd_opt) == 0:
+        print("NULL or invalid pointer")
+        return
+
+    opt_type = unsigned(nd_opt.nd_opt_type)
+    opt_len = unsigned(nd_opt.nd_opt_len)
+
+    # Option type names (from RFC 4861)
+    opt_type_names = {
+        1: "Source Link-layer Address",
+        2: "Target Link-layer Address",
+        3: "Prefix Information",
+        4: "Redirected Header",
+        5: "MTU",
+        14: "Nonce",
+        24: "Route Information",
+    }
+
+    opt_type_name = opt_type_names.get(opt_type, "Unknown")
+    total_len = opt_len * 8  # Length is in units of 8 bytes
+
+    print("Neighbor Discovery Option:")
+    print("  Type: {} ({})".format(opt_type, opt_type_name))
+    print("  Length: {} units ({} bytes)".format(opt_len, total_len))
+
+    # For link-layer address options (types 1 and 2), display the address
+    if opt_type in [1, 2] and opt_len > 0:
+        # The link-layer address follows immediately after the header
+        # Header is 2 bytes (type + len), so data starts at offset 2
+        data_len = total_len - 2
+
+        if data_len > 0:
+            # Read the address bytes after the header
+            opt_data_ptr = unsigned(nd_opt) + 2  # Skip the 2-byte header
+
+            # Get a uint8_t pointer to the data and use array indexing
+            opt_data = kern.GetValueFromAddress(opt_data_ptr, 'uint8_t *')
+
+            # Read bytes and format as colon-separated hex
+            addr_bytes = []
+            for i in range(min(data_len, 16)):  # Limit to reasonable size
+                byte_val = unsigned(opt_data[i])
+                addr_bytes.append("{:02x}".format(byte_val))
+
+            print("  Link-layer Address: {}".format(":".join(addr_bytes)))
+
+    print("")
+# EndMacro: printndopt
+
 def GetAddressAsStringColonHex(addr, count):
     out_string = ""
     i = 0
@@ -165,6 +245,56 @@ def GetSocketAddrAsStringInet6(sockaddr):
     sock_in6 = Cast(sockaddr, 'sockaddr_in6 *')
     return GetIn6AddrAsString(sock_in6.sin6_addr.__u6_addr.__u6_addr8)
 
+def GetSocketAddrAsStringInet6Enhanced(sockaddr, ifaddr=None):
+    """Enhanced IPv6 address display with prefix length and flags like ifconfig"""
+    sock_in6 = Cast(sockaddr, 'sockaddr_in6 *')
+    out_string = GetIn6AddrAsString(sock_in6.sin6_addr.__u6_addr.__u6_addr8)
+
+    # If we have the ifaddr context, extract additional IPv6 details
+    if ifaddr is not None:
+        try:
+            if ifaddr.ifa_addr.sa_family == 30:  # AF_INET6
+                in6_ia = Cast(ifaddr, 'in6_ifaddr *')
+
+                try:
+                    prefixlen = int(in6_ia.ia_plen)
+                    out_string += " prefixlen " + str(prefixlen)
+                except:
+                    pass
+
+                try:
+                    flags = int(in6_ia.ia6_flags)
+                    flag_strings = []
+
+                    if flags & 0x0010:  # IN6_IFF_DEPRECATED
+                        flag_strings.append("deprecated")
+
+                    if flags & 0x0040:  # IN6_IFF_AUTOCONF
+                        flag_strings.append("autoconf")
+
+                    if flags & 0x0080:  # IN6_IFF_TEMPORARY
+                        flag_strings.append("temporary")
+
+                    if flags & 0x0002:  # IN6_IFF_TENTATIVE
+                        flag_strings.append("tentative")
+
+                    if flags & 0x0004:  # IN6_IFF_DUPLICATED
+                        flag_strings.append("duplicated")
+
+                    if flags & 0x0100:  # IN6_IFF_DYNAMIC (DHCPv6)
+                        flag_strings.append("dynamic")
+
+                    if flag_strings:
+                        out_string += " " + " ".join(flag_strings)
+
+                except:
+                    pass
+
+        except:
+            pass
+
+    return out_string
+
 def GetSocketAddrAsStringLink(sockaddr):
     sock_link = Cast(sockaddr, 'sockaddr_dl *')
     if sock_link is None:
@@ -183,7 +313,7 @@ def GetSocketAddrAsStringAT(sockaddr):
     out_string += GetAddressAsStringColonHex(sockaddr.sa_data, sockaddr.sa_len - 2)
     return out_string
 
-def GetSocketAddrAsString(sockaddr):
+def GetSocketAddrAsString(sockaddr, ifaddr=None):
     if sockaddr is None :
         return "(null)"
     out_string = ""
@@ -198,7 +328,10 @@ def GetSocketAddrAsString(sockaddr):
         out_string += GetSocketAddrAsStringInet(sockaddr)
     elif (sockaddr.sa_family == 30):
         out_string += "INET6 "
-        out_string += GetSocketAddrAsStringInet6(sockaddr)
+        if ifaddr is not None:
+            out_string += GetSocketAddrAsStringInet6Enhanced(sockaddr, ifaddr)
+        else:
+            out_string += GetSocketAddrAsStringInet6(sockaddr)
     elif (sockaddr.sa_family == 18):
         out_string += "LINK "
         out_string += GetSocketAddrAsStringLink(sockaddr)
@@ -223,7 +356,7 @@ def ShowIfaddrs(cmd_args=None):
         i = 1
         for ifaddr in IterateTAILQ_HEAD(ifp.if_addrhead, "ifa_link"):
             format_string = "\t{0: <d}: 0x{1: <x} {2: <s} [{3: <d}]"
-            print(format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr), ifaddr.ifa_refcnt))
+            print(format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr, ifaddr), ifaddr.ifa_refcnt))
             i += 1
     else :
         print("Missing argument 0 in user function.")
@@ -235,7 +368,7 @@ def GetIfaddrs(ifp):
         i = 1
         for ifaddr in IterateTAILQ_HEAD(ifp.if_addrhead, "ifa_link"):
             format_string = "\t{0: <d}: 0x{1: <x} {2: <s}"
-            out_string += format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr)) + "\n"
+            out_string += format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr, ifaddr)) + "\n"
             i += 1
     else:
         out_string += "Missing argument 0 in user function."
@@ -1982,9 +2115,6 @@ def ShowDomains(cmd_args=None):
             if (pr.pr_drain):
                 out_string += "\t    drain:\t"
                 out_string += GetSourceInformationForAddress(pr.pr_drain) + "\n"
-            if (pr.pr_sysctl):
-                out_string += "\t    sysctl:\t"
-                out_string += GetSourceInformationForAddress(pr.pr_sysctl) + "\n"
             if (pr.pr_lock):
                 out_string += "\t    lock:\t"
                 out_string += GetSourceInformationForAddress(pr.pr_lock) + "\n"
@@ -1997,6 +2127,9 @@ def ShowDomains(cmd_args=None):
             if (pr.pr_old):
                 out_string += "\t    old:\t"
                 out_string += GetSourceInformationForAddress(pr.pr_old) + "\n"
+                if (pr.pr_old.pr_sysctl):
+                    out_string += "\t    sysctl:\t"
+                    out_string += GetSourceInformationForAddress(pr.pr_old.pr_sysctl) + "\n"
 
             out_string += "\t    pru_flags:0x\t" + hex(pru.pru_flags) + "\n"
             out_string += "\t    abort:\t"
@@ -2278,3 +2411,147 @@ def NetGetAlwaysOnPktap(cmd_args=None):
 
     DumpBPFToFile(bpf_d)
 # EndMacro: net_get_always_on_pktap
+
+def GetNDPrefixFlagsAsString(flags_struct):
+    """ Return a formatted string description of the nd_prefix flags
+    """
+    out_string = ""
+
+    # The flags_struct parameter is the struct prf_ra which contains bit fields
+    # Access the bit fields directly
+    if unsigned(flags_struct.onlink):
+        if out_string:
+            out_string += ","
+        out_string += "ONLINK"
+
+    if unsigned(flags_struct.autonomous):
+        if out_string:
+            out_string += ","
+        out_string += "AUTONOMOUS"
+
+    return out_string if out_string else "NONE"
+
+def GetNDPrefixStateAsString(stateflags):
+    """ Return a formatted string description of the nd_prefix state flags
+    """
+    out_string = ""
+    state_strings = {
+        0x01: "ONDEPRECATE",
+        0x02: "ONVALIDATE",
+        0x04: "PROCESSED",
+        0x08: "EXPIRED"
+    }
+
+    for flag_bit, flag_name in state_strings.items():
+        if stateflags & flag_bit:
+            if out_string:
+                out_string += ","
+            out_string += flag_name
+
+    return out_string if out_string else "NONE"
+
+def ShowNDPrefix(ndpr, index):
+    """ Display formatted information about an nd_prefix entry
+    """
+    out_string = ""
+
+    # Basic prefix information
+    prefix_addr = GetIn6AddrAsString(ndpr.ndpr_prefix.sin6_addr.__u6_addr.__u6_addr8)
+    plen = unsigned(ndpr.ndpr_plen)
+
+    # Interface information
+    ifname = ""
+    if ndpr.ndpr_ifp != 0:
+        ifname = str(ndpr.ndpr_ifp.if_xname)
+
+    # Format basic info
+    if kern.ptrsize == 8:
+        format_string = "{0:6d} {1:<18x} {2:<25s} {3:<10s} {4:<8d} {5:<20s} {6:<12s} {7:<8d}"
+    else:
+        format_string = "{0:6d} {1:<10x} {2:<25s} {3:<10s} {4:<8d} {5:<20s} {6:<12s} {7:<8d}"
+
+    prefix_with_len = prefix_addr + "/" + str(plen)
+
+    # Get flags and state
+    flags_str = GetNDPrefixFlagsAsString(ndpr.ndpr_flags)
+    state_str = GetNDPrefixStateAsString(unsigned(ndpr.ndpr_stateflags))
+
+    out_string += format_string.format(
+        index,
+        unsigned(ndpr),
+        prefix_with_len,
+        ifname,
+        unsigned(ndpr.ndpr_refcount),
+        flags_str,
+        state_str,
+        int(ndpr.ndpr_addrcnt)
+    )
+
+    return out_string
+
+# Macro: show_nd_prefixes
+@lldb_command('show_nd_prefixes')
+def ShowNDPrefixes(cmd_args=None):
+    """ Display the IPv6 Neighbor Discovery prefix list
+        Usage: show_nd_prefixes [prefix_address]
+               If prefix_address is provided, show details for that specific prefix
+    """
+    out_string = ""
+
+    # Header
+    if kern.ptrsize == 8:
+        header_format = "{0:6s} {1:<18s} {2:<25s} {3:<10s} {4:<8s} {5:<20s} {6:<12s} {7:<8s}"
+        print(header_format.format("Entry", "nd_prefix *", "Prefix/Length", "Interface", "RefCount", "Flags", "State", "AddrCnt"))
+        print(header_format.format("-----", "-" * 18, "-" * 25, "-" * 10, "-" * 8, "-" * 20, "-" * 12, "-" * 8))
+    else:
+        header_format = "{0:6s} {1:<10s} {2:<25s} {3:<10s} {4:<8s} {5:<20s} {6:<12s} {7:<8s}"
+        print(header_format.format("Entry", "nd_prefix *", "Prefix/Length", "Interface", "RefCount", "Flags", "State", "AddrCnt"))
+        print(header_format.format("-----", "-" * 10, "-" * 25, "-" * 10, "-" * 8, "-" * 20, "-" * 12, "-" * 8))
+
+    # Walk the nd_prefix list
+    nd_prefix_head = kern.globals.nd_prefix
+    ndpr = Cast(nd_prefix_head.lh_first, 'nd_prefix *')
+
+    index = 0
+    target_addr = None
+
+    # Check if user provided a specific prefix address to look for
+    if cmd_args is not None and len(cmd_args) > 0:
+        try:
+            # Convert string address to integer, handling 0x prefix if present
+            addr_str = cmd_args[0]
+            if addr_str.startswith('0x'):
+                target_addr_int = int(addr_str, 16)
+            else:
+                target_addr_int = int(addr_str, 16)
+            target_addr = kern.GetValueFromAddress(target_addr_int, 'nd_prefix *')
+        except ValueError:
+            print("Invalid address format. Use hex address like 0xfffffe1984b20a00")
+            return
+
+    while ndpr != 0:
+        index += 1
+
+        # If searching for specific prefix, only show that one
+        if target_addr is not None:
+            if unsigned(ndpr) == target_addr_int:
+                print(ShowNDPrefix(ndpr, index))
+                return
+        else:
+            # Show all prefixes
+            print(ShowNDPrefix(ndpr, index))
+
+        # Move to next prefix using the macro expansion
+        ndpr = Cast(ndpr.ndpr_entry.le_next, 'nd_prefix *')
+
+        # Safety check to prevent infinite loops
+        if index > 1000:
+            print("Warning: Stopped after 1000 entries to prevent infinite loop")
+            break
+
+    if target_addr is not None:
+        print("Prefix not found in list")
+    else:
+        print("Total prefixes: " + str(index))
+
+# EndMacro: show_nd_prefixes

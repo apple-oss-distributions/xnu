@@ -664,7 +664,12 @@ do_reboot:
 
 	if (reboot) {
 		IOLog("\nAbout to reboot into Recovery!\n");
-		(void)PEHaltRestart(kPEPanicRestartCPUNoCallouts);
+		// Mitigation for SEP hanging on kPERestartCPU (radar://164664790).
+		// We panic and on the next boot we should land into recovery.
+		// This should be reverted back to calling
+		// PEHaltRestart(kPERestartCPU) in rdar://169561102.
+		panic("Reboot into Recovery (this panic is expected)");
+		// (void)PEHaltRestart(kPERestartCPU);
 	}
 
 	return true;
@@ -1591,6 +1596,14 @@ IOCurrentTaskHasEntitlement(const char *entitlement)
 	return IOTaskHasEntitlement(NULL, entitlement);
 }
 
+/*
+ * Reminder to reader: This only returns `true` if:
+ *  - The entitlement is boolean-valued
+ *  - The value is `true`
+ * If you are looking to check whether an entitlement is present,
+ * you likely want `IOVnodeIsEntitlementPresentWithAnyValue`
+ * or `IOTaskHasEntitlementAsBooleanOrObject` (caveat emptor).
+ */
 extern "C" boolean_t
 IOTaskHasEntitlement(task_t task, const char *entitlement)
 {
@@ -1767,6 +1780,20 @@ IOVnodeHasEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 	}
 	obj->release();
 	return obj != kOSBooleanFalse;
+}
+
+extern "C" boolean_t
+IOVnodeIsEntitlementPresentWithAnyValue(vnode_t vnode, int64_t off, const char *entitlement)
+{
+	OSObject * obj;
+	off_t offset = (off_t)off;
+
+	obj = IOUserClient::copyClientEntitlementVnode(vnode, offset, entitlement);
+	if (!obj) {
+		return false;
+	}
+	obj->release();
+	return true;
 }
 
 /*

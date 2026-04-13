@@ -48,17 +48,6 @@
 
 #pragma mark - Constants and Tunables
 
-#include <kern/startup.h>
-
-/*
- * Tunables controlling how xnu initializes the realtime matrix. CLPC can
- * override their effects with sched_perfcontrol interfaces.
- */
-
-TUNABLE(unsigned int, sched_rt_spill_policy, "sched_rt_spill_policy", 1);
-
-TUNABLE(unsigned, sched_rt_steal_policy, "sched_rt_steal_policy", 2);
-
 uint32_t rt_deadline_epsilon;
 uint32_t rt_constraint_threshold;
 /* epsilon for comparing RT deadlines */
@@ -260,7 +249,7 @@ sched_rt_config_pset_push(processor_set_t pset)
 			continue; /* No self-edges. */
 		}
 		/* Spill */
-		sched_clutch_edge out_edge = sched_rt_config_get((pset_id_t)pset->pset_cluster_id, other_pset_id);
+		sched_clutch_edge out_edge = sched_rt_config_get((pset_id_t)pset->pset_id, other_pset_id);
 		if (out_edge.sce_migration_allowed) {
 			spill_datas[num_spill_datas++] = (sched_pset_search_order_sort_data_t) {
 				.spsosd_src_pset = pset,
@@ -269,7 +258,7 @@ sched_rt_config_pset_push(processor_set_t pset)
 			};
 		}
 		/* Steal */
-		sched_clutch_edge in_edge = sched_rt_config_get(other_pset_id, (pset_id_t)pset->pset_cluster_id);
+		sched_clutch_edge in_edge = sched_rt_config_get(other_pset_id, (pset_id_t)pset->pset_id);
 		if (in_edge.sce_steal_allowed) {
 			steal_datas[num_steal_datas++] = (sched_pset_search_order_sort_data_t) {
 				.spsosd_src_pset = pset,
@@ -671,7 +660,7 @@ sched_rt_runq_scan(sched_update_scan_context_t scan_context)
 {
 	thread_t        thread;
 
-	pset_node_t node = &pset_node0;
+	pset_node_t node = sched_boot_pset_node;
 	processor_set_t pset = node->psets;
 
 	spl_t s = splsched();
@@ -707,7 +696,7 @@ sched_rt_runq_scan(sched_update_scan_context_t scan_context)
 int64_t
 sched_rt_runq_count_sum(void)
 {
-	pset_node_t node = &pset_node0;
+	pset_node_t node = sched_boot_pset_node;
 	processor_set_t pset = node->psets;
 	int64_t count = 0;
 

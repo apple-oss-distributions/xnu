@@ -380,7 +380,11 @@ public:
  * Two OSSymbol objects are considered equal if they have the same address;
  * that is, this function is equivalent to the <code>==</code> operator.
  */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wunnecessary-virtual-specifier"
 	virtual bool isEqualTo(const OSSymbol * aSymbol) const;
+#pragma clang diagnostic pop
 
 
 /*!
@@ -437,6 +441,9 @@ public:
 
 #endif /* XNU_KERNEL_PRIVATE */
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wunnecessary-virtual-specifier"
 	OSMetaClassDeclareReservedUnused(OSSymbol, 0);
 	OSMetaClassDeclareReservedUnused(OSSymbol, 1);
 	OSMetaClassDeclareReservedUnused(OSSymbol, 2);
@@ -445,6 +452,7 @@ public:
 	OSMetaClassDeclareReservedUnused(OSSymbol, 5);
 	OSMetaClassDeclareReservedUnused(OSSymbol, 6);
 	OSMetaClassDeclareReservedUnused(OSSymbol, 7);
+#pragma clang diagnostic pop
 };
 
 #endif /* !_OS_OSSYMBOL_H */

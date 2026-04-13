@@ -67,8 +67,10 @@
 #include <mach/vm_param.h>
 #include <kern/assert.h>
 #include <kern/thread.h>
+#include <vm/vm_entry_lock_internal.h>
 #include <vm/vm_kern_internal.h>
 #include <vm/vm_map_internal.h>
+#include <vm/vm_map_lock_internal.h>
 #include <vm/vm_object_internal.h>
 #include <vm/vm_page_internal.h>
 #include <vm/vm_compressor_xnu.h>
@@ -100,30 +102,28 @@
 #include <kern/backtrace.h>
 #include <os/hash.h>
 #include <kern/zalloc_internal.h>
-#include <libkern/crypto/rand.h>
+
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
 
 /*
  *	Variables exported by this module.
  */
 
-SECURITY_READ_ONLY_LATE(vm_map_t) kernel_map;
-SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_ranges[KMEM_RANGE_COUNT];
-SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_large_ranges[KMEM_RANGE_COUNT];
+__enum_closed_decl(kmem_direction_t, uint32_t, {
+	KMEM_DIRECTION_FORWARDS,
+	KMEM_DIRECTION_BACKWARDS,
+	KMEM_DIRECTION_COUNT,
+});
 
-static TUNABLE(uint32_t, kmem_ptr_ranges, "kmem_ptr_ranges",
-    KMEM_RANGE_ID_NUM_PTR);
-#define KMEM_GOBJ_THRESHOLD   (32ULL << 20)
-#if DEBUG || DEVELOPMENT
-#define KMEM_OUTLIER_LOG_SIZE (16ULL << 10)
-#define KMEM_OUTLIER_SIZE      0
-#define KMEM_OUTLIER_ALIGN     1
-btlog_t kmem_outlier_log;
-#endif /* DEBUG || DEVELOPMENT */
+SECURITY_READ_ONLY_LATE(vm_map_t) kernel_map;
+static SECURITY_READ_ONLY_LATE(struct mach_vm_range) kmem_ranges[KMEM_RANGE_COUNT - 1];
+static struct vm_guard_object_slab kmem_slabs[KMEM_RANGE_ID_MAX][KMEM_DIRECTION_COUNT];
 
 __startup_data static vm_map_size_t data_range_size;
 __startup_data static vm_map_size_t shared_data_range_size;
 __startup_data static vm_map_size_t ptr_range_size;
-__startup_data static vm_map_size_t sprayqtn_range_size;
 
 #pragma mark helpers
 
@@ -246,18 +246,31 @@ __kmem_guard_size(kmem_flags_t flags)
 	return __kmem_guard_left(flags) + __kmem_guard_right(flags);
 }
 
+/*
+ * Computes the original size of the object underlying the entry. Adjusts for
+ * deltas used by KASAN. See declaration of vme_object_or_delta for more
+ * details.
+ */
 __pure2
 static inline vm_size_t
 __kmem_entry_orig_size(vm_map_entry_t entry)
 {
 	vm_object_t object = VME_OBJECT(entry);
 
+#if KASAN
 	if (entry->vme_kernel_object) {
 		return entry->vme_end - entry->vme_start -
 		       entry->vme_object_or_delta;
 	} else {
 		return object->vo_size - object->vo_size_delta;
 	}
+#else
+	if (entry->vme_kernel_object) {
+		return entry->vme_end - entry->vme_start;
+	} else {
+		return object->vo_size;
+	}
+#endif
 }
 
 
@@ -377,7 +390,8 @@ kmem_range_id_contains(
 	vm_map_offset_t         addr,
 	vm_map_size_t           size)
 {
-	return mach_vm_range_contains(&kmem_ranges[range_id], vm_memtag_canonicalize_kernel(addr), size);
+	addr = vm_memtag_canonicalize_kernel(addr);
+	return mach_vm_range_contains(kmem_range(range_id), addr, size);
 }
 
 __abortlike
@@ -387,7 +401,7 @@ kmem_range_invalid_panic(
 	vm_map_offset_t         addr,
 	vm_map_size_t           size)
 {
-	const struct mach_vm_range *r = &kmem_ranges[range_id];
+	const struct mach_vm_range *r = kmem_range(range_id);
 	mach_vm_offset_t rmin, rmax;
 
 	mach_vm_range_load(r, rmin, rmax);
@@ -408,7 +422,7 @@ kmem_range_contains_fully(
 	vm_map_offset_t         addr,
 	vm_map_size_t           size)
 {
-	const struct mach_vm_range *r = &kmem_ranges[range_id];
+	const struct mach_vm_range *r = kmem_range(range_id);
 	mach_vm_offset_t rmin, rmax;
 	bool result = false;
 
@@ -429,10 +443,32 @@ kmem_range_contains_fully(
 	return result;
 }
 
+__attribute__((always_inline))
+struct mach_vm_range *
+kmem_range(vm_map_range_id_t range_id)
+{
+	return &kmem_ranges[range_id - 1];
+}
+
 vm_map_size_t
 kmem_range_id_size(kmem_range_id_t range_id)
 {
-	return mach_vm_range_size(&kmem_ranges[range_id]);
+	return mach_vm_range_size(kmem_range(range_id));
+}
+
+
+vm_guard_object_slab_t
+kmem_slab(vm_map_kernel_flags_t vmk_flags)
+{
+	kmem_direction_t dir;
+	release_assert(vmk_flags.vmkf_range_id > KMEM_RANGE_ID_NONE &&
+	    vmk_flags.vmkf_range_id <= KMEM_RANGE_ID_MAX);
+	if (vmk_flags.vmkf_last_free) {
+		dir = KMEM_DIRECTION_BACKWARDS;
+	} else {
+		dir = KMEM_DIRECTION_FORWARDS;
+	}
+	return &kmem_slabs[vmk_flags.vmkf_range_id - 1][dir];
 }
 
 kmem_range_id_t
@@ -474,7 +510,7 @@ kmem_validate_range_for_overwrite(
 		kmem_range_invalid_for_overwrite(addr);
 	}
 
-	return &kmem_ranges[range_id];
+	return kmem_range(range_id);
 }
 
 
@@ -591,20 +627,22 @@ __kmem_entry_validate_object_panic(
 	    map, flags, entry, verb, what);
 }
 
-static bool
-__kmem_entry_validate_object(
-	vm_map_entry_t  entry,
-	kmem_flags_t    flags)
+static void
+__kmem_realloc_validate_object(
+	vm_map_t                map,
+	vm_map_entry_t          entry,
+	kmem_flags_t            flags)
 {
 	if (entry->is_sub_map) {
-		return false;
+		__kmem_entry_validate_object_panic(map, entry, flags);
 	}
 	if ((bool)(flags & KMEM_KOBJECT) != entry->vme_kernel_object) {
-		return false;
+		__kmem_entry_validate_object_panic(map, entry, flags);
 	}
-
-	return (bool)(flags & KMEM_COMPRESSOR) ==
-	       (VME_OBJECT(entry) == compressor_object);
+	if ((bool)(flags & KMEM_COMPRESSOR) !=
+	    (VME_OBJECT(entry) == compressor_object)) {
+		__kmem_entry_validate_object_panic(map, entry, flags);
+	}
 }
 
 vm_size_t
@@ -619,14 +657,15 @@ kmem_size_guard(
 
 	vmlp_api_start(KMEM_SIZE_GUARD);
 
-	vm_map_lock_read(map);
+	vm_map_ilk_lock(map);
 
 #if KASAN_CLASSIC
 	addr -= PAGE_SIZE;
 #endif /* KASAN_CLASSIC */
-	addr = vm_memtag_canonicalize_kernel(addr);
+	addr  = vm_memtag_canonicalize_kernel(addr);
+	entry = vm_map_lookup(map, addr);
 
-	if (!vm_map_lookup_entry(map, addr, &entry)) {
+	if (entry == VM_MAP_ENTRY_NULL) {
 		__kmem_entry_not_found_panic(map, addr);
 	}
 
@@ -638,7 +677,7 @@ kmem_size_guard(
 
 	size = __kmem_entry_orig_size(entry);
 
-	vm_map_unlock_read(map);
+	vm_map_ilk_unlock(map);
 
 	vmlp_api_end(KMEM_SIZE_GUARD, 0);
 	return size;
@@ -666,39 +705,13 @@ kmem_range_id_t
 kmem_adjust_range_id(
 	uint32_t                  hash)
 {
+#if ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
 	return (kmem_range_id_t) (KMEM_RANGE_ID_PTR_0 +
-	       (hash & KMEM_RANGE_MASK) % kmem_ptr_ranges);
-}
-
-static bool
-kmem_use_sprayqtn(
-	kma_flags_t               kma_flags,
-	vm_map_size_t             map_size,
-	vm_offset_t               mask)
-{
-	/*
-	 * Pointer allocations that are above the guard objects threshold or have
-	 * leading guard pages with non standard alignment requests are redirected
-	 * to the sprayqtn range.
-	 */
-#if DEBUG || DEVELOPMENT
-	btref_get_flags_t flags = (kma_flags & KMA_NOPAGEWAIT) ?
-	    BTREF_GET_NOWAIT : 0;
-
-	if ((kma_flags & KMA_SPRAYQTN) == 0) {
-		if (map_size > KMEM_GOBJ_THRESHOLD) {
-			btlog_record(kmem_outlier_log, (void *)map_size, KMEM_OUTLIER_SIZE,
-			    btref_get(__builtin_frame_address(0), flags));
-		} else if ((kma_flags & KMA_GUARD_FIRST) && (mask > PAGE_MASK)) {
-			btlog_record(kmem_outlier_log, (void *)mask, KMEM_OUTLIER_ALIGN,
-			    btref_get(__builtin_frame_address(0), flags));
-		}
-	}
-#endif /* DEBUG || DEVELOPMENT */
-
-	return (kma_flags & KMA_SPRAYQTN) ||
-	       (map_size > KMEM_GOBJ_THRESHOLD) ||
-	       ((kma_flags & KMA_GUARD_FIRST) && (mask > PAGE_MASK));
+	       (hash & KMEM_RANGE_MASK) % KMEM_RANGE_ID_NUM_PTR);
+#else
+	(void)hash;
+	return KMEM_RANGE_ID_PTR_0;
+#endif
 }
 
 static void
@@ -706,64 +719,109 @@ kmem_apply_security_policy(
 	vm_map_t                  map,
 	kma_flags_t               kma_flags,
 	kmem_guard_t              guard,
-	vm_map_size_t             map_size,
-	vm_offset_t               mask,
-	vm_map_kernel_flags_t    *vmk_flags,
-	bool                      assert_dir __unused)
+	vm_map_kernel_flags_t    *vmk_flags)
 {
-	kmem_range_id_t range_id;
-	bool from_right;
 	uint16_t type_hash = guard.kmg_type_hash;
 
 	if (startup_phase < STARTUP_SUB_KMEM || map != kernel_map) {
+		vmk_flags->vmkf_range_id  = KMEM_RANGE_ID_NONE;
+		vmk_flags->vmkf_last_free = false;
 		return;
 	}
 
-	/*
-	 * A non-zero type-hash must be passed by krealloc_type
-	 */
-#if (DEBUG || DEVELOPMENT)
-	if (assert_dir && !(kma_flags & (KMA_DATA | KMA_DATA_SHARED))) {
-		assert(type_hash != 0);
-	}
-#endif
-
-	if (kma_flags & (KMA_DATA | KMA_DATA_SHARED)) {
-		/*
-		 * Choose the specific which data range.
-		 */
-		if (kma_flags & KMA_DATA) {
-			range_id  = KMEM_RANGE_ID_DATA;
-		} else {
-			range_id  = kmem_needs_data_share_range() ?
-			    KMEM_RANGE_ID_DATA_SHARED : KMEM_RANGE_ID_DATA;
-		}
-
-		/*
-		 * As an optimization in KMA_DATA to avoid fragmentation,
-		 * allocate static carveouts at the end of the DATA range.
-		 */
-		from_right = (bool)(kma_flags & KMA_PERMANENT);
-	} else if (kmem_use_sprayqtn(kma_flags, map_size, mask)) {
-		range_id = KMEM_RANGE_ID_SPRAYQTN;
-		from_right = (bool)(kma_flags & KMA_PERMANENT);
+	if (kma_flags & KMA_DATA_SHARED) {
+		vmk_flags->vmkf_range_id = KMEM_RANGE_ID_DATA_SHARED;
+	} else if (kma_flags & KMA_DATA) {
+		vmk_flags->vmkf_range_id = KMEM_RANGE_ID_DATA_PRIVATE;
+	} else if (kma_flags & KMA_IO) {
+		vmk_flags->vmkf_range_id = KMEM_RANGE_ID_IO;
 	} else if (type_hash) {
-		range_id  = (kmem_range_id_t)(type_hash & KMEM_RANGE_MASK);
-		from_right = type_hash & KMEM_DIRECTION_MASK;
+		vmk_flags->vmkf_range_id = type_hash & KMEM_RANGE_MASK;
 	} else {
 		/*
 		 * Range id needs to correspond to one of the PTR ranges
 		 */
-		type_hash = (uint16_t) kmem_hash_backtrace(__builtin_frame_address(0));
-		range_id  = kmem_adjust_range_id(type_hash);
-		from_right = type_hash & KMEM_DIRECTION_MASK;
+		type_hash = (uint16_t)kmem_hash_backtrace(__builtin_frame_address(0));
+		vmk_flags->vmkf_range_id = kmem_adjust_range_id(type_hash);
 	}
 
-	vmk_flags->vmkf_range_id = range_id;
-	vmk_flags->vmkf_last_free = from_right;
+	/*
+	 * As an optimization in KMA_DATA, KMA_DATA_SHARED,
+	 * to avoid fragmentation, allocate static carveouts at the end.
+	 */
+	if (kma_flags & (KMA_DATA | KMA_DATA_SHARED | KMR_IO)) {
+		vmk_flags->vmkf_last_free = (bool)(kma_flags & KMA_PERMANENT);
+	} else {
+		vmk_flags->vmkf_last_free = (bool)(type_hash & KMEM_DIRECTION_MASK);
+	}
 }
 
 #pragma mark allocation
+
+/*!
+ * @brief
+ * Allocate a range in the specified virtual address map, returning the entry
+ * allocated for that range.
+ *
+ * @discussion
+ * The map interlock must be held. It will be returned held, though it may be
+ * dropped while the function runs.
+ *
+ * If an entry is allocated, the object/offset fields are initialized to zero.
+ */
+static kern_return_t
+kmem_find_space(
+	vm_map_t                map,
+	vm_map_size_t           size,
+	vm_map_offset_t         mask,
+	vm_map_kernel_flags_t   vmk_flags,
+	vm_map_entry_t         *entry_out)
+{
+	vm_map_store_rsv_t rsv = { };
+	vm_map_entry_t     new_entry;
+	kern_return_t      kr;
+
+	vmlp_api_start(VM_MAP_FIND_SPACE);
+
+	if (size == 0) {
+		vmlp_api_end(VM_MAP_FIND_SPACE, KERN_INVALID_ARGUMENT);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kr = vm_map_locate_space_anywhere(map, 0, size, mask, vmk_flags, &rsv);
+	if (kr != KERN_SUCCESS) {
+		vmlp_api_end(VM_MAP_FIND_SPACE, kr);
+		return kr;
+	}
+
+	new_entry = vm_map_entry_create_locked(map,
+	    vmsr_start(rsv), vmsr_start(rsv) + size);
+	new_entry->use_pmap = true;
+	new_entry->protection = VM_PROT_DEFAULT;
+	new_entry->max_protection = VM_PROT_ALL;
+	new_entry->vme_permanent = vmk_flags.vmf_permanent;
+#if HAS_MTE
+	if (vmk_flags.vmf_mte) {
+		vm_map_mark_has_sec_access_ilocked(map);
+	}
+#endif /* HAS_MTE */
+
+	/*
+	 *	At this point,
+	 *
+	 *	- new_entry's "vme_start" and "vme_end" should define
+	 *	  the endpoints of the available new range,
+	 *
+	 *	- and the map should still be locked.
+	 */
+
+	vm_map_store_insert(map, new_entry, rsv, vmk_flags);
+	vmlp_range_event_entry(map, new_entry);
+
+	*entry_out = new_entry;
+	vmlp_api_end(VM_MAP_FIND_SPACE, KERN_SUCCESS);
+	return KERN_SUCCESS;
+}
 
 static kmem_return_t
 kmem_alloc_guard_internal(
@@ -809,7 +867,7 @@ kmem_alloc_guard_internal(
 #endif
 
 #if HAS_MTE
-	if (__improbable(!is_mte_enabled)) {
+	if (!mte_kern_enabled()) {
 		flags &= ~KMA_TAG;
 	}
 #endif /* HAS_MTE */
@@ -936,6 +994,7 @@ kmem_alloc_guard_internal(
 		/* stabilize the object to prevent shadowing */
 		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
+		/* There's no real sharing, just setting true_share */
 #if HAS_MTE
 		if (flags & KMA_TAG) {
 			object->wimg_bits = VM_WIMG_MTE;
@@ -952,11 +1011,12 @@ kmem_alloc_guard_internal(
 	if (flags & KMA_PERMANENT) {
 		vmk_flags.vmf_permanent = true;
 	}
-	kmem_apply_security_policy(map, flags, guard, map_size, mask, &vmk_flags,
-	    false);
+	kmem_apply_security_policy(map, flags, guard, &vmk_flags);
 
-	kmr.kmr_return = vm_map_find_space(map, 0, map_size, mask,
-	    vmk_flags, &entry);
+	vm_map_ilk_lock(map);
+	kmr.kmr_return = kmem_find_space(map, map_size, mask, vmk_flags, &entry);
+	vm_map_ilk_unlock(map);
+
 	if (__improbable(KERN_SUCCESS != kmr.kmr_return)) {
 		vm_object_deallocate(object);
 		goto out_error;
@@ -986,7 +1046,6 @@ kmem_alloc_guard_internal(
 		vm_object_offset_t offset = 0ull;
 
 		vm_object_lock(object);
-		vm_map_unlock(map);
 
 		if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
 			offset = map_addr;
@@ -1013,16 +1072,20 @@ kmem_alloc_guard_internal(
 		} else {
 			vm_object_unlock(object);
 		}
-	} else {
-		vm_map_unlock(map);
 	}
 
 	/*
 	 * now that the pages are wired, we no longer have to fear coalesce
 	 */
-	if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
-		vm_map_simplify(map, map_addr);
+	if ((flags & (KMA_KOBJECT | KMA_COMPRESSOR)) && !guard.kmg_atomic) {
+		entry = vm_map_locked_entry_simplify(map, entry);
 	}
+
+	/*
+	 * entry was returned locked by kmem_find_space. We don't need it
+	 * anymore, so we can unlock it.
+	 */
+	vm_entry_unlock_exclusive(map, entry);
 
 #if DEBUG || DEVELOPMENT
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
@@ -1151,26 +1214,20 @@ kmem_suballoc(
 	 */
 	vm_map_reference(map);
 
+	vmk_flags.vmf_permanent = true;
 	vmk_flags.vmkf_submap = true;
-	if ((flags & (KMS_DATA | KMS_DATA_SHARED)) == 0) {
-		/* FIXME: IOKit submaps get fragmented and can't be atomic */
-		vmk_flags.vmkf_submap_atomic = true;
-	}
-	vmk_flags.vmkf_submap_adjust = true;
+	vmk_flags.vmkf_submap_atomic = true;
 	if (flags & KMS_LAST_FREE) {
 		vmk_flags.vmkf_last_free = true;
 	}
-	if (flags & KMS_PERMANENT) {
-		vmk_flags.vmf_permanent = true;
+
+	/* If this is a data allocation, set the appropriate data range */
+	if (flags & KMS_DATA_SHARED) {
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA_SHARED;
+	} else if (flags & KMS_DATA) {
+		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA_PRIVATE;
 	}
-	if (flags & (KMS_DATA | KMS_DATA_SHARED)) {
-		if (flags & KMS_DATA) {
-			vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
-		} else {
-			vmk_flags.vmkf_range_id = kmem_needs_data_share_range() ?
-			    KMEM_RANGE_ID_DATA_SHARED : KMEM_RANGE_ID_DATA;
-		}
-	}
+
 	if (flags & KMS_NOSOFTLIMIT) {
 		vmk_flags.vmkf_no_soft_limit = true;
 	}
@@ -1397,6 +1454,56 @@ mach_vm_allocate_kernel(
 	return result;
 }
 
+__static_testable __attribute__((always_inline, warn_unused_result))
+kern_return_t
+mach_vm_deallocate_kernel_sanitize(
+	vm_map_t                map,
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u,
+	mach_vm_offset_t       *start,
+	mach_vm_offset_t       *end,
+	mach_vm_size_t         *size)
+{
+#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
+	kern_return_t err = vm_sanitize_validate_non_canonical_ut_addr(map, start_u);
+	if (err != KERN_SUCCESS) {
+		return err;
+	}
+#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
+
+	return vm_sanitize_addr_size(start_u, size_u,
+	           VM_SANITIZE_CALLER_VM_DEALLOCATE, map, VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS,
+	           start, end, size);
+}
+
+kern_return_t
+mach_vm_deallocate_kernel(
+	vm_map_t                map,
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u)
+{
+	mach_vm_offset_t start, end;
+	mach_vm_size_t   size;
+	kern_return_t    kr;
+
+	if (map == VM_MAP_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kr = mach_vm_deallocate_kernel_sanitize(map,
+	    start_u,
+	    size_u,
+	    &start,
+	    &end,
+	    &size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr);
+	}
+
+	return vm_map_remove_guard(map, start, end,
+	           VM_MAP_REMOVE_NO_FLAGS, KMEM_GUARD_NONE);
+}
+
 #pragma mark population
 
 static void
@@ -1455,17 +1562,15 @@ kernel_memory_populate_object_and_unlock(
 	vm_prot_t               prot,
 	pmap_mapping_type_t     mapping_type)
 {
-	vm_page_t       mem;
-	int             pe_flags;
-	bool            gobbled_list = page_list && page_list->vmp_gobbled;
+	vm_page_t        mem;
+	int              pe_flags;
+	bool             gobbled_list = page_list && page_list->vmp_gobbled;
+	struct vmpi_acct delayed_acct = { };
 
 	assert(((flags & KMA_KOBJECT) != 0) == (is_kernel_object(object) != 0));
 	assert3u((bool)(flags & KMA_COMPRESSOR), ==, object == compressor_object);
-
 #if HAS_MTE
-	if (!is_mte_enabled) {
-		assert(!(flags & KMA_TAG));
-	}
+	assert(mte_kern_enabled() || (flags & KMA_TAG) == 0);
 #endif /* HAS_MTE */
 
 	if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
@@ -1521,7 +1626,8 @@ kernel_memory_populate_object_and_unlock(
 			 */
 			mem->vmp_on_specialq = VM_PAGE_SPECIAL_Q_EMPTY;
 
-			vm_page_insert(mem, object, offset + pg_offset);
+			vm_page_insert_internal(mem, object, offset + pg_offset,
+			    VM_KERN_MEMORY_NONE, VMPI_NONE, &delayed_acct);
 		} else {
 			mem->vmp_q_state = VM_PAGE_IS_WIRED;
 			mem->vmp_wire_count = 1;
@@ -1530,7 +1636,8 @@ kernel_memory_populate_object_and_unlock(
 			mteinfo_increment_wire_count(mem);
 #endif /* HAS_MTE */
 
-			vm_page_insert_wired(mem, object, offset + pg_offset, tag);
+			vm_page_insert_internal(mem, object, offset + pg_offset,
+			    tag, VMPI_NONE, &delayed_acct);
 		}
 
 		mem->vmp_gobbled = false;
@@ -1554,6 +1661,7 @@ kernel_memory_populate_object_and_unlock(
 		panic("%s: page_list too long", __func__);
 	}
 
+	vm_page_insert_flush_accounting(object, &delayed_acct);
 	vm_object_unlock(object);
 	if ((flags & (KMA_KOBJECT | KMA_COMPRESSOR)) == 0) {
 		vm_object_deallocate(object);
@@ -1611,9 +1719,7 @@ kernel_memory_populate(
 #endif /* DEBUG || DEVELOPMENT */
 
 #if HAS_MTE
-	if (!is_mte_enabled) {
-		assert(!(flags & KMA_TAG));
-	}
+	assert(mte_kern_enabled() || (flags & KMA_TAG) == 0);
 #endif /* HAS_MTE */
 
 	kr = vm_page_alloc_list(page_count, flags, &page_list);
@@ -1658,7 +1764,7 @@ kernel_memory_depopulate(
 		if (flags & KMA_COMPRESSOR) {
 			assert(mem->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR);
 		} else {
-			assert(mem->vmp_q_state == VM_PAGE_IS_WIRED);
+			assert(VM_PAGE_WIRED(mem));
 			pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(mem));
 			pages_unwired++;
 		}
@@ -1666,7 +1772,7 @@ kernel_memory_depopulate(
 		mem->vmp_busy = TRUE;
 
 		assert(mem->vmp_tabled);
-		vm_page_remove(mem, TRUE);
+		vm_page_remove(mem);
 		assert(mem->vmp_busy);
 
 		assert(mem->vmp_pageq.next == 0 && mem->vmp_pageq.prev == 0);
@@ -1696,51 +1802,41 @@ kernel_memory_depopulate(
 
 __abortlike
 static void
-__kmem_realloc_invalid_object_size_panic(
-	vm_map_t                map,
-	vm_address_t            address,
-	vm_size_t               size,
-	vm_map_entry_t          entry)
-{
-	vm_object_t object  = VME_OBJECT(entry);
-	vm_size_t   objsize = __kmem_entry_orig_size(entry);
-
-	panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
-	    "object %p has unexpected size %ld",
-	    map, (void *)address, (size_t)size, entry, object, objsize);
-}
-
-__abortlike
-static void
-__kmem_realloc_invalid_pager_panic(
+__kmem_realloc_invalid_object_panic(
 	vm_map_t                map,
 	vm_address_t            address,
 	vm_size_t               size,
 	vm_map_entry_t          entry)
 {
 	vm_object_t object     = VME_OBJECT(entry);
+	vm_size_t   objsize    = __kmem_entry_orig_size(entry);
 	memory_object_t pager  = object->pager;
 	bool pager_created     = object->pager_created;
 	bool pager_initialized = object->pager_initialized;
 	bool pager_ready       = object->pager_ready;
 
+	if (pager_created || pager) {
+		panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
+		    "object %p has unexpected pager %p (%d,%d,%d)",
+		    map, (void *)address, (size_t)size, entry, object,
+		    pager, pager_created, pager_initialized, pager_ready);
+	}
+
 	panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
-	    "object %p has unexpected pager %p (%d,%d,%d)",
-	    map, (void *)address, (size_t)size, entry, object,
-	    pager, pager_created, pager_initialized, pager_ready);
+	    "object %p has unexpected size %ld",
+	    map, (void *)address, (size_t)size, entry, object, objsize);
 }
 
 static kmem_return_t
-kmem_realloc_shrink_guard(
-	vm_map_t                map,
+kmem_realloc_shrink_guard_and_iunlock(
+	vm_map_find_lock_ctx_t  ctx,
 	vm_offset_t             req_oldaddr,
 	vm_size_t               req_oldsize,
 	vm_size_t               req_newsize,
 	kmr_flags_t             flags,
-	kmem_guard_t            guard,
-	vm_map_entry_t          entry)
+	kmem_guard_t            guard)
 {
-	vmr_flags_t             vmr_flags = VM_MAP_REMOVE_KUNWIRE;
+	vm_map_entry_t          del_entry;
 	vm_object_t             object;
 	vm_offset_t             delta = 0;
 	kmem_return_t           kmr;
@@ -1749,6 +1845,8 @@ kmem_realloc_shrink_guard(
 	vm_size_t               newsize = round_page(req_newsize);
 	vm_address_t            oldaddr = req_oldaddr;
 
+	vm_map_t map = ctx->vmlc_map;
+	vm_map_entry_t entry = vm_map_found_entry_get_entry(ctx);
 #if KASAN_CLASSIC
 	if (flags & KMR_KASAN_GUARD) {
 		assert((flags & (KMR_GUARD_FIRST | KMR_GUARD_LAST)) == 0);
@@ -1764,7 +1862,7 @@ kmem_realloc_shrink_guard(
 		oldaddr = vm_memtag_canonicalize_kernel(req_oldaddr);
 	}
 
-	vm_map_lock_assert_exclusive(map);
+	assert_vm_map_ilk_owned_ignore_sealed(map, LCK_RW_TYPE_EXCLUSIVE);
 
 	if ((flags & KMR_KOBJECT) == 0) {
 		object = VME_OBJECT(entry);
@@ -1777,7 +1875,8 @@ kmem_realloc_shrink_guard(
 	 */
 	was_atomic = entry->vme_atomic;
 	entry->vme_atomic = false;
-	vm_map_clip_end(map, entry, entry->vme_start + newsize);
+	del_entry = vm_map_found_entry_clip_end_ilocked(ctx, entry->vme_start + newsize);
+	vm_map_ilk_unlock(map);
 	entry->vme_atomic = was_atomic;
 
 #if KASAN
@@ -1796,10 +1895,10 @@ kmem_realloc_shrink_guard(
 	}
 #endif /* KASAN_TBI */
 #endif /* KASAN */
-	(void)vm_map_remove_and_unlock(map,
-	    oldaddr + newsize, oldaddr + oldsize,
-	    vmr_flags, KMEM_GUARD_NONE);
+	vm_map_found_entry_ex_unlock(ctx, NULL);
 
+	vm_map_remove_entry(map, del_entry, VM_MAP_REMOVE_KUNWIRE);
+	vm_map_entry_free_locked(map, del_entry);
 
 	/*
 	 *	Lastly, if there are guard pages, deal with them.
@@ -1831,7 +1930,7 @@ kmem_realloc_shrink_guard(
 		vm_object_lock(object);
 
 		if (object->vo_size != oldsize) {
-			__kmem_realloc_invalid_object_size_panic(map,
+			__kmem_realloc_invalid_object_panic(map,
 			    req_oldaddr, req_oldsize + delta, entry);
 		}
 		vm_object_set_size(object, newsize, req_newsize);
@@ -1863,7 +1962,7 @@ kmem_realloc_shrink_guard(
 	return kmr;
 }
 
-kmem_return_t
+__mockable kmem_return_t
 kmem_realloc_guard(
 	vm_map_t                map,
 	vm_offset_t             req_oldaddr,
@@ -1882,13 +1981,13 @@ kmem_realloc_guard(
 	vm_map_entry_t          oldentry;
 	vm_map_entry_t          newentry;
 	vm_page_t               page_list = NULL;
-	bool                    needs_wakeup = false;
 	kmem_return_t           kmr = { };
-	unsigned int            last_timestamp;
 	vm_map_kernel_flags_t   vmk_flags = {
 		.vmkf_last_free = (bool)(flags & KMR_LAST_FREE),
 	};
+	kern_return_t kr;
 
+	VM_MAP_FIND_LOCK_CTX_DECLARE(ctx);
 	vmlp_api_start(KMEM_REALLOC_GUARD);
 
 	assert(KMEM_REALLOC_FLAGS_VALID(flags));
@@ -1937,6 +2036,11 @@ kmem_realloc_guard(
 		newsize += delta;
 	}
 #endif /* KASAN_CLASSIC */
+#if HAS_MTE
+	if (!mte_kern_enabled()) {
+		flags &= ~KMR_TAG;
+	}
+#endif /* HAS_MTE */
 #if CONFIG_KERNEL_TAGGING
 	if (flags & KMR_TAG) {
 		vm_memtag_verify_tag(req_oldaddr + __kmem_guard_left(ANYF(flags)));
@@ -1950,7 +2054,7 @@ kmem_realloc_guard(
 #if !KASAN
 	/*
 	 *	If not on a KASAN variant and no difference in requested size,
-	 *  just return.
+	 *	just return.
 	 *
 	 *	Otherwise we want to validate the size and re-tag for KASAN_TBI.
 	 */
@@ -1974,68 +2078,31 @@ kmem_realloc_guard(
 #endif /* DEBUG || DEVELOPMENT */
 		kmr.kmr_return = vm_page_alloc_list(atop(newsize - oldsize),
 		    (kma_flags_t)flags, &page_list);
-		if (kmr.kmr_return == KERN_SUCCESS) {
-			kmem_apply_security_policy(map, (kma_flags_t)flags, guard,
-			    newsize, 0, &vmk_flags, true);
-			kmr.kmr_return = vm_map_find_space(map, 0, newsize, 0,
-			    vmk_flags, &newentry);
+		if (kmr.kmr_return != KERN_SUCCESS) {
+			goto alloc_fail;
 		}
-		if (__improbable(kmr.kmr_return != KERN_SUCCESS)) {
-			if (flags & KMR_REALLOCF) {
-				kmem_free_guard(map, req_oldaddr, req_oldsize,
-				    flags & (KMF_TAG | KMF_GUARD_FIRST |
-				    KMF_GUARD_LAST | KMF_KASAN_GUARD), guard);
-			}
-			if (page_list) {
-				vm_page_free_list(page_list, FALSE);
-			}
-#if DEBUG || DEVELOPMENT
-			VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
-			    DBG_VM_KERN_REQUEST, DBG_FUNC_END,
-			    0, 0, 0, 0);
-#endif /* DEBUG || DEVELOPMENT */
-			vmlp_api_end(KMEM_REALLOC_GUARD, kmr.kmr_return);
-			return kmr;
-		}
-
-		/* map is locked */
-	} else {
-		vm_map_lock(map);
 	}
 
-
-	/*
-	 *	Locate the entry:
-	 *	- wait for it to quiesce.
-	 *	- validate its guard,
-	 *	- learn its correct tag,
-	 */
-again:
-	if (!vm_map_lookup_entry(map, oldaddr, &oldentry)) {
+	kr = vm_map_find_entry_ex_locked(ctx, &map, oldaddr, VMRL_FIND_EX_DEFAULT);
+	if (kr != KERN_SUCCESS) {
 		__kmem_entry_not_found_panic(map, req_oldaddr);
 	}
+	assert(!vm_map_lock_ctx_is_descended(ctx));
+	oldentry = vm_map_found_entry_get_entry(ctx);
 
-	vmlp_range_event_entry(map, oldentry);
+	vm_map_ilk_lock(vm_map_lock_ctx_get_map(ctx));
 
-	if ((flags & KMR_KOBJECT) && oldentry->in_transition) {
-		oldentry->needs_wakeup = true;
-		vm_map_entry_wait(map, THREAD_UNINT);
-		goto again;
-	}
-	kmem_entry_validate_guard(map, oldentry, oldaddr, oldsize, guard);
-	if (!__kmem_entry_validate_object(oldentry, ANYF(flags))) {
-		__kmem_entry_validate_object_panic(map, oldentry, ANYF(flags));
-	}
-	/*
-	 *	TODO: We should validate for non atomic entries that the range
-	 *	      we are acting on is what we expect here.
-	 */
-#if KASAN
-	if (__kmem_entry_orig_size(oldentry) != req_oldsize) {
-		__kmem_realloc_invalid_object_size_panic(map,
+	kmem_entry_validate_guard(vm_map_lock_ctx_get_map(ctx), oldentry,
+	    oldaddr, oldsize, guard);
+	__kmem_realloc_validate_object(vm_map_lock_ctx_get_map(ctx),
+	    oldentry, ANYF(flags));
+	if (oldentry->vme_start != oldaddr ||
+	    oldentry->vme_end - oldentry->vme_start != oldsize) {
+		__kmem_realloc_invalid_object_panic(vm_map_lock_ctx_get_map(ctx),
 		    req_oldaddr, req_oldsize + delta, oldentry);
 	}
 
+#if KASAN
 	if (oldsize == newsize) {
 		kmr.kmr_address = req_oldaddr;
 		if (oldentry->vme_kernel_object) {
@@ -2047,7 +2114,6 @@ again:
 			vm_object_set_size(object, newsize, req_newsize);
 			vm_object_unlock(object);
 		}
-		vm_map_unlock(map);
 
 #if KASAN_CLASSIC
 		if (flags & KMA_KASAN_GUARD) {
@@ -2061,6 +2127,8 @@ again:
 		}
 #endif /* KASAN_TBI */
 		vmlp_api_end(KMEM_REALLOC_GUARD, kmr.kmr_return);
+		vm_map_ilk_unlock(vm_map_lock_ctx_get_map(ctx));
+		vm_map_found_entry_ex_unlock(ctx, &map);
 		return kmr;
 	}
 #endif /* KASAN */
@@ -2068,12 +2136,24 @@ again:
 	guard.kmg_tag = VME_ALIAS(oldentry);
 
 	if (newsize < oldsize) {
-		kmem_return_t ret = kmem_realloc_shrink_guard(map, req_oldaddr,
-		    req_oldsize, req_newsize, flags, guard, oldentry);
+		kmem_return_t ret = kmem_realloc_shrink_guard_and_iunlock(ctx, req_oldaddr,
+		    req_oldsize, req_newsize, flags, guard);
 		vmlp_api_end(KMEM_REALLOC_GUARD, kmr.kmr_return);
 		return ret;
 	}
 
+	assert((flags & (KMR_DATA | KMR_DATA_SHARED | KMR_IO)) || guard.kmg_type_hash != 0);
+	kmem_apply_security_policy(vm_map_lock_ctx_get_map(ctx),
+	    (kma_flags_t)flags, guard, &vmk_flags);
+	kmr.kmr_return = kmem_find_space(vm_map_lock_ctx_get_map(ctx),
+	    newsize, 0, vmk_flags, &newentry);
+
+	vm_map_ilk_unlock(vm_map_lock_ctx_get_map(ctx));
+
+	if (__improbable(kmr.kmr_return != KERN_SUCCESS)) {
+		vm_map_found_entry_ex_unlock(ctx, &map);
+		goto alloc_fail;
+	}
 
 	/*
 	 *	We are growing the entry
@@ -2081,9 +2161,6 @@ again:
 	 *	For regular objects we use the object `vo_size` updates
 	 *	as a guarantee that no 2 kmem_realloc() can happen
 	 *	concurrently (by doing it before the map is unlocked.
-	 *
-	 *	For the kernel object, prevent the entry from being
-	 *	reallocated or changed by marking it "in_transition".
 	 */
 
 	object = VME_OBJECT(oldentry);
@@ -2093,12 +2170,11 @@ again:
 	newaddr = newentry->vme_start;
 	newoffs = oldsize;
 
-	vmlp_range_event_entry(map, newentry);
+	vmlp_range_event_entry(vm_map_lock_ctx_get_map(ctx), newentry);
 
 	VME_OBJECT_SET(newentry, object, guard.kmg_atomic, guard.kmg_context);
 	VME_ALIAS_SET(newentry, guard.kmg_tag);
 	if (flags & KMR_KOBJECT) {
-		oldentry->in_transition = true;
 		VME_OFFSET_SET(newentry, newaddr);
 		newentry->wired_count = 1;
 		vme_btref_consider_and_set(newentry, __builtin_frame_address(0));
@@ -2108,23 +2184,17 @@ again:
 		    (-req_newsize & PAGE_MASK);
 #endif /* KASAN */
 	} else {
-		if (object->pager_created || object->pager) {
+		if (object->pager_created || object->pager ||
+		    object->vo_size != oldsize) {
 			/*
 			 * We can't "realloc/grow" the pager, so pageable
 			 * allocations should not go through this path.
 			 */
-			__kmem_realloc_invalid_pager_panic(map,
-			    req_oldaddr, req_oldsize + delta, oldentry);
-		}
-		if (object->vo_size != oldsize) {
-			__kmem_realloc_invalid_object_size_panic(map,
+			__kmem_realloc_invalid_object_panic(vm_map_lock_ctx_get_map(ctx),
 			    req_oldaddr, req_oldsize + delta, oldentry);
 		}
 		vm_object_set_size(object, newsize, req_newsize);
 	}
-
-	last_timestamp = map->timestamp;
-	vm_map_unlock(map);
 
 
 	/*
@@ -2158,7 +2228,7 @@ again:
 			pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(mem));
 
 			mem->vmp_busy = true;
-			vm_page_remove(mem, true);
+			vm_page_remove(mem);
 			vm_page_insert_wired(mem, object, newaddr + offset,
 			    guard.kmg_tag);
 			mem->vmp_busy = false;
@@ -2182,14 +2252,17 @@ again:
 		 *	which works because we keep the object locked
 		 *	throughout.
 		 */
-		if ((flags & KMR_GUARD_LAST) && !map->never_faults) {
+		if ((flags & KMR_GUARD_LAST) && !vm_map_lock_ctx_get_map(ctx)->never_faults) {
 			guard_right = vm_page_lookup(object, oldsize - PAGE_SIZE);
 			assert(vm_page_is_guard(guard_right));
 			guard_right->vmp_busy = true;
-			vm_page_remove(guard_right, true);
+			vm_page_remove(guard_right);
 		}
 
 		if (flags & KMR_FREEOLD) {
+			uint32_t  wires = 0;
+			vm_page_t mem;
+
 			/*
 			 * Freeing the old mapping will make
 			 * the old pages become pageable until
@@ -2200,30 +2273,22 @@ again:
 			 * the new mapping.
 			 */
 			vm_object_reference_locked(object); /* keep object alive */
-			for (vm_object_offset_t offset = 0;
-			    offset < oldsize - guard_right_size;
-			    offset += PAGE_SIZE_64) {
-				vm_page_t mem;
 
-				mem = vm_page_lookup(object, offset);
-				assert(mem != VM_PAGE_NULL);
-				assertf(!VM_PAGE_PAGEABLE(mem),
-				    "mem %p qstate %d",
-				    mem, mem->vmp_q_state);
+			vm_page_queue_iterate(&object->memq, mem, vmp_listq) {
 				if (vm_page_is_guard(mem)) {
-					/* guard pages are not wired */
-				} else {
-					assertf(VM_PAGE_WIRED(mem),
-					    "mem %p qstate %d wirecount %d",
-					    mem,
-					    mem->vmp_q_state,
-					    mem->vmp_wire_count);
-					assertf(mem->vmp_wire_count >= 1,
-					    "mem %p wirecount %d",
-					    mem, mem->vmp_wire_count);
-					mem->vmp_wire_count++;
+					continue;
 				}
+				assertf(VM_PAGE_WIRED(mem) &&
+				    mem->vmp_wire_count >= 1,
+				    "mem %p qstate %d wirecount %d",
+				    mem, mem->vmp_q_state, mem->vmp_wire_count);
+				mem->vmp_wire_count++;
+				wires++;
 			}
+
+			assert3u(wires, ==, atop(oldsize -
+			    __kmem_guard_right(ANYF(flags)) -
+			    __kmem_guard_left(ANYF(flags))));
 		}
 
 		for (vm_object_offset_t offset = oldsize - guard_right_size;
@@ -2248,26 +2313,11 @@ again:
 		vm_object_unlock(object);
 	}
 
+	vm_entry_unlock_exclusive(vm_map_lock_ctx_get_map(ctx), newentry);
+
 	/*
-	 *	Mark the entry as idle again,
-	 *	and honor KMR_FREEOLD if needed.
+	 *	Unlock the entry and honor KMR_FREEOLD if needed.
 	 */
-
-	vm_map_lock(map);
-	if (last_timestamp + 1 != map->timestamp &&
-	    !vm_map_lookup_entry(map, oldaddr, &oldentry)) {
-		__kmem_entry_not_found_panic(map, req_oldaddr);
-	}
-
-	if (flags & KMR_KOBJECT) {
-		assert(oldentry->in_transition);
-		oldentry->in_transition = false;
-		if (oldentry->needs_wakeup) {
-			needs_wakeup = true;
-			oldentry->needs_wakeup = false;
-		}
-	}
-
 	if (flags & KMR_FREEOLD) {
 		vmr_flags_t vmr_flags = VM_MAP_REMOVE_KUNWIRE;
 
@@ -2284,15 +2334,14 @@ again:
 		if (flags & KMR_GUARD_LAST) {
 			vmr_flags |= VM_MAP_REMOVE_NOKUNWIRE_LAST;
 		}
-		(void)vm_map_remove_and_unlock(map,
-		    oldaddr, oldaddr + oldsize,
-		    vmr_flags, guard);
-	} else {
-		vm_map_unlock(map);
+
+		vm_map_found_entry_ex_pop_curr(ctx);
+		vm_map_remove_entry(vm_map_lock_ctx_get_map(ctx), oldentry, vmr_flags);
+		vm_map_entry_free_locked(vm_map_lock_ctx_get_map(ctx), oldentry);
 	}
+	vm_map_found_entry_ex_unlock(ctx, &map);
 
 	if ((flags & KMR_KOBJECT) == 0) {
-		kern_return_t kr;
 		/*
 		 * This must happen _after_ we do the KMR_FREEOLD,
 		 * because wiring the pages will call into the pmap,
@@ -2307,45 +2356,38 @@ again:
 		assert(kr == KERN_SUCCESS);
 
 		if (flags & KMR_FREEOLD) {
+			uint32_t  unwires = 0;
+			vm_page_t mem;
+
 			/*
 			 * Undo the extra "wiring" we made above
 			 * and release the extra reference we took
 			 * on the object.
 			 */
 			vm_object_lock(object);
-			for (vm_object_offset_t offset = 0;
-			    offset < oldsize - guard_right_size;
-			    offset += PAGE_SIZE_64) {
-				vm_page_t mem;
 
-				mem = vm_page_lookup(object, offset);
-				assert(mem != VM_PAGE_NULL);
-				assertf(!VM_PAGE_PAGEABLE(mem),
-				    "mem %p qstate %d",
-				    mem, mem->vmp_q_state);
+			vm_page_queue_iterate(&object->memq, mem, vmp_listq) {
 				if (vm_page_is_guard(mem)) {
-					/* guard pages are not wired */
-				} else {
-					assertf(VM_PAGE_WIRED(mem),
-					    "mem %p qstate %d wirecount %d",
-					    mem,
-					    mem->vmp_q_state,
-					    mem->vmp_wire_count);
-					assertf(mem->vmp_wire_count >= 2,
-					    "mem %p wirecount %d",
-					    mem, mem->vmp_wire_count);
-					mem->vmp_wire_count--;
-					assert(VM_PAGE_WIRED(mem));
-					assert(mem->vmp_wire_count >= 1);
+					continue;
 				}
+				if (mem->vmp_offset >= oldsize - guard_right_size) {
+					continue;
+				}
+				assertf(VM_PAGE_WIRED(mem) &&
+				    mem->vmp_wire_count >= 2,
+				    "mem %p qstate %d wirecount %d",
+				    mem, mem->vmp_q_state, mem->vmp_wire_count);
+				mem->vmp_wire_count--;
+				unwires++;
 			}
+
+			assert3u(unwires, ==, atop(oldsize -
+			    __kmem_guard_right(ANYF(flags)) -
+			    __kmem_guard_left(ANYF(flags))));
+
 			vm_object_unlock(object);
 			vm_object_deallocate(object); /* release extra ref */
 		}
-	}
-
-	if (needs_wakeup) {
-		vm_map_entry_wakeup(map);
 	}
 
 #if DEBUG || DEVELOPMENT
@@ -2382,6 +2424,25 @@ again:
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
+	vmlp_api_end(KMEM_REALLOC_GUARD, kmr.kmr_return);
+	return kmr;
+
+alloc_fail:
+	if (page_list) {
+		vm_page_free_list(page_list, FALSE);
+	}
+	if (flags & KMR_REALLOCF) {
+		kmem_free_guard(map, req_oldaddr, req_oldsize,
+		    flags & (KMF_TAG | KMF_GUARD_FIRST |
+		    KMF_GUARD_LAST | KMF_KASAN_GUARD), guard);
+	}
+#if DEBUG || DEVELOPMENT
+	if (oldsize < newsize) {
+		VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
+		    DBG_VM_KERN_REQUEST, DBG_FUNC_END,
+		    0, 0, 0, 0);
+	}
+#endif /* DEBUG || DEVELOPMENT */
 	vmlp_api_end(KMEM_REALLOC_GUARD, kmr.kmr_return);
 	return kmr;
 }
@@ -2484,13 +2545,10 @@ kmem_free_guard(
 	kmf_flags_t     flags,
 	kmem_guard_t    guard)
 {
-	vmr_flags_t     vmr_flags = VM_MAP_REMOVE_KUNWIRE;
-	vm_address_t    addr      = req_addr;
-	vm_offset_t     delta     = 0;
+	vm_map_entry_t  entry = VM_MAP_ENTRY_NULL;
+	vm_address_t    addr  = req_addr;
+	vm_offset_t     delta = 0;
 	vm_size_t       size;
-#if KASAN
-	vm_map_entry_t  entry;
-#endif /* KASAN */
 
 	vmlp_api_start(KMEM_FREE_GUARD);
 
@@ -2509,26 +2567,29 @@ kmem_free_guard(
 	}
 #endif /* CONFIG_KERNEL_TAGGING */
 
+	vm_map_ilk_lock(map);
+
 	if (flags & KMF_GUESS_SIZE) {
-		vmr_flags |= VM_MAP_REMOVE_GUESS_SIZE;
-		size = PAGE_SIZE;
+		entry = vm_map_lookup(map, addr);
+		if (entry == VM_MAP_ENTRY_NULL) {
+			__kmem_entry_not_found_panic(map, req_addr);
+		}
+		req_size = __kmem_entry_orig_size(entry);
+		size = round_page(req_size);
 	} else if (req_size == 0) {
 		__kmem_invalid_size_panic(map, req_size, flags);
 	} else {
-		size = round_page(req_size) + delta;
+		size = round_page(req_size);
+#if KASAN
+		entry = vm_map_lookup(map, addr);
+		if (entry == VM_MAP_ENTRY_NULL) {
+			__kmem_entry_not_found_panic(map, req_addr);
+		}
+#endif /* KASAN */
 	}
-
-	vm_map_lock(map);
 
 #if KASAN
-	if (!vm_map_lookup_entry(map, addr, &entry)) {
-		__kmem_entry_not_found_panic(map, req_addr);
-	}
-	if (flags & KMF_GUESS_SIZE) {
-		vmr_flags &= ~VM_MAP_REMOVE_GUESS_SIZE;
-		req_size = __kmem_entry_orig_size(entry);
-		size = round_page(req_size + delta);
-	} else if (guard.kmg_atomic && entry->vme_kernel_object &&
+	if (guard.kmg_atomic && entry->vme_kernel_object &&
 	    __kmem_entry_orig_size(entry) != req_size) {
 		/*
 		 * We can't make a strict check for regular
@@ -2542,17 +2603,17 @@ kmem_free_guard(
 		__kmem_free_invalid_object_size_panic(map,
 		    req_addr, req_size + delta, entry);
 	}
-#endif /* KASAN */
 #if KASAN_CLASSIC
 	if (flags & KMR_KASAN_GUARD) {
-		kasan_poison_range(addr, size, ASAN_VALID);
+		kasan_poison_range(addr, size + delta, ASAN_VALID);
 	}
 #endif
 #if KASAN_TBI
 	if (flags & KMF_TAG) {
-		kasan_tbi_mark_free_space((caddr_t)req_addr, size);
+		kasan_tbi_mark_free_space((caddr_t)req_addr, size + delta);
 	}
 #endif /* KASAN_TBI */
+#endif /* KASAN */
 
 	/*
 	 * vm_map_remove_and_unlock is called with VM_MAP_REMOVE_KUNWIRE, which
@@ -2562,8 +2623,9 @@ kmem_free_guard(
 	 */
 	vmlp_range_event(map, addr, size);
 	vmlp_api_end(KMEM_FREE_GUARD, 0);
-	return vm_map_remove_and_unlock(map, addr, addr + size,
-	           vmr_flags, guard).kmr_size - delta;
+	(void)vm_map_remove_and_iunlock(map, addr, addr + size + delta,
+	    VM_MAP_REMOVE_KUNWIRE, guard);
+	return size;
 }
 
 __exported void
@@ -2587,565 +2649,6 @@ kmem_free_external(
 	}
 }
 
-#pragma mark kmem metadata
-
-/*
- * Guard objects for kmem pointer allocation:
- *
- * Guard objects introduce size slabs to kmem pointer allocations that are
- * allocated in chunks of n * sizeclass. When an allocation of a specific
- * sizeclass is requested a random slot from [0, n) is returned.
- * Allocations are returned from that chunk until m slots are left. The
- * remaining m slots are referred to as guard objects. They don't get
- * allocated and the chunk is now considered full. When an allocation is
- * freed to the chunk 1 slot is now available from m + 1 for the next
- * allocation of that sizeclass.
- *
- * Guard objects are intended to make exploitation of use after frees harder
- * as allocations that are freed can no longer be reliable reallocated.
- * They also make exploitation of OOBs harder as overflowing out of an
- * allocation can no longer be safe even with sufficient spraying.
- */
-
-#define KMEM_META_PRIMARY    0xf
-#define KMEM_META_START      0xe
-#define KMEM_META_FREE       0xd
-#if __ARM_16K_PG__
-#define KMEM_MIN_SIZE        PAGE_SIZE
-#define KMEM_CHUNK_SIZE_MIN (KMEM_MIN_SIZE * 16)
-#else /* __ARM_16K_PG__ */
-/*
- * PAGE_SIZE isn't a compile time constant on some arm64 devices. Those
- * devices use 4k page size when their RAM is <= 1GB and 16k otherwise.
- * Therefore populate sizeclasses from 4k for those devices.
- */
-#define KMEM_MIN_SIZE       (4 * 1024)
-#define KMEM_CHUNK_SIZE_MIN (KMEM_MIN_SIZE * 32)
-#endif /* __ARM_16K_PG__ */
-#define KMEM_MAX_SIZE       (32ULL << 20)
-#define KMEM_START_IDX      (kmem_log2down(KMEM_MIN_SIZE))
-#define KMEM_LAST_IDX       (kmem_log2down(KMEM_MAX_SIZE))
-#define KMEM_NUM_SIZECLASS  (KMEM_LAST_IDX - KMEM_START_IDX + 1)
-#define KMEM_FRONTS         (KMEM_RANGE_ID_NUM_PTR * 2)
-#define KMEM_NUM_SLOTS       8
-#define KMEM_NUM_GUARDS      2
-#define KMEM_NUM_QUARANTINE  2
-
-#define KMEM_PAGEMARKER_BITS 4
-#define KMEM_SIZECLASS_BITS  4
-#define KMEM_QUARANTINE_BITS 3
-#define KMEM_AVAIL_BITS      5
-
-static_assert(KMEM_NUM_SIZECLASS <= (1u << KMEM_SIZECLASS_BITS));
-
-struct kmem_page_meta {
-	union {
-		/*
-		 * On primary allocated chunk with KMEM_META_PRIMARY marker
-		 */
-		uint32_t km_bitmap;
-		/*
-		 * On start and end of free chunk with KMEM_META_FREE marker
-		 */
-		uint32_t km_free_chunks;
-	};
-
-	/*
-	 * KMEM_META_PRIMARY: Start meta of allocated chunk
-	 * KMEM_META_FREE   : Start and end meta of free chunk
-	 * KMEM_META_START  : Meta region start and end
-	 */
-	uint8_t  km_page_marker : KMEM_PAGEMARKER_BITS;
-	uint8_t  km_sizeclass   : KMEM_SIZECLASS_BITS;
-	uint8_t  km_quarantined : KMEM_QUARANTINE_BITS;
-	uint8_t  km_avail_count : KMEM_AVAIL_BITS;
-
-	union {
-		/*
-		 * On primary allocated chunk with KMEM_META_PRIMARY marker
-		 */
-		uint16_t km_chunk_len;
-		/*
-		 * On secondary allocated chunks
-		 */
-		uint16_t km_page_idx;
-	};
-	LIST_ENTRY(kmem_page_meta) km_link;
-} kmem_page_meta_t;
-
-typedef LIST_HEAD(kmem_list_head, kmem_page_meta) kmem_list_head_t;
-struct kmem_sizeclass {
-	vm_map_size_t                   ks_size;
-	uint32_t                        ks_num_chunk;
-	uint32_t                        ks_num_elem;
-	crypto_random_ctx_t __zpercpu   ks_rng_ctx;
-	kmem_list_head_t                ks_allfree_head[KMEM_FRONTS];
-	kmem_list_head_t                ks_partial_head[KMEM_FRONTS];
-	kmem_list_head_t                ks_full_head[KMEM_FRONTS];
-};
-
-static struct kmem_sizeclass kmem_size_array[KMEM_NUM_SIZECLASS];
-
-/*
- * Locks to synchronize metadata population
- */
-static LCK_GRP_DECLARE(kmem_locks_grp, "kmem_locks");
-static LCK_MTX_DECLARE(kmem_meta_region_lck, &kmem_locks_grp);
-#define kmem_meta_lock()   lck_mtx_lock(&kmem_meta_region_lck)
-#define kmem_meta_unlock() lck_mtx_unlock(&kmem_meta_region_lck)
-
-static SECURITY_READ_ONLY_LATE(struct mach_vm_range)
-kmem_meta_range[KMEM_RANGE_ID_NUM_PTR + 1];
-static SECURITY_READ_ONLY_LATE(struct kmem_page_meta *)
-kmem_meta_base[KMEM_RANGE_ID_NUM_PTR + 1];
-/*
- * Keeps track of metadata high water mark for each front
- */
-static struct kmem_page_meta *kmem_meta_hwm[KMEM_FRONTS];
-static SECURITY_READ_ONLY_LATE(vm_map_t)
-kmem_meta_map[KMEM_RANGE_ID_NUM_PTR + 1];
-static vm_map_size_t kmem_meta_size;
-
-static uint32_t
-kmem_guard_count(struct kmem_sizeclass *kmem)
-{
-	return kmem->ks_num_elem * KMEM_NUM_GUARDS / KMEM_NUM_SLOTS;
-}
-
-static uint32_t
-kmem_quarantine_count(struct kmem_sizeclass *kmem)
-{
-	return kmem->ks_num_elem * KMEM_NUM_QUARANTINE /
-	       KMEM_NUM_SLOTS;
-}
-
-static uint32_t
-kmem_get_front(
-	kmem_range_id_t         range_id,
-	bool                    from_right)
-{
-	assert((range_id >= KMEM_RANGE_ID_FIRST) &&
-	    (range_id <= KMEM_RANGE_ID_NUM_PTR));
-	return (range_id - KMEM_RANGE_ID_FIRST) * 2 + from_right;
-}
-
-static inline uint32_t
-kmem_slot_idx_to_bit(
-	uint32_t                slot_idx,
-	uint32_t                size_idx __unused)
-{
-	assert(slot_idx < kmem_size_array[size_idx].ks_num_elem);
-	return 1ull << slot_idx;
-}
-
-static uint32_t
-kmem_get_idx_from_size(vm_map_size_t size)
-{
-	assert(size >= KMEM_MIN_SIZE && size <= KMEM_MAX_SIZE);
-	return kmem_log2down(size - 1) - KMEM_START_IDX + 1;
-}
-
-__abortlike
-static void
-kmem_invalid_size_idx(uint32_t idx)
-{
-	panic("Invalid sizeclass idx %u", idx);
-}
-
-static vm_map_size_t
-kmem_get_size_from_idx(uint32_t idx)
-{
-	if (__improbable(idx >= KMEM_NUM_SIZECLASS)) {
-		kmem_invalid_size_idx(idx);
-	}
-	return 1ul << (idx + KMEM_START_IDX);
-}
-
-static inline uint16_t
-kmem_get_page_idx(struct kmem_page_meta *meta)
-{
-	uint8_t page_marker = meta->km_page_marker;
-
-	return (page_marker == KMEM_META_PRIMARY) ? 0 : meta->km_page_idx;
-}
-
-__abortlike
-static void
-kmem_invalid_chunk_len(struct kmem_page_meta *meta)
-{
-	panic("Reading free chunks for meta %p where marker != KMEM_META_PRIMARY",
-	    meta);
-}
-
-static inline uint16_t
-kmem_get_chunk_len(struct kmem_page_meta *meta)
-{
-	if (__improbable(meta->km_page_marker != KMEM_META_PRIMARY)) {
-		kmem_invalid_chunk_len(meta);
-	}
-
-	return meta->km_chunk_len;
-}
-
-__abortlike
-static void
-kmem_invalid_free_chunk_len(struct kmem_page_meta *meta)
-{
-	panic("Reading free chunks for meta %p where marker != KMEM_META_FREE",
-	    meta);
-}
-
-static inline uint32_t
-kmem_get_free_chunk_len(struct kmem_page_meta *meta)
-{
-	if (__improbable(meta->km_page_marker != KMEM_META_FREE)) {
-		kmem_invalid_free_chunk_len(meta);
-	}
-
-	return meta->km_free_chunks;
-}
-
-/*
- * Return the metadata corresponding to the specified address
- */
-static struct kmem_page_meta *
-kmem_addr_to_meta(
-	vm_map_offset_t         addr,
-	vm_map_range_id_t       range_id,
-	vm_map_offset_t        *range_start,
-	uint64_t               *meta_idx)
-{
-	struct kmem_page_meta *meta_base = kmem_meta_base[range_id];
-
-	*range_start = kmem_ranges[range_id].min_address;
-	*meta_idx = (addr - *range_start) / KMEM_CHUNK_SIZE_MIN;
-	return VM_FAR_ADD_PTR_UNBOUNDED(meta_base, *meta_idx);
-}
-
-/*
- * Return the metadata start of the chunk that the address belongs to
- */
-static struct kmem_page_meta *
-kmem_addr_to_meta_start(
-	vm_address_t            addr,
-	vm_map_range_id_t       range_id,
-	vm_map_offset_t        *chunk_start)
-{
-	vm_map_offset_t range_start;
-	uint64_t meta_idx;
-	struct kmem_page_meta *meta;
-
-	meta = kmem_addr_to_meta(addr, range_id, &range_start, &meta_idx);
-	meta_idx -= kmem_get_page_idx(meta);
-	meta = VM_FAR_ADD_PTR_UNBOUNDED(meta, -(ptrdiff_t)kmem_get_page_idx(meta));
-	assert(meta->km_page_marker == KMEM_META_PRIMARY);
-	*chunk_start = range_start + (meta_idx * KMEM_CHUNK_SIZE_MIN);
-	return meta;
-}
-
-__startup_func
-static void
-kmem_init_meta_front(
-	struct kmem_page_meta  *meta,
-	kmem_range_id_t         range_id,
-	bool                    from_right)
-{
-	kernel_memory_populate(trunc_page((vm_map_offset_t) meta), PAGE_SIZE,
-	    KMA_KOBJECT | KMA_ZERO | KMA_NOFAIL, VM_KERN_MEMORY_OSFMK);
-	meta->km_page_marker = KMEM_META_START;
-	if (!from_right) {
-		meta++;
-		kmem_meta_base[range_id] = meta;
-	}
-	kmem_meta_hwm[kmem_get_front(range_id, from_right)] = meta;
-}
-
-__startup_func
-static void
-kmem_metadata_init(void)
-{
-	for (kmem_range_id_t i = KMEM_RANGE_ID_FIRST; i <= kmem_ptr_ranges; i++) {
-		vm_map_offset_t addr = kmem_meta_range[i].min_address;
-		struct kmem_page_meta *meta;
-		uint64_t meta_idx;
-
-		vm_map_will_allocate_early_map(&kmem_meta_map[i]);
-		kmem_meta_map[i] = kmem_suballoc(kernel_map, &addr, kmem_meta_size,
-		    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
-		    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-		    KMS_PERMANENT | KMS_NOFAIL | KMS_NOSOFTLIMIT,
-		    VM_KERN_MEMORY_OSFMK).kmr_submap;
-
-		kmem_meta_range[i].min_address = addr;
-		kmem_meta_range[i].max_address = addr + kmem_meta_size;
-
-		meta = (struct kmem_page_meta *) kmem_meta_range[i].min_address;
-		kmem_init_meta_front(meta, i, 0);
-
-		meta = kmem_addr_to_meta(kmem_ranges[i].max_address, i, &addr,
-		    &meta_idx);
-		kmem_init_meta_front(meta, i, 1);
-	}
-}
-
-__startup_func
-static void
-kmem_init_front_head(
-	struct kmem_sizeclass  *ks,
-	uint32_t                front)
-{
-	LIST_INIT(&ks->ks_allfree_head[front]);
-	LIST_INIT(&ks->ks_partial_head[front]);
-	LIST_INIT(&ks->ks_full_head[front]);
-}
-
-__startup_func
-static void
-kmem_sizeclass_init(void)
-{
-	for (uint32_t i = 0; i < KMEM_NUM_SIZECLASS; i++) {
-		struct kmem_sizeclass *ks = &kmem_size_array[i];
-		kmem_range_id_t range_id = KMEM_RANGE_ID_FIRST;
-
-		ks->ks_size = kmem_get_size_from_idx(i);
-		ks->ks_num_chunk = roundup(KMEM_NUM_SLOTS * ks->ks_size,
-		    KMEM_CHUNK_SIZE_MIN) / KMEM_CHUNK_SIZE_MIN;
-		ks->ks_num_elem = (ks->ks_num_chunk * KMEM_CHUNK_SIZE_MIN) / ks->ks_size;
-
-		/*
-		 * Check that everything fits in the metadata.
-		 */
-		assert(ks->ks_num_elem <=
-		    (sizeof(((struct kmem_page_meta *)0)->km_bitmap) * 8));
-		assert(kmem_quarantine_count(ks) - 1 <
-		    (1u << KMEM_QUARANTINE_BITS));
-		assert(ks->ks_num_elem - kmem_guard_count(ks) <
-		    (1u << KMEM_AVAIL_BITS));
-
-		for (; range_id <= KMEM_RANGE_ID_NUM_PTR; range_id++) {
-			kmem_init_front_head(ks, kmem_get_front(range_id, 0));
-			kmem_init_front_head(ks, kmem_get_front(range_id, 1));
-		}
-	}
-}
-
-/*
- * This is done during EARLY_BOOT as it needs the corecrypto module to be
- * set up.
- */
-__startup_func
-static void
-kmem_crypto_init(void)
-{
-	vm_size_t ctx_size = crypto_random_kmem_ctx_size();
-
-	for (uint32_t i = 0; i < KMEM_NUM_SIZECLASS; i++) {
-		struct kmem_sizeclass *ks = &kmem_size_array[i];
-
-		ks->ks_rng_ctx = zalloc_percpu_permanent(ctx_size, ZALIGN_PTR);
-		zpercpu_foreach(ctx, ks->ks_rng_ctx) {
-			crypto_random_kmem_init(ctx);
-		}
-	}
-}
-STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, kmem_crypto_init);
-
-__abortlike
-static void
-kmem_validate_slot_panic(
-	vm_map_offset_t         addr,
-	struct kmem_page_meta  *meta,
-	uint32_t                slot_idx,
-	uint32_t                size_idx)
-{
-	if (meta->km_page_marker != KMEM_META_PRIMARY) {
-		panic("Metadata (%p) for addr (%p) not primary", meta, (void *)addr);
-	}
-	if (meta->km_sizeclass != size_idx) {
-		panic("Metadata's (%p) sizeclass (%u != %u) changed during deletion",
-		    meta, meta->km_sizeclass, size_idx);
-	}
-	panic("Double free detected: Slot (%u) in meta (%p) for addr %p marked free",
-	    slot_idx, meta, (void *)addr);
-}
-
-__abortlike
-static void
-kmem_invalid_slot_for_addr(
-	mach_vm_range_t         slot,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end)
-{
-	panic("Invalid kmem ptr slot [%p:%p] for allocation [%p:%p]",
-	    (void *)slot->min_address, (void *)slot->max_address,
-	    (void *)start, (void *)end);
-}
-
-void
-kmem_validate_slot(
-	vm_map_offset_t         addr,
-	struct kmem_page_meta  *meta,
-	uint32_t                size_idx,
-	uint32_t                slot_idx)
-{
-	if ((meta->km_page_marker != KMEM_META_PRIMARY) ||
-	    (meta->km_sizeclass != size_idx) ||
-	    ((meta->km_bitmap & kmem_slot_idx_to_bit(slot_idx, size_idx)) != 0)) {
-		kmem_validate_slot_panic(addr, meta, size_idx, slot_idx);
-	}
-}
-
-static void
-kmem_validate_slot_initial(
-	mach_vm_range_t         slot,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	struct kmem_page_meta  *meta,
-	uint32_t                size_idx,
-	uint32_t                slot_idx)
-{
-	if ((slot->min_address == 0) || (slot->max_address == 0) ||
-	    (start < slot->min_address) || (start >= slot->max_address) ||
-	    (end > slot->max_address)) {
-		kmem_invalid_slot_for_addr(slot, start, end);
-	}
-
-	kmem_validate_slot(start, meta, size_idx, slot_idx);
-}
-
-uint32_t
-kmem_addr_get_slot_idx(
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_map_range_id_t       range_id,
-	struct kmem_page_meta **meta,
-	uint32_t               *size_idx,
-	mach_vm_range_t         slot)
-{
-	vm_map_offset_t chunk_start;
-	vm_map_size_t slot_size;
-	uint32_t slot_idx;
-
-	*meta = kmem_addr_to_meta_start(start, range_id, &chunk_start);
-	*size_idx = (*meta)->km_sizeclass;
-	slot_size = kmem_get_size_from_idx(*size_idx);
-	slot_idx = (start - chunk_start) / slot_size;
-	slot->min_address = chunk_start + slot_idx * slot_size;
-	slot->max_address = slot->min_address + slot_size;
-
-	kmem_validate_slot_initial(slot, start, end, *meta, *size_idx, slot_idx);
-
-	return slot_idx;
-}
-
-static bool
-kmem_populate_needed(vm_offset_t from, vm_offset_t to)
-{
-#if KASAN
-#pragma unused(from, to)
-	return true;
-#else
-	vm_offset_t page_addr = trunc_page(from);
-
-	for (; page_addr < to; page_addr += PAGE_SIZE) {
-		/*
-		 * This can race with another thread doing a populate on the same metadata
-		 * page, where we see an updated pmap but unmapped KASan shadow, causing a
-		 * fault in the shadow when we first access the metadata page. Avoid this
-		 * by always synchronizing on the kmem_meta_lock with KASan.
-		 */
-		if (!pmap_find_phys(kernel_pmap, page_addr)) {
-			return true;
-		}
-	}
-
-	return false;
-#endif /* !KASAN */
-}
-
-static void
-kmem_populate_meta_locked(vm_offset_t from, vm_offset_t to)
-{
-	vm_offset_t page_addr = trunc_page(from);
-
-	vmlp_api_start(KMEM_POPULATE_META_LOCKED);
-
-	vm_map_unlock(kernel_map);
-
-	vmlp_range_event(kernel_map, from, to - from);
-
-	for (; page_addr < to; page_addr += PAGE_SIZE) {
-		for (;;) {
-			kern_return_t ret = KERN_SUCCESS;
-
-			/*
-			 * All updates to kmem metadata are done under the kmem_meta_lock
-			 */
-			kmem_meta_lock();
-			if (0 == pmap_find_phys(kernel_pmap, page_addr)) {
-				ret = kernel_memory_populate(page_addr,
-				    PAGE_SIZE, KMA_NOPAGEWAIT | KMA_KOBJECT | KMA_ZERO,
-				    VM_KERN_MEMORY_OSFMK);
-			}
-			kmem_meta_unlock();
-
-			if (ret == KERN_SUCCESS) {
-				break;
-			}
-
-			/*
-			 * We can't pass KMA_NOPAGEWAIT under a global lock as it leads
-			 * to bad system deadlocks, so if the allocation failed,
-			 * we need to do the VM_PAGE_WAIT() outside of the lock.
-			 */
-			VM_PAGE_WAIT();
-		}
-	}
-
-	vm_map_lock(kernel_map);
-	vmlp_api_end(KMEM_POPULATE_META_LOCKED, 0);
-}
-
-__abortlike
-static void
-kmem_invalid_meta_panic(
-	struct kmem_page_meta  *meta,
-	uint32_t                slot_idx,
-	struct kmem_sizeclass  *sizeclass)
-{
-	uint32_t size_idx = kmem_get_idx_from_size(sizeclass->ks_size);
-
-	if (slot_idx >= sizeclass->ks_num_elem) {
-		panic("Invalid slot idx %u [0:%u] for meta %p", slot_idx,
-		    sizeclass->ks_num_elem, meta);
-	}
-	if (meta->km_sizeclass != size_idx) {
-		panic("Invalid size_idx (%u != %u) in meta %p", size_idx,
-		    meta->km_sizeclass, meta);
-	}
-	panic("page_marker %u not primary in meta %p", meta->km_page_marker, meta);
-}
-
-__abortlike
-static void
-kmem_slot_has_entry_panic(
-	vm_map_entry_t          entry,
-	vm_map_offset_t         addr)
-{
-	panic("Entry (%p) already exists for addr (%p) being returned",
-	    entry, (void *)addr);
-}
-
-__abortlike
-static void
-kmem_slot_not_found(
-	struct kmem_page_meta  *meta,
-	uint32_t                slot_idx)
-{
-	panic("%uth free slot not found for meta %p bitmap %u", slot_idx, meta,
-	    meta->km_bitmap);
-}
-
 /*
  * Returns a 16bit random number between 0 and
  * upper_limit (inclusive)
@@ -3163,589 +2666,6 @@ kmem_get_random16(
 	uint32_t result = random_entropy & UINT32_MAX;
 	random_entropy >>= 32;
 	return (uint16_t)(result % (upper_limit + 1));
-}
-
-static uint32_t
-kmem_get_nth_free_slot(
-	struct kmem_page_meta  *meta,
-	uint32_t                n,
-	uint32_t                bitmap)
-{
-	uint32_t zeros_seen = 0, ones_seen = 0;
-
-	while (bitmap) {
-		uint32_t count = __builtin_ctz(bitmap);
-
-		zeros_seen += count;
-		bitmap >>= count;
-		if (__probable(~bitmap)) {
-			count = __builtin_ctz(~bitmap);
-		} else {
-			count = 32;
-		}
-		if (count + ones_seen > n) {
-			meta->km_avail_count -= 1;
-			return zeros_seen + n;
-		}
-		ones_seen += count;
-		bitmap >>= count;
-	}
-
-	kmem_slot_not_found(meta, n);
-}
-
-
-static uint32_t
-kmem_get_next_slot(
-	struct kmem_page_meta  *meta,
-	struct kmem_sizeclass  *sizeclass,
-	uint32_t                bitmap)
-{
-	uint32_t num_slots = meta->km_avail_count + meta->km_quarantined +
-	    kmem_guard_count(sizeclass);
-	uint64_t slot_idx = 0;
-
-	assert(meta->km_avail_count > 0 &&
-	    num_slots == __builtin_popcount(meta->km_bitmap));
-
-	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
-		/*
-		 * Use early random prior to early boot as the ks_rng_ctx requires
-		 * the corecrypto module to be setup before it is initialized and
-		 * used.
-		 *
-		 * num_slots can't be 0 as we take this path when we have more than
-		 * one slot left.
-		 */
-		slot_idx = kmem_get_random16((uint16_t)num_slots - 1);
-	} else {
-		crypto_random_uniform(zpercpu_get(sizeclass->ks_rng_ctx),
-		    num_slots, &slot_idx);
-	}
-
-	return kmem_get_nth_free_slot(meta, slot_idx, bitmap);
-}
-
-/*
- * Returns an unallocated slot from the given metadata
- */
-static vm_map_offset_t
-kmem_get_addr_from_meta(
-	struct kmem_page_meta  *meta,
-	vm_map_range_id_t       range_id,
-	struct kmem_sizeclass  *sizeclass,
-	vm_map_entry_t         *entry)
-{
-	vm_map_offset_t addr;
-	vm_map_size_t size = sizeclass->ks_size;
-	uint32_t size_idx = kmem_get_idx_from_size(size);
-	uint64_t meta_idx = meta - kmem_meta_base[range_id];
-	mach_vm_offset_t range_start = kmem_ranges[range_id].min_address;
-	uint32_t slot_bit;
-	uint32_t slot_idx = kmem_get_next_slot(meta, sizeclass, meta->km_bitmap);
-
-	if ((slot_idx >= sizeclass->ks_num_elem) ||
-	    (meta->km_sizeclass != size_idx) ||
-	    (meta->km_page_marker != KMEM_META_PRIMARY)) {
-		kmem_invalid_meta_panic(meta, slot_idx, sizeclass);
-	}
-
-	slot_bit = kmem_slot_idx_to_bit(slot_idx, size_idx);
-	meta->km_bitmap &= ~slot_bit;
-
-	addr = range_start + (meta_idx * KMEM_CHUNK_SIZE_MIN) + (slot_idx * size);
-	assert(kmem_range_contains_fully(range_id, addr, size));
-	if (vm_map_lookup_entry(kernel_map, addr, entry)) {
-		kmem_slot_has_entry_panic(*entry, addr);
-	}
-	if ((*entry != vm_map_to_entry(kernel_map)) &&
-	    ((*entry)->vme_next != vm_map_to_entry(kernel_map)) &&
-	    ((*entry)->vme_next->vme_start < (addr + size))) {
-		kmem_slot_has_entry_panic(*entry, addr);
-	}
-	return addr;
-}
-
-__abortlike
-static void
-kmem_range_out_of_va(
-	kmem_range_id_t         range_id,
-	uint32_t                num_chunks)
-{
-	panic("No more VA to allocate %u chunks in range %u", num_chunks, range_id);
-}
-
-static void
-kmem_init_allocated_chunk(
-	struct kmem_page_meta  *meta,
-	struct kmem_sizeclass  *sizeclass,
-	uint32_t                size_idx)
-{
-	uint32_t meta_num = sizeclass->ks_num_chunk;
-	uint32_t num_elem = sizeclass->ks_num_elem;
-
-	meta->km_bitmap = (1ull << num_elem) - 1;
-	meta->km_chunk_len = (uint16_t)meta_num;
-	meta->km_avail_count = (uint8_t)(num_elem - kmem_guard_count(sizeclass));
-	meta->km_quarantined = 0;
-	assert(LIST_NEXT(meta, km_link) == NULL);
-	assert(meta->km_link.le_prev == NULL);
-	meta->km_sizeclass = (uint8_t)size_idx;
-	meta->km_page_marker = KMEM_META_PRIMARY;
-	meta++;
-	for (uint32_t i = 1; i < meta_num; i++) {
-		meta->km_page_idx = (uint16_t)i;
-		meta->km_avail_count = 0;
-		meta->km_quarantined = 0;
-		meta->km_sizeclass = (uint8_t)size_idx;
-		meta->km_page_marker = 0;
-		meta->km_bitmap = 0;
-		meta++;
-	}
-}
-
-static uint32_t
-kmem_get_additional_meta(
-	struct kmem_page_meta  *meta,
-	uint32_t                meta_req,
-	bool                    from_right,
-	struct kmem_page_meta **adj_free_meta)
-{
-	struct kmem_page_meta *meta_prev = from_right ? meta : (meta - 1);
-
-	if (meta_prev->km_page_marker == KMEM_META_FREE) {
-		uint32_t chunk_len = kmem_get_free_chunk_len(meta_prev);
-
-		*adj_free_meta = from_right ? meta_prev : (meta_prev - chunk_len + 1);
-		meta_req -= chunk_len;
-	} else {
-		*adj_free_meta = NULL;
-	}
-
-	return meta_req;
-}
-
-
-static struct kmem_page_meta *
-kmem_get_new_chunk(
-	vm_map_range_id_t       range_id,
-	bool                    from_right,
-	uint32_t                size_idx,
-	uint32_t                front)
-{
-	struct kmem_sizeclass *sizeclass = &kmem_size_array[size_idx];
-	struct kmem_page_meta *start, *end, *meta_update;
-	struct kmem_page_meta *adj_free_meta = NULL;
-	uint32_t meta_req = sizeclass->ks_num_chunk;
-
-	for (;;) {
-		struct kmem_page_meta *metaf = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-		struct kmem_page_meta *metab = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-		struct kmem_page_meta *meta;
-		vm_offset_t start_addr, end_addr;
-		uint32_t meta_num;
-
-		meta = from_right ? metab : metaf;
-		meta_num = kmem_get_additional_meta(meta, meta_req, from_right,
-		    &adj_free_meta);
-
-		if (metaf + meta_num >= metab) {
-			kmem_range_out_of_va(range_id, meta_num);
-		}
-
-		start = from_right ? (metab - meta_num) : metaf;
-		end = from_right ? metab : (metaf + meta_num);
-
-		start_addr = (vm_offset_t)start;
-		end_addr   = (vm_offset_t)end;
-
-		/*
-		 * If the new high watermark stays on the same page,
-		 * no need to populate and drop the lock.
-		 */
-		if (!page_aligned(from_right ? end_addr : start_addr) &&
-		    trunc_page(start_addr) == trunc_page(end_addr - 1)) {
-			break;
-		}
-		if (!kmem_populate_needed(start_addr, end_addr)) {
-			break;
-		}
-
-		kmem_populate_meta_locked(start_addr, end_addr);
-
-		/*
-		 * Since we dropped the lock, reassess conditions still hold:
-		 * - the HWM we are changing must not have moved
-		 * - the other HWM must not intersect with ours
-		 * - in case of coalescing, the adjacent free meta must still
-		 *   be free and of the same size.
-		 *
-		 * If we failed to grow, reevaluate whether freelists have
-		 * entries now by returning NULL.
-		 */
-		metaf = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-		metab = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-		if (meta != (from_right ? metab : metaf)) {
-			return NULL;
-		}
-		if (metaf + meta_num >= metab) {
-			kmem_range_out_of_va(range_id, meta_num);
-		}
-		if (adj_free_meta) {
-			if (adj_free_meta->km_page_marker != KMEM_META_FREE ||
-			    kmem_get_free_chunk_len(adj_free_meta) !=
-			    meta_req - meta_num) {
-				return NULL;
-			}
-		}
-
-		break;
-	}
-
-	/*
-	 * If there is an adjacent free chunk remove it from free list
-	 */
-	if (adj_free_meta) {
-		LIST_REMOVE(adj_free_meta, km_link);
-		LIST_NEXT(adj_free_meta, km_link) = NULL;
-		adj_free_meta->km_link.le_prev = NULL;
-	}
-
-	/*
-	 * Update hwm
-	 */
-	meta_update = from_right ? start : end;
-	kmem_meta_hwm[kmem_get_front(range_id, from_right)] = meta_update;
-
-	/*
-	 * Initialize metadata
-	 */
-	start = from_right ? start : (end - meta_req);
-	kmem_init_allocated_chunk(start, sizeclass, size_idx);
-	LIST_INSERT_HEAD(&sizeclass->ks_partial_head[front], start, km_link);
-
-	return start;
-}
-
-static void
-kmem_requeue_meta(
-	struct kmem_page_meta  *meta,
-	struct kmem_list_head  *head)
-{
-	LIST_REMOVE(meta, km_link);
-	LIST_INSERT_HEAD(head, meta, km_link);
-}
-
-/*
- * Return corresponding sizeclass to stash free chunks in
- */
-__abortlike
-static void
-kmem_invalid_chunk_num(uint32_t chunks)
-{
-	panic("Invalid number of chunks %u\n", chunks);
-}
-
-static uint32_t
-kmem_get_size_idx_for_chunks(uint32_t chunks)
-{
-	for (uint32_t i = KMEM_NUM_SIZECLASS - 1; i > 0; i--) {
-		if (chunks >= kmem_size_array[i].ks_num_chunk) {
-			return i;
-		}
-	}
-	kmem_invalid_chunk_num(chunks);
-}
-
-static void
-kmem_clear_meta_range(struct kmem_page_meta *meta, uint32_t count)
-{
-	bzero(meta, count * sizeof(struct kmem_page_meta));
-}
-
-static void
-kmem_check_meta_range_is_clear(struct kmem_page_meta *meta, uint32_t count)
-{
-#if MACH_ASSERT
-	size_t size = count * sizeof(struct kmem_page_meta);
-
-	assert(memcmp_zero_ptr_aligned(meta, size) == 0);
-#else
-#pragma unused(meta, count)
-#endif
-}
-
-/*!
- * @function kmem_init_free_chunk()
- *
- * @discussion
- * This function prepares a range of chunks to be put on a free list.
- * The first and last metadata might be dirty, but the "inner" ones
- * must be zero filled by the caller prior to calling this function.
- */
-static void
-kmem_init_free_chunk(
-	struct kmem_page_meta  *meta,
-	uint32_t                num_chunks,
-	uint32_t                front)
-{
-	struct kmem_sizeclass *sizeclass;
-	uint32_t size_idx = kmem_get_size_idx_for_chunks(num_chunks);
-
-	if (num_chunks > 2) {
-		kmem_check_meta_range_is_clear(meta + 1, num_chunks - 2);
-	}
-
-	meta[0] = (struct kmem_page_meta){
-		.km_free_chunks = num_chunks,
-		.km_page_marker = KMEM_META_FREE,
-		.km_sizeclass   = (uint8_t)size_idx,
-	};
-	if (num_chunks > 1) {
-		meta[num_chunks - 1] = (struct kmem_page_meta){
-			.km_free_chunks = num_chunks,
-			.km_page_marker = KMEM_META_FREE,
-			.km_sizeclass   = (uint8_t)size_idx,
-		};
-	}
-
-	sizeclass = &kmem_size_array[size_idx];
-	LIST_INSERT_HEAD(&sizeclass->ks_allfree_head[front], meta, km_link);
-}
-
-static struct kmem_page_meta *
-kmem_get_free_chunk_from_list(
-	struct kmem_sizeclass  *org_sizeclass,
-	uint32_t                size_idx,
-	uint32_t                front)
-{
-	struct kmem_sizeclass *sizeclass;
-	uint32_t num_chunks = org_sizeclass->ks_num_chunk;
-	struct kmem_page_meta *meta;
-	uint32_t idx = size_idx;
-
-	while (idx < KMEM_NUM_SIZECLASS) {
-		sizeclass = &kmem_size_array[idx];
-		meta = LIST_FIRST(&sizeclass->ks_allfree_head[front]);
-		if (meta) {
-			break;
-		}
-		idx++;
-	}
-
-	/*
-	 * Trim if larger in size
-	 */
-	if (meta) {
-		uint32_t num_chunks_free = kmem_get_free_chunk_len(meta);
-
-		assert(meta->km_page_marker == KMEM_META_FREE);
-		LIST_REMOVE(meta, km_link);
-		LIST_NEXT(meta, km_link) = NULL;
-		meta->km_link.le_prev = NULL;
-		if (num_chunks_free > num_chunks) {
-			num_chunks_free -= num_chunks;
-			kmem_init_free_chunk(meta + num_chunks, num_chunks_free, front);
-		}
-
-		kmem_init_allocated_chunk(meta, org_sizeclass, size_idx);
-		LIST_INSERT_HEAD(&org_sizeclass->ks_partial_head[front], meta, km_link);
-	}
-
-	return meta;
-}
-
-kern_return_t
-kmem_locate_space(
-	vm_map_size_t           size,
-	vm_map_range_id_t       range_id,
-	bool                    from_right,
-	vm_map_offset_t        *start_inout,
-	vm_map_entry_t         *entry_out)
-{
-	vm_map_entry_t entry;
-	uint32_t size_idx = kmem_get_idx_from_size(size);
-	uint32_t front = kmem_get_front(range_id, from_right);
-	struct kmem_sizeclass *sizeclass = &kmem_size_array[size_idx];
-	struct kmem_page_meta *meta;
-
-	assert(size <= sizeclass->ks_size);
-
-	do {
-		/*
-		 * Attempt to find space trying:
-		 * 1. partial heads;
-		 * 2. free chunks in the segregated free-lists;
-		 * 3. extending the metadata range.
-		 */
-		meta = LIST_FIRST(&sizeclass->ks_partial_head[front]) ?:
-		    kmem_get_free_chunk_from_list(sizeclass, size_idx, front) ?:
-		    kmem_get_new_chunk(range_id, from_right, size_idx, front);
-	} while (meta == NULL);
-
-	*start_inout = kmem_get_addr_from_meta(meta, range_id, sizeclass, &entry);
-
-	if (meta->km_avail_count == 0) {
-		kmem_requeue_meta(meta, &sizeclass->ks_full_head[front]);
-	}
-	if (entry_out) {
-		*entry_out = entry;
-	}
-
-	return KERN_SUCCESS;
-}
-
-/*
- * Determine whether the given metadata was allocated from the right
- */
-static bool
-kmem_meta_is_from_right(
-	kmem_range_id_t         range_id,
-	struct kmem_page_meta  *meta)
-{
-	struct kmem_page_meta *metaf = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-	__assert_only struct kmem_page_meta *metab = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-	struct kmem_page_meta *meta_base = kmem_meta_base[range_id];
-	struct kmem_page_meta *meta_end;
-
-	meta_end = (struct kmem_page_meta *)kmem_meta_range[range_id].max_address;
-
-	if ((meta >= meta_base) && (meta < metaf)) {
-		return false;
-	}
-
-	assert(meta >= metab && meta < meta_end);
-	return true;
-}
-
-static void
-kmem_free_chunk(
-	kmem_range_id_t         range_id,
-	struct kmem_page_meta  *meta,
-	bool                    from_right)
-{
-	struct kmem_page_meta *meta_coalesce = meta - 1;
-	struct kmem_page_meta *meta_start = meta;
-	uint32_t num_chunks = kmem_get_chunk_len(meta);
-	uint32_t add_chunks;
-	struct kmem_page_meta *meta_end = meta + num_chunks;
-	struct kmem_page_meta *meta_hwm_l, *meta_hwm_r;
-	uint32_t front = kmem_get_front(range_id, from_right);
-
-	meta_hwm_l = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-	meta_hwm_r = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-
-	LIST_REMOVE(meta, km_link);
-	kmem_clear_meta_range(meta, num_chunks);
-
-	/*
-	 * Coalesce left
-	 */
-	if (((from_right && (meta_coalesce >= meta_hwm_r)) || !from_right) &&
-	    (meta_coalesce->km_page_marker == KMEM_META_FREE)) {
-		meta_start = meta_coalesce - kmem_get_free_chunk_len(meta_coalesce) + 1;
-		add_chunks = kmem_get_free_chunk_len(meta_start);
-		num_chunks += add_chunks;
-		LIST_REMOVE(meta_start, km_link);
-		kmem_clear_meta_range(meta_start + add_chunks - 1, 1);
-	}
-
-	/*
-	 * Coalesce right
-	 */
-	if (((!from_right && (meta_end < meta_hwm_l)) || from_right) &&
-	    (meta_end->km_page_marker == KMEM_META_FREE)) {
-		add_chunks = kmem_get_free_chunk_len(meta_end);
-		LIST_REMOVE(meta_end, km_link);
-		kmem_clear_meta_range(meta_end, 1);
-		meta_end = meta_end + add_chunks;
-		num_chunks += add_chunks;
-	}
-
-	kmem_init_free_chunk(meta_start, num_chunks, front);
-}
-
-static void
-kmem_free_slot(
-	kmem_range_id_t         range_id,
-	mach_vm_range_t         slot)
-{
-	struct kmem_page_meta *meta;
-	vm_map_offset_t chunk_start;
-	uint32_t size_idx, slot_idx;
-	struct kmem_sizeclass *sizeclass;
-	vm_map_size_t slot_size;
-
-	meta = kmem_addr_to_meta_start(slot->min_address, range_id, &chunk_start);
-	size_idx = meta->km_sizeclass;
-
-	sizeclass = &kmem_size_array[size_idx];
-	slot_size = kmem_get_size_from_idx(size_idx);
-	slot_idx = (slot->min_address - chunk_start) / slot_size;
-	assert((meta->km_bitmap & kmem_slot_idx_to_bit(slot_idx, size_idx)) == 0);
-	meta->km_bitmap |= kmem_slot_idx_to_bit(slot_idx, size_idx);
-
-	if (meta->km_bitmap == ((1u << sizeclass->ks_num_elem) - 1)) {
-		/*
-		 * If entire chunk empty add to emtpy list
-		 */
-		bool from_right = kmem_meta_is_from_right(range_id, meta);
-
-		kmem_free_chunk(range_id, meta, from_right);
-	} else if (meta->km_avail_count + meta->km_quarantined + 1 <
-	    kmem_quarantine_count(sizeclass)) {
-		/*
-		 * If we're below quarantine levels, quarantine the slot
-		 * and move on.
-		 */
-		meta->km_quarantined += 1;
-	} else {
-		/*
-		 * If we freed to full chunk move it to partial
-		 */
-		if (meta->km_avail_count == 0) {
-			uint32_t front = kmem_get_front(range_id,
-			    kmem_meta_is_from_right(range_id, meta));
-
-			kmem_requeue_meta(meta, &sizeclass->ks_partial_head[front]);
-		}
-
-		meta->km_avail_count += meta->km_quarantined + 1;
-		meta->km_quarantined = 0;
-	}
-}
-
-void
-kmem_free_space(
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_map_range_id_t       range_id,
-	mach_vm_range_t         slot)
-{
-	bool entry_present = false;
-	vm_map_entry_t prev_entry;
-	vm_map_entry_t next_entry;
-
-	if ((slot->min_address == start) && (slot->max_address == end)) {
-		/*
-		 * Entire slot is being freed at once
-		 */
-		return kmem_free_slot(range_id, slot);
-	}
-
-	entry_present = vm_map_lookup_entry(kernel_map, start, &prev_entry);
-	assert(!entry_present);
-	next_entry = prev_entry->vme_next;
-
-	if (((prev_entry == vm_map_to_entry(kernel_map) ||
-	    prev_entry->vme_end <= slot->min_address)) &&
-	    (next_entry == vm_map_to_entry(kernel_map) ||
-	    (next_entry->vme_start >= slot->max_address))) {
-		/*
-		 * Free entire slot
-		 */
-		kmem_free_slot(range_id, slot);
-	}
 }
 
 #pragma mark kmem init
@@ -3896,22 +2816,78 @@ kmem_range_startup_init(
 	}
 }
 
-static vm_offset_t
+__attribute__((always_inline))
+static void
+kmem_insert_entry(vm_map_address_t start, vm_map_address_t end, bool guard)
+{
+	vm_map_entry_t entry;
+
+	entry = vm_map_entry_create_locked(kernel_map, start, end);
+	if (guard) {
+		entry->vme_atomic = true;
+		entry->vme_permanent = true;
+		entry->protection = VM_PROT_NONE;
+		entry->max_protection = VM_PROT_NONE;
+	} else {
+		entry->use_pmap = true;
+		entry->protection = VM_PROT_DEFAULT;
+		entry->max_protection = VM_PROT_DEFAULT;
+		vm_object_reference(kernel_object_default);
+		VME_OBJECT_SET(entry, kernel_object_default, false, 0);
+		VME_OFFSET_SET(entry, entry->vme_start);
+	}
+	vm_map_store_insert(kernel_map, entry);
+	vm_entry_unlock_exclusive(kernel_map, entry);
+}
+
+__attribute__((always_inline))
+static struct mach_vm_range
 kmem_fuzz_start(void)
 {
-	vm_offset_t kmapoff_kaddr = 0;
+	vm_map_store_rsv_t   rsv  = { };
+	struct mach_vm_range hole = { };
+	struct mach_vm_range range = {
+		vm_map_min(kernel_map),
+		vm_map_max(kernel_map),
+	};
 	uint32_t kmapoff_pgcnt;
 
 	kmapoff_pgcnt = (early_random() & 0x1ff) + 1; /* 9 bits */
 
 	vm_map_size_t kmapoff_size = ptoa(kmapoff_pgcnt);
 
-	kmem_alloc(kernel_map, &kmapoff_kaddr, kmapoff_size,
-	    KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT | KMA_VAONLY,
-	    VM_KERN_MEMORY_OSFMK);
+	vm_map_ilk_lock(kernel_map);
 
+	/*
+	 * Only keep the largest hole, fill the others
+	 */
+	while (vm_map_store_find_space(kernel_map, range,
+	    VM_MAP_KERNEL_FLAGS_NONE, PAGE_SIZE, 0, &rsv) == KERN_SUCCESS) {
+		vm_map_size_t hole_size;
 
-	return kmapoff_kaddr + kmapoff_size;
+		hole_size = vm_map_store_lookup_hole(kernel_map,
+		    vmsr_start(rsv), vm_map_max(kernel_map));
+		if (mach_vm_range_size(&hole) < hole_size) {
+			if (hole.min_address) {
+				kmem_insert_entry(hole.min_address,
+				    hole.max_address, true);
+			}
+			hole.min_address = vmsr_start(rsv);
+			hole.max_address = vmsr_start(rsv) + hole_size;
+		} else {
+			kmem_insert_entry(vmsr_start(rsv),
+			    vmsr_start(rsv) + hole_size, true);
+		}
+
+		range.min_address = vmsr_start(rsv) + hole_size;
+	}
+	assert(mach_vm_range_size(&hole));
+
+	kmem_insert_entry(hole.min_address, hole.min_address + kmapoff_size, true);
+	vm_map_ilk_unlock(kernel_map);
+
+	hole.min_address += kmapoff_size;
+	return hole;
 }
 
 /*
@@ -3919,9 +2895,7 @@ kmem_fuzz_start(void)
  */
 __startup_func
 void
-kmem_shuffle(
-	uint16_t       *shuffle_buf,
-	uint16_t        count)
+kmem_shuffle(uint16_t *shuffle_buf, uint16_t count)
 {
 	for (uint16_t i = 0; i < count; i++) {
 		uint16_t j = kmem_get_random16(i);
@@ -4008,56 +2982,12 @@ kmem_readjust_ranges(
 
 __startup_func
 static void
-kmem_add_ptr_claims(void)
+kmem_add_extra_claims(struct mach_vm_range km_range)
 {
-	uint64_t kmem_meta_num, kmem_ptr_chunks;
-	vm_map_size_t org_ptr_range_size __assert_only;
-
-	org_ptr_range_size = ptr_range_size;
-
-	ptr_range_size -= PAGE_SIZE;
-	ptr_range_size *= KMEM_CHUNK_SIZE_MIN;
-	ptr_range_size /= (KMEM_CHUNK_SIZE_MIN + sizeof(struct kmem_page_meta));
-
-	kmem_ptr_chunks = ptr_range_size / KMEM_CHUNK_SIZE_MIN;
-	ptr_range_size = kmem_ptr_chunks * KMEM_CHUNK_SIZE_MIN;
-
-	kmem_meta_num = kmem_ptr_chunks + 2;
-	kmem_meta_size = round_page(kmem_meta_num * sizeof(struct kmem_page_meta));
-
-	assert(kmem_meta_size + ptr_range_size <= org_ptr_range_size);
-	/*
-	 * Add claims for kmem's ranges
-	 */
-	for (uint32_t i = 0; i < kmem_ptr_ranges; i++) {
-		struct kmem_range_startup_spec kmem_spec = {
-			.kc_name = "kmem_ptr_range",
-			.kc_range = &kmem_ranges[KMEM_RANGE_ID_PTR_0 + i],
-			.kc_size = ptr_range_size,
-			.kc_flags = KC_NO_ENTRY,
-		};
-		kmem_claims[kmem_claim_count++] = kmem_spec;
-
-		struct kmem_range_startup_spec kmem_meta_spec = {
-			.kc_name = "kmem_ptr_range_meta",
-			.kc_range = &kmem_meta_range[KMEM_RANGE_ID_PTR_0 + i],
-			.kc_size = kmem_meta_size,
-			.kc_flags = KC_NONE,
-		};
-		kmem_claims[kmem_claim_count++] = kmem_meta_spec;
-	}
-}
-
-__startup_func
-static void
-kmem_add_extra_claims(void)
-{
-	vm_map_size_t largest_free_size = 0, total_claims = 0;
-	vm_map_size_t sane_sprayqtn_size = 0, sprayqtn_allocation_size = 0;
+	vm_map_size_t free_size = mach_vm_range_size(&km_range);
+	vm_map_size_t total_claims = 0;
 	vm_map_size_t ptr_total_allocation_size = 0;
-
-	vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
-	largest_free_size = trunc_page(largest_free_size);
+	uint32_t      kmem_ptr_ranges = KMEM_RANGE_ID_NUM_PTR;
 
 	/*
 	 * kasan and configs w/o *TRR need to have just one ptr range due to
@@ -4066,6 +2996,14 @@ kmem_add_extra_claims(void)
 #if !ZSECURITY_CONFIG(KERNEL_PTR_SPLIT)
 	kmem_ptr_ranges = 1;
 #endif
+
+	kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec){
+		.kc_name  = "kmem_io",
+		.kc_range = kmem_range(KMEM_RANGE_ID_IO),
+		.kc_size  = (1u << 30),
+		.kc_flags = KC_NO_ENTRY,
+	};
+
 	/*
 	 * Determine size of data and pointer kmem_ranges
 	 */
@@ -4078,37 +3016,18 @@ kmem_add_extra_claims(void)
 	assert((total_claims & PAGE_MASK) == 0);
 
 
-	largest_free_size -= total_claims;
+	free_size -= total_claims;
 
 	/*
-	 * Use half the total available VA for all pointer allocations (this
-	 * includes the kmem_sprayqtn range). Given that we have 4 total
-	 * ranges divide the available VA by 8.
+	 * Use a little less than half the total available VA for
+	 * all pointer allocations. Given that we have 3 total ranges
+	 * divide the available VA by 7.
 	 */
-	ptr_range_size = largest_free_size / ((kmem_ptr_ranges + 1) * 2);
-
-	sprayqtn_range_size = ptr_range_size;
-	sane_sprayqtn_size = kmem_claim_to_allocation_size(
-		/* claim_size */ sane_size / 2, /* known_last */ false);
-	if (sprayqtn_range_size > sane_sprayqtn_size) {
-		vm_map_size_t sprayqtn_extra;
-
-		/*
-		 * Spray quarantine doesn't need that much space.
-		 * Shrink it to something reasonable and equally share the leftover VA
-		 * with the other pointer ranges.
-		 */
-		sprayqtn_extra = sprayqtn_range_size - sane_sprayqtn_size;
-		sprayqtn_range_size -= sprayqtn_extra;
-		ptr_range_size += sprayqtn_extra / kmem_ptr_ranges;
-	}
-
+	ptr_range_size = free_size / (kmem_ptr_ranges * 2 + 1);
 	ptr_range_size = round_page(ptr_range_size);
-	sprayqtn_range_size = round_page(sprayqtn_range_size);
 
 	/* Less any necessary allocation padding... */
 	ptr_range_size = kmem_allocation_to_claim_size(ptr_range_size);
-	sprayqtn_range_size = kmem_allocation_to_claim_size(sprayqtn_range_size);
 
 	/*
 	 * Add the pointer and metadata claims
@@ -4116,45 +3035,51 @@ kmem_add_extra_claims(void)
 	 * requirements, slightly increase or decrease the overall allocation size
 	 * of the pointer+metadata region.
 	 */
-	kmem_add_ptr_claims();
+	kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec){
+		.kc_name  = "kmem_ptr_range_0",
+		.kc_range = kmem_range(KMEM_RANGE_ID_PTR_0),
+		.kc_size  = ptr_range_size,
+		.kc_flags = KC_NO_ENTRY,
+	};
+	if (kmem_ptr_ranges == KMEM_RANGE_ID_NUM_PTR) {
+		kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec){
+			.kc_name  = "kmem_ptr_range_1",
+			.kc_range = kmem_range(KMEM_RANGE_ID_PTR_1),
+			.kc_size  = ptr_range_size,
+			.kc_flags = KC_NO_ENTRY,
+		};
+		kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec){
+			.kc_name  = "kmem_ptr_range_2",
+			.kc_range = kmem_range(KMEM_RANGE_ID_PTR_2),
+			.kc_size  = ptr_range_size,
+			.kc_flags = KC_NO_ENTRY,
+		};
+	}
 
-	sprayqtn_allocation_size = kmem_claim_to_allocation_size(
-		sprayqtn_range_size, /* known_last */ false);
-	ptr_total_allocation_size =
-	    (kmem_claim_to_allocation_size(ptr_range_size, /* known_last */ false) +
-	    kmem_claim_to_allocation_size(kmem_meta_size, /* known_last */ false)) *
-	    kmem_ptr_ranges;
+	ptr_total_allocation_size = kmem_ptr_ranges *
+	    kmem_claim_to_allocation_size(ptr_range_size, /* known_last */ false);
 
 	/*
-	 * Check: spray and ptr_range are minimally valid.
-	 * This is a useful assert as it should catch us if we were to end up with a
-	 * "negative" (or extremely large) data_range_size.
+	 * Check: ptr_range are minimally valid.
+	 * This is a useful assert as it should catch us if we were to end up
+	 * with a "negative" (or extremely large) data_range_size.
 	 */
-	assert(sprayqtn_allocation_size + ptr_total_allocation_size < largest_free_size);
+	assert(ptr_total_allocation_size < free_size);
 
 	/*
 	 * Finally, give any remaining allocable space to the data region.
 	 */
-	data_range_size = largest_free_size - sprayqtn_allocation_size -
-	    ptr_total_allocation_size;
+	data_range_size = free_size - ptr_total_allocation_size;
 
 	/*
-	 * If we need the data shared range, divide the size
-	 * for the data ranges between BUFFERS and SHARED.
+	 * Divide the size for the data range between PRIVATE and SHARED.
 	 *
-	 * If not, all data allocations go into KMEM_RANGE_ID_DATA.
+	 * Round down the size, because our kmem ranges logic round
+	 * these sizes to page size, and we need to make sure we never
+	 * exceed the remaining allocable space we divided.
 	 */
-	if (kmem_needs_data_share_range()) {
-		/*
-		 * Round down the size, because our kmem ranges logic round
-		 * these sizes to page size, and we need to make sure we never
-		 * exceed the remaining allocable space we divided.
-		 */
-		shared_data_range_size = data_range_size =
-		    trunc_page(data_range_size / 2);
-	} else {
-		shared_data_range_size = 0;
-	}
+	shared_data_range_size = data_range_size =
+	    trunc_page(data_range_size / 2);
 
 	/* Less any necessary allocation padding... */
 	data_range_size = kmem_allocation_to_claim_size(data_range_size);
@@ -4162,51 +3087,31 @@ kmem_add_extra_claims(void)
 	    kmem_allocation_to_claim_size(shared_data_range_size) : 0;
 
 	/* Check: our allocations should all still fit in the free space */
-	assert(sprayqtn_allocation_size + ptr_total_allocation_size +
+	assert(ptr_total_allocation_size +
 	    kmem_claim_to_allocation_size(data_range_size, /* known_last */ false) +
 	    kmem_claim_to_allocation_size(shared_data_range_size, /* known_last */ false) <=
-	    largest_free_size);
+	    free_size);
 
-	struct kmem_range_startup_spec kmem_spec_sprayqtn = {
-		.kc_name = "kmem_sprayqtn_range",
-		.kc_range = &kmem_ranges[KMEM_RANGE_ID_SPRAYQTN],
-		.kc_size = sprayqtn_range_size,
+	kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec) {
+		.kc_name  = "kmem_data_private_range",
+		.kc_range = kmem_range(KMEM_RANGE_ID_DATA_PRIVATE),
+		.kc_size  = data_range_size,
 		.kc_flags = KC_NO_ENTRY,
 	};
-	kmem_claims[kmem_claim_count++] = kmem_spec_sprayqtn;
 
-	struct kmem_range_startup_spec kmem_spec_data_buffers = {
-		.kc_name = "kmem_data_buffers_range",
-		.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA],
-		.kc_size = data_range_size,
+	kmem_claims[kmem_claim_count++] = (struct kmem_range_startup_spec){
+		.kc_name  = "kmem_data_shared_range",
+		.kc_range = kmem_range(KMEM_RANGE_ID_DATA_SHARED),
+		.kc_size  = shared_data_range_size,
 		.kc_flags = KC_NO_ENTRY,
 	};
-	kmem_claims[kmem_claim_count++] = kmem_spec_data_buffers;
-
-	if (kmem_needs_data_share_range()) {
-		struct kmem_range_startup_spec kmem_spec_data_shared = {
-			.kc_name = "kmem_data_shared_range",
-			.kc_range = &kmem_ranges[KMEM_RANGE_ID_DATA_SHARED],
-			.kc_size = shared_data_range_size,
-			.kc_flags = KC_NO_ENTRY,
-		};
-		kmem_claims[kmem_claim_count++] = kmem_spec_data_shared;
-	}
 }
 
 __startup_func
 static void
 kmem_scramble_ranges(void)
 {
-	vm_map_offset_t va_alloc_head = 0;
-
-	/*
-	 * Initiatize KMEM_RANGE_ID_NONE range to use the entire map so that
-	 * the vm can find the requested ranges.
-	 */
-	kmem_ranges[KMEM_RANGE_ID_NONE].min_address = MAX(kernel_map->min_offset,
-	    VM_MAP_PAGE_SIZE(kernel_map));
-	kmem_ranges[KMEM_RANGE_ID_NONE].max_address = kernel_map->max_offset;
+	struct mach_vm_range km_range;
 
 	/*
 	 * Allocating the g_kext_map prior to randomizing the remaining submaps as
@@ -4224,12 +3129,12 @@ kmem_scramble_ranges(void)
 	 * pointer packing schemes using KERNEL_PMAP_HEAP_RANGE_START as a base
 	 * do not admit this address to be part of any zone submap.
 	 */
-	va_alloc_head = kmem_fuzz_start();
+	km_range = kmem_fuzz_start();
 
 	/*
-	 * Add claims for ptr and data kmem_ranges
+	 * Add claims for ptr and data kmem ranges
 	 */
-	kmem_add_extra_claims();
+	kmem_add_extra_claims(km_range);
 
 	/*
 	 * Minimally verify that our placer will be able to resolve the constraints
@@ -4260,6 +3165,8 @@ kmem_scramble_ranges(void)
 	assert(kmem_claim_count < UINT16_MAX);
 	kmem_shuffle_claims();
 
+	vm_map_ilk_lock(kernel_map);
+
 	/*
 	 * Apply restrictions and determine range for each claim
 	 */
@@ -4272,71 +3179,63 @@ kmem_scramble_ranges(void)
 		 * order to ensure we provide any applicable padding.
 		 */
 		bool is_last = (i == kmem_claim_count - 1);
-		vm_map_offset_t sp_allocation_size =
-		    kmem_claim_to_allocation_size(sp.kc_size, is_last);
+		vm_map_offset_t hole_size, sp_size;
 
-		if (vm_map_locate_space_anywhere(kernel_map, sp_allocation_size, 0,
-		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_no_soft_limit = true),
-		    &va_alloc_head, NULL) != KERN_SUCCESS) {
-			panic("kmem_range_init: vm_map_locate_space failing for claim %s, "
-			    "size 0x%llx",
-			    sp.kc_name, sp_allocation_size);
+		hole_size = vm_map_store_lookup_hole(kernel_map,
+		    km_range.min_address, vm_map_max(kernel_map));
+		sp_size   = kmem_claim_to_allocation_size(sp.kc_size, is_last);
+
+		if (hole_size < sp_size) {
+			panic("kmem_range_init: vm_map_store_lookup_hole() "
+			    "failing for claim %s, hole %#llx < size %#llx",
+			    sp.kc_name, hole_size, sp_size);
 		}
 
 		/*
 		 * Re-adjust ranges if restriction not met
 		 */
-		if (sp_range->min_address && va_alloc_head > sp_range->min_address) {
+		if (sp_range->min_address &&
+		    sp_range->min_address < km_range.min_address) {
 			kmem_readjust_ranges(i);
 		} else {
 			/*
 			 * Though the actual allocated space may be larger, provide only the
 			 * size requested by the original claim.
 			 */
-			sp_range->min_address = va_alloc_head;
-			sp_range->max_address = va_alloc_head + sp.kc_size;
+			sp_range->min_address = km_range.min_address;
+			sp_range->max_address = km_range.min_address + sp.kc_size;
 		}
 
-		va_alloc_head += sp_allocation_size;
+		km_range.min_address += sp_size;
 	}
 
 	/*
 	 * We have settled on the ranges, now create temporary entries for the
 	 * claims
 	 */
+
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
 		struct kmem_range_startup_spec sp = kmem_claims[i];
 		bool is_last = (i == kmem_claim_count - 1);
-		vm_map_offset_t sp_allocation_size =
-		    kmem_claim_to_allocation_size(sp.kc_size, is_last);
-		vm_map_entry_t entry = NULL;
-		if (sp.kc_flags & KC_NO_ENTRY) {
-			continue;
-		}
-
+		vm_map_address_t start;
+		vm_map_offset_t  sp_full_size;
 
 		/*
 		 * We reserve the full allocation size (rather than the claim size) so
 		 * that nothing ends up placed in the padding space (if applicable).
 		 */
-		if (vm_map_find_space(kernel_map, sp.kc_range->min_address,
-		    sp_allocation_size, 0,
-		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_no_soft_limit = true),
-		    &entry) != KERN_SUCCESS) {
-			panic("kmem_range_init: vm_map_find_space failing for claim %s",
-			    sp.kc_name);
+		start        = sp.kc_range->min_address;
+		sp_full_size = kmem_claim_to_allocation_size(sp.kc_size, is_last);
+		if ((sp.kc_flags & KC_NO_ENTRY) == 0) {
+			kmem_insert_entry(start, start + sp.kc_size, false);
 		}
-		vm_object_reference(kernel_object_default);
-		VME_OBJECT_SET(entry, kernel_object_default, false, 0);
-		VME_OFFSET_SET(entry, entry->vme_start);
-		vm_map_unlock(kernel_map);
+		if (sp.kc_size < sp_full_size) {
+			kmem_insert_entry(start + sp.kc_size,
+			    start + sp_full_size, true);
+		}
 	}
 
-	/*
-	 * Now that we are done assigning all the ranges, reset
-	 * kmem_ranges[KMEM_RANGE_ID_NONE]
-	 */
-	kmem_ranges[KMEM_RANGE_ID_NONE] = (struct mach_vm_range) {};
+	vm_map_ilk_unlock(kernel_map);
 
 #if DEBUG || DEVELOPMENT
 	for (uint32_t i = 0; i < kmem_claim_count; i++) {
@@ -4366,124 +3265,15 @@ __startup_func
 static void
 kmem_range_init(void)
 {
-	vm_size_t range_adjustment;
-
 	kmem_scramble_ranges();
-
-	range_adjustment = sprayqtn_range_size >> 3;
-	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address =
-	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].min_address + range_adjustment;
-	kmem_large_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address =
-	    kmem_ranges[KMEM_RANGE_ID_SPRAYQTN].max_address;
-
-	range_adjustment = data_range_size >> 3;
-	kmem_large_ranges[KMEM_RANGE_ID_DATA].min_address =
-	    kmem_ranges[KMEM_RANGE_ID_DATA].min_address + range_adjustment;
-	kmem_large_ranges[KMEM_RANGE_ID_DATA].max_address =
-	    kmem_ranges[KMEM_RANGE_ID_DATA].max_address;
-
-	if (kmem_needs_data_share_range()) {
-		range_adjustment = shared_data_range_size >> 3;
-		kmem_large_ranges[KMEM_RANGE_ID_DATA_SHARED].min_address =
-		    kmem_ranges[KMEM_RANGE_ID_DATA_SHARED].min_address + range_adjustment;
-		kmem_large_ranges[KMEM_RANGE_ID_DATA_SHARED].max_address =
-		    kmem_ranges[KMEM_RANGE_ID_DATA_SHARED].max_address;
-	}
-
 	pmap_init();
-	kmem_metadata_init();
-	kmem_sizeclass_init();
 
-#if DEBUG || DEVELOPMENT
-	for (kmem_range_id_t i = 1; i < KMEM_RANGE_COUNT; i++) {
-		vm_size_t range_size = mach_vm_range_size(&kmem_large_ranges[i]);
-		printf("kmem_large_ranges[%d]    : %p - %p (%u%c)\n", i,
-		    (void *)kmem_large_ranges[i].min_address,
-		    (void *)kmem_large_ranges[i].max_address,
-		    mach_vm_size_pretty(range_size),
-		    mach_vm_size_unit(range_size));
+	for (uint32_t i = 0; i < ARRAY_COUNT(kmem_slabs); i++) {
+		vm_guard_object_slab_init(&kmem_slabs[i][KMEM_DIRECTION_FORWARDS]);
+		vm_guard_object_slab_init(&kmem_slabs[i][KMEM_DIRECTION_BACKWARDS]);
 	}
-#endif
 }
-#ifndef __BUILDING_XNU_LIB_UNITTEST__ /* kernel map is not maintained in unit-test */
 STARTUP(KMEM, STARTUP_RANK_THIRD, kmem_range_init);
-#endif /* __BUILDING_XNU_LIB_UNITTEST__ */
-
-#if DEBUG || DEVELOPMENT
-__startup_func
-static void
-kmem_log_init(void)
-{
-	/*
-	 * Log can only be created after the the kmem subsystem is initialized as
-	 * btlog creation uses kmem
-	 */
-	kmem_outlier_log = btlog_create(BTLOG_LOG, KMEM_OUTLIER_LOG_SIZE, 0);
-}
-STARTUP(ZALLOC, STARTUP_RANK_FIRST, kmem_log_init);
-
-kmem_gobj_stats
-kmem_get_gobj_stats(void)
-{
-	vmlp_api_start(KMEM_GET_GOBJ_STATS);
-	kmem_gobj_stats stats = {};
-
-	vm_map_lock(kernel_map);
-	for (uint8_t i = 0; i < kmem_ptr_ranges; i++) {
-		kmem_range_id_t range_id = KMEM_RANGE_ID_FIRST + i;
-		struct mach_vm_range range = kmem_ranges[range_id];
-		struct kmem_page_meta *meta = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-		struct kmem_page_meta *meta_end;
-		uint64_t meta_idx = meta - kmem_meta_base[range_id];
-		vm_map_size_t used = 0, va = 0, meta_sz = 0, pte_sz = 0;
-		vm_map_offset_t addr;
-		vm_map_entry_t entry;
-
-		/*
-		 * Left front
-		 */
-		va = (meta_idx * KMEM_CHUNK_SIZE_MIN);
-		meta_sz = round_page(meta_idx * sizeof(struct kmem_page_meta));
-
-		/*
-		 * Right front
-		 */
-		meta = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-		meta_end = kmem_addr_to_meta(range.max_address, range_id, &addr,
-		    &meta_idx);
-		meta_idx = meta_end - meta;
-		meta_sz += round_page(meta_idx * sizeof(struct kmem_page_meta));
-		va += (meta_idx * KMEM_CHUNK_SIZE_MIN);
-
-		/*
-		 * Compute VA allocated in entire range
-		 */
-		if (vm_map_lookup_entry(kernel_map, range.min_address, &entry) == false) {
-			entry = entry->vme_next;
-		}
-
-		vmlp_range_event_entry(kernel_map, entry);
-
-		while (entry != vm_map_to_entry(kernel_map) &&
-		    entry->vme_start < range.max_address) {
-			used += (entry->vme_end - entry->vme_start);
-			entry = entry->vme_next;
-		}
-
-		pte_sz = round_page(atop(va - used) * 8);
-
-		stats.total_used += used;
-		stats.total_va += va;
-		stats.pte_sz += pte_sz;
-		stats.meta_sz += meta_sz;
-	}
-	vm_map_unlock(kernel_map);
-
-	vmlp_api_end(KMEM_GET_GOBJ_STATS, 0);
-	return stats;
-}
-
-#endif /* DEBUG || DEVELOPMENT */
 
 /*
  *	kmem_init:
@@ -4507,9 +3297,11 @@ kmem_init(
 
 	vm_map_will_allocate_early_map(&kernel_map);
 #if defined(__arm64__)
+	_Static_assert(VM_MAX_KERNEL_ADDRESS <= (UINTPTR_MAX - ARM_PGBYTES),
+	    "VM_MAX_KERNEL_ADDRESS will overflow if page-rounded");
 	kernel_map = vm_map_create_options(pmap_kernel(),
 	    VM_MIN_KERNEL_AND_KEXT_ADDRESS,
-	    VM_MAX_KERNEL_ADDRESS,
+	    vm_map_round_page(VM_MAX_KERNEL_ADDRESS, VM_MAP_PAGE_MASK(kernel_map)),
 	    VM_MAP_CREATE_DEFAULT);
 	/*
 	 *	Reserve virtual memory allocated up to this time.
@@ -4528,7 +3320,6 @@ kmem_init(
 			    VM_MAP_PAGE_MASK(kernel_map)),
 			    (vm_map_offset_t) 0,
 			    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(
-				    .vmkf_no_pmap_check = true,
 				    .vmkf_no_soft_limit = true),
 			    VM_OBJECT_NULL,
 			    (vm_object_offset_t) 0, FALSE, VM_PROT_NONE, VM_PROT_NONE,
@@ -4559,7 +3350,7 @@ kmem_init(
 		    &map_addr,
 		    (vm_map_size_t)(map_start - VM_MIN_KERNEL_AND_KEXT_ADDRESS),
 		    (vm_map_offset_t) 0,
-		    VM_MAP_KERNEL_FLAGS_FIXED(.vmkf_no_pmap_check = true),
+		    VM_MAP_KERNEL_FLAGS_FIXED(),
 		    VM_OBJECT_NULL,
 		    (vm_object_offset_t) 0, FALSE,
 		    VM_PROT_NONE, VM_PROT_NONE,
@@ -4848,11 +3639,9 @@ kmem_test_for_entry(
 	vm_offset_t             addr,
 	void                  (^block)(vm_map_entry_t))
 {
-	vm_map_entry_t entry;
-
-	vm_map_lock(map);
-	block(vm_map_lookup_entry(map, addr, &entry) ? entry : NULL);
-	vm_map_unlock(map);
+	vm_map_ilk_lock(map);
+	block(vm_map_lookup(map, addr));
+	vm_map_ilk_unlock(map);
 }
 
 #define kmem_test_assert_map(map, pg, entries) ({ \
@@ -4920,7 +3709,8 @@ static void
 kmem_alloc_basic_test(vm_map_t map)
 {
 	kmem_guard_t guard = {
-		.kmg_tag = VM_KERN_MEMORY_DIAG,
+		.kmg_tag       = VM_KERN_MEMORY_DIAG,
+		.kmg_type_hash = KMEM_RANGE_ID_PTR_0, /* else kmem_realloc_guard() asserts */
 	};
 	vm_offset_t addr;
 
@@ -4977,9 +3767,10 @@ static void
 kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 {
 	kmem_guard_t guard = {
-		.kmg_atomic  = !(kind & (KMR_DATA | KMR_DATA_SHARED)),
-		.kmg_tag     = VM_KERN_MEMORY_DIAG,
-		.kmg_context = 0xefface,
+		.kmg_atomic    = !(kind & (KMR_DATA | KMR_DATA_SHARED)),
+		.kmg_tag       = VM_KERN_MEMORY_DIAG,
+		.kmg_context   = 0xefface,
+		.kmg_type_hash = KMEM_RANGE_ID_PTR_0, /* else kmem_realloc_guard() asserts */
 	};
 	vm_offset_t addr, newaddr;
 	const int N = 10;
@@ -5079,9 +3870,8 @@ kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 static int
 kmem_basic_test(__unused int64_t in, int64_t *out)
 {
-	mach_vm_offset_t addr;
 	vm_map_t map;
-
+	vm_map_address_t addr;
 	printf("%s: test running\n", __func__);
 
 	map = kmem_suballoc(kernel_map, &addr, 64U << 20,
@@ -5178,52 +3968,11 @@ kmem_basic_test(__unused int64_t in, int64_t *out)
 	kmem_realloc_basic_test(map, KMR_DATA_SHARED);
 	printf("%s:     PASS\n", __func__);
 
-	kmem_free_guard(kernel_map, addr, 64U << 20, KMF_NONE, KMEM_GUARD_SUBMAP);
-	vm_map_deallocate(map);
-
 	printf("%s: test passed\n", __func__);
 	*out = 1;
 	return 0;
 }
 SYSCTL_TEST_REGISTER(kmem_basic, kmem_basic_test);
-
-static void
-kmem_test_get_size_idx_for_chunks(uint32_t chunks)
-{
-	__assert_only uint32_t idx = kmem_get_size_idx_for_chunks(chunks);
-
-	assert(chunks >= kmem_size_array[idx].ks_num_chunk);
-}
-
-__attribute__((noinline))
-static void
-kmem_test_get_size_idx_for_all_chunks()
-{
-	for (uint32_t i = 0; i < KMEM_NUM_SIZECLASS; i++) {
-		uint32_t chunks = kmem_size_array[i].ks_num_chunk;
-
-		if (chunks != 1) {
-			kmem_test_get_size_idx_for_chunks(chunks - 1);
-		}
-		kmem_test_get_size_idx_for_chunks(chunks);
-		kmem_test_get_size_idx_for_chunks(chunks + 1);
-	}
-}
-
-static int
-kmem_guard_obj_test(__unused int64_t in, int64_t *out)
-{
-	printf("%s: test running\n", __func__);
-
-	printf("%s: kmem_get_size_idx_for_chunks\n", __func__);
-	kmem_test_get_size_idx_for_all_chunks();
-	printf("%s:     PASS\n", __func__);
-
-	printf("%s: test passed\n", __func__);
-	*out = 1;
-	return 0;
-}
-SYSCTL_TEST_REGISTER(kmem_guard_obj, kmem_guard_obj_test);
 
 
 #endif /* MACH_ASSERT */

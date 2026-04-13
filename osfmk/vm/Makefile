@@ -62,7 +62,8 @@ XNU_ONLY_EXPORTS += \
 	vm_sanitize_internal.h \
 	vm_sanitize_telemetry.h \
 	vm_shared_region_internal.h \
-	vm_lock_perf.h
+	vm_lock_perf.h \
+	vm_lock_contention.h
 
 # Internal files exported with specific subsystems
 # who needs access to some VM internals.

@@ -673,7 +673,6 @@ errno_t
 dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 {
 	VERIFY(*proto_family == PF_INET);
-	VERIFY(IS_INTF_CLAT46(ifp));
 
 	pbuf_t pbuf_store, *pbuf = NULL;
 	struct ip *iph = NULL;
@@ -835,7 +834,6 @@ errno_t
 dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 {
 	VERIFY(*proto_family == PF_INET6);
-	VERIFY(IS_INTF_CLAT46(ifp));
 
 	struct ip6_hdr *ip6h = NULL;
 	struct in6_addr osrc, odst;
@@ -898,11 +896,13 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 		ia4_clat_dst = inifa_ifpclatv4(ifp);
 		if (ia4_clat_dst == NULL) {
 			ifa_remref(&ia6_clat_dst->ia_ifa);
+			ia6_clat_dst = NULL;
 			ip6stat.ip6s_clat464_in_nov4addr_drop++;
 			error = -1;
 			goto cleanup;
 		}
 		ifa_remref(&ia6_clat_dst->ia_ifa);
+		ia6_clat_dst = NULL;
 
 		/* Translate IPv6 src to IPv4 src by removing the NAT64 prefix */
 		dst = &ia4_clat_dst->ia_addr.sin_addr;
@@ -975,6 +975,10 @@ cleanup:
 			ip6stat.ip6s_clat464_in_success++;
 		}
 	} /* CLAT traffic */
+
+	if (ia6_clat_dst != NULL) {
+		ifa_remref(&ia6_clat_dst->ia_ifa);
+	}
 
 done:
 	return error;

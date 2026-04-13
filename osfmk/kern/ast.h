@@ -120,42 +120,45 @@ __options_decl(ast_t, uint32_t, {
 	AST_RESET_PCS             = 0x400,   /* restartable ranges */
 	AST_ARCADE                = 0x800,   /* arcade subsciption support */
 	AST_MACH_EXCEPTION        = 0x1000,
-	AST_TELEMETRY_USER        = 0x2000,  /* telemetry sample requested on interrupt from userspace */
-	AST_TELEMETRY_KERNEL      = 0x4000,  /* telemetry sample requested on interrupt from kernel */
-	AST_TELEMETRY_PMI         = 0x8000,  /* telemetry sample requested on PMI */
+	AST_TELEMETRY             = 0x2000,  /* telemetry sample requested, see t_telemetry_ast field */
+	// was AST_TELEMETRY_KERNEL 0x4000,
+	// was AST_TELEMETRY_PMI    0x8000,
 	AST_SFI                   = 0x10000, /* Evaluate if SFI wait is needed before return to userspace */
 	AST_DTRACE                = 0x20000,
-	AST_TELEMETRY_IO          = 0x40000, /* telemetry sample requested for I/O */
+	// was AST_TELEMETRY_IO     0x40000
 	AST_KEVENT                = 0x80000,
 	AST_REBALANCE             = 0x100000, /* thread context switched due to rebalancing */
-	// was  AST_UNQUIESCE       0x200000
+	// was AST_UNQUIESCE        0x200000
 	AST_PROC_RESOURCE         = 0x400000, /* port space and/or file descriptor table has reached its limits */
 	AST_DEBUG_ASSERT          = 0x800000, /* check debug assertion */
-	AST_TELEMETRY_MACF        = 0x1000000, /* telemetry sample requested by MAC framework */
+	// was AST_TELEMETRY_MACF   0x1000000
 	AST_SYNTHESIZE_MACH       = 0x2000000,
 	AST_LARGE_ENTER_TELEMETRY = 0x4000000, /* guard objects telemetry */
 });
 
-#define AST_NONE                0x00
+#define AST_NONE                (UINT32_C(0))
 #define AST_ALL                 (~AST_NONE)
 
-#define AST_SCHEDULING  (AST_PREEMPTION | AST_YIELD | AST_HANDOFF)
 #define AST_PREEMPTION  (AST_PREEMPT | AST_QUANTUM | AST_URGENT)
-
-#define AST_TELEMETRY_ALL (AST_TELEMETRY_USER | AST_TELEMETRY_KERNEL | \
-	        AST_TELEMETRY_PMI | AST_TELEMETRY_IO | AST_TELEMETRY_MACF)
+#define AST_SCHEDULING  (AST_PREEMPTION | AST_YIELD | AST_HANDOFF)
 
 /* Per-thread ASTs follow the thread at context-switch time. */
 #define AST_PER_THREAD  (AST_APC | AST_BSD | AST_MACF | AST_RESET_PCS | \
 	AST_ARCADE | AST_LEDGER | AST_MACH_EXCEPTION | AST_SYNTHESIZE_MACH | \
-	AST_LARGE_ENTER_TELEMETRY | AST_TELEMETRY_ALL | AST_KEVENT | \
+	AST_LARGE_ENTER_TELEMETRY | AST_TELEMETRY | AST_KEVENT | \
 	AST_PROC_RESOURCE | AST_DEBUG_ASSERT)
+
+/* ASTs that can be skipped when checking if there's a reason to return to userspace */
+#define AST_LAZY (AST_DEBUG_ASSERT)
 
 /* Handle AST_URGENT detected while in the kernel */
 extern void ast_taken_kernel(void);
 
 /* Handle an AST flag set while returning to user mode (may continue via thread_exception_return) */
 extern void ast_taken_user(void);
+
+/* Check for pending maintenance work */
+extern void maintenance_ack_ipi(int cpu);
 
 /* Check for ASTs for per-process aio threads in the kernel */
 extern void ast_check_async_thread(void);

@@ -50,6 +50,10 @@
 
 #include <sys/cdefs.h>
 
+#if defined(PRIVATE) && !defined(KERNEL) && !defined(MODULES_SUPPORTED)
+#include <mach/vm_region_private.h>
+#endif /* PRIVATE && !KERNEL && !MODULES_SUPPORTED */
+
 #pragma pack(push, 4)
 
 // LP64todo: all the current tools are 32bit, obviously never worked for 64b
@@ -126,6 +130,13 @@ typedef struct vm_region_basic_info              vm_region_basic_info_data_t;
 #define VM_REGION_BASIC_INFO_COUNT ((mach_msg_type_number_t) \
 	(sizeof(vm_region_basic_info_data_t)/sizeof(int)))
 
+/*
+ * Clients should move away from using these codes for anything other than debugging
+ * or best-effort accounting.
+ * Each value is only loosely defined, and even within those definitions it is not
+ * always possible for the VM to return the correct value. This behavior is also
+ * subject to change as VM internals evolve.
+ */
 #define SM_COW             1
 #define SM_PRIVATE         2
 #define SM_EMPTY           3
@@ -323,6 +334,9 @@ typedef struct vm_region_submap_info_64          vm_region_submap_info_data_64_t
 #define VM_REGION_FLAG_JIT_ENABLED              0x1
 #define VM_REGION_FLAG_TPRO_ENABLED             0x2
 
+#ifdef PRIVATE
+#define VM_REGION_FLAG_MTE_ENABLED              0x4
+#endif /* PRIVATE */
 
 struct vm_region_submap_short_info_64 {
 	vm_prot_t               protection;     /* present access protection */

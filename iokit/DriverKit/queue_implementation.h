@@ -1090,6 +1090,56 @@ MACRO_BEGIN                                                     \
 MACRO_END
 
 /*
+ *	Macro:		queue_extend_last
+ *	Function:
+ *		Move the elements of a source queue to the end of a destination queue.
+ *	Note:
+ *		This should only be used with Method 2 queue iteration (element chains)
+ */
+#define queue_extend_last(dst, src, type, field)                                \
+MACRO_BEGIN                                                                     \
+	queue_entry_t __src = (src);                                            \
+	queue_entry_t __dst = (dst);                                            \
+	if (queue_empty(__dst)) {                                               \
+	        queue_new_head(__src, __dst, type, field);                      \
+	        queue_init(__src);                                              \
+	} else if (!queue_empty(__src)) {                                       \
+	        ((type)(void *)queue_first(__src))->field.prev =                \
+	                queue_last(__dst);                                      \
+	        ((type)(void *)queue_last(__dst))->field.next =                 \
+	                queue_first(__src);                                     \
+	        queue_last(__dst) = queue_last(__src);                          \
+	        ((type)(void *)queue_last(__dst))->field.next = __dst;          \
+	        queue_init(__src);                                              \
+	}                                                                       \
+MACRO_END
+
+/*
+ *	Macro:		queue_extend_first
+ *	Function:
+ *		Move the elements of a source queue to the beginning of a destination queue.
+ *	Note:
+ *		This should only be used with Method 2 queue iteration (element chains)
+ */
+#define queue_extend_first(dst, src, type, field)                               \
+MACRO_BEGIN                                                                     \
+	queue_entry_t __src = (src);                                            \
+	queue_entry_t __dst = (dst);                                            \
+	if (queue_empty(__dst)) {                                               \
+	        queue_new_head(__src, __dst, type, field);                      \
+	        queue_init(__src);                                              \
+	} else if (!queue_empty(__src)) {                                       \
+	        ((type)(void *)queue_first(__dst))->field.prev =                \
+	                queue_last(__src);                                      \
+	        ((type)(void *)queue_last(__src))->field.next =                 \
+	                queue_first(__dst);                                     \
+	        queue_first(__dst) = queue_first(__src);                        \
+	        ((type)(void *)queue_first(__dst))->field.prev = __dst;         \
+	        queue_init(__src);                                              \
+	}                                                                       \
+MACRO_END
+
+/*
  *	Macro:		queue_iterate
  *	Function:
  *		iterate over each item in the queue.

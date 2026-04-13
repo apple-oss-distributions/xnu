@@ -103,12 +103,12 @@ struct vm_page;
  */
 
 struct vm_object_fault_info {
-	int             interruptible;
-	uint32_t        user_tag;
-	vm_size_t       cluster_size;
-	vm_behavior_t   behavior;
-	vm_object_offset_t lo_offset;
-	vm_object_offset_t hi_offset;
+	wait_interrupt_t        interruptible;
+	uint32_t                user_tag;
+	vm_size_t               cluster_size;
+	vm_behavior_t           behavior;
+	vm_object_offset_t      lo_offset;
+	vm_object_offset_t      hi_offset;
 	unsigned int
 	/* boolean_t */ no_cache:1,
 	/* boolean_t */ stealth:1,
@@ -148,7 +148,7 @@ struct vm_object {
 	 * 64 byte size before creating the zone.
 	 */
 	vm_page_queue_head_t    memq;           /* Resident memory - must be first */
-	lck_rw_t                Lock;           /* Synchronization */
+	lck_rw_new_t            Lock;           /* Synchronization */
 
 	union {
 		vm_object_size_t  vou_size;     /* Object size (only valid if internal) */
@@ -323,8 +323,14 @@ struct vm_object {
 	uint32_t                pages_created;
 	uint32_t                pages_used;
 	/* hold object lock when altering */
-	unsigned        int
-	    wimg_bits:8,                /* cache WIMG bits         */
+	vm_tag_t                wire_tag;
+	uint8_t                 wimg_bits;
+	/*
+	 * scan_collisions cannot be turned into a bitfield (see comment in
+	 * vps_switch_object).
+	 */
+	uint8_t                 scan_collisions;
+	uint32_t
 	    code_signed:1,              /* pages are signed and should be
 	                                 *  validated; the signatures are stored
 	                                 *  with the pager */
@@ -353,22 +359,32 @@ struct vm_object {
 	__unused_access_tracking:1,
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 	vo_ledger_tag:3,
-	    vo_no_footprint:1;
+	    vo_no_footprint:1,
+#if MACH_ASSERT
+	    delayed_page_insert:1,
+#else
+	__unused_delayed_page_insert:1,
+#endif /* !MACH_ASSERT */
+	has_been_shared_permanently:1,     /* true if it's ever been shared
+	                                    * permanently. (see vm_object_mark_shared).
+	                                    * the definition of this is somewhat vague,
+	                                    * so this shouldn't be used for
+	                                    * policy decisions */
+	    has_been_clipped:1,            /* true if it's ever been clipped */
+	    __object4_unused_bits:5;
 
 #if VM_OBJECT_ACCESS_TRACKING
 	uint32_t        access_tracking_reads;
 	uint32_t        access_tracking_writes;
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
-	uint8_t                 scan_collisions;
 #if COMPRESSOR_PAGEOUT_CHEADS_MAX_COUNT > 1
 	/* This value is used for selecting a chead in the compressor for internal objects.
 	 * see rdar://140849693 for a possible way to implement the chead_hint functionality
 	 * in a way that doesn't require these bits */
-	uint8_t vo_chead_hint:COMPRESSOR_PAGEOUT_CHEADS_BITS;
+	uint32_t vo_chead_hint:COMPRESSOR_PAGEOUT_CHEADS_BITS;
+	uint32_t __object5_unused_bits:32 - COMPRESSOR_PAGEOUT_CHEADS_BITS;
 #endif /*COMPRESSOR_PAGEOUT_CHEADS_COUNT */
-	uint8_t __object4_unused_bits:8 - COMPRESSOR_PAGEOUT_CHEADS_BITS;
-	vm_tag_t                wire_tag;
 
 #if CONFIG_PHANTOM_CACHE
 	uint32_t                phantom_object_id;
@@ -420,6 +436,8 @@ struct vm_object {
 	  (object)->purgable == VM_PURGABLE_EMPTY))
 
 extern const vm_object_t kernel_object_default;  /* the default kernel object */
+
+extern const vm_object_t sentinel_object;        /* sentinel object for locks */
 
 extern const vm_object_t compressor_object;      /* the single compressor object, allocates pages for compressed
                                                   * buffers (not the segments) */
@@ -558,8 +576,8 @@ os_refgrp_decl_extern(vm_object_refgrp);
 #define VM_OBJECT_WIRED_PAGE_REMOVE(object, m)                  \
     if (vm_page_is_canonical(m)) __wireddelta--;
 
-#define OBJECT_LOCK_SHARED      0
-#define OBJECT_LOCK_EXCLUSIVE   1
+#define OBJECT_LOCK_SHARED      1
+#define OBJECT_LOCK_EXCLUSIVE   2
 
 extern lck_grp_t        vm_object_lck_grp;
 extern lck_attr_t       vm_object_lck_attr;
@@ -569,7 +587,6 @@ extern lck_attr_t       compressor_object_lck_attr;
 extern vm_object_t      vm_pageout_scan_wants_object;
 
 extern void             vm_object_lock(vm_object_t);
-extern bool             vm_object_lock_check_contended(vm_object_t);
 extern boolean_t        vm_object_lock_try(vm_object_t);
 extern boolean_t        _vm_object_lock_try(vm_object_t);
 extern boolean_t        vm_object_lock_avoid(vm_object_t);

@@ -78,7 +78,7 @@ OSData::initWithCapacity(unsigned int inCapacity)
 		if (capacity) {
 			OSCONTAINER_ACCUMSIZE(-(size_t)capacity);
 			/* can't use kfree() as we need to pass Z_MAY_COPYINMAP */
-			__kheap_realloc(GET_KEXT_KHEAP_DATA(), data, capacity, 0,
+			__kheap_realloc(KHEAP_DATA_PRIVATE, data, capacity, 0,
 			    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
 			    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 			data     = nullptr;
@@ -89,7 +89,7 @@ OSData::initWithCapacity(unsigned int inCapacity)
 		 * Nothing to change
 		 */
 	} else {
-		kr = kalloc_ext(GET_KEXT_KHEAP_DATA(), inCapacity,
+		kr = kalloc_ext(KHEAP_DATA_PRIVATE, inCapacity,
 		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
 		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 
@@ -225,7 +225,7 @@ OSData::free()
 {
 	if ((capacity != EXTERNAL) && data && capacity) {
 		/* can't use kfree() as we need to pass Z_MAY_COPYINMAP */
-		__kheap_realloc(GET_KEXT_KHEAP_DATA(), data, capacity, 0,
+		__kheap_realloc(KHEAP_DATA_PRIVATE, data, capacity, 0,
 		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
 		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 		OSCONTAINER_ACCUMSIZE( -((size_t)capacity));
@@ -284,7 +284,7 @@ OSData::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	kr = krealloc_ext(GET_KEXT_KHEAP_DATA(), data, capacity, finalCapacity,
+	kr = krealloc_ext(KHEAP_DATA_PRIVATE, data, capacity, finalCapacity,
 	    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
 	    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);
 
@@ -319,7 +319,7 @@ OSData::clipForCopyout()
 	 * address stable.
 	 */
 	if (length >= msg_ool_size_small && newCapacity < capacity) {
-		kr = krealloc_ext(GET_KEXT_KHEAP_DATA(),
+		kr = krealloc_ext(KHEAP_DATA_PRIVATE,
 		    data, capacity, newCapacity,
 		    Z_VM_TAG_BT(Z_WAITOK_ZERO | Z_FULLSIZE | Z_MAY_COPYINMAP,
 		    VM_KERN_MEMORY_LIBKERN), (void *)&this->data);

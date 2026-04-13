@@ -429,8 +429,8 @@ extern boolean_t pmap_ept_support_ad;
 #define PMAP_NO_GUARD_CACHE     8
 
 /* Per-pmap ledger operations */
-#define pmap_ledger_debit(p, e, a) ledger_debit((p)->ledger, e, a)
-#define pmap_ledger_credit(p, e, a) ledger_credit((p)->ledger, e, a)
+#define pmap_ledger_debit(p, e, a) ledger_debit_scalable(&task_ledger_template, (p)->ledger, e, a)
+#define pmap_ledger_credit(p, e, a) ledger_credit_scalable(&task_ledger_template, (p)->ledger, e, a)
 
 #ifndef ASSEMBLER
 
@@ -581,7 +581,7 @@ pmap_tlbi_range(uint64_t startv, uint64_t endv, bool global, uint16_t pcid);
  */
 
 struct pmap {
-	lck_rw_t        pmap_rwl __attribute((aligned(64)));
+	lck_rw_new_t    pmap_rwl __attribute((aligned(64)));
 	pmap_paddr_t    pm_cr3 __attribute((aligned(64))); /* Kernel+user shared PML4 physical*/
 	pmap_paddr_t    pm_ucr3;        /* Mirrored user PML4 physical */
 	pml4_entry_t    *pm_pml4;       /* VKA of top level */
@@ -732,10 +732,6 @@ extern void             pmap_bootstrap(
 extern boolean_t        pmap_valid_page(
 	ppnum_t pn);
 
-extern int              pmap_list_resident_pages(
-	struct pmap     *pmap,
-	vm_offset_t     *listp,
-	int             space);
 extern void             x86_filter_TLB_coherency_interrupts(boolean_t);
 
 extern void
@@ -801,12 +797,13 @@ extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset
 #include <kern/spl.h>
 
 
-#define PMAP_ACTIVATE_MAP(map, thread, my_cpu)  {                               \
-	pmap_t		tpmap;                                  \
+#define PMAP_ACTIVATE_MAP(map, thread, my_cpu)  ({                      \
+	pmap_t		tpmap;                                          \
                                                                         \
 	tpmap = vm_map_pmap(map);                                       \
-	set_dirbase(tpmap, thread, my_cpu);                                     \
-}
+	ledger_tab_open(&task_ledger_template, tpmap->ledger);          \
+	set_dirbase(tpmap, thread, my_cpu);                             \
+})
 
 #if   defined(__x86_64__)
 #define PMAP_DEACTIVATE_MAP(map, thread, ccpu)                          \
@@ -815,7 +812,7 @@ extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset
 #define PMAP_DEACTIVATE_MAP(map, thread)
 #endif
 
-#define PMAP_SWITCH_USER(th, new_map, my_cpu) {                         \
+#define PMAP_SWITCH_USER(th, new_map, my_cpu)  ({                       \
 	spl_t		spl;                                            \
                                                                         \
 	spl = splhigh();                                                \
@@ -823,7 +820,7 @@ extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset
 	th->map = new_map;                                              \
 	PMAP_ACTIVATE_MAP(th->map, th, my_cpu);                         \
 	splx(spl);                                                      \
-}
+})
 
 /*
  * Marking the current cpu's cr3 inactive is achieved by setting its lsb.
@@ -885,8 +882,6 @@ extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset
 
 
 #define pmap_copy(dst_pmap, src_pmap, dst_addr, len, src_addr)
-#define pmap_attribute(pmap, addr, size, attr, value) \
-	                                (KERN_INVALID_ADDRESS)
 #define pmap_attribute_cache_sync(addr, size, attr, value) \
 	                                (KERN_INVALID_ADDRESS)
 

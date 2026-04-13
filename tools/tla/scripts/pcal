@@ -1,0 +1,6 @@
+#!/bin/sh
+
+dir="$(dirname "$0")"
+jar=tla2tools.jar
+
+exec java -cp "$dir/$jar" pcal.trans -nocfg "$@"

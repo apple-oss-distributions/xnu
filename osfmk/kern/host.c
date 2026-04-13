@@ -77,6 +77,7 @@
 #include <mach/host_priv_server.h>
 #include <mach/vm_map.h>
 #include <mach/task_info.h>
+#include <mach/resource_monitors.h>
 
 #include <machine/commpage.h>
 #include <machine/cpu_capabilities.h>
@@ -94,10 +95,13 @@
 #include <kern/sched.h>
 #include <kern/processor.h>
 
+#include <sys/variant_internal.h>
+
 #include <vm/vm_map_xnu.h>
 #include <vm/vm_purgeable_xnu.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_kern_xnu.h>
+#include <vm/vm_log.h>
 
 #include <IOKit/IOBSD.h> // IOTaskHasEntitlement
 #include <IOKit/IOKitKeys.h> // DriverKit entitlement strings
@@ -115,6 +119,8 @@
 #endif
 
 #include <pexpert/pexpert.h>
+
+extern bool proc_sdk_26_4_or_later(proc_t);
 
 SCALABLE_COUNTER_DEFINE(vm_statistics_zero_fill_count);        /* # of zero fill pages */
 SCALABLE_COUNTER_DEFINE(vm_statistics_reactivations);          /* # of pages reactivated */
@@ -486,7 +492,8 @@ host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_ty
 		*count = HOST_VM_INFO_REV0_COUNT; /* rev0 already filled in */
 		if (original_count >= HOST_VM_INFO_REV1_COUNT) {
 			/* rev1 added "purgeable" info */
-			stat32->purgeable_count = VM_STATISTICS_TRUNCATE_TO_32_BIT(vm_page_purgeable_count);
+			stat32->purgeable_count =
+			    VM_STATISTICS_TRUNCATE_TO_32_BIT(counter_load(&vm_page_purgeable_count));
 			stat32->purges = VM_STATISTICS_TRUNCATE_TO_32_BIT(vm_page_purged_count);
 			*count = HOST_VM_INFO_REV1_COUNT;
 		}
@@ -522,8 +529,6 @@ host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_ty
 		cpu_load_info->cpu_ticks[CPU_STATE_IDLE] = 0;
 		cpu_load_info->cpu_ticks[CPU_STATE_NICE] = 0;
 
-		simple_lock(&processor_list_lock, LCK_GRP_NULL);
-
 		unsigned int pcount = processor_count;
 
 		for (unsigned int i = 0; i < pcount; i++) {
@@ -531,7 +536,6 @@ host_statistics(host_t host, host_flavor_t flavor, host_info_t info, mach_msg_ty
 			assert(processor != PROCESSOR_NULL);
 			processor_cpu_load_info(processor, cpu_load_info->cpu_ticks);
 		}
-		simple_unlock(&processor_list_lock);
 
 		*count = HOST_CPU_LOAD_INFO_COUNT;
 
@@ -681,6 +685,7 @@ get_host_info_data_index(bool is_stat64, host_flavor_t flavor, mach_msg_type_num
 			*ret = KERN_FAILURE;
 			return -1;
 		}
+
 		if (*count >= HOST_VM_INFO64_REV2_COUNT) {
 			return HOST_VM_INFO64_REV2;
 		}
@@ -810,6 +815,21 @@ vm_stats(void *info, unsigned int *count)
 	natural_t speculative_count = vm_page_speculative_count;
 	natural_t throttled_count = vm_page_throttled_count;
 
+#if DEVELOPMENT || DEBUG
+	if (*count > HOST_VM_INFO64_COUNT) {
+		vm_log_error("host_statistics64() count is larger than expected "
+		    "(actual:%u > HOST_VM_INFO64_COUNT:%u). This is most likely a bug in "
+		    "%s [%d] and is likely to result in memory corruption. The buffer count "
+		    "must be passed in units of integer_t's. HOST_VM_INFO64_COUNT may be "
+		    "used as shorthand.\n",
+		    *count, HOST_VM_INFO64_COUNT,
+		    task_best_name(current_task()), task_pid(current_task()));
+		DTRACE_VM2(vm_stats_bad_count,
+		    uint, *count,
+		    uint, HOST_VM_INFO64_COUNT);
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	if (*count < HOST_VM_INFO64_REV0_COUNT) {
 		return KERN_FAILURE;
 	}
@@ -844,7 +864,8 @@ vm_stats(void *info, unsigned int *count)
 	stat->lookups = host_vm_stat.lookups;
 	stat->hits = host_vm_stat.hits;
 
-	stat->purgeable_count = vm_page_purgeable_count;
+	stat->purgeable_count =
+	    VM_STATISTICS_TRUNCATE_TO_32_BIT(counter_load(&vm_page_purgeable_count));
 	stat->purges = vm_page_purged_count;
 
 	stat->speculative_count = speculative_count;
@@ -1212,7 +1233,7 @@ host_processor_info(host_t host,
 
 	needed = pcount * icount * sizeof(natural_t);
 	size = vm_map_round_page(needed, VM_MAP_PAGE_MASK(ipc_kernel_map));
-	result = kmem_alloc(ipc_kernel_map, &addr, size, KMA_DATA, VM_KERN_MEMORY_IPC);
+	result = kmem_alloc(ipc_kernel_map, &addr, size, KMA_DATA_SHARED, VM_KERN_MEMORY_IPC);
 	if (result != KERN_SUCCESS) {
 		return KERN_RESOURCE_SHORTAGE;
 	}

@@ -214,6 +214,20 @@ Rank 2: sets up static percpu counters.
 
 - Rank 1: `LCK_MTX_DECLARE`.
 
+`STARTUP_SUB_SCHED`
+-------------------
+
+### Description
+
+Initializes the scheduler subsystem.
+
+### Rank usage.
+
+- Rank 1: `sched_init`: Calls the `SCHED(init)` call-out, then initializes the
+  `pset_array` based on the hardware topology.
+- Rank 2: `ml_bootstrap_processors`: Initializes the `processor_array` (which
+  requires allocating and registering the PERCPU data for each processor).
+
 `STARTUP_SUB_CODESIGNING`
 -------------------------
 

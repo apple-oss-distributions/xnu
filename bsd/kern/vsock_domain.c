@@ -90,6 +90,19 @@ vsock_get_peer_space(struct vsockpcb *_Nonnull pcb)
 	return pcb->peer_buf_alloc - (pcb->tx_cnt - pcb->peer_fwd_cnt);
 }
 
+static void
+vsock_update_send_buffer_space(struct vsockpcb *_Nonnull pcb)
+{
+	VERIFY(pcb != NULL);
+	socket_lock_assert_owned(pcb->so);
+	// rdar://152542875 (xpc_file_transfer_create_with_path() fails for VIRTUALMACHINE_DEVICE)
+	// We must keep the socket send buffer high water count aligned with our calculated
+	// peer receive buffer space to workaround a quirk in `sendmsg()` / `sosend()` for
+	// non-blocking sockets where a EWOULDBLOCK return code is quietly hidden from the caller.
+	uint32_t free_space = vsock_get_peer_space(pcb);
+	pcb->so->so_snd.sb_hiwat = min(pcb->send_space, free_space);
+}
+
 static struct vsockpcb *
 vsock_get_matching_pcb(struct vsock_address src, struct vsock_address dst, uint16_t protocol)
 {
@@ -637,6 +650,12 @@ vsock_put_message_listening(struct vsockpcb *_Nonnull pcb, enum vsock_operation 
 			goto done;
 		}
 
+		// Initialize the new socket peer credits using the listening socket.
+		// This ensures sb_hiwat is updated based on peer buffer space before we try to send.
+		pcb2->peer_buf_alloc = pcb->peer_buf_alloc;
+		pcb2->peer_fwd_cnt = pcb->peer_fwd_cnt;
+		vsock_update_send_buffer_space(pcb2);
+
 		error = vsock_pcb_respond(pcb2);
 		if (error) {
 			goto done;
@@ -745,6 +764,7 @@ vsock_put_message(struct vsock_address src, struct vsock_address dst, enum vsock
 	int buffers_changed = (pcb->peer_buf_alloc != buf_alloc) || (pcb->peer_fwd_cnt) != fwd_cnt;
 	pcb->peer_buf_alloc = buf_alloc;
 	pcb->peer_fwd_cnt = fwd_cnt;
+	vsock_update_send_buffer_space(pcb);
 
 	// Peer's buffer has enough space for the next packet. Notify any threads waiting for space.
 	if (buffers_changed && vsock_get_peer_space(pcb) >= pcb->waiting_send_size) {
@@ -967,6 +987,13 @@ vsock_attach(struct socket *_Nonnull so, int proto, struct proc *p)
 		return error;
 	}
 
+	// Initially set send buffer high water mark to 0 - it will be updated based on peer credits.
+	// This allows sosendcheck() to naturally block when peer has no space.
+	so->so_snd.sb_hiwat = 0;
+
+	// Set SB_LIMITED to prevent sbreserve() from overriding our hiwat value.
+	so->so_snd.sb_flags |= SB_LIMITED;
+
 	// Attach should only be run once per socket.
 	struct vsockpcb *pcb = sotovsockpcb(so);
 	if (pcb) {
@@ -983,6 +1010,7 @@ vsock_attach(struct socket *_Nonnull so, int proto, struct proc *p)
 	pcb = zalloc_flags(vsockpcb_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	pcb->so = so;
 	pcb->transport = transport;
+	pcb->send_space = send_space;
 	pcb->local_address = (struct vsock_address) {
 		.cid = VMADDR_CID_ANY,
 		.port = VMADDR_PORT_ANY
@@ -1424,6 +1452,7 @@ vsock_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam, s
 	}
 
 	pcb->tx_cnt += len;
+	vsock_update_send_buffer_space(pcb);
 
 	return 0;
 

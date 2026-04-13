@@ -3,12 +3,26 @@ import inspect
 import numbers
 import struct
 import sys
+import re
 
 import lldb
 
 __all__ = []
 
 UPCASTS = {}
+
+def apple_lldb_build_tuple():
+    # examples of what this parses:
+    # "lldb_host-1703.2.29.104" - Apple internal version from the internal SDK (via xcrun)
+    # "lldb-1703.0.26.101" - default installed lldb on macOS (/usr/bin/lldb)
+    # This is an Apple-specific format, non-Apple lldb has a different version string.
+    ver_str = lldb.debugger.GetVersionString()
+    match = re.search("^lldb.*-([0-9.]+)", ver_str, re.MULTILINE)
+    if match is None:
+        return (0, 0, 0, 0)
+    return tuple(int(part) for part in match.group(1).split('.'))
+
+lldb_version = apple_lldb_build_tuple()
 
 #
 # List of Quirks, once fixed, replace the booleans with an evaluation
@@ -37,8 +51,9 @@ QUIRK_100103405 = True
 #                  in the same load address in some cases depending
 #                  on whether the original value is a pointer created
 #                  with AddressOf() or not.)
-#
-QUIRK_100162262 = True
+#                  This bug has been confirmed to be fixed as of this version,
+#                  but it was likely fixed before it.
+QUIRK_100162262 = (lldb_version <= (1703, 2, 25, 101))
 
 #
 # rdar://102642763 (LLDB macros are unable to access member of anon struct
@@ -422,31 +437,6 @@ class SBTarget(lldb.SBTarget, metaclass=LLDBWrapMetaclass):
             int(spec.unpack(data[i : i + size])[0])
             for i in range(0, count * size, size)
         )
-
-    def xStripPtr(self, sbvalue):
-        """ Strips top bits in a pointer value """
-
-        if strip := getattr(self, '_strip_ptr', None):
-            return strip(sbvalue)
-
-        is_tagged = False
-        # is_tagged = self.FindFirstGlobalVariable('kasan_tbi_enabled').IsValid()
-
-        def stripPtr(sbvalue: lldb.SBValue):
-            if sbvalue.GetValueAsAddress() != sbvalue.GetValueAsUnsigned():
-                addr = sbvalue.GetValueAsAddress()
-                sbv_new = sbvalue.CreateValueFromExpression(None, '(void *)' + str(addr))
-                return sbv_new.Cast(sbvalue.GetType())
-
-            return sbvalue
-
-        if is_tagged:
-            strip = lambda sbv: stripPtr(sbv)
-        else:
-            strip = lambda sbv : sbv
-
-        self._strip_ptr = strip
-        return strip(sbvalue)
 
     def xIterAsInt8(self, addr, count):
         """ Conveniency wrapper to xIterAsScalar() on int8_t """
@@ -920,8 +910,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
                 self.GetLoadAddress(), rawty.GetArrayElementType())
 
         if fl & lldb.eTypeIsPointer:
-            sbv_new = self.GetTarget().xStripPtr(self)
-            return sbv_new.chkDereference() if self.GetValueAsAddress() else None
+            return self.chkDereference() if self.GetValueAsAddress() else None
 
         lldbwrap_raise(TypeError, self.xDereference, "Type can't be dereferenced")
 

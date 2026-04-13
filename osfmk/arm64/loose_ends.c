@@ -58,6 +58,7 @@
 #include <libkern/OSDebug.h>
 
 #if HAS_MTE
+#include <arm64/mte.h>
 #include <arm64/mte_xnu.h>
 #endif
 
@@ -448,7 +449,7 @@ bzero_phys_nc(addr64_t src64, vm_size_t bytes)
 	bzero_phys_internal(src64, bytes, 0);
 }
 
-void
+__mockable void
 bzero_phys(addr64_t src, vm_size_t bytes)
 {
 	bzero_phys_internal(src, bytes, 0);

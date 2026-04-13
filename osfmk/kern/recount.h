@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/_types/_size_t.h>
+#include <kern/cpc.h>
 
 #if CONFIG_SPTM
 // Track counters in secure execution contexts when the SPTM is available.
@@ -338,8 +339,7 @@ struct processor;
 struct recount_snap {
 	uint64_t rsn_time_mach;
 #if CONFIG_PERVASIVE_CPI
-	uint64_t rsn_insns;
-	uint64_t rsn_cycles;
+	struct cpc_cycles_instrs rsn_cpu_counts;
 #endif // CONFIG_PERVASIVE_CPI
 };
 
@@ -355,6 +355,7 @@ struct recount_processor {
 	uint64_t rpr_last_interrupt_leave_time_mach;
 	uint64_t rpr_idle_time_mach;
 	_Atomic uint64_t rpr_state_last_abs_time;
+	_Atomic uint64_t rpr_idle_count;
 #if __AMP__
 	// Cache the RCT_TOPO_CPU_KIND offset, which cannot change.
 	uint8_t rpr_cpu_kind_index;

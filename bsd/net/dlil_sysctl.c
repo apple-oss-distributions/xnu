@@ -53,6 +53,7 @@ static int sysctl_sndq_maxlen SYSCTL_HANDLER_ARGS;
 static int sysctl_rcvq_maxlen SYSCTL_HANDLER_ARGS;
 static int sysctl_rcvq_burst_limit SYSCTL_HANDLER_ARGS;
 static int sysctl_rcvq_trim_pct SYSCTL_HANDLER_ARGS;
+static int sysctl_max_magic_search_len SYSCTL_HANDLER_ARGS;
 static int sysctl_hwcksum_dbg_mode SYSCTL_HANDLER_ARGS;
 static int sysctl_hwcksum_dbg_partial_rxoff_forced SYSCTL_HANDLER_ARGS;
 static int sysctl_hwcksum_dbg_partial_rxoff_adj SYSCTL_HANDLER_ARGS;
@@ -345,6 +346,16 @@ SYSCTL_INT(_net_link_generic_system, OID_AUTO, dlil_verbose,
 uint32_t net_wake_pkt_debug = 0;
 SYSCTL_UINT(_net_link_generic_system, OID_AUTO, wake_pkt_debug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &net_wake_pkt_debug, 0, "");
+
+#define IF_MAX_MAGIC_SEARCH_LEN_MIN     102     /* MAGIC_PATTERN_LEN: 6 + 16*6 */
+#define IF_MAX_MAGIC_SEARCH_LEN_DEFAULT 512
+#define IF_MAX_MAGIC_SEARCH_LEN_MAX     2048    /* 2KB reasonable upper bound */
+uint32_t if_max_magic_search_len = IF_MAX_MAGIC_SEARCH_LEN_DEFAULT;
+SYSCTL_PROC(_net_link_generic_system, OID_AUTO, max_magic_search_len,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_max_magic_search_len,
+    IF_MAX_MAGIC_SEARCH_LEN_DEFAULT,
+    sysctl_max_magic_search_len, "I", "Max bytes to search for magic packet pattern");
+
 
 #if IFNET_INPUT_SANITY_CHK
 uint32_t dlil_input_sanity_check = 0;
@@ -639,6 +650,38 @@ sysctl_rcvq_trim_pct SYSCTL_HANDLER_ARGS
 	}
 
 	if_rcvq_trim_pct = i;
+	return err;
+}
+
+static int
+sysctl_max_magic_search_len SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int i, err;
+
+	i = if_max_magic_search_len;
+
+	err = sysctl_handle_int(oidp, &i, 0, req);
+	if (err != 0 || req->newptr == USER_ADDR_NULL) {
+		return err;
+	}
+
+	/*
+	 * Safeguard to "sane" values on customer builds.
+	 * Min ensures we can detect at least a magic packet at offset 0.
+	 * Max prevents scanning excessive packet data.
+	 */
+#if !(DEVELOPMENT || DEBUG)
+	if (i < IF_MAX_MAGIC_SEARCH_LEN_MIN) {
+		i = IF_MAX_MAGIC_SEARCH_LEN_MIN;
+	}
+
+	if (IF_MAX_MAGIC_SEARCH_LEN_MAX < i) {
+		i = IF_MAX_MAGIC_SEARCH_LEN_MAX;
+	}
+#endif
+
+	if_max_magic_search_len = i;
 	return err;
 }
 

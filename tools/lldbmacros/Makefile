@@ -42,6 +42,7 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	core/pointer.py \
 	core/standard.py \
 	core/xnu_lldb_init.py \
+	cpc.py \
 	kmemory/__init__.py \
 	kmemory/btlog.py \
 	kmemory/kmem.py \
@@ -112,7 +113,7 @@ endif
 # Adding plugin with macros to test all LLDB macros.
 LLDBMACROS_PYTHON_FILES += \
 	tests/integration_smoke/__init__.py \
-	tests/integration_smoke/lldb_session.py \
+	tests/utils/lldb_session.py \
 	tests/integration_smoke/conftest.py \
 	tests/integration_smoke/test_lldb_macros.py
 

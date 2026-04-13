@@ -20,7 +20,7 @@ extern int clutch_interactivity_score_max;
 extern const unsigned int CLUTCH_THREAD_SELECT;
 
 /* Used by the Edge harness */
-extern void clutch_impl_init_topology(test_hw_topology_t hw_topology);
+extern test_sched_topology_t clutch_impl_init_topology(test_hw_topology_t hw_topology);
 extern void clutch_impl_init_params(void);
 extern void clutch_impl_init_tracepoints(void);
 extern struct thread_group *clutch_impl_create_tg(int interactivity_score);

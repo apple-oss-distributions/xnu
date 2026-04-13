@@ -63,7 +63,11 @@ successful_mincore_nested(
 
 	/* No checker updates. mincore has no VM side effects. */
 	int err = mincore((void *)start, size, (char *)page_infos);
-	assert(err == 0);
+	if (err != 0) {
+		T_QUIET; T_EXPECT_POSIX_SUCCESS(err, "mincore");
+		free(page_infos);
+		return TestFailed;
+	}
 
 	/* Verify that mincore's result matches the checker's expectation. */
 	for (mach_vm_size_t page_index = 0;
@@ -95,8 +99,7 @@ successful_mincore_nested(
 
 		/* resident */
 		bool mincore_resident = (page_info & MINCORE_INCORE);
-		/* TODO this assumes writes affect entire entries */
-		bool checker_resident = (checker->pages_resident > 0);
+		bool checker_resident = checker_page_at_address_is_resident(checker, page_address);
 		if (mincore_resident != checker_resident) {
 			T_LOG("page residency mismatch, address 0x%llx: expected %s, "
 			    "mincore reported %s (0x%02hhx & MINCORE_INCORE)",
@@ -140,6 +143,11 @@ T_DECL(mincore,
 		.single_entry_2 = successful_mincore,
 		.single_entry_3 = successful_mincore,
 		.single_entry_4 = successful_mincore,
+
+		.single_entry_nonnull_1 = successful_mincore,
+		.single_entry_nonnull_2 = successful_mincore,
+		.single_entry_nonnull_3 = successful_mincore,
+		.single_entry_nonnull_4 = successful_mincore,
 
 		.multiple_entries_1 = successful_mincore,
 		.multiple_entries_2 = successful_mincore,

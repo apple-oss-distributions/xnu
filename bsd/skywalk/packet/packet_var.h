@@ -810,7 +810,7 @@ SYSCTL_DECL(_kern_skywalk_packet);
 extern int pkt_trailers;
 #endif /* !DEVELOPMENT && !DEBUG */
 
-typedef void (pkt_copy_from_pkt_t)(const enum txrx, kern_packet_t,
+typedef int (pkt_copy_from_pkt_t)(const enum txrx, kern_packet_t,
     const uint16_t, kern_packet_t, const uint16_t, const uint32_t,
     const boolean_t, const uint16_t, const uint16_t, const boolean_t);
 
@@ -818,7 +818,7 @@ typedef void (pkt_copy_from_mbuf_t)(const enum txrx, kern_packet_t,
     const uint16_t, struct mbuf *, const uint16_t, const uint32_t,
     const boolean_t, const uint16_t);
 
-typedef void (pkt_copy_to_mbuf_t)(const enum txrx, kern_packet_t,
+typedef int (pkt_copy_to_mbuf_t)(const enum txrx, kern_packet_t,
     const uint16_t, struct mbuf *, const uint16_t, const uint32_t,
     const boolean_t, const uint16_t);
 

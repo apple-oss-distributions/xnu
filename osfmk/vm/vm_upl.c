@@ -933,7 +933,7 @@ process_upl_to_commit:
 					if (m->vmp_wire_count == 0) {
 						panic("wire_count == 0, m = %p, obj = %p", m, shadow_object);
 					}
-					assert(m->vmp_q_state == VM_PAGE_IS_WIRED);
+					assert(VM_PAGE_WIRED(m));
 
 					/*
 					 * XXX FBDP need to update some other
@@ -945,7 +945,6 @@ process_upl_to_commit:
 
 					if (m->vmp_wire_count == 0) {
 						m->vmp_q_state = VM_PAGE_NOT_ON_Q;
-						m->vmp_iopl_wired = false;
 						unwired_count++;
 
 #if HAS_MTE

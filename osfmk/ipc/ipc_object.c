@@ -283,7 +283,7 @@ ipc_object_translate(
 }
 
 /*
- *	Routine:	ipc_object_translate_pset_receive
+ *	Routine:	ipc_object_translate_port_pset
  *	Purpose:
  *		Look up two objects in a space (a port set and a receive right)
  *	Conditions:
@@ -1242,6 +1242,7 @@ ipc_object_validate_preflight_panic(ipc_object_t io)
  *		true:  the lock was acquired
  *		false: the object was freed or not initialized.
  */
+__mockable
 bool
 ipc_object_lock_allow_invalid(ipc_object_t orig_io)
 {
@@ -1264,7 +1265,7 @@ ipc_object_lock_allow_invalid(ipc_object_t orig_io)
 	return false;
 }
 
-__attribute__((always_inline))
+__always_inline_testable
 void
 ipc_object_unlock(ipc_object_t object)
 {

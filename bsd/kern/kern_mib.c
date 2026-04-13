@@ -107,6 +107,7 @@
 #include <pexpert/pexpert.h>
 #include <kern/sched_prim.h>
 #include <console/serial_protos.h>
+#include <kern/bits.h>
 
 extern vm_map_t bsd_pageable_map;
 
@@ -175,6 +176,11 @@ static struct {
 	uint32_t ephemeral_storage:1;
 	uint32_t use_recovery_securityd:1;
 } property_existence = {0, 0};
+
+// fail-safe: assume we are dev fused until initialized
+static bool eng_sample_dev_fused = true;
+
+TUNABLE(bool, eng_sample_hide_status, "-engineering_sample_hide_status", false);
 
 SYSCTL_EXTENSIBLE_NODE(, 0, sysctl, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "Sysctl internal magic");
@@ -738,6 +744,8 @@ sysctl_load_devicetree_entries(void)
 			property_existence.use_recovery_securityd = 1;
 		}
 	}
+
+	eng_sample_dev_fused = !ml_device_is_prod_fused();
 }
 STARTUP(SYSCTL, STARTUP_RANK_MIDDLE, sysctl_load_devicetree_entries);
 
@@ -999,33 +1007,27 @@ SYSCTL_PROC(_hw, OID_AUTO, mempath, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED
  * Users may check these to determine properties that vary across different CPU types, such as number of CPUs,
  * or cache sizes. Perflevel 0 corresponds to the highest performance one.
  */
-SYSCTL_NODE(_hw, OID_AUTO, perflevel0, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, NULL, "Perf level 0 topology and cache geometry paramaters");
-SYSCTL_NODE(_hw, OID_AUTO, perflevel1, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, NULL, "Perf level 1 topology and cache geometry paramaters");
+SYSCTL_NODE(_hw, OID_AUTO, perflevel0, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, NULL, "Perf level 0 topology and cache geometry parameters");
+SYSCTL_NODE(_hw, OID_AUTO, perflevel1, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, NULL, "Perf level 1 topology and cache geometry parameters");
 SYSCTL_PROC(_hw, OID_AUTO, nperflevels, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_NPERFLEVELS, sysctl_hw_generic, "I", "Number of performance levels supported by this system");
 
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, physicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_PHYSICALCPU, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, physicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_PHYSICALCPUMAX, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, logicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_LOGICALCPU, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, logicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_LOGICALCPUMAX, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, l1icachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_L1ICACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, l1dcachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_L1DCACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, l2cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_L2CACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, cpusperl2, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_CPUSPERL2, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, l3cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_L3CACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, cpusperl3, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_CPUSPERL3, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel0, OID_AUTO, name, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)0, HW_PERFLEVEL_NAME, sysctl_hw_generic, "A", "");
+#define PERFLEVEL_SYSCTLS(lvl) \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, physicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_PHYSICALCPU, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, physicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_PHYSICALCPUMAX, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, logicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_LOGICALCPU, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, logicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_LOGICALCPUMAX, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, l1icachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_L1ICACHESIZE, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, l1dcachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_L1DCACHESIZE, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, l2cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_L2CACHESIZE, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, cpusperl2, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_CPUSPERL2, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, l3cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_L3CACHESIZE, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, cpusperl3, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_CPUSPERL3, sysctl_hw_generic, "I", ""); \
+	SYSCTL_PROC(_hw_perflevel##lvl, OID_AUTO, name, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)(lvl), HW_PERFLEVEL_NAME, sysctl_hw_generic, "A", "");
 
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, physicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_PHYSICALCPU, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, physicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_PHYSICALCPUMAX, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, logicalcpu, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_LOGICALCPU, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, logicalcpu_max, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_LOGICALCPUMAX, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, l1icachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_L1ICACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, l1dcachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_L1DCACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, l2cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_L2CACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, cpusperl2, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_CPUSPERL2, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, l3cachesize, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_L3CACHESIZE, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, cpusperl3, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_CPUSPERL3, sysctl_hw_generic, "I", "");
-SYSCTL_PROC(_hw_perflevel1, OID_AUTO, name, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *)1, HW_PERFLEVEL_NAME, sysctl_hw_generic, "A", "");
+PERFLEVEL_SYSCTLS(0)
+PERFLEVEL_SYSCTLS(1)
+
+#undef PERFLEVEL_SYSCTLS
 
 /*
  * Optional CPU features can register nodes below hw.optional.
@@ -1077,6 +1079,28 @@ SYSCTL_PROC(_hw, HW_VECTORUNIT, vectorunit, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_M
 SYSCTL_PROC(_hw, HW_L2SETTINGS, l2settings, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, 0, HW_L2SETTINGS, sysctl_hw_generic, "I", "");
 SYSCTL_PROC(_hw, HW_L3SETTINGS, l3settings, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, 0, HW_L3SETTINGS, sysctl_hw_generic, "I", "");
 SYSCTL_INT(_hw, OID_AUTO, cputhreadtype, CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED, &cputhreadtype, 0, "");
+
+static int
+sysctl_hw_engineering_sample(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2,
+    struct sysctl_req *req)
+{
+#if DEVELOPMENT || DEBUG
+	int es = 1;
+#else
+	int es = 0;
+#endif
+
+	es = es || eng_sample_dev_fused;
+	es = es || kern_osreleasetype_matches("Internal");
+
+	if (eng_sample_hide_status) {
+		es = 0;
+	}
+
+	return SYSCTL_OUT(req, &es, sizeof(es));
+}
+SYSCTL_PROC(_hw, OID_AUTO, engineering_sample, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_hw_engineering_sample, "", "");
 
 #if defined(__i386__) || defined(__x86_64__) || CONFIG_X86_64_COMPAT
 static int
@@ -1144,6 +1168,8 @@ SECURITY_READ_ONLY_LATE(int) arm64_flag = 0;
 #define ARM_FEATURE_FLAG(flag_name) \
 	SECURITY_READ_ONLY_LATE(int) gARM_ ## flag_name = 0; \
 	SYSCTL_INT(_hw_optional_arm, OID_AUTO, flag_name, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_ ## flag_name, 0, "")
+
+
 #include <arm/arm_features.inc>
 #undef ARM_FEATURE_FLAG
 
@@ -1211,6 +1237,7 @@ SYSCTL_INT(_hw_optional, OID_AUTO, arm64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LO
 
 #if defined (__arm64__)
 
+
 /*
  * Generate an uint64_t containing one bit per FEAT extension, reporting
  * the presence of each extension.
@@ -1219,6 +1246,7 @@ static int
 sysctl_hw_caps(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2, struct sysctl_req *req)
 {
+
 	/* Local buffer, one bit per FEAT, reset to 0, set if FEAT present. */
 	#define CAP_BYTE_NB ((CAP_BIT_NB + 7) / 8)
 	uint8_t feats[CAP_BYTE_NB] = {0};

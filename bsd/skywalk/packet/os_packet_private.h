@@ -335,11 +335,14 @@ struct __user_buflet {
 #endif /* KERNEL */
 
 #ifdef KERNEL
+#include <os/overflow.h>
 #define BUF_IN_RANGE(_buf)                                              \
+	({uint32_t tmplim;                                              \
 	((_buf)->buf_addr >= (mach_vm_address_t)(_buf)->buf_objaddr &&  \
 	((uintptr_t)(_buf)->buf_addr + (_buf)->buf_dlim) <=             \
 	((uintptr_t)(_buf)->buf_objaddr + (_buf)->buf_objlim) &&        \
-	((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)
+	!os_add_overflow((_buf)->buf_doff, (_buf)->buf_dlen, &tmplim) &&\
+	tmplim <= (_buf)->buf_dlim);})
 #else /* !KERNEL */
 #define BUF_IN_RANGE(_buf)                                              \
 	(((_buf)->buf_doff + (_buf)->buf_dlen) <= (_buf)->buf_dlim)

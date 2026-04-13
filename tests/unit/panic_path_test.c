@@ -27,8 +27,8 @@
  */
 
 #include <darwintest.h>
-#include "mocks/unit_test_utils.h"
-#include "mocks/mock_pmap.h"
+#include "mocks/osfmk/unit_test_utils.h"
+#include "mocks/osfmk/mock_pmap.h"
 
 #include <kdp/output_stages/output_stages.h>
 #include <kdp/kdp_core.h>
@@ -61,8 +61,9 @@ kosf_outproc_mock(
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.panic_path_test"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("debugging"),
 	T_META_OWNER("e_zisman"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RUN_CONCURRENTLY(true)
 	);
 
 T_DECL(xnu_osfmk_kdp_memory_backing_aware_buffer_stage_outproc, "memory_backing_aware_buffer_stage_outproc")

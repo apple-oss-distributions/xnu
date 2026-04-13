@@ -66,16 +66,6 @@ uint64_t coalition_get_page_count(coalition_t coal, int *ntasks);
 int coalition_get_pid_list(coalition_t coal, uint32_t rolemask, int sort_order,
     int *pid_list, int list_sz);
 
-/* defined in task.c */
-extern ledger_template_t task_ledger_template;
-
-/*
- * Templates; task template is copied due to potential allocation limits on
- * task ledgers.
- */
-ledger_template_t coalition_task_ledger_template = NULL;
-ledger_template_t coalition_ledger_template = NULL;
-
 extern int      proc_selfpid(void);
 /*
  * Coalition zone needs limits. We expect there will be as many coalitions as
@@ -397,9 +387,24 @@ static KALLOC_TYPE_DEFINE(coalition_zone, struct coalition, KT_PRIV_ACCT);
  *
  */
 
-struct coalition_ledger_indices coalition_ledgers =
-{.logical_writes = -1, };
-void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO(int flavor);
+struct coalition_ledger_indices {
+	ledger_entry_id_t logical_writes;
+};
+
+static void coalition_io_rate_exceeded(ledger_warning_t warning, const void *param0)
+asm("_SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO");
+
+static SECURITY_READ_ONLY_LATE(struct coalition_ledger_indices) coalition_ledgers;
+
+static SECURITY_READ_ONLY_LATE(struct ledger_entry_template) coaltion_lentries[] = {
+	LEDGER_ENTRY_CALLBACK("logical_writes", "res", "bytes",
+    LFEAT_DEBIT | LFEAT_REFILL,
+    coalition_io_rate_exceeded, (void *)FLAVOR_IO_LOGICAL_WRITES),
+};
+
+LEDGER_TEMPLATE_DEFINE(coalition_ledger_template, "Per-coalition ledger", coaltion_lentries);
+
+LEDGER_TEMPLATE_DEFINE_EMPTY(coalition_task_ledger_template, "Per-coalition task ledger");
 
 ledger_t
 coalition_ledger_get_from_task(task_t task)
@@ -457,9 +462,10 @@ out:
 	return error;
 }
 
-void __attribute__((noinline))
-SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO(int flavor)
+static void
+coalition_io_rate_exceeded(ledger_warning_t warning, const void *param0)
 {
+#pragma unused(warning, param0)
 	int pid = proc_selfpid();
 	ledger_amount_t new_limit;
 	task_t task = current_task();
@@ -467,9 +473,12 @@ SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO(int flavor)
 	kern_return_t kr;
 	ledger_t ledger;
 	struct coalition *coalition = task->coalition[COALITION_TYPE_RESOURCE];
+	long flavor = (long)param0;
 
 	assert(coalition != NULL);
 	ledger = coalition->r.resource_monitor_ledger;
+
+	assert(warning == LEDGER_WARNING_LEVEL_CRITICAL);
 
 	switch (flavor) {
 	case FLAVOR_IO_LOGICAL_WRITES:
@@ -480,9 +489,10 @@ SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO(int flavor)
 		goto Exit;
 	}
 
-	os_log(OS_LOG_DEFAULT, "Coalition [%lld] caught causing excessive I/O (flavor: %d). Task I/O: %lld MB. [Limit : %lld MB per %lld secs]. Triggered by process [%d]\n",
-	    coalition->id, flavor, (lei.lei_balance / (1024 * 1024)), (lei.lei_limit / (1024 * 1024)),
-	    (lei.lei_refill_period / NSEC_PER_SEC), pid);
+	os_log(OS_LOG_DEFAULT, "Coalition [%lld] caught causing excessive I/O (flavor: %ld). "
+	    "Task I/O: %lld MB. [Limit : %lld MB per %lld secs]. Triggered by process [%d]\n",
+	    coalition->id, flavor, lei.lei_balance / (1024 * 1024),
+	    lei.lei_limit / (1024 * 1024), lei.lei_refill_period / NSEC_PER_SEC, pid);
 
 	kr = send_resource_violation(send_disk_writes_violation, task, &lei, kRNFlagsNone);
 	if (kr) {
@@ -507,41 +517,15 @@ Exit:
 }
 
 void
-coalition_io_rate_exceeded(int warning, const void *param0, __unused const void *param1)
-{
-	if (warning == 0) {
-		SENDING_NOTIFICATION__THIS_COALITION_IS_CAUSING_TOO_MUCH_IO((int)param0);
-	}
-}
-
-void
 init_coalition_ledgers(void)
 {
-	ledger_template_t t;
-	assert(coalition_ledger_template == NULL);
+	ledger_template_t t = &coalition_ledger_template;
 
-	if ((t = ledger_template_create("Per-coalition ledgers")) == NULL) {
-		panic("couldn't create coalition ledger template");
-	}
+	ledger_template_finalize(&coalition_ledger_template, LEDGER_TPL_NONE);
 
-	coalition_ledgers.logical_writes = ledger_entry_add(t, "logical_writes", "res", "bytes");
+	LEDGER_KEY_MEMOIZE(t, coalition_ledgers, logical_writes);
 
-	if (coalition_ledgers.logical_writes < 0) {
-		panic("couldn't create entries for coaliton ledger template");
-	}
-
-	ledger_set_callback(t, coalition_ledgers.logical_writes, coalition_io_rate_exceeded, (void *)FLAVOR_IO_LOGICAL_WRITES, NULL);
-	ledger_template_complete(t);
-
-	coalition_task_ledger_template = ledger_template_copy(task_ledger_template, "Coalition task ledgers");
-
-	if (coalition_task_ledger_template == NULL) {
-		panic("couldn't create coalition task ledger template");
-	}
-
-	ledger_template_complete(coalition_task_ledger_template);
-
-	coalition_ledger_template = t;
+	ledger_template_copy(&coalition_task_ledger_template, &task_ledger_template);
 }
 
 void
@@ -591,18 +575,8 @@ i_coal_resource_init(coalition_t coal, boolean_t privileged, boolean_t efficient
 	assert(coal && coal->type == COALITION_TYPE_RESOURCE);
 
 	recount_coalition_init(&coal->r.co_recount);
-	coal->r.ledger = ledger_instantiate(coalition_task_ledger_template,
-	    LEDGER_CREATE_ACTIVE_ENTRIES);
-	if (coal->r.ledger == NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	coal->r.resource_monitor_ledger = ledger_instantiate(coalition_ledger_template,
-	    LEDGER_CREATE_ACTIVE_ENTRIES);
-	if (coal->r.resource_monitor_ledger == NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
+	coal->r.ledger = ledger_instantiate(&coalition_task_ledger_template);
+	coal->r.resource_monitor_ledger = ledger_instantiate(&coalition_ledger_template);
 	queue_init(&coal->r.tasks);
 
 	return KERN_SUCCESS;
@@ -773,10 +747,7 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		}
 	}
 
-	ledger_t sum_ledger = ledger_instantiate(coalition_task_ledger_template, LEDGER_CREATE_ACTIVE_ENTRIES);
-	if (sum_ledger == LEDGER_NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
+	ledger_t sum_ledger = ledger_instantiate(&coalition_task_ledger_template);
 
 	coalition_lock(coal);
 
@@ -852,7 +823,8 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 #endif /* CONFIG_PHYS_WRITE_ACCT */
 
 		/* The exited process ledger can have a phys_footprint balance, which should be ignored. */
-		kr = ledger_get_balance(task->ledger, task_ledgers.phys_footprint, (int64_t *)&task_phys_footprint);
+		kr = ledger_get_balance(task->ledger, task_ledgers.phys_footprint,
+		    LEO_NO_SETTLE, (int64_t *)&task_phys_footprint);
 		if (kr != KERN_SUCCESS || task_phys_footprint < 0) {
 			task_phys_footprint = 0;
 		}
@@ -863,32 +835,38 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		recount_task_usage_perf_only(task, &stats_sum, &stats_perf_only);
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.conclave_mem, (int64_t *)&conclave_mem);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.conclave_mem,
+	    LEO_NO_SETTLE, (int64_t *)&conclave_mem);
 	if (kr != KERN_SUCCESS || conclave_mem < 0) {
 		conclave_mem = 0;
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_me, (int64_t *)&cpu_time_billed_to_me);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_me,
+	    LEO_NO_SETTLE, (int64_t *)&cpu_time_billed_to_me);
 	if (kr != KERN_SUCCESS || cpu_time_billed_to_me < 0) {
 		cpu_time_billed_to_me = 0;
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_others, (int64_t *)&cpu_time_billed_to_others);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_others,
+	    LEO_NO_SETTLE, (int64_t *)&cpu_time_billed_to_others);
 	if (kr != KERN_SUCCESS || cpu_time_billed_to_others < 0) {
 		cpu_time_billed_to_others = 0;
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.energy_billed_to_me, (int64_t *)&energy_billed_to_me);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.energy_billed_to_me,
+	    LEO_NO_SETTLE, (int64_t *)&energy_billed_to_me);
 	if (kr != KERN_SUCCESS || energy_billed_to_me < 0) {
 		energy_billed_to_me = 0;
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.energy_billed_to_others, (int64_t *)&energy_billed_to_others);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.energy_billed_to_others,
+	    LEO_NO_SETTLE, (int64_t *)&energy_billed_to_others);
 	if (kr != KERN_SUCCESS || energy_billed_to_others < 0) {
 		energy_billed_to_others = 0;
 	}
 
-	kr = ledger_get_balance(sum_ledger, task_ledgers.swapins, (int64_t *)&swapins);
+	kr = ledger_get_balance(sum_ledger, task_ledgers.swapins,
+	    LEO_NO_SETTLE, (int64_t *)&swapins);
 	if (kr != KERN_SUCCESS || swapins < 0) {
 		swapins = 0;
 	}
@@ -908,7 +886,7 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 
 	/* Copy the totals out of sum_ledger */
 	kr = ledger_get_entries(sum_ledger, task_ledgers.cpu_time,
-	    &credit, &debit);
+	    LEO_NO_SETTLE, &credit, &debit);
 	if (kr != KERN_SUCCESS) {
 		credit = 0;
 	}
@@ -922,14 +900,14 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	cru_out->swapins = swapins;
 
 	kr = ledger_get_entries(sum_ledger, task_ledgers.interrupt_wakeups,
-	    &credit, &debit);
+	    LEO_NO_SETTLE, &credit, &debit);
 	if (kr != KERN_SUCCESS) {
 		credit = 0;
 	}
 	cru_out->interrupt_wakeups = credit;
 
 	kr = ledger_get_entries(sum_ledger, task_ledgers.platform_idle_wakeups,
-	    &credit, &debit);
+	    LEO_NO_SETTLE, &credit, &debit);
 	if (kr != KERN_SUCCESS) {
 		credit = 0;
 	}

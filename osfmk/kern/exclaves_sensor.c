@@ -40,10 +40,8 @@
 
 #include <kern/locks.h>
 #include <kern/thread.h>
-#include <kern/thread_call.h>
 
 #include "kern/exclaves.tightbeam.h"
-
 
 /* -------------------------------------------------------------------------- */
 #pragma mark EIC
@@ -129,17 +127,22 @@ eic_sensorstatus_to_sensor_status(exclaveindicatorcontroller_sensorstatusrespons
 		return EXCLAVES_SENSOR_STATUS_CONTROL;
 	case EXCLAVEINDICATORCONTROLLER_SENSORSTATUSRESPONSE_SENSOR_PENDING:
 		return EXCLAVES_SENSOR_STATUS_PENDING;
+#if defined(EXCLAVEINDICATORCONTROLLER_SENSORSTATUSRESPONSE_SENSOR_EXPIRED)
+	case EXCLAVEINDICATORCONTROLLER_SENSORSTATUSRESPONSE_SENSOR_EXPIRED:
+		return EXCLAVES_SENSOR_STATUS_EXPIRED;
+#endif
 	default:
 		panic("unknown sensor status");
 	}
 }
 
+
 static kern_return_t
-exclaves_eic_init(void)
+exclaves_eic_client_init(void)
 {
 	exclaves_id_t sensorrequest_id, sensorcopyrequest_id;
 	tb_endpoint_t sensorrequest_endpoint, sensorcopyrequest_endpoint;
-	tb_error_t ret;
+	tb_error_t ret = TB_ERROR_SUCCESS;
 
 	sensorrequest_id = exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, EXCLAVES_EIC);
 	if (sensorrequest_id == EXCLAVES_INVALID_ID) {
@@ -172,12 +175,14 @@ exclaves_eic_init(void)
 		return KERN_FAILURE;
 	}
 
+
 	return KERN_SUCCESS;
 }
 
 static kern_return_t
 exclaves_eic_tick_rate(uint64_t rate_hz)
 {
+	tb_error_t ret = TB_ERROR_SUCCESS;
 	exclaveindicatorcontroller_indicatorrefreshrate_s rate;
 
 	/* Round up to nearest supported value. */
@@ -196,76 +201,11 @@ exclaves_eic_tick_rate(uint64_t rate_hz)
 		break;
 	}
 
-	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_setindicatorrefreshrate(
-		&eic_client, &rate, ^(__unused exclaveindicatorcontroller_requesterror_s result) {});
-
-	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
-}
-
-static kern_return_t
-exclaves_eic_sensor_start(exclaves_sensor_type_t __unused sensor_type,
-    __assert_only uint64_t flags, exclaves_sensor_status_t *status)
-{
-	assert3p(status, !=, NULL);
-	assert3u(flags, ==, 0);
-
-	const exclaveindicatorcontroller_sensortype_s sensor =
-	    sensor_type_to_eic_sensortype(sensor_type);
-
-	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_start(
-		&eic_client, sensor, ^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
-		*status = eic_sensorstatus_to_sensor_status(result);
-	});
-
-	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
-}
-
-static kern_return_t
-exclaves_eic_sensor_stop(exclaves_sensor_type_t __unused sensor_type)
-{
-	const exclaveindicatorcontroller_sensortype_s sensor =
-	    sensor_type_to_eic_sensortype(sensor_type);
-
-	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_stop(&eic_client,
-	    sensor);
-	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
-}
-
-static kern_return_t
-exclaves_eic_sensor_status(exclaves_sensor_type_t __unused sensor_type,
-    __assert_only uint64_t flags, exclaves_sensor_status_t *status)
-{
-	assert3p(status, !=, NULL);
-	assert3u(flags, ==, 0);
-
-	const exclaveindicatorcontroller_sensortype_s sensor =
-	    sensor_type_to_eic_sensortype(sensor_type);
-
-	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_status(
-		&eic_client, sensor, ^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
-		*status = eic_sensorstatus_to_sensor_status(result);
-	});
-
-	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
-}
-
-/*
- * It is intentional to keep "buffer" untyped here as it avoids xnu having to
- * understand what those IDs are at all. They are simply passed through from the
- * resource table as-is.
- */
-static kern_return_t
-exclaves_eic_sensor_copy(uint32_t buffer, uint64_t size1, uint64_t offset1,
-    uint64_t size2, uint64_t offset2, exclaves_sensor_status_t *status)
-{
-	assert3u(size1, >, 0);
-	assert3p(status, !=, NULL);
-
-	tb_error_t ret = exclaveindicatorcontroller_sensorcopyrequest_copy(
-		&eic_copy_client, buffer, offset1, size1, offset2, size2,
-		^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
-		*status = eic_sensorstatus_to_sensor_status(result);
-	});
+	/* BEGIN IGNORE CODESTYLE */
+	ret = exclaveindicatorcontroller_sensorrequest_setindicatorrefreshrate(
+	    &eic_client, &rate,
+	    ^(__unused exclaveindicatorcontroller_requesterror_s result) {});
+	/* END IGNORE CODESTYLE */
 
 	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
 }
@@ -283,8 +223,86 @@ exclaves_sensor_tick(void)
 	return again;
 }
 
+static kern_return_t
+exclaves_eic_sensor_start(exclaves_sensor_type_t sensor_type,
+    __assert_only uint64_t flags, exclaves_sensor_status_t *status)
+{
+	assert3p(status, !=, NULL);
+	assert3u(flags, ==, 0);
+
+	tb_error_t ret = TB_ERROR_SUCCESS;
+	const exclaveindicatorcontroller_sensortype_s sensor =
+	    sensor_type_to_eic_sensortype(sensor_type);
+
+	ret = exclaveindicatorcontroller_sensorrequest_start(&eic_client, sensor,
+	    ^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
+		*status = eic_sensorstatus_to_sensor_status(result);
+	});
+
+	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static kern_return_t
+exclaves_eic_sensor_stop(exclaves_sensor_type_t sensor_type)
+{
+	tb_error_t ret = TB_ERROR_SUCCESS;
+	const exclaveindicatorcontroller_sensortype_s sensor =
+	    sensor_type_to_eic_sensortype(sensor_type);
+
+	ret = exclaveindicatorcontroller_sensorrequest_stop(&eic_client, sensor);
+
+	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static kern_return_t
+exclaves_eic_sensor_status(exclaves_sensor_type_t sensor_type,
+    __assert_only uint64_t flags, exclaves_sensor_status_t *status)
+{
+	assert3p(status, !=, NULL);
+	assert3u(flags, ==, 0);
+
+	tb_error_t ret = TB_ERROR_SUCCESS;
+	const exclaveindicatorcontroller_sensortype_s sensor =
+	    sensor_type_to_eic_sensortype(sensor_type);
+
+	ret = exclaveindicatorcontroller_sensorrequest_status(&eic_client, sensor,
+	    ^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
+		*status = eic_sensorstatus_to_sensor_status(result);
+	});
+
+	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+/*
+ * It is intentional to keep "buffer" untyped here as it avoids xnu having to
+ * understand what those IDs are at all. They are simply passed through from the
+ * resource table as-is.
+ */
+static kern_return_t
+exclaves_eic_sensor_copy(uint64_t buffer, uint64_t size1, uint64_t offset1,
+    uint64_t size2, uint64_t offset2, exclaves_sensor_status_t *status,
+    bool *second_range)
+{
+	tb_error_t ret = TB_ERROR_SUCCESS;
+	assert3u(size1, >, 0);
+	assert3p(status, !=, NULL);
+	assert3p(second_range, !=, NULL);
+
+	*second_range = true;
+	/* BEGIN IGNORE CODESTYLE */
+	ret = exclaveindicatorcontroller_sensorcopyrequest_copy(
+	    &eic_copy_client, buffer, offset1, size1, offset2, size2,
+	    ^(exclaveindicatorcontroller_sensorstatusresponse_s result) {
+		*status = eic_sensorstatus_to_sensor_status(result);
+	});
+	/* END IGNORE CODESTYLE */
+
+	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+
 /* -------------------------------------------------------------------------- */
-#pragma mark sensor
+#pragma mark sensor resource
 
 static LCK_GRP_DECLARE(sensor_lck_grp, "exclaves_sensor");
 
@@ -304,6 +322,9 @@ typedef struct {
 	/* mutex to protect updates to the above */
 	lck_mtx_t s_mutex;
 
+	/* Device id generated by EIC */
+	exclaveindicatorcontroller_deviceid_s s_device_id;
+
 	/* Keep track of whether this sensor was initialised or not. */
 	bool s_initialised;
 } exclaves_sensor_t;
@@ -313,15 +334,25 @@ typedef struct {
  * as the kpi uses sensor ids directly to access the same resources */
 static exclaves_sensor_t sensors[EXCLAVES_SENSOR_MAX];
 
-/*
- * A thread call used to periodically call "status" on any open sensors.
- */
-static thread_call_t sensor_healthcheck_tcall = NULL;
+
+static inline exclaves_sensor_type_t
+sensor_id_to_sensor_type(uint64_t sensor_id)
+{
+	return (exclaves_sensor_type_t)(sensor_id);
+}
+
+static inline exclaves_device_type_t
+sensor_id_to_device_type(uint64_t sensor_id)
+{
+	return (exclaves_device_type_t)SENSOR_ID_GET_DEVICE(sensor_id);
+}
+
 
 static inline bool
-valid_sensor(exclaves_sensor_type_t sensor_type)
+valid_sensor_id(uint64_t sensor_id)
 {
-	switch (sensor_type) {
+
+	switch (sensor_id_to_sensor_type(sensor_id)) {
 	case EXCLAVES_SENSOR_CAM:
 	case EXCLAVES_SENSOR_MIC:
 	case EXCLAVES_SENSOR_CAM_ALT_FACEID:
@@ -338,49 +369,53 @@ valid_sensor(exclaves_sensor_type_t sensor_type)
 static inline exclaves_sensor_t *
 sensor_type_to_sensor(exclaves_sensor_type_t sensor_type)
 {
-	assert(valid_sensor(sensor_type));
+	assert3u(sensor_type, <=, EXCLAVES_SENSOR_MAX);
 	return &sensors[sensor_type - 1];
 }
 
-/* Calculate the next healthcheck time. */
-static void
-healthcheck_deadline(uint64_t *deadline, uint64_t *leeway)
+static inline exclaves_sensor_t *
+sensor_id_to_sensor(uint64_t sensor_id)
 {
-	const uint32_t interval =
-	    NSEC_PER_SEC / exclaves_display_healthcheck_rate_hz;
-	clock_interval_to_deadline(interval, 1, deadline);
-	nanoseconds_to_absolutetime(interval / 2, leeway);
+	return sensor_type_to_sensor(sensor_id_to_sensor_type(sensor_id));
 }
 
 
-/*
- * Called from the threadcall to call into exclaves with a status command for
- * every started sensor. Re-arms itself so it runs at a frequency set by the
- * display healthcheck rate. Exits when there are no longer any started sensors.
- * A sensor has a minimum on-time. For stopped sensors, call back into exclaves
- * until this minimum time has been reached.
- */
-static void
-exclaves_sensor_healthcheck(__unused void *param0, __unused void *param1)
+static inline exclaves_device_type_t
+arbitrated_buffer_id_to_device_type(uint64_t resource_id)
 {
-	uint64_t hc_leeway, hc_deadline;
-
-	/*
-	 * Calculate the next deadline up-front so the overhead of calling into
-	 * exclaves doesn't add to the period.
-	 */
-	healthcheck_deadline(&hc_deadline, &hc_leeway);
-
-	if (exclaves_sensor_tick()) {
-		thread_call_enter_delayed_with_leeway(sensor_healthcheck_tcall,
-		    NULL, hc_deadline, hc_leeway, THREAD_CALL_DELAY_LEEWAY);
-	}
+	return (exclaves_device_type_t)
+	       ARBITRATED_BUFFER_MEMORY_ID_GET_DEVICE(resource_id);
 }
+
+
+static inline uint64_t
+arbitrated_buffer_id_to_buffer(uint64_t resource_id)
+{
+	return ARBITRATED_BUFFER_MEMORY_ID_GET_BUFFER(resource_id);
+}
+
+static inline uint64_t
+arbitrated_buffer_id_to_endpoint(uint64_t resource_id)
+{
+	return ARBITRATED_BUFFER_MEMORY_ID_GET_ENDPOINT(resource_id);
+}
+
+
+/* -------------------------------------------------------------------------- */
+#pragma mark sensor operations
+
+static thread_t sensor_tick_loop_thread = NULL;
+static event_t sensor_tick_loop_event = (event_t) &sensor_tick_loop_event;
+static LCK_MTX_DECLARE(sensor_tick_loop_mtx, &sensor_lck_grp);
+
+__attribute__((noreturn))
+static void
+exclaves_sensor_tick_loop(__unused void *arg, __unused wait_result_t wr);
 
 static kern_return_t
-exclaves_sensor_init(void)
+exclaves_sensor_boot(void)
 {
-	kern_return_t kr = exclaves_eic_init();
+	kern_return_t kr = exclaves_eic_client_init();
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -394,29 +429,72 @@ exclaves_sensor_init(void)
 		sensor->s_initialised = true;
 	}
 
-	sensor_healthcheck_tcall =
-	    thread_call_allocate_with_priority(exclaves_sensor_healthcheck,
-	    NULL, THREAD_CALL_PRIORITY_KERNEL);
+
+	kernel_thread_start(exclaves_sensor_tick_loop, NULL, &sensor_tick_loop_thread);
+	thread_set_thread_name(sensor_tick_loop_thread, "exclaves_sensor_tick_loop");
 
 	return KERN_SUCCESS;
 }
-EXCLAVES_BOOT_TASK(exclaves_sensor_init, EXCLAVES_BOOT_RANK_ANY);
+EXCLAVES_BOOT_TASK(exclaves_sensor_boot, EXCLAVES_BOOT_RANK_ANY);
 
-kern_return_t
-exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
-    exclaves_sensor_status_t *status)
+static kern_return_t
+exclaves_sensor_init(exclaves_sensor_t *sensor,
+    __unused exclaves_device_type_t device_type)
 {
-	if (!valid_sensor(sensor_type)) {
-		return KERN_INVALID_ARGUMENT;
+	kern_return_t kr = KERN_SUCCESS;
+	lck_mtx_lock(&sensor->s_mutex);
+
+	if (sensor->s_initialised) {
+		lck_mtx_unlock(&sensor->s_mutex);
+		return KERN_SUCCESS;
 	}
 
-	exclaves_sensor_t *sensor = sensor_type_to_sensor(sensor_type);
+	if (kr == KERN_SUCCESS) {
+		sensor->s_initialised = true;
+	}
+
+	lck_mtx_unlock(&sensor->s_mutex);
+
+	return kr;
+}
+
+kern_return_t
+exclaves_sensor_id_init(uint64_t sensor_id)
+{
+	exclaves_sensor_t *sensor = NULL;
+	exclaves_device_type_t device_type = sensor_id_to_device_type(sensor_id);
+
+
+	if (!sensor || sensor->s_initialised) {
+		return KERN_SUCCESS;
+	}
+
+	return exclaves_sensor_init(sensor, device_type);
+}
+
+kern_return_t
+exclaves_sensor_id_start(uint64_t sensor_id, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+	kern_return_t kr;
+	exclaves_sensor_t *sensor = NULL;
+	exclaves_sensor_type_t sensor_type;
+
+	{
+		if (!valid_sensor_id(sensor_id)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		sensor_type = sensor_id_to_sensor_type(sensor_id);
+		sensor = sensor_id_to_sensor(sensor_id);
+	}
+
+	assert3p(sensor, !=, NULL);
+
 	if (!sensor->s_initialised) {
 		return KERN_FAILURE;
 	}
 
 	lck_mtx_lock(&sensor->s_mutex);
-	kern_return_t kr;
 
 	if (sensor->s_startcount == UINT64_MAX) {
 		lck_mtx_unlock(&sensor->s_mutex);
@@ -424,7 +502,9 @@ exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	}
 
 	if (sensor->s_startcount > 0) {
-		kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+		{
+			kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+		}
 		if (kr == KERN_SUCCESS) {
 			sensor->s_startcount += 1;
 		}
@@ -433,7 +513,9 @@ exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	}
 
 	// call start iff startcount is 0
-	kr = exclaves_eic_sensor_start(sensor_type, flags, status);
+	{
+		kr = exclaves_eic_sensor_start(sensor_type, flags, status);
+	}
 	if (kr != KERN_SUCCESS) {
 		lck_mtx_unlock(&sensor->s_mutex);
 		return kr;
@@ -445,25 +527,36 @@ exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	lck_mtx_unlock(&sensor->s_mutex);
 
 	/* Kick off the periodic status check. */
-	(void)thread_call_enter(sensor_healthcheck_tcall);
+	/* the lock will be available only when the tick_loop thread is sleeping */
+	lck_mtx_lock(&sensor_tick_loop_mtx);
+	thread_wakeup(sensor_tick_loop_event);
+	/* let the tick_loop thread retake the lock */
+	lck_mtx_unlock(&sensor_tick_loop_mtx);
 
 	return KERN_SUCCESS;
 }
 
 kern_return_t
-exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
+exclaves_sensor_id_stop(uint64_t sensor_id, uint64_t flags,
     exclaves_sensor_status_t *status)
 {
-	if (!valid_sensor(sensor_type)) {
-		return KERN_INVALID_ARGUMENT;
+	kern_return_t kr;
+	exclaves_sensor_t *sensor = NULL;
+	exclaves_sensor_type_t sensor_type;
+
+	{
+		if (!valid_sensor_id(sensor_id)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		sensor_type = sensor_id_to_sensor_type(sensor_id);
+		sensor = sensor_id_to_sensor(sensor_id);
 	}
 
-	exclaves_sensor_t *sensor = sensor_type_to_sensor(sensor_type);
+	assert3p(sensor, !=, NULL);
+
 	if (!sensor->s_initialised) {
 		return KERN_FAILURE;
 	}
-
-	kern_return_t kr;
 
 	lck_mtx_lock(&sensor->s_mutex);
 
@@ -473,7 +566,9 @@ exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	}
 
 	if (sensor->s_startcount > 1) {
-		kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+		{
+			kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+		}
 		if (kr == KERN_SUCCESS) {
 			sensor->s_startcount -= 1;
 		}
@@ -482,7 +577,9 @@ exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	}
 
 	// call stop iff startcount is going to go to 0
-	kr = exclaves_eic_sensor_stop(sensor_type);
+	{
+		kr = exclaves_eic_sensor_stop(sensor_type);
+	}
 	if (kr != KERN_SUCCESS) {
 		lck_mtx_unlock(&sensor->s_mutex);
 		return kr;
@@ -491,7 +588,9 @@ exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
 	sensor->s_stop_abs = mach_absolute_time();
 	sensor->s_startcount = 0;
 
-	kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+	{
+		kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+	}
 
 	lck_mtx_unlock(&sensor->s_mutex);
 
@@ -499,19 +598,155 @@ exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
 }
 
 kern_return_t
-exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
+exclaves_sensor_id_status(uint64_t sensor_id, uint64_t flags,
     exclaves_sensor_status_t *status)
 {
-	if (!valid_sensor(sensor_type)) {
-		return KERN_INVALID_ARGUMENT;
+	kern_return_t kr;
+	exclaves_sensor_t *sensor = NULL;
+	exclaves_sensor_type_t sensor_type;
+
+	{
+		if (!valid_sensor_id(sensor_id)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		sensor_type = sensor_id_to_sensor_type(sensor_id);
+		sensor = sensor_id_to_sensor(sensor_id);
 	}
 
-	exclaves_sensor_t *sensor = sensor_type_to_sensor(sensor_type);
+	assert3p(sensor, !=, NULL);
+
 	if (!sensor->s_initialised) {
 		return KERN_FAILURE;
 	}
 
-	return exclaves_eic_sensor_status(sensor_type, flags, status);
+	{
+		kr = exclaves_eic_sensor_status(sensor_type, flags, status);
+	}
+
+	return kr;
+}
+
+kern_return_t
+exclaves_sensor_buffer_id_copy(uint64_t resource_id, uint64_t size,
+    uint64_t offset, uint64_t param1, uint64_t param2,
+    exclaves_sensor_status_t *status, bool *second_range)
+{
+	kern_return_t kr;
+	exclaves_sensor_t *sensor = NULL;
+	exclaves_sensor_type_t sensor_type;
+	exclaves_device_type_t device_type;
+	uint64_t buffer = 0;
+
+	device_type = arbitrated_buffer_id_to_device_type(resource_id);
+	buffer = arbitrated_buffer_id_to_buffer(resource_id);
+
+	{
+		/*
+		 * Make sure that the initialisation has taken place before calling into
+		 * the EIC. Any sensor is sufficient.
+		 */
+		sensor_type = EXCLAVES_SENSOR_CAM;
+		sensor = sensor_type_to_sensor(sensor_type);
+	}
+
+	assert3p(sensor, !=, NULL);
+
+	if (!sensor->s_initialised) {
+		return KERN_FAILURE;
+	}
+
+	{
+		kr = exclaves_eic_sensor_copy(buffer, size, offset, param1, param2,
+		    status, second_range);
+	}
+
+	return kr;
+}
+uint64_t
+exclaves_sensor_buffer_id_endpoint(uint64_t resource_id)
+{
+	return arbitrated_buffer_id_to_endpoint(resource_id);
+}
+
+/* Exported KPI compatibility entry points */
+
+kern_return_t
+exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+	return exclaves_sensor_id_start((uint64_t)sensor_type, flags, status);
+}
+
+kern_return_t
+exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+	return exclaves_sensor_id_stop((uint64_t)sensor_type, flags, status);
+}
+
+kern_return_t
+exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+	return exclaves_sensor_id_status((uint64_t)sensor_type, flags, status);
+}
+
+/* -------------------------------------------------------------------------- */
+#pragma mark sensor timer
+
+static uint64_t
+exclaves_sensor_tick_calculate_deadline(void)
+{
+	uint64_t deadline;
+	const uint32_t interval =
+	    NSEC_PER_SEC / exclaves_display_healthcheck_rate_hz;
+	clock_interval_to_deadline(interval, 1, &deadline);
+	return deadline;
+}
+
+__attribute__((noinline))
+static void
+exclaves_sensor_tick_wait_indefinitely(void)
+{
+	lck_mtx_sleep(&sensor_tick_loop_mtx,
+	    LCK_SLEEP_DEFAULT,
+	    sensor_tick_loop_event,
+	    THREAD_UNINT);
+}
+
+__attribute__((noinline))
+static void
+exclaves_sensor_tick_wait_with_deadline(uint64_t deadline)
+{
+	lck_mtx_sleep_deadline(&sensor_tick_loop_mtx,
+	    LCK_SLEEP_DEFAULT,
+	    sensor_tick_loop_event,
+	    THREAD_UNINT,
+	    deadline);
+}
+
+__attribute__((noreturn))
+static void
+exclaves_sensor_tick_loop(__unused void *arg, __unused wait_result_t wr)
+{
+	uint64_t deadline;
+	bool next_tick_has_deadline = false;
+
+	/* we always hold the lock below here, except while waiting */
+	lck_mtx_lock(&sensor_tick_loop_mtx);
+
+	for (;;) {
+		if (next_tick_has_deadline) {
+			exclaves_sensor_tick_wait_with_deadline(deadline);
+		} else {
+			/* wait for rearm by exclaves_sensor_id_start */
+			exclaves_sensor_tick_wait_indefinitely();
+		}
+		deadline = exclaves_sensor_tick_calculate_deadline();
+		next_tick_has_deadline = exclaves_sensor_tick();
+	}
+
+	__builtin_unreachable();
 }
 
 kern_return_t
@@ -536,23 +771,6 @@ exclaves_display_healthcheck_rate(uint64_t __unused ns)
 	return KERN_SUCCESS;
 }
 
-kern_return_t
-exclaves_sensor_copy(uint32_t buffer, uint64_t size1, uint64_t offset1,
-    uint64_t size2, uint64_t offset2, exclaves_sensor_status_t *status)
-{
-	/*
-	 * Make sure that the initialisation has taken place before calling into
-	 * the EIC. Any sensor is sufficient.
-	 */
-	exclaves_sensor_t *sensor = sensor_type_to_sensor(EXCLAVES_SENSOR_CAM);
-	if (!sensor->s_initialised) {
-		return KERN_FAILURE;
-	}
-
-
-	return exclaves_eic_sensor_copy(buffer, size1, offset1, size2, offset2,
-	           status);
-}
 
 kern_return_t
 exclaves_indicator_min_on_time_deadlines(struct exclaves_indicator_deadlines *deadlines)
@@ -650,6 +868,33 @@ exclaves_indicator_metrics_report(void)
 }
 
 #else /* CONFIG_EXCLAVES */
+
+/* -------------------------------------------------------------------------- */
+#pragma mark KPI stubs
+
+kern_return_t
+exclaves_sensor_start(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+#pragma unused(sensor_type, flags, status)
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+exclaves_sensor_stop(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+#pragma unused(sensor_type, flags, status)
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+exclaves_sensor_status(exclaves_sensor_type_t sensor_type, uint64_t flags,
+    exclaves_sensor_status_t *status)
+{
+#pragma unused(sensor_type, flags, status)
+	return KERN_NOT_SUPPORTED;
+}
 
 kern_return_t
 exclaves_display_healthcheck_rate(__unused uint64_t ns)

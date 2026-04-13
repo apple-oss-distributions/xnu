@@ -476,7 +476,7 @@ exclaves_storage_upcall_legacy_readdir(const enum xnuupcalls_fstag_s fstag,
 	}
 
 	error = vfs_exclave_fs_readdir((uint32_t)fstag, fileid,
-	    storage_buffer, length, &count);
+	    storage_buffer + buf, length, &count);
 	if (error) {
 		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
 		    "vfs_exclave_fs_readdir %d %lld %lld %d failed with errno %d\n",
@@ -882,7 +882,7 @@ exclaves_storage_upcall_readdir(const uint32_t fstag,
 		return completion(result);
 	}
 
-	error = vfs_exclave_fs_readdir((uint32_t)fstag, fileid, storage_buffer,
+	error = vfs_exclave_fs_readdir((uint32_t)fstag, fileid, storage_buffer + buf,
 	    length, &count);
 	if (error) {
 		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "

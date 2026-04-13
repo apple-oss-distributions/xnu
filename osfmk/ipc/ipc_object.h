@@ -85,13 +85,18 @@
 #include <libkern/OSAtomic.h>
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
-#pragma GCC visibility push(hidden)
+__exported_push_hidden
 
 typedef natural_t ipc_object_bits_t;
 
 __options_closed_decl(ipc_object_copyout_flags_t, uint32_t, {
 	IPC_OBJECT_COPYOUT_FLAGS_NONE                 = 0x0,
 	IPC_OBJECT_COPYOUT_FLAGS_PINNED               = 0x1,
+	/*
+	 * XNU code paths that may enter immovable send rights must
+	 * self-declare via this copyout flag.
+	 */
+	IPC_OBJECT_COPYOUT_FLAGS_ALLOW_IMMOVABLE_SEND = 0x2,
 });
 
 __options_closed_decl(ipc_object_copyin_flags_t, uint16_t, {
@@ -241,6 +246,7 @@ struct ipc_object {
 		const void                      *iol_pointer;
 		unsigned long                    iol_value;
 		struct ipc_service_port_label   *iol_service;
+		struct ipc_bootstrap_port_label *iol_bootstrap;
 		struct ipc_conn_port_label      *iol_connection;
 		struct ipc_kobject_label        *iol_kobject;
 		struct mk_timer                 *iol_mktimer;
@@ -597,7 +603,7 @@ extern void ipc_object_unpin(
 	ipc_space_t             space,
 	ipc_port_t              port);
 
-#pragma GCC visibility pop
+__exported_pop
 __ASSUME_PTR_ABI_SINGLE_END __END_DECLS
 
 #endif  /* _IPC_IPC_OBJECT_H_ */

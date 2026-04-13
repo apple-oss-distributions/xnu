@@ -1061,6 +1061,7 @@ dyld_pager_data_request(
 		 * We already hold a reference on the src_top_object.
 		 */
 retry_src_fault:
+		vm_page_grab_prime();
 		vm_object_lock(src_top_object);
 		vm_object_paging_begin(src_top_object);
 		error_code = 0;
@@ -1077,7 +1078,8 @@ retry_src_fault:
 		    NULL,
 		    &error_code,
 		    FALSE,
-		    &fault_info);
+		    &fault_info,
+		    NULL);
 		switch (vmfr) {
 		case VM_FAULT_SUCCESS:
 			break;
@@ -1585,7 +1587,7 @@ dyld_pager_create(
  * Provide the caller with a memory object backed by the provided
  * "backing_object" VM object.
  */
-static memory_object_t
+__static_testable memory_object_t
 dyld_pager_setup(
 	task_t            task,
 	vm_object_t       backing_object,
@@ -1632,6 +1634,7 @@ vm_map_with_linking(
 	uint32_t                link_info_size,
 	memory_object_control_t file_control)
 {
+	VM_MAP_FIND_LOCK_CTX_DECLARE(ctx);
 	vm_map_t                map = task->map;
 	vm_object_t             file_object = VM_OBJECT_NULL;
 	memory_object_t         pager = MEMORY_OBJECT_NULL;
@@ -1661,23 +1664,31 @@ vm_map_with_linking(
 	 * Check that the mapping is backed by the same file.
 	 */
 	map_addr = regions[0].mwlr_address;
-	vm_map_lock_read(map);
-	if (!vm_map_lookup_entry(map,
-	    map_addr,
-	    &map_entry) ||
-	    map_entry->is_sub_map ||
-	    VME_OBJECT(map_entry) == VM_OBJECT_NULL) {
-		vm_map_unlock_read(map);
+
+	/* Lock the map entry at map_addr. Reject submaps and NULL objects. */
+	vm_map_lock_ctx_set_preflight(ctx, ^kern_return_t (vm_map_lock_ctx_t vctx __unused, vm_map_entry_t vme) {
+		if (vme->is_sub_map || VME_OBJECT(vme) == VM_OBJECT_NULL) {
+		        return KERN_INVALID_ADDRESS;
+		}
+		return KERN_SUCCESS;
+	});
+	kr = vm_map_find_entry_sh_locked(ctx, &map, map_addr, VMRL_FIND_SH_DEFAULT);
+	if (kr != KERN_SUCCESS) {
+		/* not mapped, or mapped but preflight failed */
+		assert(kr == KERN_INVALID_ADDRESS);
 		kr = KERN_INVALID_ADDRESS;
 		vm_map_with_linking_stats.vmwls_bad_addr++;
 		goto done;
 	}
+	map_entry = ctx->vmlc_vme;
 	if (!(map_entry->max_protection & VM_PROT_WRITE)) {
-		vm_map_unlock_read(map);
+		vm_map_found_entry_sh_unlock(ctx, &map);
+		map_entry = NULL;
 		kr = KERN_PROTECTION_FAILURE;
 		vm_map_with_linking_stats.vmwls_bad_prot++;
 		goto done;
 	}
+
 	/* go down the shadow chain looking for the file object and its copy object */
 	num_extra_shadows = 0;
 	num_extra_shadow_pages = 0;
@@ -1718,7 +1729,8 @@ vm_map_with_linking(
 		// ktriage_record(...);
 		vm_object_unlock(shadow_object);
 		shadow_object = VM_OBJECT_NULL;
-		vm_map_unlock_read(map);
+		vm_map_found_entry_sh_unlock(ctx, &map);
+		map_entry = NULL;
 		vm_map_with_linking_stats.vmwls_bad_file++;
 		kr = KERN_INVALID_ARGUMENT;
 		goto done;
@@ -1736,7 +1748,8 @@ vm_map_with_linking(
 		printf("%d[%s] %s: (warn) found %d shadow object(s) with %llu pages at 0x%llx\n",
 		    proc_selfpid(), proc_name_address(current_proc()), __func__,
 		    num_extra_shadows, num_extra_shadow_pages, (uint64_t)map_addr);
-		vm_map_unlock_read(map);
+		vm_map_found_entry_sh_unlock(ctx, &map);
+		map_entry = NULL;
 		vm_map_with_linking_stats.vmwls_bad_shadows++;
 		kr = KERN_INVALID_ARGUMENT;
 		goto done;
@@ -1749,14 +1762,15 @@ vm_map_with_linking(
 		printf("%d[%s] %s: mapping at 0x%llx not a proper copy-on-write mapping\n",
 		    proc_selfpid(), proc_name_address(current_proc()), __func__,
 		    (uint64_t)map_addr);
-		vm_map_unlock_read(map);
+		vm_map_found_entry_sh_unlock(ctx, &map);
+		map_entry = NULL;
 		vm_map_with_linking_stats.vmwls_bad_cow++;
 		kr = KERN_INVALID_ARGUMENT;
 		goto done;
 	}
 
-	vm_map_unlock_read(map);
-	map_entry = VM_MAP_ENTRY_NULL;
+	vm_map_found_entry_sh_unlock(ctx, &map);
+	map_entry = NULL;
 
 	/* create a pager, backed by the latest snapshot (copy object) of the file */
 	pager = dyld_pager_setup(task, backing_object, regions, region_cnt, *link_info, link_info_size);
@@ -1813,7 +1827,7 @@ done:
 	if (pager != MEMORY_OBJECT_NULL) {
 		/*
 		 * Release the pager reference obtained by dyld_pager_setup().
-		 * The mappings, if succesful, are each holding a reference on the
+		 * The mappings, if successful, are each holding a reference on the
 		 * pager's VM object, which keeps the pager (aka memory object) alive.
 		 */
 		memory_object_deallocate(pager);

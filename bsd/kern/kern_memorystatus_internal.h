@@ -246,13 +246,10 @@ extern unsigned int    vm_page_free_count;
 extern unsigned int    vm_page_active_count;
 extern unsigned int    vm_page_inactive_count;
 extern unsigned int    vm_page_throttled_count;
-extern unsigned int    vm_page_purgeable_count;
 extern unsigned int    vm_page_wire_count;
 extern unsigned int    vm_page_speculative_count;
 extern uint32_t        c_late_swapout_count, c_late_swappedin_count;
 extern uint32_t        c_seg_allocsize;
-extern bool            vm_swapout_thread_running;
-extern _Atomic bool    vm_swapout_wake_pending;
 #define VM_PAGE_DONATE_DISABLED     0
 #define VM_PAGE_DONATE_ENABLED      1
 extern uint32_t vm_page_donate_mode;
@@ -479,6 +476,12 @@ static inline bool
 _memstat_proc_inactive_memlimit_is_fatal(proc_t p)
 {
 	return _memstat_proc_memlimit_is_fatal(p, false);
+}
+
+static inline bool
+_memstat_proc_has_error(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_ERROR;
 }
 
 #pragma mark Jetsam

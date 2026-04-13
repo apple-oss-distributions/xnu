@@ -50,7 +50,6 @@
 #include <vm/vm_object_internal.h>
 #include <vm/vm_iokit.h>
 #include <kern/ledger.h>
-extern ledger_template_t        task_ledger_template;
 
 #define FLAGS_AND_TAG(f, t) ({                             \
 	vm_map_kernel_flags_t vmk_flags;                   \
@@ -557,6 +556,7 @@ kasprintf(char ** __restrict out_str, const char * __restrict format, ...) __pri
 #define TRIALSFORMULA_ENUM(VARIANT) \
 	VARIANT(eUNKNOWN_TRIALS) \
 	VARIANT(eSMART_VM_MAP_KERNEL_FLAGS_TRIALS) \
+	VARIANT(eSMART_ALIGN_MASK_TRIALS) \
 	VARIANT(eSMART_VM_INHERIT_TRIALS) \
 	VARIANT(eSMART_MMAP_KERNEL_FLAGS_TRIALS) \
 	VARIANT(eSMART_MMAP_FLAGS_TRIALS) \
@@ -1297,6 +1297,87 @@ cleanup_vm_machine_attribute_trials(vm_machine_attribute_trials_t **trials)
 {
 	free_trials(*trials);
 }
+
+
+#define SMART_ALIGN_MASK_TRIALS()                                              \
+	__attribute__((cleanup(cleanup_align_mask_trials)))                        \
+	= allocate_align_mask_trials(countof(align_mask_trials_values));           \
+	append_trials(trials, align_mask_trials_values, countof(align_mask_trials_values))
+
+// generate vm_map_offset_t alignment mask trials
+
+typedef struct {
+	mach_vm_offset_t align_mask;
+	char * name;
+} align_mask_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	align_mask_trial_t list[];
+} align_mask_trials_t;
+
+#define VM_MAP_ALIGN_MASK_TRIAL(new_align_mask)                                \
+	(align_mask_trial_t) {.align_mask = (mach_vm_offset_t)(new_align_mask),    \
+	                      .name ="vm_map_align_mask " #new_align_mask}
+
+static align_mask_trial_t align_mask_trials_values[] = {
+	// no alignment
+	VM_MAP_ALIGN_MASK_TRIAL(0),
+
+	// power of 2 alignment
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 1),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 2),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 3),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 4),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 5),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 6),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 7),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 8),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 9),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 10),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 11),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 12),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 13),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 14),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 15),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 16),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 17),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 18),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 19),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 20),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 21),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 22),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 23),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 24),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 25),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 26),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 27),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 28),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 29),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 30),
+	VM_MAP_ALIGN_MASK_TRIAL(1u << 31),
+
+	// arbitrary alignment
+	VM_MAP_ALIGN_MASK_TRIAL(0x1),
+	VM_MAP_ALIGN_MASK_TRIAL(0x12),
+	VM_MAP_ALIGN_MASK_TRIAL(0x123),
+	VM_MAP_ALIGN_MASK_TRIAL(0x1234),
+	VM_MAP_ALIGN_MASK_TRIAL(0x1010101),
+	VM_MAP_ALIGN_MASK_TRIAL((1u << 20) + 1),
+	VM_MAP_ALIGN_MASK_TRIAL((1u << 20) - 1),
+	VM_MAP_ALIGN_MASK_TRIAL((1u << 20) + (1u << 18)),
+	VM_MAP_ALIGN_MASK_TRIAL((1u << 20) - (1u << 18)),
+};
+
+TRIALS_IMPL(align_mask)
+
+static void
+cleanup_align_mask_trials(align_mask_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
 
 // allocate vm_map_kernel_flags trials, and deallocate it at end of scope
 #define SMART_VM_MAP_KERNEL_FLAGS_TRIALS()                              \
@@ -3232,11 +3313,11 @@ dealloc_would_time_out(
 static inline vm_map_t
 create_map(mach_vm_address_t map_start, mach_vm_address_t map_end)
 {
-	ledger_t ledger = ledger_instantiate(task_ledger_template, LEDGER_CREATE_ACTIVE_ENTRIES);
+	ledger_t ledger = ledger_instantiate(&task_ledger_template);
 	pmap_t pmap = pmap_create_options(ledger, 0, PMAP_CREATE_64BIT);
 	assert(pmap);
 	ledger_dereference(ledger);  // now retained by pmap
-	vm_map_t map = vm_map_create_options(pmap, map_start, map_end, VM_MAP_CREATE_PAGEABLE);
+	vm_map_t map = vm_map_create_options(pmap, map_start, map_end, VM_MAP_CREATE_DEFAULT);
 	assert(map);
 
 	/*
@@ -4805,6 +4886,54 @@ test_deallocator(kern_return_t (*func)(MAP_T map, mach_vm_address_t start, mach_
 				// Deallocation succeeded. Don't deallocate again.
 				set_already_deallocated(&base);
 			}
+		}
+		append_result(results, ret, trial.name);
+	}
+
+	return results;
+}
+
+__unused
+static results_t *
+test_deallocator_with_flags(kern_return_t (*func)(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, int flags), const char *testname)
+{
+	MAP_T map SMART_MAP;
+
+	vm_map_kernel_flags_trials_t *trials SMART_VM_MAP_KERNEL_FLAGS_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_VM_MAP_KERNEL_FLAGS_TRIALS, 0, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		vm_map_kernel_flags_trial_t trial = trials->list[i];
+		allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+
+		kern_return_t ret = func(map, base.addr, base.size, trial.flags);
+		if (ret == 0) {
+			// Deallocation succeeded. Don't deallocate again.
+			set_already_deallocated(&base);
+		}
+		append_result(results, ret, trial.name);
+	}
+
+	return results;
+}
+
+__unused
+static results_t *
+test_deallocator_with_align_mask(kern_return_t (*func)(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, mach_vm_offset_t align_mask), const char *testname)
+{
+	MAP_T map SMART_MAP;
+
+	align_mask_trials_t *trials SMART_ALIGN_MASK_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_ALIGN_MASK_TRIALS, 0, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		align_mask_trial_t trial = trials->list[i];
+		allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+
+		kern_return_t ret = func(map, base.addr, base.size, trial.align_mask);
+		if (ret == 0) {
+			// Deallocation succeeded. Don't deallocate again.
+			set_already_deallocated(&base);
 		}
 		append_result(results, ret, trial.name);
 	}

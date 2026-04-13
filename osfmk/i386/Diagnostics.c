@@ -51,7 +51,7 @@
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <kern/ipc_kobject.h>
-#include <kern/monotonic.h>
+#include <kern/cpc.h>
 #include <mach/vm_param.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
@@ -283,9 +283,10 @@ diagCall64(x86_saved_state_t * state)
 			cest.crtime_total = cpu_data_ptr[i]->cpu_rtime_total;
 			cest.cpu_idle_exits = cpu_data_ptr[i]->cpu_idle_exits;
 #if CONFIG_CPU_COUNTERS
-			cest.cpu_insns = cpu_data_ptr[i]->cpu_monotonic.mtc_counts[MT_CORE_INSTRS];
-			cest.cpu_ucc = cpu_data_ptr[i]->cpu_monotonic.mtc_counts[MT_CORE_CYCLES];
-			cest.cpu_urc = cpu_data_ptr[i]->cpu_monotonic.mtc_counts[MT_CORE_REFCYCLES];
+			struct cpc_cycles_instrs counts = cpc_cycles_instrs_raw_approx_x86_64(
+				&cest.cpu_urc);
+			cest.cpu_insns = counts.instrs;
+			cest.cpu_ucc = counts.cycles;
 #endif /* CONFIG_CPU_COUNTERS */
 #if DIAG_ALL_PMCS
 			bcopy(&cpu_data_ptr[i]->cpu_gpmcs[0], &cest.gpmcs[0], sizeof(cest.gpmcs));
@@ -377,7 +378,7 @@ cpu_powerstats(__unused void *arg)
 
 	if (diag_pmc_enabled) {
 #if CONFIG_CPU_COUNTERS
-		mt_update_fixed_counts();
+		cpc_hw_update(CPC_HW_CPMU);
 #else /* CONFIG_CPU_COUNTERS */
 		uint64_t insns = read_pmc(FIXED_S3_2_C15_C0_0);
 		uint64_t ucc = read_pmc(FIXED_S3_2_C15_C1_0);

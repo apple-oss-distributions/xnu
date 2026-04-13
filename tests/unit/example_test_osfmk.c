@@ -27,15 +27,16 @@
  */
 
 #include <darwintest.h>
-#include "mocks/unit_test_utils.h"
+#include "mocks/osfmk/unit_test_utils.h"
 #include <vm/vm_object_internal.h>
 
 #define UT_MODULE osfmk
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.unit.example_test_osfmk"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("misc"),
 	T_META_OWNER("s_shalom"),
-	T_META_RUN_CONCURRENTLY(false)
+	T_META_RUN_CONCURRENTLY(true)
 	);
 
 
@@ -45,8 +46,8 @@ T_GLOBAL_META(
 T_DECL(xnu_example_test_osfmk, "an OSFMK test")
 {
 	T_ASSERT_PANIC({
-		vm_object_copy_slowly(NULL, 0, 0, false, NULL);
-	}, "copy_slowly");
+		panic("I panicked!");
+	}, "calling panic");
 
 	T_EXPECT_MACH_SUCCESS(0, "hello");
 }

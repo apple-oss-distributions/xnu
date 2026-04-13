@@ -14,6 +14,7 @@ from bank import *
 from waitq import *
 from ioreg import *
 from memory import *
+from core.kernelcore import IterateCircleQueue
 import xnudefines
 import kmemory
 
@@ -21,6 +22,14 @@ import kmemory
 
 # from osfmk/ipc/ipc_entry.h
 IE_BITS_ROLL_MASK = 0x03000000
+
+# from osfmk/mach/port.h
+MACH_PORT_RIGHT_SEND      = 0x00010000
+MACH_PORT_RIGHT_RECEIVE   = 0x00020000
+MACH_PORT_RIGHT_SEND_ONCE = 0x00040000
+MACH_PORT_RIGHT_PORT_SET  = 0x00080000
+MACH_PORT_RIGHT_DEAD_NAME = 0x00100000
+MACH_PORT_RIGHT_LABELH    = 0x00200000
 
 # from osfmk/mach/mach_types.h
 TASK_FLAVOR_CONTROL = 0
@@ -156,7 +165,7 @@ def GetTaskBusyPortsSummary(task):
 
     if is_tableval:
         ports = GetSpaceObjectsWithBits(
-            is_tableval, num_entries, 0x00020000, gettype("struct ipc_port")
+            is_tableval, num_entries, MACH_PORT_RIGHT_RECEIVE, gettype("struct ipc_port")
         )
 
         for port in ports:
@@ -744,6 +753,18 @@ def GetKObjectFromPort(portval):
                 GetProcNameForTask(task), GetProcPIDForTask(task)
             )
 
+    elif objtype_str[:7] == "thread_":
+        thread = value(
+            portval.GetSBValue()
+            .xCreateValueFromAddress(None, kobject_addr, gettype("struct thread"))
+            .AddressOf()
+        )
+        task = thread.t_tro.tro_task
+        if GetProcFromTask(task) is not None:
+            desc_str += " {:s}({:d})".format(
+                GetProcNameForTask(task), GetProcPIDForTask(task)
+            )
+
     return desc_str
 
 
@@ -864,10 +885,10 @@ def GetIPCEntrySummary(entry, ipc_name="", rights_filter=0):
     nsets = 0
     nmsgs = 0
 
-    if ie_bits & 0x00100000:
+    if ie_bits & MACH_PORT_RIGHT_DEAD_NAME:
         right_str = "Dead"
         kind = ""
-    elif ie_bits & 0x00080000:
+    elif ie_bits & MACH_PORT_RIGHT_PORT_SET:
         right_str = "Set"
         kind = ""
         psetval = kern.CreateTypedPointerFromAddress(
@@ -879,17 +900,17 @@ def GetIPCEntrySummary(entry, ipc_name="", rights_filter=0):
             members += 1
         destname_str = "{:d} Members".format(members)
     else:
-        if ie_bits & 0x00010000:
-            if ie_bits & 0x00020000:
+        if ie_bits & MACH_PORT_RIGHT_SEND:
+            if ie_bits & MACH_PORT_RIGHT_RECEIVE:
                 # SEND + RECV
                 right_str = "SR"
             else:
                 # SEND only
                 right_str = "S"
-        elif ie_bits & 0x00020000:
+        elif ie_bits & MACH_PORT_RIGHT_RECEIVE:
             # RECV only
             right_str = "R"
-        elif ie_bits & 0x00040000:
+        elif ie_bits & MACH_PORT_RIGHT_SEND_ONCE:
             # SEND_ONCE
             right_str = "O"
         if ie_bits & xnudefines.IE_BITS_IMMOVABLE_SEND:
@@ -1139,7 +1160,7 @@ def ShowTaskRights(cmd_args=None, cmd_options={}):
 
 
 # Count the vouchers in a given task's ipc space
-@header("{: <20s} {: <6s} {: <20s} {: <8s}".format("task", "pid", "name", "#vouchers"))
+@header("{: <20s} {: <6s} {: <36s} {: <8s}".format("task", "pid", "name", "#vouchers"))
 def GetTaskVoucherCount(t):
     is_tableval, num_entries = GetSpaceTable(t.itk_space)
     count = 0
@@ -1154,21 +1175,92 @@ def GetTaskVoucherCount(t):
             if port.xGetIntegerByPath(".ip_object.io_type") == voucher_kotype:
                 count += 1
 
-    format_str = "{: <#20x} {: <6d} {: <20s} {: <8d}"
+    format_str = "{: <#20x} {: <6d} {: <36s} {: <8d}"
     pval = GetProcFromTask(t)
     return format_str.format(t, GetProcPID(pval), GetProcNameForTask(t), count)
 
 
 # Macro: countallvouchers
-@lldb_command("countallvouchers", fancy=True)
+@lldb_command("countallvouchers", "SG", fancy=True)
 def CountAllVouchers(cmd_args=None, cmd_options={}, O=None):
     """Routine to count the number of vouchers by task. Useful for finding leaks.
-    Usage: countallvouchers
+    Usage: countallvouchers [-S] [-G]
+           -S : sort tasks by voucher count (highest to lowest)
+           -G : group and sum vouchers by process name
     """
 
+    sort_results = "-S" in cmd_options
+    group_by_name = "-G" in cmd_options
+
+    # Collect all task voucher information with progress indicator
+    task_results = []
+    ellipsis_states = [".", "..", "..."]
+    ellipsis_idx = 0
+    task_count = 0
+
+    for t in kern.tasks:
+        # Show progress with cycling ellipsis (update every 10 tasks)
+        if task_count % 10 == 0:
+            sys.stderr.write("Counting{:<3s}\r".format(ellipsis_states[ellipsis_idx % 3]))
+            sys.stderr.flush()
+            ellipsis_idx += 1
+        task_count += 1
+
+        # Get the formatted string and parse out the count for sorting
+        result_str = GetTaskVoucherCount(t)
+        task_results.append(result_str)
+
+    # Clear the progress indicator
+    sys.stderr.write("{:80s}\r".format(""))
+    sys.stderr.flush()
+
+    # Group by name if requested
+    if group_by_name:
+        # Parse results and group by process name
+        # Format is: task (20 chars) + space + pid (6 chars) + space + name (36 chars) + space + vouchers
+        grouped = {}
+        for result in task_results:
+            if len(result) < 64:
+                continue
+
+            # Parse fixed-width columns
+            task_addr = result[0:20].strip()
+            pid = result[21:27].strip()
+            name = result[28:64].strip()
+            voucher_str = result[65:].strip()
+
+            try:
+                voucher_count = int(voucher_str)
+            except ValueError:
+                continue
+
+            if name not in grouped:
+                grouped[name] = {
+                    'task_addr': task_addr,  # Use first task's address
+                    'pids': [],
+                    'voucher_sum': 0
+                }
+            grouped[name]['pids'].append(pid)
+            grouped[name]['voucher_sum'] += voucher_count
+
+        # Format grouped results
+        format_str = "{: <#20x} {: <6s} {: <36s} {: <8d}"
+        task_results = []
+        for name, data in grouped.items():
+            pid_count = len(data['pids'])
+            pid_str = f"{pid_count} pids" if pid_count > 1 else data['pids'][0]
+            task_addr = int(data['task_addr'], 16)
+            task_results.append(format_str.format(task_addr, pid_str, name, data['voucher_sum']))
+
+    # Sort if requested (by the last field which is the voucher count)
+    if sort_results:
+        # Parse and sort by voucher count (extract the last number from each line)
+        task_results.sort(key=lambda x: int(x.split()[-1]), reverse=True)
+
+    # Display results
     with O.table(GetTaskVoucherCount.header):
-        for t in kern.tasks:
-            print(GetTaskVoucherCount(t))
+        for result in task_results:
+            print(result)
 
 
 # Macro: showataskrightsbt
@@ -1291,18 +1383,18 @@ def GetDispositionFromEntryType(entry_bits):
     if (ebits & 0x003F0000) == 0:
         return 0
 
-    if (ebits & 0x00010000) != 0:
-        return 17  ## MACH_PORT_RIGHT_SEND
-    elif (ebits & 0x00020000) != 0:
-        return 16  ## MACH_PORT_RIGHT_RECEIVE
-    elif (ebits & 0x00040000) != 0:
-        return 18  ## MACH_PORT_RIGHT_SEND_ONCE
-    elif (ebits & 0x00080000) != 0:
-        return 100  ## MACH_PORT_RIGHT_PORT_SET
-    elif (ebits & 0x00100000) != 0:
-        return 101  ## MACH_PORT_RIGHT_DEAD_NAME
-    elif (ebits & 0x00200000) != 0:
-        return 102  ## MACH_PORT_RIGHT_LABELH
+    if (ebits & MACH_PORT_RIGHT_SEND) != 0:
+        return 17
+    elif (ebits & MACH_PORT_RIGHT_RECEIVE) != 0:
+        return 16
+    elif (ebits & MACH_PORT_RIGHT_SEND_ONCE) != 0:
+        return 18
+    elif (ebits & MACH_PORT_RIGHT_PORT_SET) != 0:
+        return 100
+    elif (ebits & MACH_PORT_RIGHT_DEAD_NAME) != 0:
+        return 101
+    elif (ebits & MACH_PORT_RIGHT_LABELH) != 0:
+        return 102
     else:
         return 0
 
@@ -1639,8 +1731,8 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
             ## XXX: look at block reason to see if it's in mach_msg_receive - then look at saved state / message
 
             ## Thread port (send right)
-            if getattr(thval.t_tro, "tro_settable_self_port", 0) > 0:
-                thport = thval.t_tro.tro_settable_self_port
+            if unsigned(thval.thread_settable_self_port) > 0:
+                thport = thval.thread_settable_self_port
                 func(
                     t, space, ctx, thports_idx, 0, thport, 17
                 )  ## see: osfmk/mach/message.h
@@ -1873,7 +1965,7 @@ def ShowTaskBusyPorts(cmd_args=None, cmd_options={}, O=None):
 
     if is_tableval:
         ports = GetSpaceObjectsWithBits(
-            is_tableval, num_entries, 0x00020000, gettype("struct ipc_port")
+            is_tableval, num_entries, MACH_PORT_RIGHT_RECEIVE, gettype("struct ipc_port")
         )
 
         with O.table(PrintPortSummary.header):
@@ -1960,7 +2052,7 @@ def ShowTaskBusyPortSets(cmd_args=None, cmd_options={}, O=None):
 
     if is_tableval:
         psets = GetSpaceObjectsWithBits(
-            is_tableval, num_entries, 0x00080000, gettype("struct ipc_pset")
+            is_tableval, num_entries, MACH_PORT_RIGHT_PORT_SET, gettype("struct ipc_pset")
         )
 
         with O.table(PrintPortSetSummary.header):
@@ -2744,6 +2836,45 @@ def ShowTaskSuspenders(cmd_args=[], cmd_options={}):
         return
 
     return FindPortRights(cmd_args=[unsigned(port)], cmd_options={"-R": "S"})
+
+
+@lldb_command("showthreadsuspenders")
+def ShowThreadSuspenders(cmd_args=[], cmd_options={}):
+    """Display the tasks and send rights that are holding a target thread suspended.
+    Usage: (lldb) showthreadsuspenders <thread_t>
+    """
+    if cmd_args is None or len(cmd_args) == 0:
+        raise ArgumentError("no thread address provided")
+
+    thread = kern.GetValueFromAddress(cmd_args[0], "thread_t")
+    task = thread.t_tro.tro_task
+
+    if thread.user_stop_count == 0:
+        print(
+            "thread {:#x} ({:s}) is not suspended".format(
+                unsigned(thread), GetProcNameForTask(task)
+            )
+        )
+        return
+
+    # If the thread is not suspended by thread_suspend2, or if the client of
+    # thread_suspend2 does not convert its thread suspension token to a port using
+    # convert_thread_suspension_token_to_port, then it's impossible to determine
+    # which task did the suspension.
+    port = thread.thread_resume_port
+    if not port:
+        print(
+            "thread {:#x} ({:s}) is suspended but no resume port exists".format(
+                unsigned(thread), GetProcNameForTask(task)
+            )
+        )
+        return
+    print(
+        "thread {:#x} ({:s}) is suspended. resume port {:#x}".format(
+            unsigned(thread), GetProcNameForTask(task), unsigned(port)
+        )
+    )
+    return FindPortRights(cmd_args=[unsigned(port)])
 
 
 # Macro: showmqueue:

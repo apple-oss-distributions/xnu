@@ -452,6 +452,12 @@ void ml_hibernate_active_post(void);
 
 int ml_page_protection_type(void);
 
+static inline boolean_t
+ml_device_is_prod_fused(void)
+{
+	return 1;
+}
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS

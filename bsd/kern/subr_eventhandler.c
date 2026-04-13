@@ -144,7 +144,7 @@ eventhandler_register_internal(
 		/* Do we need to create the list? */
 		if (list == NULL) {
 			lck_mtx_convert_spin(&evthdlr_lists_ctxt->eventhandler_mutex);
-			new_list = kalloc_type(struct eventhandler_list, Z_WAITOK_ZERO);
+			new_list = kalloc_type(struct eventhandler_list, Z_WAITOK_ZERO_NOFAIL);
 			evhlog2(debug, "%s: creating list \"%s\"", __func__, name);
 			list = new_list;
 			list->el_flags = 0;
@@ -190,7 +190,7 @@ eventhandler_register(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
 	struct eventhandler_entry_generic       *__single eg;
 
 	/* allocate an entry for this handler, populate it */
-	eg = kalloc_type(struct eventhandler_entry_generic, Z_WAITOK_ZERO);
+	eg = kalloc_type(struct eventhandler_entry_generic, Z_WAITOK_ZERO_NOFAIL);
 	eg->func = func;
 	eg->ee.ee_arg = arg;
 	eg->ee.ee_priority = priority;

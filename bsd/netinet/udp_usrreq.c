@@ -83,6 +83,7 @@
 #include <net/if_types.h>
 #include <net/route.h>
 #include <net/dlil.h>
+#include <net/dlil_var_private.h>
 #include <net/droptap.h>
 #include <net/net_api_stats.h>
 
@@ -324,6 +325,26 @@ udp_init(struct protosw *pp, struct domain *dp)
 
 	udbinfo.ipi_gc = udp_gc;
 	in_pcbinfo_attach(&udbinfo);
+
+	udp_log_handle = os_log_create("com.apple.xnu.net.udp", "");
+	inp_log_init();
+}
+
+/*
+ * In the data path don't inline function that are unlikely
+ */
+__attribute__((noinline))
+static void
+udp_proto_process_lpw_packet(struct mbuf *m, struct inpcb *inp, const char *reason)
+{
+	struct ifnet *ifp = m->m_pkthdr.rcvif;
+
+	if (inp != NULL) {
+		UDP_LOG(inp, "%s", reason);
+	}
+
+	if_ports_used_match_mbuf(ifp, PF_INET, m);
+	if_exit_lpw(ifp, reason);
 }
 
 void
@@ -331,7 +352,7 @@ udp_input(struct mbuf *m, int iphlen)
 {
 	struct ip *ip;
 	struct udphdr *uh;
-	struct inpcb *inp;
+	struct inpcb *inp = NULL;
 	mbuf_ref_t opts = NULL;
 	int len, isbroadcast;
 	struct ip save_ip;
@@ -350,6 +371,7 @@ udp_input(struct mbuf *m, int iphlen)
 	boolean_t is_wake_pkt = false;
 	boolean_t check_cfil = cfil_filter_present();
 	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
+	bool is_magic_packet = false;
 
 	SOCKADDR_ZERO(&udp_in, sizeof(udp_in));
 	udp_in.sin_len = sizeof(struct sockaddr_in);
@@ -438,6 +460,16 @@ udp_input(struct mbuf *m, int iphlen)
 	if (udp_input_checksum(m, uh, iphlen, len)) {
 		drop_reason = DROP_REASON_UDP_BAD_CHECKSUM;
 		goto bad;
+	}
+
+	/*
+	 * Transition to full wake for a magic packet wether the packet is for
+	 * an open or closed port.
+	 */
+	if (__improbable(if_is_lpw_enabled(ifp))) {
+		if ((is_magic_packet = packet_has_magic_pattern(m))) {
+			udp_proto_process_lpw_packet(m, inp, "LPW UDP magic packet");
+		}
 	}
 
 	isbroadcast = in_broadcast(ip->ip_dst, ifp);
@@ -597,6 +629,7 @@ udp_input(struct mbuf *m, int iphlen)
 				    &udp_in, &udp_in6, &udp_ip6, ifp);
 				mcast_delivered++;
 
+
 				m = n;
 			}
 			if (is_wake_pkt) {
@@ -640,6 +673,7 @@ udp_input(struct mbuf *m, int iphlen)
 			udpstat.udps_noportbcast++;
 			IF_UDP_STATINC(ifp, port_unreach);
 			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
+
 			goto bad;
 		}
 
@@ -700,6 +734,7 @@ udp_input(struct mbuf *m, int iphlen)
 				ip = mtod(m, struct ip *);
 				uh = (struct udphdr *)(void *)((caddr_t)ip + iphlen);
 			}
+
 			/* Check for NAT keepalive packet */
 			if (payload_len == 1 && *(u_int8_t *)
 			    ((caddr_t)uh + sizeof(struct udphdr)) == 0xFF) {
@@ -774,6 +809,14 @@ udp_input(struct mbuf *m, int iphlen)
 			goto bad;
 		}
 
+		if (is_magic_packet) {
+			/*
+			 * Silently drop magic packet for a closed port
+			 */
+			drop_reason = DROP_REASON_UDP_PORT_UNREACHEABLE;
+			goto bad;
+		}
+
 		*ip = save_ip;
 		ip->ip_len += iphlen;
 		icmp_error(m, ICMP_UNREACH, ICMP_UNREACH_PORT, 0, 0);
@@ -824,6 +867,7 @@ udp_input(struct mbuf *m, int iphlen)
 			goto bad;
 		}
 	}
+
 	m_adj(m, iphlen + sizeof(struct udphdr));
 
 	KERNEL_DEBUG(DBG_LAYER_IN_END, uh->uh_dport, uh->uh_sport,
@@ -2146,14 +2190,28 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		INP_ADD_TXSTAT(inp, ifnet_count_type, 1, len);
 	}
 
-	if (flowadv && (adv->code == FADV_FLOW_CONTROLLED ||
-	    adv->code == FADV_SUSPENDED)) {
-		/*
-		 * return a hint to the application that
-		 * the packet has been dropped
-		 */
-		error = ENOBUFS;
-		inp_set_fc_state(inp, adv->code);
+	if (flowadv) {
+		switch (adv->code) {
+		case FADV_SUSPENDED:
+			/*
+			 * return a hint to the application that
+			 * the packet has been dropped
+			 */
+			error = ENOBUFS;
+			OS_FALLTHROUGH;
+		case FADV_FLOW_CONTROLLED:
+			/*
+			 * AQM drops from head of Q but this packet got
+			 * added to tail so don't return error to application.
+			 * If it continues to send while flow controlled,
+			 * the INP_WAIT_FOR_IF_FEEDBACK check above will be
+			 * hit and it will get the error.
+			 */
+			inp_set_fc_state(inp, adv->code);
+			break;
+		default:
+			break;
+		}
 	}
 
 	/* Synchronize PCB cached route */

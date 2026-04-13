@@ -28,7 +28,8 @@
 
 #pragma once
 #include <stdbool.h>
-#include "unit_test_utils.h"
+#include "osfmk/unit_test_utils.h"
+#include <mach/kern_return.h>
 
 // -- darwin-test proxy macros and support --
 // libdarwintest.a is linked only to the main executable of the test and not to the XNU .dylib or
@@ -43,10 +44,12 @@ struct dt_proxy_callbacks {
 	void (*t_assert_true)(bool cond, const char *msg);
 	void (*t_assert_notnull)(void *ptr, const char *msg);
 	void (*t_assert_posix_zero)(int v, const char *msg);
+	void (*t_assert_mach_success)(kern_return_t kr, const char *msg);
 	void (*t_log)(const char *msg);
 	void (*t_log_fmtstr)(const char *fmt, const char *msg);
 	void (*t_fail)(const char *msg);
 	void (*t_quiet)(void);
+	bool (*t_state_pass)(void);
 };
 
 // register the proxies to the XNU .dylib
@@ -60,10 +63,70 @@ extern struct dt_proxy_callbacks *get_dt_proxy_mock(void);
 // A pointer of this name appears in the XNU .dylib and the mocks .dylib
 extern struct dt_proxy_callbacks *dt_proxy;
 
-#define PT_ASSERT_TRUE(cond, msg)   do { if (dt_proxy) { dt_proxy->t_assert_true((cond), #cond msg); } } while(false)
-#define PT_ASSERT_TRUE_S(cond, msg) do { if (dt_proxy) { dt_proxy->t_assert_true((cond), msg); } } while(false)
-#define PT_ASSERT_NOTNULL(ptr, msg) do { if (dt_proxy) { dt_proxy->t_assert_notnull((ptr), msg); } } while(false)
-#define PT_ASSERT_POSIX_ZERO(v, msg) do { if (dt_proxy) { dt_proxy->t_assert_posix_zero((v), msg); } } while(false)
+/*
+ * PT_ASSERT and PT_FAIL fall back to raw_printf() and abort()
+ * during initialization before dt_proxy is set.
+ */
+#define PT_ASSERT_TRUE(cond, msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_assert_true((cond), #cond " " msg); \
+	        } else if (!(cond)) { \
+	                raw_printf("FAIL assertion %s %s\n", #cond, msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
+#define PT_ASSERT_TRUE_S(cond, msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_assert_true((cond), msg); \
+	        } else if (!(cond)) { \
+	                raw_printf("FAIL assertion %s\n", msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
+#define PT_ASSERT_NOTNULL(ptr, msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_assert_notnull((ptr), msg); \
+	        } else if (!(ptr)) { \
+	                raw_printf("FAIL non-null %s %s\n", #ptr, msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
+#define PT_ASSERT_POSIX_ZERO(v, msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_assert_posix_zero((v), msg); \
+	        } else if (v) { \
+	                raw_printf("FAIL non-zero posix return %s %s\n", #v, msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
+#define PT_ASSERT_MACH_SUCCESS(kr, msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_assert_mach_success((kr), msg); \
+	        } else if (kr) { \
+	                raw_printf("FAIL non-zero mach return %s %s\n", #kr, msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
+#define PT_FAIL(msg) \
+	do { \
+	        if (dt_proxy) { \
+	                dt_proxy->t_fail(msg); \
+	        } else { \
+	                raw_printf("FAIL %s\n", msg); \
+	                abort(); \
+	        } \
+	} while(false)
+
 #define PT_LOG(msg) do { if (dt_proxy) { dt_proxy->t_log(msg); } } while(false)
 #define PT_LOG_FMTSTR(fmt, str) do { if (dt_proxy) { dt_proxy->t_log_fmtstr(fmt, str); } } while(false)
 #define PT_LOG_OR_RAW_FMTSTR(fmt, str) do { \
@@ -73,5 +136,5 @@ extern struct dt_proxy_callbacks *dt_proxy;
 	    raw_printf(fmt "\n", str);          \
 	}                                       \
 	} while(false)
-#define PT_FAIL(msg) do { if (dt_proxy) { dt_proxy->t_fail(msg); } } while(false)
 #define PT_QUIET do { if (dt_proxy) { dt_proxy->t_quiet(); } } while(false)
+#define PT_STATE_PASS  ((dt_proxy) ? dt_proxy->t_state_pass() : false)

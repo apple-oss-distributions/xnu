@@ -46,8 +46,10 @@
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kdebug.h>
+#include <sys/kern_memorystatus_xnu.h>
 #include <sys/queue.h>
 #include <sys/reason.h>
+#include <vm/vm_compressor_xnu.h>
 #include <vm/vm_fault_xnu.h>
 #include <vm/vm_map.h>
 #include <vm/vm_map_internal.h>
@@ -63,19 +65,51 @@ TUNABLE(uint32_t, kReclaimChunkSize, "vm_reclaim_chunk_size", 16);
 #else /* RELEASE */
 const uint32_t kReclaimChunkSize = 16;
 #endif /* DEVELOPMENT || DEBUG */
-TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_sampling_period_ns, "vm_reclaim_sampling_period_ns",
+
+/*
+ * Vary the sampling period based on the VM pressure level. When the device is
+ * under memory pressure, we want to err on the side of more frequent sampling.
+ * When the device is under critical pressure, sample as frequently as possible
+ * and always fully reclaim the contents of the buffer. This state (Ts == 0) is
+ * comparable to libmalloc's "agressive madvise" policy.
+ */
 #if XNU_TARGET_OS_OSX
-    10ULL * NSEC_PER_SEC);
-#else
-    1ULL * NSEC_PER_SEC);
+#define VMDR_SAMPLING_PERIOD_NORMAL_NS (10ULL * NSEC_PER_SEC)
+#define VMDR_SAMPLING_PERIOD_PRESSURE_NS (1ULL * NSEC_PER_SEC)
+#define VMDR_SAMPLING_PERIOD_CRITICAL_NS (0)
+#else /* !XNU_TARGET_OS_OSX */
+#define VMDR_SAMPLING_PERIOD_NORMAL_NS (1ULL * NSEC_PER_SEC)
+#define VMDR_SAMPLING_PERIOD_PRESSURE_NS (NSEC_PER_SEC / 2)
+#define VMDR_SAMPLING_PERIOD_CRITICAL_NS (0)
 #endif
+
+TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_sampling_period_normal_ns,
+    "vm_reclaim_sampling_period_normal_ns", VMDR_SAMPLING_PERIOD_NORMAL_NS);
+TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_sampling_period_pressure_ns,
+    "vm_reclaim_sampling_period_pressure_ns", VMDR_SAMPLING_PERIOD_PRESSURE_NS);
+TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_sampling_period_critical_ns,
+    "vm_reclaim_sampling_period_critical_ns", VMDR_SAMPLING_PERIOD_CRITICAL_NS);
 TUNABLE_DEV_WRITEABLE(bool, vm_reclaim_enabled, "vm_reclaim_enabled", true);
+/*
+ * Vary the autotrim percentage by the VM presssure level. When the device is
+ * under memory pressure, we want to reclaim more aggressively.
+ */
+#if XNU_TARGET_OS_OSX
 TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_normal, "vm_reclaim_autotrim_pct_normal", 10);
 TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_pressure, "vm_reclaim_autotrim_pct_pressure", 5);
 TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_critical, "vm_reclaim_autotrim_pct_critical", 1);
+#else
+TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_normal, "vm_reclaim_autotrim_pct_normal", 1);
+TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_pressure, "vm_reclaim_autotrim_pct_pressure", 0);
+TUNABLE_DEV_WRITEABLE(uint32_t, vm_reclaim_autotrim_pct_critical, "vm_reclaim_autotrim_pct_critical", 0);
+#endif
+/*
+ * Weights for working set estimation's exponential moving average.
+ */
 TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_wma_weight_base, "vm_reclaim_wma_weight_base", 3);
 TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_wma_weight_cur, "vm_reclaim_wma_weight_cur", 1);
 TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_wma_denom, "vm_reclaim_wma_denom", 4);
+
 TUNABLE_DEV_WRITEABLE(uint64_t, vm_reclaim_abandonment_threshold, "vm_reclaim_abandonment_threshold", 512);
 
 TUNABLE(bool, panic_on_kill, "vm_reclaim_panic_on_kill", false);
@@ -94,16 +128,17 @@ extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code, m
 struct proc *proc_ref(struct proc *p, int locked);
 int proc_rele(proc_t p);
 
+extern vm_pressure_level_t memorystatus_vm_pressure_level;
+
 #define _vmdr_log_type(type, fmt, ...) os_log_with_type(vm_reclaim_log_handle, type, "vm_reclaim: " fmt, ##__VA_ARGS__)
 #define vmdr_log(fmt, ...) _vmdr_log_type(OS_LOG_TYPE_DEFAULT, fmt, ##__VA_ARGS__)
 #define vmdr_log_info(fmt, ...) _vmdr_log_type(OS_LOG_TYPE_INFO, fmt, ##__VA_ARGS__)
 #define vmdr_log_error(fmt, ...) _vmdr_log_type(OS_LOG_TYPE_ERROR, fmt, ##__VA_ARGS__)
 #if DEVELOPMENT || DEBUG
-#define vmdr_log_debug(fmt, ...) \
-MACRO_BEGIN \
-if (os_unlikely(vm_reclaim_debug)) { \
-	_vmdr_log_type(OS_LOG_TYPE_DEBUG, fmt, ##__VA_ARGS__); \
-} \
+#define vmdr_log_debug(fmt, ...) MACRO_BEGIN \
+	if (os_unlikely(vm_reclaim_debug)) { \
+	        _vmdr_log_type(OS_LOG_TYPE_DEBUG, fmt, ##__VA_ARGS__); \
+	} \
 MACRO_END
 #else /* !(DEVELOPMENT || DEBUG)*/
 #define vmdr_log_debug(...)
@@ -113,9 +148,10 @@ static kern_return_t reclaim_copyin_head(vm_deferred_reclamation_metadata_t meta
 static kern_return_t reclaim_copyin_tail(vm_deferred_reclamation_metadata_t metadata, uint64_t *tail);
 static kern_return_t reclaim_copyin_busy(vm_deferred_reclamation_metadata_t metadata, uint64_t *busy);
 static kern_return_t reclaim_handle_copyio_error(vm_deferred_reclamation_metadata_t metadata, int result);
-static mach_error_t vmdr_sample_working_set(
+static mach_error_t vmdr_sample_working_set_locked(
 	vm_deferred_reclamation_metadata_t metadata,
-	mach_vm_size_t *trim_threshold_out,
+	uint64_t sampling_interval_abs,
+	size_t *trim_threshold_out,
 	vm_deferred_reclamation_options_t options);
 static void vmdr_metadata_release(vm_deferred_reclamation_metadata_t metadata);
 static void vmdr_list_append_locked(vm_deferred_reclamation_metadata_t metadata);
@@ -123,10 +159,10 @@ static void vmdr_list_remove_locked(vm_deferred_reclamation_metadata_t metadata)
 static void vmdr_metadata_own(vm_deferred_reclamation_metadata_t metadata);
 static void vmdr_metadata_disown(vm_deferred_reclamation_metadata_t metadata);
 static void vmdr_garbage_collect(vm_deferred_reclamation_gc_action_t action,
-    mach_vm_size_t *total_bytes_reclaimed_out,
+    size_t *total_bytes_reclaimed_out,
     vm_deferred_reclamation_options_t options);
 static kern_return_t reclaim_chunk(vm_deferred_reclamation_metadata_t metadata,
-    uint64_t bytes_to_reclaim, uint64_t *bytes_reclaimed_out,
+    size_t bytes_to_reclaim, size_t *bytes_reclaimed_out,
     mach_vm_reclaim_count_t chunk_size, mach_vm_reclaim_count_t *num_reclaimed_out);
 
 struct vm_deferred_reclamation_metadata_s {
@@ -214,7 +250,9 @@ static decl_lck_mtx_gate_data(, vm_reclaim_gc_gate);
 os_log_t vm_reclaim_log_handle;
 /* Number of initialized reclaim buffers */
 _Atomic uint32_t vm_reclaim_buffer_count;
-uint64_t vm_reclaim_sampling_period_abs = 0;
+uint64_t vm_reclaim_sampling_period_normal_abs = 0;
+uint64_t vm_reclaim_sampling_period_pressure_abs = 0;
+uint64_t vm_reclaim_sampling_period_critical_abs = 0;
 static SECURITY_READ_ONLY_LATE(thread_t) vm_reclaim_scavenger_thread = THREAD_NULL;
 static sched_cond_atomic_t vm_reclaim_scavenger_cond = SCHED_COND_INIT;
 
@@ -267,11 +305,41 @@ vmdr_metadata_free(vm_deferred_reclamation_metadata_t metadata)
 	}
 }
 
+static uint64_t
+vmdr_sampling_period_for_ring(vm_deferred_reclamation_metadata_t metadata)
+{
+	/*
+	 * Consider varying the sampling rate for different process properties (e.g.
+	 * daemon vs app)
+	 */
+	(void)metadata;
+	if (VM_CONFIG_SWAP_IS_ACTIVE && vm_compressor_swapout_conditions_met()) {
+		/*
+		 * Always use the most memory-efficient configuration if the system has
+		 * begun to swap
+		 */
+		return vm_reclaim_sampling_period_critical_abs;
+	}
+
+	vm_pressure_level_t pressure_level = os_atomic_load(&memorystatus_vm_pressure_level, relaxed);
+	switch (pressure_level) {
+	case kVMPressureNormal:
+		return vm_reclaim_sampling_period_normal_abs;
+	case kVMPressureWarning:
+	case kVMPressureUrgent:
+		return vm_reclaim_sampling_period_pressure_abs;
+	case kVMPressureCritical:
+		return vm_reclaim_sampling_period_critical_abs;
+	default:
+		panic("Unexpected value for VM pressure level %d", pressure_level);
+	}
+}
+
 static mach_vm_size_t
 vmdr_round_len_to_size(vm_map_t map, mach_vm_reclaim_count_t count)
 {
-	mach_vm_size_t metadata_size = offsetof(struct mach_vm_reclaim_ring_s, entries);
-	mach_vm_size_t entries_size = count * sizeof(struct mach_vm_reclaim_entry_s);
+	size_t metadata_size = offsetof(struct mach_vm_reclaim_ring_s, entries);
+	size_t entries_size = count * sizeof(struct mach_vm_reclaim_entry_s);
 	return vm_map_round_page(metadata_size + entries_size, vm_map_page_mask(map));
 }
 
@@ -279,7 +347,7 @@ mach_error_t
 vm_deferred_reclamation_buffer_allocate_internal(
 	task_t                   task,
 	mach_vm_address_ut       *address_u,
-	uint64_t                 *sampling_period,
+	uint64_t                 *next_deadline,
 	mach_vm_reclaim_count_t  len,
 	mach_vm_reclaim_count_t  max_len)
 {
@@ -293,7 +361,7 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	if (task == TASK_NULL) {
 		return KERN_INVALID_TASK;
 	}
-	if (address_u == NULL || sampling_period == NULL ||
+	if (address_u == NULL || next_deadline == NULL ||
 	    len == 0 || max_len == 0 || max_len < len) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -323,7 +391,7 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	}
 
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_START,
-	    task_pid(task), len);
+	    len, max_len);
 
 	/*
 	 * Allocate a VM region that can contain the maximum buffer size. The
@@ -338,7 +406,7 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	 * anywhere flag.
 	 */
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE_PERMANENT(
-		.vm_tag = VM_MEMORY_MALLOC);
+		.vm_tag = VM_MEMORY_VM_RECLAIM);
 	mach_vm_size_ut size_u = vm_sanitize_wrap_size(rounded_vm_size);
 	kr = mach_vm_map_kernel(map, address_u, size_u, VM_MAP_PAGE_MASK(map),
 	    vmk_flags, IPC_PORT_NULL, 0, FALSE,
@@ -346,6 +414,8 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	if (kr != KERN_SUCCESS) {
 		vmdr_log_error("%s [%d] failed to allocate VA for reclaim "
 		    "buffer (%d)\n", task_best_name(task), task_pid(task), kr);
+		KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_END,
+		    kr, 0, 0);
 		return kr;
 	}
 	mach_vm_address_t address = VM_SANITIZE_UNSAFE_UNWRAP(*address_u);
@@ -359,22 +429,22 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	 */
 	kr = reclaim_copyin_busy(metadata, &busy);
 	if (kr != KERN_SUCCESS) {
-		goto out;
+		goto fail;
 	}
 	kr = reclaim_copyin_head(metadata, &head);
 	if (kr != KERN_SUCCESS) {
-		goto out;
+		goto fail;
 	}
 	kr = reclaim_copyin_tail(metadata, &tail);
 	if (kr != KERN_SUCCESS) {
-		goto out;
+		goto fail;
 	}
 
 	if (head != 0 || tail != 0 || busy != 0) {
 		vmdr_log_error("indices were not "
 		    "zero-initialized\n");
 		kr = KERN_INVALID_ARGUMENT;
-		goto out;
+		goto fail;
 	}
 
 	/*
@@ -407,11 +477,13 @@ vm_deferred_reclamation_buffer_allocate_internal(
 	task_unlock(task);
 	lck_mtx_unlock(&reclaim_buffers_lock);
 
+	*next_deadline = mach_absolute_time() + vmdr_sampling_period_for_ring(metadata);
+
 	vmdr_log_debug("%s [%d] allocated ring with capacity %u/%u\n",
 	    task_best_name(task), task_pid(task),
 	    len, max_len);
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_END,
-	    task_pid(task), KERN_SUCCESS, address);
+	    KERN_SUCCESS, address, next_deadline);
 	DTRACE_VM3(reclaim_ring_allocate,
 	    mach_vm_address_t, address,
 	    mach_vm_reclaim_count_t, len,
@@ -422,16 +494,16 @@ fail_task:
 	task_unlock(task);
 	lck_mtx_unlock(&reclaim_buffers_lock);
 
-	tmp_kr = mach_vm_deallocate(map,
+	tmp_kr = mach_vm_deallocate_kernel(map,
 	    *address_u, size_u);
 	assert(tmp_kr == KERN_SUCCESS);
 
-out:
-	*address_u = vm_sanitize_wrap_addr(0ull);
-	*sampling_period = vm_reclaim_sampling_period_abs;
+fail:
+	*address_u = vm_sanitize_wrap_addr(0);
+	*next_deadline = 0;
 	vmdr_metadata_release(metadata);
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_END,
-	    kr, NULL);
+	    kr, NULL, 0);
 	return kr;
 }
 
@@ -662,17 +734,21 @@ reclaim_kill_with_reason(
 		goto out;
 	}
 
-	int flags = PX_DEBUG_NO_HONOR;
-	exception_info_t info = {
-		.os_reason = OS_REASON_GUARD,
-		.exception_type = EXC_GUARD,
-		.mx_code = code,
-		.mx_subcode = subcode
-	};
-
 	vmdr_log("Force-exiting %s [%d]\n", task_best_name(task), task_pid(task));
 
-	err = exit_with_mach_exception(p, info, flags);
+	/* At this point forward, the exception is fatal. */
+	assert(fatal);
+
+	/*
+	 * Perform fatal exception logic.
+	 *
+	 * The generic fatal exception interface only attempts to
+	 * deliver the exception to userspace if we are the current
+	 * proc, which is equivalent to check killing_self here.
+	 */
+	err = exit_with_fatal_exception_and_notify(p, OS_REASON_GUARD,
+	    EXC_GUARD, code, subcode, PX_FLAGS_NONE);
+
 	if (err != 0) {
 		vmdr_log_error("Unable to deliver guard exception to %p: %d\n", p, err);
 		goto out;
@@ -909,13 +985,13 @@ reclaim_copyout_min_reclaimable_bytes(vm_deferred_reclamation_metadata_t metadat
  */
 static kern_return_t
 reclaim_chunk(vm_deferred_reclamation_metadata_t metadata,
-    uint64_t bytes_to_reclaim, uint64_t *bytes_reclaimed_out,
+    size_t bytes_to_reclaim, size_t *bytes_reclaimed_out,
     mach_vm_reclaim_count_t chunk_size, mach_vm_reclaim_count_t *num_reclaimed_out)
 {
 	kern_return_t kr = KERN_SUCCESS;
 	int result = 0;
 	mach_vm_reclaim_count_t num_reclaimed = 0, num_copied = 0;
-	uint64_t bytes_reclaimed = 0;
+	size_t bytes_reclaimed = 0;
 	uint64_t head = 0, tail = 0, busy = 0, num_to_reclaim = 0, new_tail = 0;
 	vm_map_t map = metadata->vdrm_map;
 	vm_map_switch_context_t switch_ctx;
@@ -1037,7 +1113,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata,
 		 * so this is gauranteed to converge.
 		 */
 	}
-	vmdr_log_debug("[%d] reclaiming up to %llu entries (%llu KiB) head=%llu "
+	vmdr_log_debug("[%d] reclaiming up to %llu entries (%zu KiB) head=%llu "
 	    "busy=%llu tail=%llu len=%u", metadata->vdrm_pid, num_to_reclaim,
 	    bytes_reclaimed, head, busy, tail, metadata->vdrm_buffer_len);
 
@@ -1092,7 +1168,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata,
 			case VM_RECLAIM_DEALLOCATE:
 				kr = vm_map_remove_guard(map,
 				    start, end, VM_MAP_REMOVE_GAPS_FAIL,
-				    KMEM_GUARD_NONE).kmr_return;
+				    KMEM_GUARD_NONE);
 				if (kr == KERN_INVALID_VALUE) {
 					vmdr_log_error(
 						"[%d] Killing due to virtual-memory guard at (0x%llx, 0x%llx)\n",
@@ -1150,7 +1226,7 @@ reclaim_chunk(vm_deferred_reclamation_metadata_t metadata,
 	}
 
 done:
-	vmdr_log_debug("[%d] reclaimed %u entries (%llu KiB) head=%llu "
+	vmdr_log_debug("[%d] reclaimed %u entries (%zu KiB) head=%llu "
 	    "busy=%llu tail=%llu len=%u", metadata->vdrm_pid, num_reclaimed,
 	    bytes_reclaimed, head, busy, tail, metadata->vdrm_buffer_len);
 	vm_map_switch_back(switch_ctx);
@@ -1187,7 +1263,7 @@ done:
  */
 static kern_return_t
 vmdr_reclaim_from_buffer(vm_deferred_reclamation_metadata_t metadata,
-    mach_vm_size_t bytes_to_reclaim, mach_vm_size_t *num_bytes_reclaimed_out,
+    size_t bytes_to_reclaim, size_t *num_bytes_reclaimed_out,
     vm_deferred_reclamation_options_t options)
 {
 	kern_return_t kr = KERN_SUCCESS;
@@ -1196,9 +1272,9 @@ vmdr_reclaim_from_buffer(vm_deferred_reclamation_metadata_t metadata,
 		vm_fault_disable();
 	}
 
-	mach_vm_size_t total_bytes_reclaimed = 0;
+	size_t total_bytes_reclaimed = 0;
 	while (total_bytes_reclaimed < bytes_to_reclaim) {
-		mach_vm_size_t cur_bytes_reclaimed;
+		size_t cur_bytes_reclaimed;
 		mach_vm_reclaim_count_t entries_reclaimed;
 		kr = reclaim_chunk(metadata, bytes_to_reclaim - total_bytes_reclaimed,
 		    &cur_bytes_reclaimed, kReclaimChunkSize, &entries_reclaimed);
@@ -1211,7 +1287,7 @@ vmdr_reclaim_from_buffer(vm_deferred_reclamation_metadata_t metadata,
 	if (options & RECLAIM_NO_FAULT) {
 		vm_fault_enable();
 	}
-	vmdr_log_debug("reclaimed %llu B / %llu B from %d\n", total_bytes_reclaimed, bytes_to_reclaim, metadata->vdrm_pid);
+	vmdr_log_debug("reclaimed %zu B / %zu B from %d\n", total_bytes_reclaimed, bytes_to_reclaim, metadata->vdrm_pid);
 	if (num_bytes_reclaimed_out) {
 		*num_bytes_reclaimed_out = total_bytes_reclaimed;
 	}
@@ -1243,12 +1319,13 @@ vmdr_acquire_task_metadata(task_t task)
 kern_return_t
 vm_deferred_reclamation_buffer_flush_internal(task_t task,
     mach_vm_reclaim_count_t num_entries_to_reclaim,
-    mach_vm_size_t *bytes_reclaimed_out)
+    size_t *bytes_reclaimed_out,
+    uint64_t *next_deadline_out)
 {
 	kern_return_t kr;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
 	mach_vm_reclaim_count_t total_reclaimed = 0;
-	uint64_t bytes_reclaimed = 0;
+	uint64_t bytes_reclaimed = 0, next_deadline;
 
 	if (!task_is_active(task)) {
 		return KERN_INVALID_TASK;
@@ -1262,11 +1339,11 @@ vm_deferred_reclamation_buffer_flush_internal(task_t task,
 	vmdr_metadata_own(metadata);
 
 	vmdr_log_debug("[%d] flushing %u entries\n", task_pid(task), num_entries_to_reclaim);
-	KDBG_FILTERED(VM_RECLAIM_CODE(VM_RECLAIM_FLUSH) | DBG_FUNC_START, metadata->vdrm_pid, num_entries_to_reclaim);
+	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_FLUSH) | DBG_FUNC_START, metadata->vdrm_pid, num_entries_to_reclaim);
 
 	while (total_reclaimed < num_entries_to_reclaim) {
 		mach_vm_reclaim_count_t cur_reclaimed;
-		uint64_t cur_bytes_reclaimed;
+		size_t cur_bytes_reclaimed;
 		mach_vm_reclaim_count_t chunk_size = MIN(num_entries_to_reclaim - total_reclaimed, kReclaimChunkSize);
 		kr = reclaim_chunk(metadata, UINT64_MAX, &cur_bytes_reclaimed, chunk_size,
 		    &cur_reclaimed);
@@ -1292,11 +1369,13 @@ vm_deferred_reclamation_buffer_flush_internal(task_t task,
 	 */
 	bytes_reclaimed += metadata->vdrm_kernel_bytes_reclaimed;
 	metadata->vdrm_kernel_bytes_reclaimed = 0;
+	next_deadline = mach_absolute_time() + vmdr_sampling_period_for_ring(metadata);
 
 	vmdr_metadata_disown(metadata);
 
 	*bytes_reclaimed_out = bytes_reclaimed;
-	KDBG_FILTERED(VM_RECLAIM_CODE(VM_RECLAIM_FLUSH) | DBG_FUNC_END, kr, total_reclaimed, bytes_reclaimed);
+	*next_deadline_out = next_deadline;
+	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_FLUSH) | DBG_FUNC_END, kr, total_reclaimed, bytes_reclaimed);
 	DTRACE_VM2(reclaim_flush,
 	    mach_vm_reclaim_count_t, num_entries_to_reclaim,
 	    size_t, bytes_reclaimed);
@@ -1307,11 +1386,13 @@ kern_return_t
 vm_deferred_reclamation_buffer_resize_internal(
 	task_t                   task,
 	mach_vm_reclaim_count_t len,
-	mach_vm_size_t *bytes_reclaimed_out)
+	size_t *bytes_reclaimed_out,
+	uint64_t *next_deadline_out)
 {
 	kern_return_t kr;
 	mach_vm_reclaim_count_t num_entries_reclaimed = 0;
 	mach_vm_reclaim_count_t old_len;
+	uint64_t next_deadline;
 
 	if (task == TASK_NULL) {
 		return KERN_INVALID_TASK;
@@ -1359,9 +1440,9 @@ vm_deferred_reclamation_buffer_resize_internal(
 	 * TODO: Consider encoding the ringbuffer-capacity in the
 	 * mach_vm_reclaim_id_t, so reuses can still find objects after a resize.
 	 */
-	mach_vm_size_t total_bytes_reclaimed = 0;
+	size_t total_bytes_reclaimed = 0;
 	do {
-		mach_vm_size_t cur_bytes_reclaimed;
+		size_t cur_bytes_reclaimed;
 		kr = reclaim_chunk(metadata, UINT64_MAX, &cur_bytes_reclaimed, kReclaimChunkSize,
 		    &num_entries_reclaimed);
 		total_bytes_reclaimed += cur_bytes_reclaimed;
@@ -1370,12 +1451,13 @@ vm_deferred_reclamation_buffer_resize_internal(
 		}
 	} while (num_entries_reclaimed > 0);
 
-	vmdr_log_debug("[%d] successfully resized buffer | reclaimed: %llu B "
+	vmdr_log_debug("[%d] successfully resized buffer | reclaimed: %zu B "
 	    "kernel_reclaimed: %zu B\n", metadata->vdrm_pid,
 	    total_bytes_reclaimed, metadata->vdrm_kernel_bytes_reclaimed);
 
 	total_bytes_reclaimed += metadata->vdrm_kernel_bytes_reclaimed;
 	metadata->vdrm_kernel_bytes_reclaimed = 0;
+	next_deadline = mach_absolute_time() + vmdr_sampling_period_for_ring(metadata);
 
 	/* Publish new user addresses in kernel metadata */
 	vmdr_metadata_lock(metadata);
@@ -1385,6 +1467,7 @@ vm_deferred_reclamation_buffer_resize_internal(
 	vmdr_metadata_release(metadata);
 
 	*bytes_reclaimed_out = total_bytes_reclaimed;
+	*next_deadline_out = next_deadline;
 
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_RESIZE) | DBG_FUNC_END, KERN_SUCCESS, num_entries_reclaimed, total_bytes_reclaimed);
 	DTRACE_VM2(reclaim_ring_resize,
@@ -1401,8 +1484,6 @@ fail:
 }
 
 #pragma mark Accounting
-
-extern vm_pressure_level_t memorystatus_vm_pressure_level;
 
 static kern_return_t
 vmdr_calculate_autotrim_threshold(vm_deferred_reclamation_metadata_t metadata, size_t *trim_threshold_out)
@@ -1444,7 +1525,7 @@ vmdr_calculate_autotrim_threshold(vm_deferred_reclamation_metadata_t metadata, s
 	vmdr_metadata_unlock(metadata);
 
 	kr = ledger_get_lifetime_max(task->ledger,
-	    task_ledgers.phys_footprint, &phys_footprint_max);
+	    task_ledgers.phys_footprint, LEO_SETTLE, &phys_footprint_max);
 	assert3u(kr, ==, KERN_SUCCESS);
 
 	task_deallocate(task);
@@ -1464,6 +1545,9 @@ vmdr_calculate_autotrim_threshold(vm_deferred_reclamation_metadata_t metadata, s
  * @param metadata
  * The reclaim buffer to sample
  *
+ * @param sampling_interval_abs
+ * The sampling interval at which to evaluate the working set estimation
+ *
  * @param trim_threshold_out
  * If the buffer should be trimmed, the amount to trim (in bytes) will be
  * written out
@@ -1471,17 +1555,19 @@ vmdr_calculate_autotrim_threshold(vm_deferred_reclamation_metadata_t metadata, s
  * @returns KERN_MEMORY_ERROR if copyio failed due to RECLAIM_NO_FAULT
  *
  * @discussion
- * The caller must own the buffer
+ * The caller must have both the metadata locked and the buffer own the buffer and have the metadata lock
  */
 static mach_error_t
-vmdr_sample_working_set(vm_deferred_reclamation_metadata_t metadata,
-    mach_vm_size_t *trim_threshold_out, vm_deferred_reclamation_options_t options)
+vmdr_sample_working_set_locked(vm_deferred_reclamation_metadata_t metadata,
+    uint64_t sampling_interval_abs,
+    size_t *trim_threshold_out,
+    vm_deferred_reclamation_options_t options)
 {
 	mach_error_t err = ERR_SUCCESS;
 	size_t min_reclaimable_bytes = 0, cur_reclaimable_bytes = 0;
 	uint64_t wma = 0;
 
-	vmdr_metadata_assert_owned(metadata);
+	vmdr_metadata_assert_owned_locked(metadata);
 
 	*trim_threshold_out = 0;
 
@@ -1491,19 +1577,16 @@ vmdr_sample_working_set(vm_deferred_reclamation_metadata_t metadata,
 		vm_fault_disable();
 	}
 
+	vmdr_metadata_unlock(metadata);
 	err = reclaim_copyin_min_reclaimable_bytes(metadata, &min_reclaimable_bytes);
 	if (err != ERR_SUCCESS) {
 		goto done;
 	}
 
 	uint64_t now = mach_absolute_time();
-	if (now - metadata->vdrm_last_sample_abs < vm_reclaim_sampling_period_abs) {
-		/* A sampling period has not elapsed */
-		goto done;
-	}
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_SAMPLE) | DBG_FUNC_START,
 	    metadata->vdrm_pid,
-	    now,
+	    sampling_interval_abs,
 	    metadata->vdrm_last_sample_abs,
 	    min_reclaimable_bytes);
 
@@ -1539,8 +1622,15 @@ vmdr_sample_working_set(vm_deferred_reclamation_metadata_t metadata,
 		min_reclaimable_bytes = 0;
 	}
 
+	if (sampling_interval_abs == 0) {
+		/* Revert to maximally-aggressive reclamation */
+		*trim_threshold_out = cur_reclaimable_bytes;
+		goto done;
+	}
+
+
 	uint64_t samples_elapsed = (now - metadata->vdrm_last_sample_abs) /
-	    vm_reclaim_sampling_period_abs;
+	    sampling_interval_abs;
 	if (samples_elapsed > vm_reclaim_abandonment_threshold) {
 		/*
 		 * Many sampling periods have elapsed since the ring was
@@ -1579,14 +1669,21 @@ vmdr_sample_working_set(vm_deferred_reclamation_metadata_t metadata,
 		    vm_map_page_mask(metadata->vdrm_map));
 	}
 
-	metadata->vdrm_last_sample_abs = mach_absolute_time();
-	metadata->vdrm_reclaimable_bytes_last = cur_reclaimable_bytes;
-
 done:
+	/*
+	 * NB: This cannot be done under the metadata lock. Dereferencing the
+	 * switched-to map may deallocate the task, which needs to take the
+	 * metadata lock to uninstall it.
+	 */
 	vm_map_switch_back(map_ctx);
 	if (options & RECLAIM_NO_FAULT) {
 		vm_fault_enable();
 	}
+
+	vmdr_metadata_lock(metadata);
+	metadata->vdrm_last_sample_abs = mach_absolute_time();
+	metadata->vdrm_reclaimable_bytes_last = cur_reclaimable_bytes;
+
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_SAMPLE) | DBG_FUNC_END,
 	    wma,
 	    min_reclaimable_bytes,
@@ -1598,7 +1695,7 @@ done:
 	    size_t, min_reclaimable_bytes,
 	    size_t, cur_reclaimable_bytes,
 	    size_t, *trim_threshold_out);
-	vmdr_log_debug("sampled buffer with min %lu est %lu trim %llu wma %llu\n",
+	vmdr_log_debug("sampled buffer with min %lu est %lu trim %zu wma %llu\n",
 	    min_reclaimable_bytes,
 	    cur_reclaimable_bytes,
 	    *trim_threshold_out,
@@ -1610,8 +1707,8 @@ done:
  * Caller must have buffer owned and unlocked
  */
 static kern_return_t
-vmdr_trim(vm_deferred_reclamation_metadata_t metadata, mach_vm_size_t bytes_to_reclaim,
-    mach_vm_size_t *bytes_reclaimed, vm_deferred_reclamation_options_t options)
+vmdr_trim(vm_deferred_reclamation_metadata_t metadata, size_t bytes_to_reclaim,
+    size_t *bytes_reclaimed, vm_deferred_reclamation_options_t options)
 {
 	kern_return_t kr;
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_TRIM) | DBG_FUNC_START,
@@ -1632,7 +1729,7 @@ vmdr_trim(vm_deferred_reclamation_metadata_t metadata, mach_vm_size_t bytes_to_r
  * Caller must have buffer owned and unlocked
  */
 static kern_return_t
-vmdr_drain(vm_deferred_reclamation_metadata_t metadata, mach_vm_size_t *bytes_reclaimed,
+vmdr_drain(vm_deferred_reclamation_metadata_t metadata, size_t *bytes_reclaimed,
     vm_deferred_reclamation_options_t options)
 {
 	kern_return_t kr;
@@ -1650,11 +1747,15 @@ vmdr_drain(vm_deferred_reclamation_metadata_t metadata, mach_vm_size_t *bytes_re
 }
 
 mach_error_t
-vm_deferred_reclamation_update_accounting_internal(task_t task, uint64_t *bytes_reclaimed_out)
+vm_deferred_reclamation_update_accounting_internal(
+	task_t task,
+	uint64_t *bytes_reclaimed_out,
+	uint64_t *next_deadline_out)
 {
 	vm_deferred_reclamation_metadata_t metadata = task->deferred_reclamation_metadata;
-	mach_vm_size_t bytes_to_reclaim, bytes_reclaimed = 0;
+	size_t bytes_to_reclaim, bytes_reclaimed = 0;
 	mach_error_t err = ERR_SUCCESS;
+	uint64_t next_deadline_abs;
 
 	if (metadata == NULL) {
 		return KERN_NOT_FOUND;
@@ -1668,28 +1769,40 @@ vm_deferred_reclamation_update_accounting_internal(task_t task, uint64_t *bytes_
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_UPDATE_ACCOUNTING) | DBG_FUNC_START,
 	    metadata->vdrm_pid);
 
+	vmdr_log_debug(" %s [%d] updating kernel accounting\n",
+	    task_best_name(task), task_pid(task));
+
 	vmdr_metadata_lock(metadata);
 	uint64_t now = mach_absolute_time();
-	if (now - metadata->vdrm_last_sample_abs < vm_reclaim_sampling_period_abs) {
+	uint64_t sampling_period_abs = vmdr_sampling_period_for_ring(metadata);
+	if (sampling_period_abs &&
+	    now - metadata->vdrm_last_sample_abs < sampling_period_abs) {
 		/*
 		 * This is a fast path to avoid waiting on the gate if another
 		 * thread beat us to sampling.
 		 */
-		vmdr_metadata_unlock(metadata);
+		next_deadline_abs = metadata->vdrm_last_sample_abs + sampling_period_abs;
 		goto done;
 	}
+
 	vmdr_metadata_own_locked(metadata, RECLAIM_OPTIONS_NONE);
-	vmdr_metadata_unlock(metadata);
 
-	err = vmdr_sample_working_set(metadata, &bytes_to_reclaim, RECLAIM_OPTIONS_NONE);
+	/* Recompute in-case the system state changed while waiting for the gate */
+	sampling_period_abs = vmdr_sampling_period_for_ring(metadata);
+
+	err = vmdr_sample_working_set_locked(metadata, sampling_period_abs, &bytes_to_reclaim, RECLAIM_OPTIONS_NONE);
+	next_deadline_abs = metadata->vdrm_last_sample_abs + sampling_period_abs;
 	if (err != ERR_SUCCESS) {
-		vmdr_metadata_disown(metadata);
+		vmdr_metadata_disown_locked(metadata);
 		goto done;
 	}
-	if (bytes_to_reclaim) {
-		vmdr_log_debug("[%d] trimming %llu B\n", metadata->vdrm_pid, bytes_to_reclaim);
 
+	if (bytes_to_reclaim) {
+		vmdr_metadata_unlock(metadata);
+
+		vmdr_log_debug("%s [%d] trimming with target %zu B\n", task_best_name(task), metadata->vdrm_pid, bytes_to_reclaim);
 		err = vmdr_trim(metadata, bytes_to_reclaim, &bytes_reclaimed, RECLAIM_OPTIONS_NONE);
+		vmdr_log_debug("%s [%d] trimmed %zu B\n", task_best_name(task), metadata->vdrm_pid, bytes_reclaimed);
 
 		if (err == KERN_ABORTED) {
 			/*
@@ -1699,6 +1812,7 @@ vm_deferred_reclamation_update_accounting_internal(task_t task, uint64_t *bytes_
 			 */
 			err = KERN_SUCCESS;
 		}
+		vmdr_metadata_lock(metadata);
 	}
 
 	/*
@@ -1708,14 +1822,17 @@ vm_deferred_reclamation_update_accounting_internal(task_t task, uint64_t *bytes_
 	bytes_reclaimed += metadata->vdrm_kernel_bytes_reclaimed;
 	metadata->vdrm_kernel_bytes_reclaimed = 0;
 
-	vmdr_metadata_disown(metadata);
+	vmdr_metadata_disown_locked(metadata);
 
 done:
+	vmdr_metadata_unlock(metadata);
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_UPDATE_ACCOUNTING) | DBG_FUNC_END,
 	    metadata->vdrm_last_sample_abs,
 	    bytes_to_reclaim,
-	    bytes_reclaimed);
+	    bytes_reclaimed,
+	    next_deadline_abs);
 	*bytes_reclaimed_out = (uint64_t)bytes_reclaimed;
+	*next_deadline_out = next_deadline_abs;
 	return err;
 }
 
@@ -1724,7 +1841,7 @@ vm_deferred_reclamation_task_drain(task_t task,
     vm_deferred_reclamation_options_t options)
 {
 	kern_return_t kr;
-	mach_vm_size_t bytes_reclaimed;
+	size_t bytes_reclaimed;
 
 	task_lock(task);
 	if (!task_is_active(task) || task_is_halting(task)) {
@@ -1809,7 +1926,7 @@ vm_deferred_reclamation_ring_disown(vm_deferred_reclamation_metadata_t metadata)
 
 void
 vm_deferred_reclamation_gc(vm_deferred_reclamation_gc_action_t action,
-    mach_vm_size_t *total_bytes_reclaimed,
+    size_t *total_bytes_reclaimed,
     vm_deferred_reclamation_options_t options)
 {
 	vmdr_garbage_collect(action, total_bytes_reclaimed, options);
@@ -1823,11 +1940,8 @@ vm_deferred_reclamation_settle_ledger(task_t task)
 		return;
 	}
 	vmdr_metadata_lock(meta);
-	ledger_zero_balance(task->ledger, task_ledgers.est_reclaimable);
-	ledger_credit(
-		task->ledger,
-		task_ledgers.est_reclaimable,
-		meta->vdrm_reclaimable_bytes_last);
+	ledger_reset(task->ledger, task_ledgers.est_reclaimable,
+	    meta->vdrm_reclaimable_bytes_last, 0);
 	vmdr_metadata_unlock(meta);
 	vmdr_metadata_release(meta);
 }
@@ -1836,11 +1950,11 @@ vm_deferred_reclamation_settle_ledger(task_t task)
 
 static void
 vmdr_garbage_collect(vm_deferred_reclamation_gc_action_t action,
-    mach_vm_size_t *total_bytes_reclaimed_out,
+    size_t *total_bytes_reclaimed_out,
     vm_deferred_reclamation_options_t options)
 {
 	kern_return_t kr;
-	mach_vm_size_t total_bytes_reclaimed = 0;
+	size_t total_bytes_reclaimed = 0;
 	gate_wait_result_t wr;
 
 	lck_mtx_lock(&reclaim_buffers_lock);
@@ -1886,8 +2000,8 @@ vmdr_garbage_collect(vm_deferred_reclamation_gc_action_t action,
 		bool buffer_is_suspended = task_is_app_suspended(task);
 		task = TASK_NULL;
 
-		mach_vm_size_t bytes_reclaimed = 0;
-		mach_vm_size_t bytes_to_reclaim = 0;
+		size_t bytes_reclaimed = 0;
+		size_t bytes_to_reclaim = 0;
 
 		switch (action) {
 		case RECLAIM_GC_DRAIN:
@@ -1923,14 +2037,15 @@ vmdr_garbage_collect(vm_deferred_reclamation_gc_action_t action,
 			if (!vmdr_metadata_own_locked(metadata, options)) {
 				goto next;
 			}
-			vmdr_metadata_unlock(metadata);
-			kr = vmdr_sample_working_set(metadata, &bytes_to_reclaim, options);
+			uint64_t sampling_interval_abs = vmdr_sampling_period_for_ring(metadata);
+			kr = vmdr_sample_working_set_locked(metadata, sampling_interval_abs, &bytes_to_reclaim, options);
 			if (kr == KERN_SUCCESS && bytes_to_reclaim) {
+				vmdr_metadata_unlock(metadata);
 				vmdr_log_debug("GC found stale buffer (%d), trimming\n", metadata->vdrm_pid);
 				kr = vmdr_trim(metadata, bytes_to_reclaim, &bytes_reclaimed, options);
 				metadata->vdrm_kernel_bytes_reclaimed += bytes_reclaimed;
+				vmdr_metadata_lock(metadata);
 			}
-			vmdr_metadata_lock(metadata);
 			vmdr_metadata_disown_locked(metadata);
 			break;
 		}
@@ -1958,10 +2073,10 @@ vm_reclaim_scavenger_thread_continue(__unused void *param, __unused wait_result_
 	sched_cond_ack(&vm_reclaim_scavenger_cond);
 
 	while (true) {
-		mach_vm_size_t total_bytes_reclaimed;
+		size_t total_bytes_reclaimed;
 		vmdr_garbage_collect(RECLAIM_GC_SCAVENGE, &total_bytes_reclaimed,
 		    RECLAIM_OPTIONS_NONE);
-		vmdr_log_info("scavenger reclaimed %llu KiB of virtual memory\n",
+		vmdr_log_info("scavenger reclaimed %zu KiB of virtual memory\n",
 		    total_bytes_reclaimed >> 10);
 		sched_cond_wait(&vm_reclaim_scavenger_cond, THREAD_UNINT,
 		    vm_reclaim_scavenger_thread_continue);
@@ -1985,8 +2100,13 @@ static void
 vm_deferred_reclamation_init(void)
 {
 	vm_reclaim_log_handle = os_log_create("com.apple.xnu", "vm_reclaim");
-	nanoseconds_to_absolutetime((uint64_t)vm_reclaim_sampling_period_ns,
-	    &vm_reclaim_sampling_period_abs);
+
+	nanoseconds_to_absolutetime((uint64_t)vm_reclaim_sampling_period_normal_ns,
+	    &vm_reclaim_sampling_period_normal_abs);
+	nanoseconds_to_absolutetime((uint64_t)vm_reclaim_sampling_period_pressure_ns,
+	    &vm_reclaim_sampling_period_pressure_abs);
+	nanoseconds_to_absolutetime((uint64_t)vm_reclaim_sampling_period_critical_ns,
+	    &vm_reclaim_sampling_period_critical_abs);
 
 	sched_cond_init(&vm_reclaim_scavenger_cond);
 	lck_mtx_gate_init(&reclaim_buffers_lock, &vm_reclaim_gc_gate);

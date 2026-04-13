@@ -143,7 +143,7 @@ ipc_host_init(void)
 		realhost.exc_actions[i].behavior = 0;
 		realhost.exc_actions[i].flavor = 0;
 		realhost.exc_actions[i].privileged = FALSE;
-	} /* for */
+	}
 
 	/*
 	 *	Set up ipc for default processor set.

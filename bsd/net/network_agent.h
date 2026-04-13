@@ -109,6 +109,7 @@ struct netagent_session_assign_nexus_message {
 #define NETAGENT_MESSAGE_TYPE_CLIENT_TRIGGER    13      // Kernel initiated, struct netagent_client_message
 #define NETAGENT_MESSAGE_TYPE_CLIENT_ASSERT             14      // Kernel initiated, struct netagent_client_message
 #define NETAGENT_MESSAGE_TYPE_CLIENT_UNASSERT   15      // Kernel initiated, struct netagent_client_message
+#define NETAGENT_MESSAGE_TYPE_UPDATE_NEXUS      16      // Kernel initiated, struct netagent_client_message
 
 #define NETAGENT_OPTION_TYPE_REGISTER                   NETAGENT_MESSAGE_TYPE_REGISTER          // Pass netagent to set, no return value
 #define NETAGENT_OPTION_TYPE_UNREGISTER                 NETAGENT_MESSAGE_TYPE_UNREGISTER        // Pass agent uuid in session mode, no return value
@@ -309,6 +310,7 @@ struct netagent_nexus_agent {
 #define NETAGENT_EVENT_NEXUS_FLOW_INSERT                        NETAGENT_MESSAGE_TYPE_REQUEST_NEXUS
 #define NETAGENT_EVENT_NEXUS_FLOW_REMOVE                        NETAGENT_MESSAGE_TYPE_CLOSE_NEXUS
 #define NETAGENT_EVENT_NEXUS_FLOW_ABORT                         NETAGENT_MESSAGE_TYPE_ABORT_NEXUS
+#define NETAGENT_EVENT_NEXUS_FLOW_UPDATE                        NETAGENT_MESSAGE_TYPE_UPDATE_NEXUS
 
 typedef errno_t (*netagent_event_f)(u_int8_t event, uuid_t necp_client_uuid, pid_t pid, void *necp_handle, void *context, struct necp_client_agent_parameters *parameters, void * __sized_by (*assigned_results_length) *assigned_results, size_t *assigned_results_length);
 
