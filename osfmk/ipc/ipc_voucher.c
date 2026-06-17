@@ -2391,7 +2391,7 @@ mach_generate_activity_id(
 
 /* User data manager is removed on !macOS */
 #if CONFIG_VOUCHER_DEPRECATED
-#if defined(MACH_VOUCHER_ATTR_KEY_USER_DATA) || defined(MACH_VOUCHER_ATTR_KEY_TEST)
+#if defined(MACH_VOUCHER_ATTR_KEY_USER_DATA)
 
 /*
  * Build-in a simple User Data Resource Manager
@@ -2478,17 +2478,8 @@ const struct ipc_voucher_attr_manager user_data_manager = {
 };
 
 ipc_voucher_attr_control_t user_data_control;
-ipc_voucher_attr_control_t test_control;
 
-#if defined(MACH_VOUCHER_ATTR_KEY_USER_DATA) && defined(MACH_VOUCHER_ATTR_KEY_TEST)
-#define USER_DATA_ASSERT_KEY(key)                               \
-	assert(MACH_VOUCHER_ATTR_KEY_USER_DATA == (key) ||      \
-	       MACH_VOUCHER_ATTR_KEY_TEST == (key));
-#elif defined(MACH_VOUCHER_ATTR_KEY_USER_DATA)
 #define USER_DATA_ASSERT_KEY(key) assert(MACH_VOUCHER_ATTR_KEY_USER_DATA == (key))
-#else
-#define USER_DATA_ASSERT_KEY(key) assert(MACH_VOUCHER_ATTR_KEY_TEST == (key))
-#endif
 
 static void
 user_data_value_element_free(user_data_element_t elem)
@@ -2751,25 +2742,16 @@ __startup_func
 static void
 user_data_attr_manager_init(void)
 {
-#if defined(MACH_VOUCHER_ATTR_KEY_USER_DATA)
 	ipc_register_well_known_mach_voucher_attr_manager(&user_data_manager,
 	    (mach_voucher_attr_value_handle_t)0,
 	    MACH_VOUCHER_ATTR_KEY_USER_DATA,
 	    &user_data_control);
-#endif
-#if defined(MACH_VOUCHER_ATTR_KEY_TEST)
-	ipc_register_well_known_mach_voucher_attr_manager(&user_data_manager,
-	    (mach_voucher_attr_value_handle_t)0,
-	    MACH_VOUCHER_ATTR_KEY_TEST,
-	    &test_control);
-#endif
-#if defined(MACH_VOUCHER_ATTR_KEY_USER_DATA) || defined(MACH_VOUCHER_ATTR_KEY_TEST)
+
 	for (int i = 0; i < USER_DATA_HASH_BUCKETS; i++) {
 		queue_init(&user_data_bucket[i]);
 	}
-#endif
 }
 STARTUP(MACH_IPC, STARTUP_RANK_FIRST, user_data_attr_manager_init);
 
-#endif /* MACH_VOUCHER_ATTR_KEY_USER_DATA || MACH_VOUCHER_ATTR_KEY_TEST */
+#endif /* MACH_VOUCHER_ATTR_KEY_USER_DATA */
 #endif /* CONFIG_VOUCHER_DEPRECATED */

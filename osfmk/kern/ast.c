@@ -77,6 +77,10 @@
 #include <vm/vm_map_xnu.h> // for vm_map_enter_large_telemetry_ast
 #include <stdatomic.h>
 
+#if CONFIG_SPTM
+#include <arm64/sop.h>
+#endif
+
 #if CONFIG_ARCADE
 #include <kern/arcade.h>
 #endif
@@ -281,6 +285,17 @@ ast_taken_user(void)
 	}
 
 	splx(s);
+
+#if CONFIG_SPTM
+	/*
+	 * Clean up any redzone stack page that was mapped during exception handling.
+	 * This must be done before returning to userspace to avoid leaking kernel
+	 * memory pages.
+	 */
+	if (thread->machine.kredzonestack) {
+		sop_unmap_redzone_page(thread);
+	}
+#endif
 
 	/*
 	 * Here's a good place to put assertions of things which must be true

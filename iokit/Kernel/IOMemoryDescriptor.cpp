@@ -4948,9 +4948,6 @@ IOGeneralMemoryDescriptor::dmaMap(
 	IOReturn          err = kIOReturnSuccess;
 	ioGMDData *       dataP;
 	IOOptionBits      type = _flags & kIOMemoryTypeMask;
-	mach_vm_address_t range0Addr = 0;
-	mach_vm_size_t    range0Len = 0;
-	Ranges            vec = _ranges;
 
 	*mapAddress = 0;
 	if (kIOMemoryHostOnly & _flags) {

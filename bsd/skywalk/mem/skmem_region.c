@@ -1690,12 +1690,13 @@ sksegment_freelist_insert(struct skmem_region *skr, struct sksegment *sg,
 		/*
 		 * Let the client remove the memory from IOMMU, and unwire it.
 		 */
-		if (skr->skr_seg_dtor != NULL) {
-			skr->skr_seg_dtor(sg, sg->sg_md, skr->skr_private);
+		if (sg->sg_state != SKSEG_STATE_DETACHED) {
+			ASSERT(sg->sg_state == SKSEG_STATE_MAPPED ||
+			    sg->sg_state == SKSEG_STATE_MAPPED_WIRED);
+			if (skr->skr_seg_dtor != NULL) {
+				skr->skr_seg_dtor(sg, sg->sg_md, skr->skr_private);
+			}
 		}
-
-		ASSERT(sg->sg_state == SKSEG_STATE_MAPPED ||
-		    sg->sg_state == SKSEG_STATE_MAPPED_WIRED);
 
 		IOSKRegionClearBufferDebug(skr->skr_reg, sg->sg_index, &md);
 		VERIFY(sg->sg_md == md);
@@ -1738,6 +1739,20 @@ sksegment_freelist_insert(struct skmem_region *skr, struct sksegment *sg,
 	ASSERT(skr->skr_seg_free_cnt <= skr->skr_seg_max_cnt);
 }
 
+static inline void
+sksegment_lists_remove(struct skmem_region *skr, struct sksegment *sg)
+{
+	TAILQ_REMOVE(&skr->skr_seg_free, sg, sg_link);
+	sg->sg_link.tqe_next = NULL;
+	sg->sg_link.tqe_prev = NULL;
+	RB_REMOVE(segtfreehead, &skr->skr_seg_tfree, sg);
+	sg->sg_node.rbe_left = NULL;
+	sg->sg_node.rbe_right = NULL;
+	sg->sg_node.rbe_parent = NULL;
+
+	ASSERT(skr->skr_seg_free_cnt != 0);
+	--skr->skr_seg_free_cnt;
+}
 /*
  * Remove a segment from the freelist (allocating the segment).
  */
@@ -1774,55 +1789,26 @@ sksegment_freelist_remove(struct skmem_region *skr, struct sksegment *sg,
 	}
 #endif /* (DEVELOPMENT || DEBUG) */
 
-	TAILQ_REMOVE(&skr->skr_seg_free, sg, sg_link);
-	sg->sg_link.tqe_next = NULL;
-	sg->sg_link.tqe_prev = NULL;
-	RB_REMOVE(segtfreehead, &skr->skr_seg_tfree, sg);
-	sg->sg_node.rbe_left = NULL;
-	sg->sg_node.rbe_right = NULL;
-	sg->sg_node.rbe_parent = NULL;
-
-	ASSERT(skr->skr_seg_free_cnt != 0);
-	--skr->skr_seg_free_cnt;
-
+	ASSERT(sg->sg_md == NULL);
+	ASSERT(sg->sg_start == 0 && sg->sg_end == 0);
+	ASSERT(sg->sg_state == SKSEG_STATE_DETACHED);
 	/*
 	 * If the region is being depopulated, then we're done.
 	 */
 	if (__improbable(purging)) {
-		ASSERT(sg->sg_md == NULL);
-		ASSERT(sg->sg_start == 0 && sg->sg_end == 0);
-		ASSERT(sg->sg_state == SKSEG_STATE_DETACHED);
 		sg->sg_type = SKSEG_TYPE_DESTROYED;
+		sksegment_lists_remove(skr, sg);
 		return sg;
 	}
-
-	ASSERT(sg->sg_md == NULL);
-	ASSERT(sg->sg_start == 0 && sg->sg_end == 0);
-	ASSERT(sg->sg_state == SKSEG_STATE_DETACHED);
 
 	/* created as non-volatile (mapped) upon success */
 	if ((sg->sg_md = IOSKMemoryBufferCreate(skr->skr_seg_size,
 	    &skr->skr_bufspec, &segstart)) == NULL) {
 		ASSERT(sg->sg_type == SKSEG_TYPE_FREE);
-		if (skmflag & SKMEM_PANIC) {
-			/* if the caller insists for a success then panic */
-			panic_plain("\"%s\": skr 0x%p sg 0x%p (idx %u) unable "
-			    "to satisfy mandatory allocation\n", skr->skr_name,
-			    skr, sg, sg->sg_index);
-			/* NOTREACHED */
-			__builtin_unreachable();
-		}
-		/* reinsert this segment to freelist */
-		ASSERT(sg->sg_link.tqe_next == NULL);
-		ASSERT(sg->sg_link.tqe_prev == NULL);
-		TAILQ_INSERT_HEAD(&skr->skr_seg_free, sg, sg_link);
-		ASSERT(sg->sg_node.rbe_left == NULL);
-		ASSERT(sg->sg_node.rbe_right == NULL);
-		ASSERT(sg->sg_node.rbe_parent == NULL);
-		RB_INSERT(segtfreehead, &skr->skr_seg_tfree, sg);
-		++skr->skr_seg_free_cnt;
-		return NULL;
+		goto fail;
 	}
+
+	sksegment_lists_remove(skr, sg);
 
 	sg->sg_start = segstart;
 	sg->sg_end = (segstart + skr->skr_seg_size);
@@ -1853,6 +1839,10 @@ sksegment_freelist_remove(struct skmem_region *skr, struct sksegment *sg,
 		panic("Fail to set md %p, err %d", sg->sg_md, err);
 	}
 
+	sg->sg_type = SKSEG_TYPE_ALLOC;
+
+	/* any failures after this can make a full call to sksegment_freelist_insert() */
+
 	/*
 	 * Let the client wire it and insert to IOMMU, if applicable.
 	 * Try to find out if it's wired and set the right state.
@@ -1861,31 +1851,9 @@ sksegment_freelist_remove(struct skmem_region *skr, struct sksegment *sg,
 		ret = skr->skr_seg_ctor(sg, sg->sg_md, skr->skr_private);
 		/* Handle segment creation failure from driver power down */
 		if (__improbable(ret != 0)) {
-			SK_ERR("segment constructor for sg %p failed, err %d", sg, ret);
 			if (ret == ENOMEM) {
-				/*
-				 * Undo IOSKMemoryBufferCreate, IOSKMemoryReclaim,
-				 * IOSKMemoryWire, and IOSKRegionSetBuffer.
-				 */
-				IOSKMemoryBufferRef __single md;
-				IOSKRegionClearBufferDebug(skr->skr_reg, sg->sg_index, &md);
-				VERIFY(sg->sg_md == md);
-				if ((skr->skr_mode & SKR_MODE_PERSISTENT) &&
-				    !(skr->skr_mode & SKR_MODE_MEMTAG)) {
-					err = IOSKMemoryUnwire(md);
-					if (err != kIOReturnSuccess) {
-						panic("Fail to unwire md %p, err %d", md, err);
-					}
-				}
-				/* mark memory as empty/discarded for consistency */
-				if (!(skr->skr_mode & SKR_MODE_MEMTAG)) {
-					err = IOSKMemoryDiscard(md);
-					if (err != kIOReturnSuccess) {
-						panic("Fail to discard md %p, err %d", md, err);
-					}
-				}
-				IOSKMemoryDestroy(md);
-				return NULL;
+				sksegment_freelist_insert(skr, sg, FALSE);
+				goto fail;
 			}
 		}
 	}
@@ -1896,8 +1864,18 @@ sksegment_freelist_remove(struct skmem_region *skr, struct sksegment *sg,
 	ASSERT(sg->sg_md != NULL);
 	ASSERT(sg->sg_start != 0 && sg->sg_end != 0);
 
-	sg->sg_type = SKSEG_TYPE_ALLOC;
 	return sg;
+
+fail:
+	if (skmflag & SKMEM_PANIC) {
+		/* if the caller insists for a success then panic */
+		panic_plain("\"%s\": skr 0x%p sg 0x%p (idx %u) unable "
+		    "to satisfy mandatory allocation\n", skr->skr_name,
+		    skr, sg, sg->sg_index);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+	return NULL;
 }
 
 /*

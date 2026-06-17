@@ -249,6 +249,11 @@ typedef struct {
  *	This flag must be passed when the allocation is for kernel stacks.
  *	This only has an effect on Intel.
  *
+ * @const KMEM_GUARD_STACK (alloc, realloc, free)
+ *	Adds an additional fictitious guard page right after the first guard page.
+ *	This is used for kernel stacks to allow for on-demand expansion of the
+ *	guard region. Must be used with @c KMEM_GUARD_FIRST.
+ *
  * @const KMEM_NOENCRYPT (alloc)
  *	Obsolete, will be repurposed soon.
  *
@@ -297,6 +302,7 @@ __options_decl(kmem_flags_t, uint32_t, {
 	KMEM_NOENCRYPT      = 0x02000000,
 	KMEM_KASAN_GUARD    = 0x04000000,
 	KMEM_TAG            = 0x08000000,
+	KMEM_GUARD_STACK    = 0x10000000,
 });
 
 
@@ -484,6 +490,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_NOENCRYPT       = KMEM_NOENCRYPT,
 	KMA_KASAN_GUARD     = KMEM_KASAN_GUARD,
 	KMA_TAG             = KMEM_TAG,
+	KMA_GUARD_STACK     = KMEM_GUARD_STACK,
 });
 
 
@@ -684,6 +691,7 @@ __options_decl(kmr_flags_t, uint32_t, {
 	/* Entry properties */
 	KMR_GUARD_FIRST     = KMEM_GUARD_FIRST,
 	KMR_GUARD_LAST      = KMEM_GUARD_LAST,
+	KMR_GUARD_STACK     = KMEM_GUARD_STACK,
 	KMR_KASAN_GUARD     = KMEM_KASAN_GUARD,
 	KMR_TAG             = KMEM_TAG,
 });
@@ -785,6 +793,7 @@ __options_decl(kmf_flags_t, uint32_t, {
 	/* Entry properties */
 	KMF_GUARD_FIRST     = KMEM_GUARD_FIRST,
 	KMF_GUARD_LAST      = KMEM_GUARD_LAST,
+	KMF_GUARD_STACK     = KMEM_GUARD_STACK,
 	KMF_KASAN_GUARD     = KMEM_KASAN_GUARD,
 	KMF_TAG             = KMEM_TAG,
 });

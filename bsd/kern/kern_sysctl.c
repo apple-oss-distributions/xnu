@@ -272,8 +272,7 @@ int
 sysctl_procargs(int *name, u_int namelen, user_addr_t where,
     size_t *sizep, proc_t cur_proc);
 STATIC int
-sysctl_procargsx(int *name, u_int namelen, user_addr_t where, size_t *sizep,
-    proc_t cur_proc, int argc_yes);
+sysctl_procargsx(int *name, u_int namelen, user_addr_t where, size_t *sizep, int argc_yes);
 int
 sysctl_struct(user_addr_t oldp, size_t *oldlenp, user_addr_t newp,
     size_t newlen, void *sp, int len);
@@ -1283,7 +1282,7 @@ sysctl_doprocargs SYSCTL_HANDLER_ARGS
 //	size_t newlen = req->newlen;	/* user buffer copy in size */
 	int error;
 
-	error =  sysctl_procargsx( name, namelen, oldp, oldlenp, current_proc(), 0);
+	error =  sysctl_procargsx( name, namelen, oldp, oldlenp, 0);
 
 	/* adjust index so we return the right required/consumed amount */
 	if (!error) {
@@ -1312,7 +1311,7 @@ sysctl_doprocargs2 SYSCTL_HANDLER_ARGS
 //	size_t newlen = req->newlen;	/* user buffer copy in size */
 	int error;
 
-	error = sysctl_procargsx( name, namelen, oldp, oldlenp, current_proc(), 1);
+	error = sysctl_procargsx( name, namelen, oldp, oldlenp, 1);
 
 	/* adjust index so we return the right required/consumed amount */
 	if (!error) {
@@ -1328,10 +1327,93 @@ SYSCTL_PROC(_kern, KERN_PROCARGS2, procargs2, CTLTYPE_NODE | CTLFLAG_RD | CTLFLA
     NULL,                       /* Data pointer */
     "");
 
+static bool
+is_procargs_content_read_permitted(proc_t p)
+{
+	smr_proc_task_enter();
+	uid_t uid = kauth_cred_getuid(proc_ucred_smr(p));
+	smr_proc_task_leave();
+
+	if ((uid != kauth_cred_getuid(kauth_cred_get()))
+	    && suser(kauth_cred_get(), &current_proc()->p_acflag)) {
+		return false;
+	}
+
+	return true;
+}
+
+
 #define SYSCTL_PROCARGS_READ_ENVVARS_ENTITLEMENT "com.apple.private.read-environment-variables"
+
+/*
+ * Handle KERN_PROCARGS/KERN_PROCARGS2 for processes with the no-read-procargs entitlement.
+ *
+ * When a process has the entitlement at exec time, we save argv[0] in p_execpath.
+ * This function returns a synthetic response using that saved path instead of
+ * reading from the process's memory, which could be modified by malicious
+ * code.
+ *
+ * Called with the remote proc referenced and unlocked.
+ * Returns with the remote proc unreferenced and unlocked.
+ */
 STATIC int
-sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
-    size_t *sizep, proc_t cur_proc, int argc_yes)
+sysctl_procargs_no_read(proc_t p, user_addr_t where, size_t *sizep, int argc_yes)
+{
+	if (!is_procargs_content_read_permitted(p)) {
+		proc_rele(p);
+		return EINVAL;
+	}
+
+	size_t buflen = *sizep;
+	size_t argslen = 0;
+
+	/*
+	 * Format:
+	 * - int argc, set to 1 (if requested)
+	 * - exec path (null-terminated)
+	 * - one null byte padding
+	 * - argv[0], set to exec path (null-terminated)
+	 */
+	char output[sizeof(int) + MAXPATHLEN + 1 + MAXPATHLEN];
+
+	/* Write argc if requested */
+	if (argc_yes) {
+		int argc = 1;
+		memcpy(output, &argc, sizeof(int));
+		argslen += sizeof(int);
+	}
+
+	/*
+	 * Write exec path, padding null, and argv[0] (= exec path again).
+	 *
+	 * We do not need to take any lock to view p_execpath here, as it's stable
+	 * between exec and process exit while we have a reference to the proc.
+	 */
+	argslen += snprintf(output + argslen, MAXPATHLEN + 1 + MAXPATHLEN,
+	    "%s%c%c%s", p->p_execpath, '\0', '\0', p->p_execpath);
+
+	/* snprintf's return value excludes the null terminator */
+	argslen += 1;
+
+	/* snprintf can return more than it wrote (but this should never happen here) */
+	assert(argslen <= sizeof(output));
+
+	/* Drop proc ref before copyout */
+	proc_rele(p);
+
+	if (where == USER_ADDR_NULL) {
+		*sizep = argslen;
+		return 0;
+	}
+
+	/* Don't copyout more than the user asked for. */
+	*sizep = MIN(buflen, argslen);
+
+	return copyout(output, where, *sizep);
+}
+
+STATIC int
+sysctl_procargsx(int *name, u_int namelen, user_addr_t where, size_t *sizep, int argc_yes)
 {
 	assert(sizep != NULL);
 	proc_t p = NULL;
@@ -1349,7 +1431,6 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 	vm_offset_t     smallbuffer_start;
 	kern_return_t ret;
 	int pid;
-	uid_t uid;
 	int argc = -1;
 	size_t argvsize;
 	size_t remaining;
@@ -1385,6 +1466,15 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 	if (p == NULL) {
 		error = EINVAL;
 		goto finish;
+	}
+
+	/*
+	 * Processes may opt out of having their procargs read externally by
+	 * setting the com.apple.private.no-read-procargs entitlement.
+	 * p_execpath will be non-NULL iff the entitlement is present.
+	 */
+	if (p != current_proc() && p->p_execpath != NULL) {
+		return sysctl_procargs_no_read(p, where, sizep, argc_yes);
 	}
 
 	/* Allow reading environment variables if any of the following are true:
@@ -1446,12 +1536,7 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 		goto calculate_size;
 	}
 
-	smr_proc_task_enter();
-	uid = kauth_cred_getuid(proc_ucred_smr(p));
-	smr_proc_task_leave();
-
-	if ((uid != kauth_cred_getuid(kauth_cred_get()))
-	    && suser(kauth_cred_get(), &cur_proc->p_acflag)) {
+	if (!is_procargs_content_read_permitted(p)) {
 		error = EINVAL;
 		goto finish;
 	}
@@ -1497,7 +1582,7 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 	arg_addr = user_stack - arg_size;
 
 	ret = kmem_alloc(kernel_map, &copy_start, arg_size,
-	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD);
+	    KMA_DATA_SHARED | KMA_ZERO, VM_KERN_MEMORY_BSD);
 	if (ret != KERN_SUCCESS) {
 		error = ENOMEM;
 		goto finish;
@@ -3400,6 +3485,19 @@ extern unsigned int sc_dump_mode;
 SYSCTL_UINT(_kern, OID_AUTO, secure_coredump, CTLFLAG_RD, &sc_dump_mode, 0, "secure_coredump");
 
 #endif /* EXCLAVES_COREDUMP */
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+
+/* Stack overflow protection debug counters. */
+extern uint32_t sop_redzone_alloc_count;
+SYSCTL_UINT(_kern, OID_AUTO, sop_redzone_alloc_count, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &sop_redzone_alloc_count, 0, "Number of times a redzone stack page was allocated");
+
+extern uint32_t sop_redzone_free_count;
+SYSCTL_UINT(_kern, OID_AUTO, sop_redzone_free_count, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &sop_redzone_free_count, 0, "Number of times a redzone stack page was freed");
+
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 #if CONFIG_COREDUMP || CONFIG_UCOREDUMP
 

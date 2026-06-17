@@ -48,6 +48,8 @@
 #define RECOUNT_THREAD_BASED_LEVEL 0
 #endif // !__arm64__
 
+#define RECOUNT_CPU_KIND_COUNT 2
+
 __BEGIN_DECLS;
 
 // Recount maintains counters for resources used by software, like CPU time and cycles.
@@ -81,9 +83,12 @@ size_t recount_topo_count(recount_topo_t topo);
 
 // Recount's definitions of CPU kinds, in lieu of one from the platform layers.
 __enum_decl(recount_cpu_kind_t, unsigned int, {
-	RCT_CPU_EFFICIENCY,
-	RCT_CPU_PERFORMANCE,
-	RCT_CPU_KIND_COUNT,
+	RCT_CPU_PERFORMANCE = 0,
+#if HAS_MCORE
+	RCT_CPU_MP_EFFICIENT = 1,
+#endif // HAS_MCORE
+	// Either 1 or 2, depending on how many CPU kinds are present on the system.
+	RCT_CPU_EFFICIENCY = RECOUNT_CPU_KIND_COUNT - 1,
 });
 
 // A `recount_plan` structure controls the granularity of counting for a set of tracks and must be consulted when updating their counters.
@@ -163,15 +168,6 @@ void recount_usage_free(recount_topo_t topo, struct recount_usage *usage);
 void recount_sum(recount_plan_t plan, const struct recount_track *tracks,
     struct recount_usage *sum);
 
-// Summarize tracks into a total sum and another for a particular CPU kind.
-void recount_sum_and_isolate_cpu_kind(recount_plan_t plan,
-    struct recount_track *tracks, recount_cpu_kind_t kind,
-    struct recount_usage *sum, struct recount_usage *only_kind);
-// The same as above, but for usage-only objects, like coalitions.
-void recount_sum_usage_and_isolate_cpu_kind(recount_plan_t plan,
-    struct recount_usage *usage_list, recount_cpu_kind_t kind,
-    struct recount_usage *sum, struct recount_usage *only_kind);
-
 // Sum the counters for each perf-level, in the order returned by the sysctls.
 void recount_sum_perf_levels(recount_plan_t plan,
     struct recount_track *tracks, struct recount_usage *sums);
@@ -203,23 +199,31 @@ void recount_thread_perf_level_usage(struct thread *thread,
     struct recount_usage *usage_levels);
 uint64_t recount_thread_time_mach(struct thread *thread);
 struct recount_times_mach recount_thread_times(struct thread *thread);
+// For use by stackshot, running under the kernel debugger.
+void recount_thread_usage_cpu_kinds_kdp(struct thread *thread,
+    struct recount_usage *usage_all, struct recount_usage *usage_perf,
+    struct recount_usage *usage_mp);
 
 // Read the current thread's usage data, accumulating counts until now.
 //
 // Interrupts must be disabled.
 void recount_current_thread_usage(struct recount_usage *usage);
 struct recount_times_mach recount_current_thread_times(void);
-void recount_current_thread_usage_perf_only(struct recount_usage *usage,
-    struct recount_usage *usage_perf_only);
+void recount_current_thread_usage_cpu_kinds(struct recount_usage *usage_all,
+    struct recount_usage *usage_perf, struct recount_usage *usage_mp);
 void recount_current_thread_perf_level_usage(struct recount_usage
     *usage_levels);
 uint64_t recount_current_thread_time_mach(void);
 uint64_t recount_current_thread_user_time_mach(void);
 uint64_t recount_current_thread_interrupt_time_mach(void);
 uint64_t recount_current_thread_energy_nj(void);
+
+// Read the current task's usage data.
 void recount_current_task_usage(struct recount_usage *usage);
-void recount_current_task_usage_perf_only(struct recount_usage *usage,
-    struct recount_usage *usage_perf_only);
+
+// Emit instructions and cycles for threads and tasks.
+void recount_current_thread_trace_cpi(void);
+void recount_current_task_trace_cpi(void);
 
 // Access a work interval's usage data.
 void recount_work_interval_usage(struct work_interval *work_interval, struct recount_usage *usage);
@@ -229,8 +233,8 @@ uint64_t recount_work_interval_energy_nj(struct work_interval *work_interval);
 // Access another task's usage data.
 void recount_task_usage(struct task *task, struct recount_usage *usage);
 struct recount_times_mach recount_task_times(struct task *task);
-void recount_task_usage_perf_only(struct task *task, struct recount_usage *sum,
-    struct recount_usage *sum_perf_only);
+void recount_task_usage_cpu_kinds(struct task *task, struct recount_usage *sum,
+    struct recount_usage *sum_perf_only, struct recount_usage *sum_mp_only);
 void recount_task_times_perf_only(struct task *task,
     struct recount_times_mach *sum, struct recount_times_mach *sum_perf_only);
 uint64_t recount_task_energy_nj(struct task *task);
@@ -241,8 +245,9 @@ bool recount_task_thread_perf_level_usage(struct task *task, uint64_t tid,
 void recount_task_terminated_usage(struct task *task,
     struct recount_usage *sum);
 struct recount_times_mach recount_task_terminated_times(struct task *task);
-void recount_task_terminated_usage_perf_only(struct task *task,
-    struct recount_usage *sum, struct recount_usage *perf_only);
+void recount_task_terminated_usage_cpu_kinds(struct task *task,
+    struct recount_usage *usage_all, struct recount_usage *usage_perf,
+    struct recount_usage *usage_mp);
 
 int proc_pidthreadcounts(struct proc *p, uint64_t thuniqueid, user_addr_t uaddr,
     size_t usize, int *ret);
@@ -254,11 +259,6 @@ int proc_pidthreadcounts(struct proc *p, uint64_t thuniqueid, user_addr_t uaddr,
 #include <kern/smp.h>
 #include <mach/machine/thread_status.h>
 #include <machine/machine_routines.h>
-
-#if __arm64__
-static_assert((RCT_CPU_EFFICIENCY > RCT_CPU_PERFORMANCE) ==
-    (CLUSTER_TYPE_E > CLUSTER_TYPE_P));
-#endif // __arm64__
 
 #pragma mark threads
 
@@ -328,8 +328,9 @@ void recount_coalition_init(struct recount_coalition *co);
 void recount_coalition_deinit(struct recount_coalition *co);
 
 // Get the sum of all currently-exited tasks in the coalition, and a separate P-only structure.
-void recount_coalition_usage_perf_only(struct recount_coalition *coal,
-    struct recount_usage *sum, struct recount_usage *sum_perf_only);
+void recount_coalition_usage_cpu_kinds(struct recount_coalition *coal,
+    struct recount_usage *sum, struct recount_usage *sum_perf_only,
+    struct recount_usage *sum_mp_only);
 
 #pragma mark processors
 
@@ -356,12 +357,7 @@ struct recount_processor {
 	uint64_t rpr_idle_time_mach;
 	_Atomic uint64_t rpr_state_last_abs_time;
 	_Atomic uint64_t rpr_idle_count;
-#if __AMP__
-	// Cache the RCT_TOPO_CPU_KIND offset, which cannot change.
-	uint8_t rpr_cpu_kind_index;
-#endif // __AMP__
 };
-void recount_processor_init(struct processor *processor);
 
 // Get a snapshot of the processor's usage, along with an up-to-date snapshot
 // of its idle time (to now if the processor is currently idle).

@@ -16,6 +16,8 @@
     T_META_REQUIRES_SYSTCL_EQ("kern.pervasive_energy", 1)
 #define REQUIRE_MULTIPLE_PERF_LEVELS \
     T_META_REQUIRES_SYSCTL_NE("hw.nperflevels", 1)
+#define REQUIRE_PME_PERF_LEVELS \
+	T_META_REQUIRES_SYSCTL_EQ("hw.nperflevels", 3)
 #define REQUIRE_EXCLAVES \
     T_META_REQUIRES_SYSCTL_EQ("kern.exclaves_status", 1)
 #define SET_THREAD_BIND_BOOTARG \

@@ -26,8 +26,8 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#ifndef OS_X18_H
-#define OS_X18_H
+#ifndef OS_ARCH_ARM64_H
+#define OS_ARCH_ARM64_H
 
 #if defined(__arm64__)
 
@@ -40,7 +40,7 @@
 __BEGIN_DECLS
 
 /*!
- * @function os_custom_x18_abi
+ * @function os_set_custom_x18_abi_enabled
  *
  * @abstract
  *
@@ -62,42 +62,49 @@ __BEGIN_DECLS
  *
  * This API enables per-thread use of x18 under such special
  * circumstances. To use it, application code must issue
- * `os_custom_x18_abi(true)` at the boundary between the regular macOS
- * application code and the code using the custom ABI. When in this
- * mode, x18 behaves like any other general purpose register for this
- * thread: It has no other semantics towards the operating system
- * other than holding arbitrary values, and it will get saved and
- * restored across context switches like any other GPR. When switching
- * back from the custom ABI code to macOS application code,
- * `os_custom_x18_abi(false)` must then be issued, in order to restore
- * the proper system-defined operating semantics for x18 again.
+ * `os_set_custom_x18_abi_enabled(true)` at the boundary between the
+ * regular macOS application code and the code using the custom
+ * ABI. When in this mode, x18 behaves like any other general purpose
+ * register for this thread: It has no other semantics towards the
+ * operating system other than holding arbitrary values, and it will
+ * get saved and restored across context switches like any other
+ * GPR. When switching back from the custom ABI code to macOS
+ * application code, `os_set_custom_x18_abi_enabled(false)` must then
+ * be issued, in order to restore the proper system-defined operating
+ * semantics for x18 again.
  *
- * Note that code running after `os_custom_x18_abi(true)` must not
- * call, directly or in the form of callbacks, into any macOS
+ * Note that code running after `os_set_custom_x18_abi_enabled(true)`
+ * must not call, directly or in the form of callbacks, into any macOS
  * library/framework code in the current thread, with the exception of
- * `os_custom_x18_abi() and `os_custom_x18_abi_get()` themselves.
+ * `os_set_custom_x18_abi_enabled()` and `os_custom_x18_abi_enabled()`
+ * themselves.
+ *
+ * This function strictly toggles the state: calling it with the same
+ * value as the current state will cause the process to abort.
  *
  * Great care must also be taken with signal handlers and other
  * asynchronous code entry points. These should either not call into
  * any macOS library/framework code (note that this includes POSIX
  * interfaces), or bracket such calls between
- * `os_custom_x18_abi(false)` and `os_custom_x18_abi(true)`, iff the
- * custom x18 ABI is enabled according to `os_custom_x18_abi_get()`.
- * Any other regular limitations for signal handler code calling into
- * OS functions apply as well. Unless the use of signals is absolutely
+ * `os_set_custom_x18_abi_enabled(false)` and
+ * `os_set_custom_x18_abi_enabled(true)`, iff the custom x18 ABI is
+ * enabled according to `os_custom_x18_abi_enabled()`.  Any other
+ * regular limitations for signal handler code calling into OS
+ * functions apply as well. Unless the use of signals is absolutely
  * required, masking all signals before entering custom x18 ABI mode
  * avoids any complication with signal handlers.
  *
  * Also note that the operating system does not preserve any x18 value
- * from within the custom ABI code across `os_custom_x18_abi()`
- * calls. Effectively, calling `os_custom_x18_abi(false)` destroys
- * x18's value. In the likely case that the application code wishes to
- * preserve x18's content for the custom ABI code, the application
- * code must save and restore the affected thread's x18 value itself.
+ * from within the custom ABI code across
+ * `os_set_custom_x18_abi_enabled()` calls. Effectively, calling
+ * `os_set_custom_x18_abi_enabled(false)` destroys x18's value. In the
+ * likely case that the application code wishes to preserve x18's
+ * content for the custom ABI code, the application code must save and
+ * restore the affected thread's x18 value itself.
  *
- * `os_custom_x18_abi()` will, however, properly save and restore x18
- * for its system-defined operating semantics, meaning that
- * application code must not restore x18 in the other direction,
+ * `os_set_custom_x18_abi_enabled()` will, however, properly save and
+ * restore x18 for its system-defined operating semantics, meaning
+ * that application code must not restore x18 in the other direction,
  * i.e. after switching back from custom ABI code to macOS code, nor
  * does it have to save the value before entering custom ABI code (the
  * application code may actually not have the proper information to do
@@ -110,28 +117,29 @@ __BEGIN_DECLS
  *
  */
 
-API_UNAVAILABLE(ios, tvos, watchos, bridgeos) API_AVAILABLE(macos(16.4))
+API_UNAVAILABLE(ios, tvos, watchos, bridgeos) API_AVAILABLE(macos(26.4))
 extern
-void os_custom_x18_abi(bool custom);
+void os_set_custom_x18_abi_enabled(bool custom);
 
 /*!
- * @function os_custom_x18_abi_get
+ * @function os_custom_x18_abi_enabled
  *
  * @abstract
  *
  * Returns whether custom x18 ABI mode is enabled.
  *
  * This can be used to determine if the custom x18 ABI needs temporary
- * disablement prior to calling into any macOS code, e.g. in signal handlers.
+ * disablement prior to calling into any macOS code, e.g. in signal
+ * handlers.
  *
  * @return `true` iff custom x18 ABI is enabled.
  */
-API_UNAVAILABLE(ios, tvos, watchos, bridgeos) API_AVAILABLE(macos(16.4))
+API_UNAVAILABLE(ios, tvos, watchos, bridgeos) API_AVAILABLE(macos(26.4))
 extern
-bool os_custom_x18_abi_get(void);
+bool os_custom_x18_abi_enabled(void);
 
 __END_DECLS
 
 #endif // defined(__arm64__)
 
-#endif // OS_X18_H
+#endif // OS_ARCH_ARM64_H

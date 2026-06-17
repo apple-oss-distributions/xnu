@@ -196,6 +196,9 @@ typedef struct host_priority_info       *host_priority_info_t;
 #define HOST_VM_INFO64          4       /* 64-bit virtual memory stats */
 #define HOST_EXTMOD_INFO64      5       /* External modification stats */
 #define HOST_EXPIRED_TASK_INFO  6       /* Statistics for expired tasks */
+#if PRIVATE
+#define HOST_VM_COMPRESSOR_Q_LENS 7
+#endif /* PRIVATE */
 
 #if PRIVATE
 struct vm_compressor_q_lens {
@@ -215,7 +218,6 @@ struct vm_compressor_q_lens {
 }; /* PRIVATE */
 
 typedef struct vm_compressor_q_lens       vm_compressor_q_lens_data_t;
-#define HOST_VM_COMPRESSOR_Q_LENS 7
 #define VM_COMPRESSOR_Q_LENS_COUNT ((mach_msg_type_number_t) \
 	        (sizeof(struct vm_compressor_q_lens)/sizeof(integer_t)))
 #endif
@@ -246,7 +248,9 @@ typedef struct vm_purgeable_info        *host_purgable_info_t;
 
 /* size of the latest version of the structure */
 #define HOST_VM_INFO64_LATEST_COUNT HOST_VM_INFO64_COUNT
-#define HOST_VM_INFO64_REV2_COUNT HOST_VM_INFO64_COUNT
+#define HOST_VM_INFO64_REV3_COUNT HOST_VM_INFO64_COUNT
+#define HOST_VM_INFO64_REV2_COUNT ((mach_msg_type_number_t) \
+	 (offsetof(vm_statistics64_data_t, total_tag_storage_pages) / sizeof(integer_t)))
 #define HOST_VM_INFO64_REV1_COUNT ((mach_msg_type_number_t) \
 	 (offsetof(vm_statistics64_data_t, swapped_count) / sizeof(integer_t)))
 /* previous versions: adjust the size according to what was added each time */

@@ -145,8 +145,43 @@ struct test_hw_topology two_of_each = {
 	}
 };
 
+#if HAS_MCORE
+struct test_hw_topology sotra_chop = {
+	.num_cpus = 18,
+	.boot_cpu = 6,
+	.cpu_ranges = {
+		{
+			.cpu_type = TEST_CPU_TYPE_MP_OPTIMIZED,
+			.cluster_id = 0,
+			.die_id = 0,
+			.first_cpu_id = 0,
+			.num_cpus = 6,
+		},
+		{
+			.cpu_type = TEST_CPU_TYPE_MP_OPTIMIZED,
+			.cluster_id = 1,
+			.die_id = 0,
+			.first_cpu_id = 6,
+			.num_cpus = 6,
+		},
+		{
+			.cpu_type = TEST_CPU_TYPE_PERFORMANCE,
+			.cluster_id = 2,
+			.die_id = 0,
+			.first_cpu_id = 12,
+			.num_cpus = 6,
+		},
+	}
+};
 
+
+#endif /* HAS_MCORE */
+
+#if HAS_MCORE
+#define MAX_NODES 3
+#else /* !HAS_MCORE */
 #define MAX_NODES 2
+#endif /* !HAS_MCORE */
 
 const unsigned int EDGE_REBAL_RUNNABLE = MACH_SCHED_EDGE_REBAL_RUNNABLE;
 const unsigned int EDGE_REBAL_RUNNING = MACH_SCHED_EDGE_REBAL_RUNNING;

@@ -1472,7 +1472,7 @@ get_stackshot_est_tasksize(uint64_t trace_flags)
 	    sizeof_if_traceflag(struct io_stats_snapshot, STACKSHOT_INSTRS_CYCLES) +
 	    sizeof_if_traceflag(uint32_t, STACKSHOT_ASID) +
 	    sizeof_if_traceflag(sizeof(uintptr_t) * STACKSHOT_PAGETABLE_BUFSZ, STACKSHOT_PAGE_TABLES) +
-	    sizeof_if_traceflag(struct instrs_cycles_snapshot_v2, STACKSHOT_INSTRS_CYCLES) +
+	    sizeof_if_traceflag(struct instrs_cycles_snapshot_v3, STACKSHOT_INSTRS_CYCLES) +
 	    sizeof(struct stackshot_cpu_architecture) +
 	    sizeof(struct stackshot_task_codesigning_info);
 
@@ -3852,14 +3852,17 @@ error_exit:
 static kern_return_t
 kcdata_record_task_instrs_cycles(kcdata_descriptor_t kcd, task_t task)
 {
-	struct instrs_cycles_snapshot_v2 instrs_cycles = { 0 };
-	struct recount_usage usage = { 0 };
-	struct recount_usage perf_only = { 0 };
-	recount_task_terminated_usage_perf_only(task, &usage, &perf_only);
-	instrs_cycles.ics_instructions = recount_usage_instructions(&usage);
-	instrs_cycles.ics_cycles = recount_usage_cycles(&usage);
-	instrs_cycles.ics_p_instructions = recount_usage_instructions(&perf_only);
-	instrs_cycles.ics_p_cycles = recount_usage_cycles(&perf_only);
+	struct instrs_cycles_snapshot_v3 instrs_cycles = { 0 };
+	struct recount_usage usage_all = { 0 };
+	struct recount_usage usage_perf = { 0 };
+	struct recount_usage usage_mp = { 0 };
+	recount_task_terminated_usage_cpu_kinds(task, &usage_all, &usage_perf, &usage_mp);
+	instrs_cycles.ics_instructions = recount_usage_instructions(&usage_all);
+	instrs_cycles.ics_cycles = recount_usage_cycles(&usage_all);
+	instrs_cycles.ics_p_instructions = recount_usage_instructions(&usage_perf);
+	instrs_cycles.ics_p_cycles = recount_usage_cycles(&usage_perf);
+	instrs_cycles.ics_m_instructions = recount_usage_instructions(&usage_mp);
+	instrs_cycles.ics_m_cycles = recount_usage_cycles(&usage_mp);
 
 	return kcdata_push_data(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(instrs_cycles), &instrs_cycles);
 }
@@ -4750,14 +4753,19 @@ kcdata_record_thread_snapshot(kcdata_descriptor_t kcd, thread_t thread, task_t t
 
 #if CONFIG_PERVASIVE_CPI
 	if (collect_instrs_cycles) {
-		struct recount_usage usage = { 0 };
-		recount_sum_unsafe(&recount_thread_plan, thread->th_recount.rth_lifetime,
-		    &usage);
+		struct recount_usage usage_all = { 0 };
+		struct recount_usage usage_perf = { 0 };
+		struct recount_usage usage_mp = { 0 };
+		recount_thread_usage_cpu_kinds_kdp(thread, &usage_all, &usage_perf, &usage_mp);
 
-		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(struct instrs_cycles_snapshot), &out_addr));
-		struct instrs_cycles_snapshot *instrs_cycles = (struct instrs_cycles_snapshot *)out_addr;
-		    instrs_cycles->ics_instructions = recount_usage_instructions(&usage);
-		    instrs_cycles->ics_cycles = recount_usage_cycles(&usage);
+		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(struct instrs_cycles_snapshot_v3), &out_addr));
+		struct instrs_cycles_snapshot_v3 *instrs_cycles = (struct instrs_cycles_snapshot_v3 *)out_addr;
+		    instrs_cycles->ics_instructions = recount_usage_instructions(&usage_all);
+		    instrs_cycles->ics_cycles = recount_usage_cycles(&usage_all);
+		    instrs_cycles->ics_p_instructions = recount_usage_instructions(&usage_perf);
+		    instrs_cycles->ics_p_cycles = recount_usage_cycles(&usage_perf);
+		    instrs_cycles->ics_m_instructions = recount_usage_instructions(&usage_mp);
+		    instrs_cycles->ics_m_cycles = recount_usage_cycles(&usage_mp);
 	}
 #endif /* CONFIG_PERVASIVE_CPI */
 

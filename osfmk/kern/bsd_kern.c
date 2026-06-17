@@ -35,6 +35,7 @@
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kern/task.h>
+#include <kern/task_ident.h>
 #include <kern/spl.h>
 #include <kern/ast.h>
 #include <kern/monotonic.h>
@@ -49,6 +50,8 @@
 #include <sys/signal.h>
 #include <sys/errno.h>
 #include <sys/proc_require.h>
+#include <sys/reason.h>
+#include <corpses/task_corpse.h>
 
 #include <machine/limits.h>
 #include <sys/codesign.h> /* CS_CDHASH_LEN */
@@ -70,18 +73,22 @@ int fill_task_io_rusage(task_t task, rusage_info_current *ri);
 int fill_task_qos_rusage(task_t task, rusage_info_current *ri);
 uint64_t get_task_logical_writes(task_t task, bool external);
 void fill_task_billed_usage(task_t task, rusage_info_current *ri);
-void task_bsdtask_kill(task_t);
+void task_self_sigkill(os_reason_t reason);
 
 extern uint64_t get_dispatchqueue_serialno_offset_from_proc(void *p);
 extern uint64_t get_dispatchqueue_label_offset_from_proc(void *p);
 extern uint64_t proc_uniqueid_task(void *p, void *t);
 extern int proc_pidversion(void *p);
 extern int proc_getcdhash(void *p, char *cdhash);
+extern void* proc_find_ident(struct proc_ident const *i);
+extern int proc_rele(void* p);
+extern task_t proc_task(void* p);
 
 int mach_to_bsd_errno(kern_return_t mach_err);
 kern_return_t kern_return_for_errno(int bsd_errno);
 void get_task_crashinfo_voucher(task_t corpse_task, void *crash_info_ptr);
 #if MACH_BSD
+extern void psignal_with_reason(void *, int, os_reason_t reason);
 extern void psignal(void *, int);
 #endif
 
@@ -96,13 +103,46 @@ get_bsdtask_info(task_t t)
 	return task_has_proc(t) ? proc_from_task : NULL;
 }
 
+/*
+ * This function is unsafe to be called with only task reference.
+ * Caller must make sure that proc is still alive (by holding
+ * reference to the proc)
+ */
 void
-task_bsdtask_kill(task_t t)
+taskbsd_kill_and_release(void* _Nonnull p)
 {
-	void * bsd_info = get_bsdtask_info(t);
-	if (bsd_info != NULL) {
-		psignal(bsd_info, SIGKILL);
+	psignal(p, SIGKILL);
+	proc_rele(p);
+}
+
+/* NOTE: This function is not for common or generic use. Never use on a generic proc ident token */
+kern_return_t
+task_identity_token_try_sigkill(
+	task_id_token_t token)
+{
+	if (token == TASK_ID_TOKEN_NULL) {
+		return KERN_INVALID_ARGUMENT;
 	}
+	if (token->task_uniqueid) {
+		/* corpse is already killed */
+		return KERN_SUCCESS;
+	} else {
+		void *p = proc_find_ident(&token->ident);
+
+		if (p) {
+			/* trying to sigkill the proc */
+			psignal(p, SIGKILL);
+
+			proc_rele(p);
+		}
+	}
+	return KERN_SUCCESS;
+}
+
+void
+task_self_sigkill(os_reason_t reason)
+{
+	psignal_with_reason(current_proc(), SIGKILL, reason);
 }
 /*
  *
@@ -1121,15 +1161,18 @@ fill_task_rusage(task_t task, rusage_info_current *ri)
 	task_power_info_locked(task, &powerinfo, NULL, NULL, &extra);
 	ri->ri_pkg_idle_wkups = powerinfo.task_platform_idle_wakeups;
 	ri->ri_interrupt_wkups = powerinfo.task_interrupt_wakeups;
+	ri->ri_runnable_time = extra.runnable_time;
+
 	ri->ri_user_time = powerinfo.total_user;
 	ri->ri_system_time = powerinfo.total_system;
-	ri->ri_runnable_time = extra.runnable_time;
+	ri->ri_user_ptime = extra.user_ptime;
+	ri->ri_system_ptime = extra.system_ptime;
+
 	ri->ri_cycles = extra.cycles;
 	ri->ri_instructions = extra.instructions;
 	ri->ri_pcycles = extra.pcycles;
 	ri->ri_pinstructions = extra.pinstructions;
-	ri->ri_user_ptime = extra.user_ptime;
-	ri->ri_system_ptime = extra.system_ptime;
+
 	ri->ri_energy_nj = extra.energy;
 	ri->ri_penergy_nj = extra.penergy;
 	ri->ri_secure_time_in_system = extra.secure_time;

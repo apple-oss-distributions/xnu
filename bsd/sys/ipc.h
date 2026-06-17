@@ -176,6 +176,20 @@ struct __ipc_perm_old {
 #define IPCID_TO_SEQ(id)        (((id) >> 16) & 0xffff)
 #define IXSEQ_TO_IPCID(ix, perm) (((perm._seq) << 16L) | ((ix) & 0xffff))
 
+/*
+ * Increment the sequence number, wrapping to 0 at 0x8000 so that
+ * IXSEQ_TO_IPCID always produces a non-negative int32_t. A negative
+ * msqid/semid/shmid would be confused with the -1 error return.
+ */
+static inline unsigned short
+ipc_perm_seq_inc(unsigned short seq)
+{
+	if (++seq > 0x7FFF) {
+		seq = 0;
+	}
+	return seq;
+}
+
 struct ucred;
 
 int     ipcperm(struct ucred *, struct ipc_perm *, int);

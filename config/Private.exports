@@ -1427,6 +1427,7 @@ _vfs_last_completion_time
 _vfs_mount_at_path
 _vfs_materialize_file
 _vfs_materialize_dir
+_vfs_setsnapshotmntflags
 _vfs_shutdown_in_progress
 _vfs_shutdown_finished
 _vfs_update_last_completion_time

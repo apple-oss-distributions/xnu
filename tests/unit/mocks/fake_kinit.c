@@ -87,9 +87,20 @@ fake_init_bootargs(uint32_t __unused step_id)
 	BootArgs = &ba; // arm_init()
 }
 
+// This stands in for ml_parse_cpu_topology()
+void
+fake_cpu_topology(void)
+{
+	ml_topology_info_t *topo_info = (ml_topology_info_t *)ml_get_topology_info();
+	for (int i = 0; i < MAX_CPUS; ++i) {
+		topo_info->cpus[i].cluster_type = CLUSTER_TYPE_P;
+	}
+}
+
 void
 fake_kernel_bootstrap(uint32_t __unused step_id)
 {
+	fake_cpu_topology();
 	kernel_startup_bootstrap(); // runs up to STARTUP_SUB_LOCKS
 
 	mem_size = 0x0000000080000000ULL; // 2 GB

@@ -86,6 +86,25 @@ CA_EVENT(exclave_indicator_controller_metrics_v1,
     CA_INT, bips_control_cam,
     CA_INT, bips_denied_cam);
 
+CA_EVENT(exclave_indicator_controller_chillpill_metrics_v1,
+    CA_INT, chillpill_limit_ms,
+    CA_INT, max_chillpill_used_ms,
+    CA_INT, chillpill_bucket_0_100_ms,
+    CA_INT, chillpill_bucket_101_200_ms,
+    CA_INT, chillpill_bucket_201_300_ms,
+    CA_INT, chillpill_bucket_301_400_ms,
+    CA_INT, chillpill_bucket_401_500_ms,
+    CA_INT, chillpill_bucket_501_600_ms,
+    CA_INT, chillpill_bucket_601_700_ms,
+    CA_INT, chillpill_bucket_701_800_ms,
+    CA_INT, chillpill_bucket_801_900_ms,
+    CA_INT, chillpill_bucket_901_1000_ms,
+    CA_INT, chillpill_bucket_1001_1500_ms,
+    CA_INT, chillpill_bucket_1501_2000_ms,
+    CA_INT, chillpill_bucket_2001_2500_ms,
+    CA_INT, chillpill_bucket_2501_3000_ms,
+    CA_INT, chillpill_bucket_3000_plus_ms);
+
 static inline __unused exclaveindicatorcontroller_sensortype_s
 sensor_type_to_eic_sensortype(exclaves_sensor_type_t type)
 {
@@ -800,9 +819,10 @@ exclaves_indicator_min_on_time_deadlines(struct exclaves_indicator_deadlines *de
 }
 
 static kern_return_t
-exclaves_sensor_get_and_clear_metrics(ca_event_t event)
+exclaves_sensor_get_and_clear_metrics(ca_event_t sensor_metrics_event,
+    ca_event_t chillpill_event)
 {
-	if (!event) {
+	if (!sensor_metrics_event || !chillpill_event) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -815,7 +835,10 @@ exclaves_sensor_get_and_clear_metrics(ca_event_t event)
 		return KERN_FAILURE;
 	}
 
-	CA_EVENT_TYPE(exclave_indicator_controller_metrics_v1) * e = event->data;
+	CA_EVENT_TYPE(exclave_indicator_controller_metrics_v1) * e =
+	    sensor_metrics_event->data;
+	CA_EVENT_TYPE(exclave_indicator_controller_chillpill_metrics_v1) * cp =
+	    chillpill_event->data;
 
 	tb_error_t ret = exclaveindicatorcontroller_sensorrequest_getandclearmetrics(
 		&eic_client, ^(exclaveindicatorcontroller_sensorrequestmetrics_s result) {
@@ -848,6 +871,25 @@ exclaves_sensor_get_and_clear_metrics(ca_event_t event)
 		e->bips_pending_cam = result.bipspendingcam;
 		e->bips_control_cam = result.bipscontrolcam;
 		e->bips_denied_cam = result.bipsdeniedcam;
+
+		/* Chill pill metrics */
+		cp->chillpill_limit_ms = result.chillpilllimitms;
+		cp->max_chillpill_used_ms = result.maxchillpillusedms;
+		cp->chillpill_bucket_0_100_ms = result.chillpillbucket0to100ms;
+		cp->chillpill_bucket_101_200_ms = result.chillpillbucket101to200ms;
+		cp->chillpill_bucket_201_300_ms = result.chillpillbucket201to300ms;
+		cp->chillpill_bucket_301_400_ms = result.chillpillbucket301to400ms;
+		cp->chillpill_bucket_401_500_ms = result.chillpillbucket401to500ms;
+		cp->chillpill_bucket_501_600_ms = result.chillpillbucket501to600ms;
+		cp->chillpill_bucket_601_700_ms = result.chillpillbucket601to700ms;
+		cp->chillpill_bucket_701_800_ms = result.chillpillbucket701to800ms;
+		cp->chillpill_bucket_801_900_ms = result.chillpillbucket801to900ms;
+		cp->chillpill_bucket_901_1000_ms = result.chillpillbucket901to1000ms;
+		cp->chillpill_bucket_1001_1500_ms = result.chillpillbucket1001to1500ms;
+		cp->chillpill_bucket_1501_2000_ms = result.chillpillbucket1501to2000ms;
+		cp->chillpill_bucket_2001_2500_ms = result.chillpillbucket2001to2500ms;
+		cp->chillpill_bucket_2501_3000_ms = result.chillpillbucket2501to3000ms;
+		cp->chillpill_bucket_3000_plus_ms = result.chillpillbucket3000plusms;
 	});
 
 	return ret == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
@@ -856,15 +898,21 @@ exclaves_sensor_get_and_clear_metrics(ca_event_t event)
 void
 exclaves_indicator_metrics_report(void)
 {
-	ca_event_t event = CA_EVENT_ALLOCATE(exclave_indicator_controller_metrics_v1);
-	kern_return_t kr = exclaves_sensor_get_and_clear_metrics(event);
+	ca_event_t sensor_metrics_event =
+	    CA_EVENT_ALLOCATE(exclave_indicator_controller_metrics_v1);
+	ca_event_t chillpill_event =
+	    CA_EVENT_ALLOCATE(exclave_indicator_controller_chillpill_metrics_v1);
+	kern_return_t kr = exclaves_sensor_get_and_clear_metrics(
+		sensor_metrics_event, chillpill_event);
 
 	if (kr != KERN_SUCCESS) {
-		CA_EVENT_DEALLOCATE(event);
+		CA_EVENT_DEALLOCATE(sensor_metrics_event);
+		CA_EVENT_DEALLOCATE(chillpill_event);
 		return;
 	}
 
-	CA_EVENT_SEND(event);
+	CA_EVENT_SEND(sensor_metrics_event);
+	CA_EVENT_SEND(chillpill_event);
 }
 
 #else /* CONFIG_EXCLAVES */

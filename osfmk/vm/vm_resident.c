@@ -6565,6 +6565,11 @@ vm_page_speculate(
 	assert(!vm_page_is_guard(m));
 	LCK_MTX_ASSERT(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
 	assert(!(m->vmp_absent && !m->vmp_unusual));
+
+	if (m_object->internal) {
+		vm_page_deactivate(m);
+		return;
+	}
 	assert(m_object->internal == FALSE);
 
 	/*

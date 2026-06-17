@@ -64,7 +64,12 @@
 #ifndef CURRENT_MACHINE_CONFIG_LC
 #error CURRENT_MACHINE_CONFIG_LC must be defined in makedefs/MakeInc.def
 #endif /* CURRENT_MACHINE_CONFIG_LC */
+#ifdef ARM64_BOARD_CONFIG_T6050
+// T6050 EH format is <soc/t6050+d/>
+#define ARM64_SOC_NAME t6050+d
+#else
 #define ARM64_SOC_NAME CURRENT_MACHINE_CONFIG_LC
+#endif /* ARM64_BOARD_CONFIG_T6050 */
 #endif /* ARM64_SOC_NAME */
 
 #define SPDS_CHIP_REV_LC latest

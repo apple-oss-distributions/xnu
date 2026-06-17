@@ -266,7 +266,18 @@ extern mach_msg_return_t ipc_preflight_msg_option64(
  */
 extern bool ipc_should_apply_policy(
 	const ipc_space_policy_t current_policy,
-	const ipc_space_policy_t requested_level);
+	const ipc_space_policy_t requested_level)
+__attribute__((diagnose_if(
+	    ((requested_level) & IPC_SPACE_POLICY_ENHANCED_VERSION_MASK) &&
+	    !((requested_level) & IPC_SPACE_POLICY_ENHANCED),
+	    "requested_level has ENHANCED version bits without IPC_SPACE_POLICY_ENHANCED; "
+	    "use IPC_POLICY_ENHANCED_V* instead of IPC_SPACE_POLICY_ENHANCED_V*",
+	    "error")))
+__attribute__((diagnose_if(
+	    ((requested_level) & IPC_SPACE_POLICY_DEFAULT) &&
+	    (requested_level) != IPC_SPACE_POLICY_DEFAULT,
+	    "requested_level must not mix IPC_SPACE_POLICY_DEFAULT with other flags",
+	    "error")));
 
 
 #pragma mark legacy trap policies

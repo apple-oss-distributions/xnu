@@ -304,7 +304,7 @@ kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 	}
 
 	/* Perform the new mapping */
-	sptm_return_t ret = sptm_map_page(root_pt_paddr, vaddr, newpte);
+	sptm_return_t ret = sptm_map_page(root_pt_paddr, vaddr, newpte, SPTM_MAP_PAGE_NO_OUTPUT);
 	assert(ret == SPTM_SUCCESS);
 #else
 	*pte = newpte;

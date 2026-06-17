@@ -209,36 +209,6 @@ SYSCTL_PROC(_net_inet_tcp, OID_AUTO, now,
     CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_tcp_now, "IU", "Current tcp_now timer value in milliseconds");
 
-/*
- * Debug sysctl to force tcp_now to a specific value.
- * This is used for testing TIME_WAIT timer wraparound behavior.
- * Setting this immediately updates tcp_now to the specified value.
- */
-static int
-sysctl_tcp_now_offset SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	uint32_t new_value;
-	int error;
-
-	error = SYSCTL_IN(req, &new_value, sizeof(new_value));
-	if (error) {
-		return error;
-	}
-
-	/*
-	 * Force tcp_now to the requested value.
-	 * This takes effect immediately.
-	 */
-	tcp_now = new_value;
-
-	return 0;
-}
-
-SYSCTL_PROC(_net_inet_tcp, OID_AUTO, now_offset,
-    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED,
-    0, 0, sysctl_tcp_now_offset, "IU",
-    "Force tcp_now to specific value for testing (DEBUG/DEVELOPMENT only)");
 #endif /* DEVELOPMENT || DEBUG */
 
 /*

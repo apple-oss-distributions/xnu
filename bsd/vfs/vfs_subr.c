@@ -5737,7 +5737,8 @@ retry:
 #endif /* CONFIG_JETSAM */
 
 	if (((numvnodes - deadvnodes + deadvnodes_noreuse) < desiredvnodes) ||
-	    force_alloc || force_alloc_freeable) {
+	    force_alloc || force_alloc_freeable ||
+	    (numvnodes < numvnodes_max && can_free && (deadvnodes > deadvnodes_noreuse))) {
 		struct timespec ts;
 		uint32_t vflag = 0;
 
@@ -5810,7 +5811,7 @@ retry:
 		nanouptime(&ts);
 		vp->v_id = (uint32_t)ts.tv_nsec;
 		vp->v_flag = VSTANDARD | vflag;
-		if (force_alloc_freeable) {
+		if (force_alloc_freeable || ((numvnodes > desiredvnodes) && !force_alloc)) {
 			/* This vnode should be recycled and freed immediately */
 			vp->v_lflag = VL_MARKTERM;
 			vp->v_listflag = VLIST_NO_REUSE;
@@ -5929,29 +5930,30 @@ retry:
 		}
 	}
 
-	//
-	// if we don't have a vnode and the walk_count is >= MAX_WALK_COUNT
-	// then we're trying to create a vnode on behalf of a
-	// process like diskimages-helper that has file systems
-	// mounted on top of itself (and thus we can't reclaim
-	// vnodes in the file systems on top of us).  if we can't
-	// find a vnode to reclaim then we'll just have to force
-	// the allocation.
-	//
-	if (vp == NULL && walk_count >= MAX_WALK_COUNT) {
-		force_alloc = 1;
-		vnode_list_unlock();
-		goto retry;
-	}
-
 	if (vp == NULL) {
 		if (can_free && (vn_dealloc_level > DEALLOC_VNODE_NONE) &&
 		    (numvnodes >= force_alloc_min) && (numvnodes < numvnodes_max)) {
 			force_alloc_freeable = true;
-			vnode_list_unlock();
+		}
+
+		//
+		// if we don't have a vnode and the walk_count is >= MAX_WALK_COUNT
+		// then we're trying to create a vnode on behalf of a
+		// process like diskimages-helper that has file systems
+		// mounted on top of itself (and thus we can't reclaim
+		// vnodes in the file systems on top of us).  if we can't
+		// find a vnode to reclaim then we'll just have to force
+		// the allocation.
+		//
+		if (!force_alloc_freeable && walk_count >= MAX_WALK_COUNT) {
+			force_alloc = 1;
+		}
+
+		vnode_list_unlock();
+
+		if (force_alloc_freeable || force_alloc) {
 			goto retry;
 		}
-		vnode_list_unlock();
 
 		/*
 		 * we've reached the system imposed maximum number of vnodes

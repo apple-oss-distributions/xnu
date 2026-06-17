@@ -124,6 +124,10 @@ test_cpu_type_to_str(test_cpu_type_t cpu_type)
 	switch (cpu_type) {
 	case TEST_CPU_TYPE_EFFICIENCY:
 		return "E";
+#if HAS_MCORE
+	case TEST_CPU_TYPE_MP_OPTIMIZED:
+		return "M";
+#endif /* HAS_MCORE */
 	case TEST_CPU_TYPE_PERFORMANCE:
 		return "P";
 	default:
@@ -138,6 +142,10 @@ test_cpu_type_to_cluster_type(test_cpu_type_t cpu_type)
 	switch (cpu_type) {
 	case TEST_CPU_TYPE_EFFICIENCY:
 		return CLUSTER_TYPE_E;
+#if HAS_MCORE
+	case TEST_CPU_TYPE_MP_OPTIMIZED:
+		return CLUSTER_TYPE_M;
+#endif /* HAS_MCORE */
 	case TEST_CPU_TYPE_PERFORMANCE:
 		return CLUSTER_TYPE_P;
 	default:
@@ -153,6 +161,10 @@ pset_type_to_test_cpu_type(pset_type_t pset_type)
 #if __AMP__
 	case PSET_AMP_E:
 		return TEST_CPU_TYPE_EFFICIENCY;
+#if HAS_MCORE
+	case PSET_AMP_M:
+		return TEST_CPU_TYPE_MP_OPTIMIZED;
+#endif /* HAS_MCORE */
 	case PSET_AMP_P:
 		return TEST_CPU_TYPE_PERFORMANCE;
 #else /* !__AMP__ */

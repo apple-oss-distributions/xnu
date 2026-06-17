@@ -3147,6 +3147,7 @@ mteinfo_tag_storage_release_startup(vm_page_t tag_page)
 	uint32_t          mte_count  = 0;
 	uint32_t          desired_active = (mte_tag_storage_count - mte_tag_storage_discarded) / 8;
 
+
 	/*
 	 * If this is a tag storage page we won't even classify as tag
 	 * storage.  Just give it to the normal free queues.
@@ -3178,7 +3179,9 @@ mteinfo_tag_storage_release_startup(vm_page_t tag_page)
 		}
 
 		if (cell_free_page_count(*cell) == MTE_PAGES_PER_TAG_PAGE &&
-		    mteinfo_tag_storage_active(true) < desired_active) {
+		    (mteinfo_tag_storage_active_locked() +
+		    mteinfo_tag_storage_active_zero_locked()) <
+		    desired_active) {
 			deactivate = false;
 		} else if (mte_count) {
 			deactivate = false;
@@ -3392,9 +3395,9 @@ mteinfo_tag_storage_fragmentation(bool actual)
 	uint32_t value;
 
 	vm_free_page_lock_spin();
-	ts_active = mte_info_lists[MTE_LIST_ACTIVE_IDX].count;
+	ts_active = mteinfo_tag_storage_active_locked();
 	if (actual) {
-		ts_active += mte_info_lists[MTE_LIST_ACTIVE_0_IDX].count;
+		ts_active += mteinfo_tag_storage_active_zero_locked();
 	}
 	if (ts_active) {
 		value  = 1000 * vm_page_tagged_count;
@@ -3408,21 +3411,72 @@ mteinfo_tag_storage_fragmentation(bool actual)
 }
 
 uint32_t
-mteinfo_tag_storage_active(bool fq_locked)
+mteinfo_tag_storage_nontags_wired_locked(void)
+{
+	return vm_page_wired_tag_storage_count;
+}
+
+uint32_t
+mteinfo_tag_storage_nontags_pageable_locked(void)
+{
+	uint32_t total = mte_info_lists[MTE_LIST_CLAIMED_IDX].count +
+	    mte_info_lists[MTE_LIST_DISABLED_IDX].count +
+	    mte_info_lists[MTE_LIST_PINNED_IDX].count;
+	/* Exclude free claimed and unmanaged pages */
+	uint32_t free = vm_page_free_unmanaged_tag_storage_count +
+	    (uint32_t)counter_load(&vm_cpu_free_claimed_count);
+	/*
+	 * Subtract all the wired pages from consideration. MTE_LIST_PINNED_IDX is not
+	 * comprehensive and is updated lazily.
+	 */
+	uint32_t wired = vm_page_wired_tag_storage_count;
+
+	return total - free - wired;
+}
+
+uint32_t
+mteinfo_tag_storage_free_locked(void)
+{
+	return mte_info_lists[MTE_LIST_INACTIVE_IDX].count +
+	       /*
+	        * Count all the transient states as "free" since they are
+	        * transitioning between free states.
+	        */
+	       mte_info_lists[MTE_LIST_RECLAIMING_IDX].count +
+	       mte_info_lists[MTE_LIST_DEACTIVATING_IDX].count +
+	       mte_info_lists[MTE_LIST_ACTIVATING_IDX].count +
+	       /*
+	        * NB: In practice, not all active-0 pages will be reclaimable, so
+	        * this is a slight overestimate of "free" tag storage pages, but is
+	        * the best we can do without iterating over the pages.
+	        */
+	       mte_info_lists[MTE_LIST_ACTIVE_0_IDX].count +
+	       /* The below comprise a subset of CLAIMED and DISABLED */
+	       vm_page_free_unmanaged_tag_storage_count +
+	       (uint32_t)counter_load(&vm_cpu_free_claimed_count);
+}
+
+uint32_t
+mteinfo_tag_storage_active_zero_locked(void)
+{
+	return mte_info_lists[MTE_LIST_ACTIVE_0_IDX].count;
+}
+
+uint32_t
+mteinfo_tag_storage_active_locked(void)
+{
+	return mte_info_lists[MTE_LIST_ACTIVE_IDX].count;
+}
+
+uint32_t
+mteinfo_tag_storage_active(void)
 {
 	uint32_t active;
 
-	if (!fq_locked) {
-		vm_free_page_lock_spin();
-	}
-
-	active = mte_info_lists[MTE_LIST_ACTIVE_0_IDX].count +
-	    mte_info_lists[MTE_LIST_ACTIVE_IDX].count;
-
-	if (!fq_locked) {
-		vm_free_page_unlock();
-	}
-
+	vm_free_page_lock_spin();
+	active = mteinfo_tag_storage_active_locked() +
+	    mteinfo_tag_storage_active_zero_locked();
+	vm_free_page_unlock();
 	return active;
 }
 

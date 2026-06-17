@@ -512,7 +512,15 @@ retry_copy:
 		if (error) {
 			assert(!volfs_vp);
 			goto error_out;
+		} else if (volfs_vp && (vnode_vtype(volfs_vp) == VLNK) && (cnp->cn_flags & FOLLOW)) {
+			/*
+			 * we can't cross check if the result of the lookup will the same as volfs_vp
+			 * since it will be the target of the symlink and not the symlink vnode itself.
+			 */
+			vnode_put(volfs_vp);
+			volfs_vp = NULLVP;
 		}
+
 		if (volfs_vp) {
 			error = vnode_ref_ext(volfs_vp, O_EVTONLY, VNODE_REF_FORCE);
 			vnode_put(volfs_vp);

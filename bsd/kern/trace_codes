@@ -1380,6 +1380,7 @@
 0x31301A8	VFS_graft_notify_graft
 0x31301AC	VFS_graft_notify_ungraft
 0x31301B0	VFS_check_lookup_postflight
+0x31301B4	VFS_notify_will_rename_swap
 0X3134000	VFS_io_compression_stats
 0x3CF0000	CP_OFFSET_IO
 0x4010004	proc_exit

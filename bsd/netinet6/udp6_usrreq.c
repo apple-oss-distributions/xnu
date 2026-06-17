@@ -691,6 +691,17 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 		goto bad;
 	}
 
+	/*
+	 * Transition to full wake for a UDP packet to an open port.
+	 * Unlike TCP, UDP has no idle connection concept — any packet
+	 * to an open port triggers a full AP wake unless SO_NOWAKEFROMSLEEP is set
+	 */
+	if (__improbable(if_is_lpw_enabled(ifp) && !is_magic_packet)) {
+		if ((in6p->inp_socket->so_options & SO_NOWAKEFROMSLEEP) == 0) {
+			udp6_proto_process_lpw_packet(m, in6p, "LPW UDP unicast");
+		}
+	}
+
 	init_sin6(&udp_in6, m); /* general init */
 	udp_in6.sin6_port = uh->uh_sport;
 	if ((in6p->in6p_flags & INP_CONTROLOPTS) != 0 ||

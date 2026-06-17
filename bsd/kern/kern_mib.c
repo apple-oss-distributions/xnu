@@ -258,7 +258,12 @@ cpu_type_for_perflevel(int perflevel)
 	cluster_types_in_order[0] = CLUSTER_TYPE_SMP;
 #if defined(__arm__) || defined(__arm64__)
 	cluster_types_in_order[1] = CLUSTER_TYPE_P;
+#if !HAS_MCORE
 	cluster_types_in_order[2] = CLUSTER_TYPE_E;
+#else /* HAS_MCORE */
+	cluster_types_in_order[2] = CLUSTER_TYPE_M;
+	cluster_types_in_order[3] = CLUSTER_TYPE_E;
+#endif /* HAS_MCORE */
 #endif /* defined(__arm__) || defined(__arm64__) */
 
 	int perflevel_ind = 0;

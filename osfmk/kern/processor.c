@@ -314,6 +314,7 @@ psets_create_for_cluster(
 
 	const pset_type_t pset_type_order[MAX_PSET_TYPES] = {
 		PSET_AMP_P,
+		PSET_AMP_M,
 		PSET_AMP_E,
 	};
 
@@ -486,7 +487,6 @@ processor_init(
 		    running_timer_funcs[i], processor);
 		running_timer_clear(processor, i);
 	}
-	recount_processor_init(processor);
 #endif /* !SCHED_TEST_HARNESS */
 
 #if CONFIG_SCHED_EDGE
@@ -1990,6 +1990,8 @@ cluster_type_to_pset_type(cluster_type_t cluster_type)
 	switch (cluster_type) {
 	case CLUSTER_TYPE_E:
 		return PSET_AMP_E;
+	case CLUSTER_TYPE_M:
+		return PSET_AMP_M;
 	case CLUSTER_TYPE_P:
 		return PSET_AMP_P;
 	default:

@@ -4197,6 +4197,28 @@ sched_edge_matrix_get(sched_clutch_edge *edge_matrix, bool *edge_requested, __un
 	}
 }
 
+#if CONFIG_SCHED_PERF_ISLANDS
+/*
+ * Friction edge weights
+ *
+ * Default migration weight settings in the edge matrix between performance islands
+ * of matching type.
+ *
+ * These are enforced strictly (i.e. even in the presence of idle cores), and higher
+ * values introduce greater "friction" between the performance islands, making spills
+ * across the edge less likely at a cost of scheduling latency. The values represent
+ * reasonable preemption latencies we are willing to sacrifice in exchange for power
+ * savings.
+ */
+static uint64_t sched_edge_qos_friction_weight_us[TH_BUCKET_SCHED_MAX] = {
+	0,                                              /* FIXPRI */
+	0,                                              /* FG */
+	250,                                            /* IN */
+	500,                                            /* DF */
+	1000,                                           /* UT (1ms) */
+	2000                                            /* BG (2ms) */
+};
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 
 /*
  * sched_edge_init()
@@ -4651,6 +4673,22 @@ sched_edge_pset_peek_steal_possible(
 	return false;
 }
 
+#if CONFIG_SCHED_PERF_ISLANDS
+
+/*
+ * sched_edge_crosses_perf_islands()
+ *
+ * Logic to infer whether two psets are considered to be
+ * isolated in separate performance islands, for the purpose
+ * of enforcing a more restrictive migration policy.
+ */
+static inline bool
+sched_edge_crosses_perf_islands(processor_set_t src, processor_set_t dst, sched_clutch_edge edge)
+{
+	return (src->pset_id != dst->pset_id) && (edge.sce_migration_weight > 0) && (src->pset_type == dst->pset_type);
+}
+
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 
 /*
  * Configurable behaviors when looking for threads to steal
@@ -4660,6 +4698,10 @@ __options_decl(sched_edge_steal_options_t, uint8_t, {
 	SCHED_EDGE_STEAL_OPTIONS_NONE                 = 0x0,
 	/* Only steal when there are more threads at the QoS than CPUs in the pset */
 	SCHED_EDGE_STEAL_OPTIONS_ONLY_EXCESS_LOAD     = 0x1,
+#if CONFIG_SCHED_PERF_ISLANDS
+	/* Only steal when the load metric exceeds the edge weight from the silo */
+	SCHED_EDGE_STEAL_OPTIONS_EDGE_THRESHOLD       = 0x2,
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 });
 
 /*
@@ -4709,6 +4751,19 @@ sched_edge_pset_steal_thread(
 					}
 				}
 			}
+#if CONFIG_SCHED_PERF_ISLANDS
+			if (steal_options & SCHED_EDGE_STEAL_OPTIONS_EDGE_THRESHOLD) {
+				processor_set_t silo_pset = pset_for_id(silo_id);
+				if (sched_edge_crosses_perf_islands(silo_pset, idle_pset, silo_edge)) {
+					uint32_t candidate_load = sched_edge_pset_load_metric(silo_pset, bucket);
+					uint32_t idle_load = sched_edge_pset_load_metric(idle_pset, bucket);
+					if ((idle_load > candidate_load) || ((candidate_load - idle_load) < silo_edge.sce_migration_weight)) {
+						/* Delta not high enough for us to steal */
+						continue;
+					}
+				}
+			}
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 			/* Thread candidate found */
 			struct priority_queue_sched_max *steal_queue = &steal_silo->sess_steal_queues[bucket];
 			sched_clutch_bucket_t clutch_bucket = priority_queue_max(steal_queue, struct sched_clutch_bucket, scb_stealqlink);
@@ -4845,6 +4900,9 @@ sched_edge_steal_thread(processor_set_t idle_pset, uint64_t candidate_pset_bitma
 		pset_lock(steal_from_pset);
 
 		sched_edge_steal_options_t steal_options = SCHED_EDGE_STEAL_OPTIONS_ONLY_EXCESS_LOAD;
+#if CONFIG_SCHED_PERF_ISLANDS
+		steal_options |= SCHED_EDGE_STEAL_OPTIONS_EDGE_THRESHOLD;
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 		stolen_thread = sched_edge_pset_steal_thread(steal_from_pset, idle_pset, migration_allowed_map, steal_options);
 
 		if (stolen_thread != THREAD_NULL) {
@@ -5716,6 +5774,10 @@ sched_edge_migration_check(pset_id_t pset_id, processor_set_t preferred_pset,
 	}
 	uint32_t dst_load = shared_rsrc_thread ? (uint32_t)sched_edge_pset_cluster_shared_rsrc_load(dst_pset, shared_rsrc_type) : sched_edge_pset_load_metric(dst_pset, thread->th_sched_bucket);
 	if (dst_load == 0
+#if CONFIG_SCHED_PERF_ISLANDS
+	    /* Still enforce edge weights across performance islands */
+	    && (sched_edge_crosses_perf_islands(preferred_pset, dst_pset, edge) == false)
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 	    ) {
 		/* The candidate pset is idle; select it immediately for execution */
 		*selected_pset = dst_pset;
@@ -6299,6 +6361,18 @@ sched_edge_cpu_init_completed(void)
 	edge_config_defaults[PSET_AMP_P][PSET_AMP_E] = weighted_spill;
 	/* E -> P */
 	edge_config_defaults[PSET_AMP_E][PSET_AMP_P] = no_spill;
+#if HAS_MCORE
+	/* M -> M */
+	edge_config_defaults[PSET_AMP_M][PSET_AMP_M] = free_spill;
+	/* P -> M */
+	edge_config_defaults[PSET_AMP_P][PSET_AMP_M] = weighted_spill;
+	/* M -> E */
+	edge_config_defaults[PSET_AMP_M][PSET_AMP_E] = weighted_spill;
+	/* E -> M */
+	edge_config_defaults[PSET_AMP_E][PSET_AMP_M] = no_spill;
+	/* M -> P */
+	edge_config_defaults[PSET_AMP_M][PSET_AMP_P] = no_spill;
+#endif /* HAS_MCORE */
 
 	spl_t s = splsched();
 	for (pset_id_t src_pset_id = 0; src_pset_id < sched_num_psets; src_pset_id++) {
@@ -6350,6 +6424,26 @@ sched_edge_cpu_init_completed(void)
 			for (sched_bucket_t bucket = 0; bucket < TH_BUCKET_SCHED_MAX; bucket++) {
 				/* Set tunables for an edge based on the pset types at either ends of it */
 				sched_clutch_edge edge_config = edge_config_defaults[src_pset->pset_type][dst_pset->pset_type];
+#if HAS_MCORE && CONFIG_SCHED_PERF_ISLANDS
+				if ((src_pset->pset_type == PSET_AMP_M) && (dst_pset->pset_type == PSET_AMP_M)) {
+					if (bucket == TH_BUCKET_SHARE_BG) {
+						/* BG threads isolated to their preferred island by default */
+						edge_config = no_spill;
+					} else {
+						/* Introduce non-zero edge weight between M-islands for some QoSes */
+						edge_config.sce_migration_weight = sched_edge_qos_friction_weight_us[bucket];
+					}
+				} else if ((src_pset->pset_type == PSET_AMP_P) && (dst_pset->pset_type == PSET_AMP_M)) {
+					/* Default ordering of M-islands prefers spilling down to higher id psets first */
+					assert3u(edge_config.sce_migration_weight, >=, dst_pset->pset_id);
+					edge_config.sce_migration_weight -= dst_pset->pset_id;
+				}
+#elif CONFIG_SCHED_PERF_ISLANDS
+				/*
+				 * Use the same edge setting across all QoS-levels. CLPC can override specific
+				 * values when deciding to enforce performance islands for certain buckets.
+				 */
+#endif /* CONFIG_SCHED_PERF_ISLANDS */
 				sched_edge_config_set(src_pset_id, dst_pset_id, bucket, edge_config);
 				if (edge_config.sce_migration_allowed) {
 					src_pset->max_parallel_cores[bucket] += dst_pset->cpu_set_count;
@@ -6475,6 +6569,14 @@ sched_edge_qos_max_parallelism(int qos, uint64_t options)
 {
 	pset_node_t low_node = pset_node_for_pset_type(PSET_AMP_E);
 	pset_node_t high_node = pset_node_for_pset_type(PSET_AMP_P);
+#if HAS_MCORE
+	if (pset_node_is_empty(low_node)) {
+		low_node = pset_node_for_pset_type(PSET_AMP_M);
+	}
+	if (pset_node_is_empty(high_node)) {
+		high_node = pset_node_for_pset_type(PSET_AMP_M);
+	}
+#endif /* HAS_MCORE */
 	if (pset_node_is_empty(low_node) || pset_node_is_empty(high_node)) {
 		low_node = high_node = sched_boot_pset_node;
 	}
@@ -6512,9 +6614,29 @@ sched_edge_qos_max_parallelism(int qos, uint64_t options)
 	switch (qos) {
 	case THREAD_QOS_BACKGROUND:
 	case THREAD_QOS_MAINTENANCE:;
+#if CONFIG_SCHED_PERF_ISLANDS
+		/*
+		 * With performance islands, BG threads are isolated to fewer psets
+		 * than the full M- or E-width of the system (whichever core type is
+		 * the lowest present).
+		 *
+		 * Iterate over all psets of the lowest core type and return the
+		 * largest width found, were CLPC to assign that pset as the preferred
+		 * island for some BG threads.
+		 */
+		uint32_t bg_cpu_count = 0;
+		uint32_t bg_pset_count = 0;
+		foreach_pset_id(src_pset_id, low_node) {
+			processor_set_t src_pset = pset_for_id(src_pset_id);
+			bg_cpu_count = MAX(bg_cpu_count, src_pset->max_parallel_cores[TH_BUCKET_SHARE_BG]);
+			bg_pset_count = MAX(bg_pset_count, src_pset->max_parallel_clusters[TH_BUCKET_SHARE_BG]);
+		}
+		return (options & QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE) ? bg_pset_count : bg_cpu_count;
+#else /* !CONFIG_SCHED_PERF_ISLANDS */
 		uint32_t low_pset_count = bitmap_count(&low_node->pset_map, MAX_PSETS);
 		uint32_t low_cpu_count = bitmap_count(&low_node->cpu_map, MAX_CPUS);
 		return (options & QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE) ? low_pset_count : low_cpu_count;
+#endif /* !CONFIG_SCHED_PERF_ISLANDS */
 	default:;
 		uint32_t total_cpus = ml_get_cpu_count();
 		uint32_t total_clusters = ml_get_cluster_count();

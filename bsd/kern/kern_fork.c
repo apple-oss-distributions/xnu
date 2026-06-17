@@ -852,6 +852,8 @@ forkproc_free(proc_t p)
 		p->p_textvp = NULL;
 	}
 
+	kfree_data(p->p_execpath, MAXPATHLEN);
+
 	/* Update the audit session proc count */
 	AUDIT_SESSION_PROCEXIT(p);
 
@@ -1024,6 +1026,12 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	 * directly from the parent.
 	 */
 	child_proc->p_forkcopy = parent_proc->p_forkcopy;
+
+	/* Inherit p_execpath on fork. */
+	if (in_fork && parent_proc->p_execpath != NULL) {
+		child_proc->p_execpath = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		strlcpy(child_proc->p_execpath, parent_proc->p_execpath, MAXPATHLEN);
+	}
 
 	proc_ro_data.syscall_filter_mask = proc_syscall_filter_mask(parent_proc);
 	proc_ro_data.p_platform_data = proc_get_ro(parent_proc)->p_platform_data;

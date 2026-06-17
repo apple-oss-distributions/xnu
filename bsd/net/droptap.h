@@ -101,6 +101,7 @@ struct droptap_header {
 #define _DROPTAP_PAD_3  3
 #define _DROPTAP_PAD_4  4
 #define DROPTAP_AQM     5
+#define DROPTAP_NETEM   6
 
 /* All domains for BSD component */
 #define DROPTAP_TCP     1
@@ -147,6 +148,11 @@ struct droptap_header {
 	X(DROP_REASON_AQM_PURGE_FLOW,               DROPTAP_SKYWALK, DROPTAP_AQM,  4,  "AQM purge flow")                             \
 	X(DROP_REASON_AQM_DROP,                     DROPTAP_SKYWALK, DROPTAP_AQM,  5,  "AQM drop")                                   \
 	X(DROP_REASON_AQM_HIGH_DELAY,               DROPTAP_SKYWALK, DROPTAP_AQM,  6,  "AQM drop due to high delay")                 \
+	X(DROP_REASON_AQM_HEAD_DROP,                DROPTAP_SKYWALK, DROPTAP_AQM,  7,  "AQM head drop")                              \
+	/* Netem */                                                                                                                  \
+	X(DROP_REASON_NETEM_DROP,                   DROPTAP_SKYWALK, DROPTAP_NETEM, 1, "Netem simulated drop")                       \
+	X(DROP_REASON_NETEM_HEAP_FULL,              DROPTAP_SKYWALK, DROPTAP_NETEM, 2, "Netem heap full")                            \
+	X(DROP_REASON_NETEM_TEARDOWN,               DROPTAP_SKYWALK, DROPTAP_NETEM, 3, "Netem teardown")                             \
 	/* Socket */                                                                                                                 \
 	X(DROP_REASON_FULL_SOCK_RCVBUF,             DROPTAP_BSD,     DROPTAP_SOCK, 1,  "Socket receive buffer full")                 \
 	/* DLIL */                                                                                                                   \

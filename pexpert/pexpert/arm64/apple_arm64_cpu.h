@@ -38,6 +38,7 @@
  */
 __enum_closed_decl(arm64_core_type_t, unsigned int, {
 	E_CORE = MPIDR_CORETYPE_ACC_E,
+	M_CORE = MPIDR_CORETYPE_ACC_M,
 	P_CORE = MPIDR_CORETYPE_ACC_P,
 });
 
@@ -74,6 +75,17 @@ arm64_is_e_core(void)
 	return arm64_core_type() == E_CORE;
 }
 
+/*
+ * Convenience wrapper around arm64_core_type() which determines whether the
+ * executing CPU is an M-core.
+ *
+ * @return Whether the executing CPU is an M-core.
+ */
+static inline bool
+arm64_is_m_core(void)
+{
+	return arm64_core_type() == M_CORE;
+}
 
 /*
  * Convenience wrapper around arm64_core_type() which determines whether the
@@ -101,6 +113,8 @@ arm64_core_type_to_string(arm64_core_type_t core_type)
 	switch (core_type) {
 	case E_CORE:
 		return "E-core";
+	case M_CORE:
+		return "M-core";
 	case P_CORE:
 		return "P-core";
 	default:

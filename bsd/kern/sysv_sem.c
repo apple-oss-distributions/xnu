@@ -156,7 +156,7 @@ static void
 semid_ds_kernelto32(struct user_semid_ds *in, struct user32_semid_ds *out)
 {
 	out->sem_perm = in->sem_perm;
-	out->sem_base = CAST_DOWN_EXPLICIT(__int32_t, in->sem_base);
+	out->sem_base = (int32_t)VM_KERNEL_ADDRHASH(in->sem_base);
 	out->sem_nsems = in->sem_nsems;
 	out->sem_otime = in->sem_otime;         /* XXX loses precision */
 	out->sem_ctime = in->sem_ctime;         /* XXX loses precision */
@@ -166,7 +166,7 @@ static void
 semid_ds_kernelto64(struct user_semid_ds *in, struct user64_semid_ds *out)
 {
 	out->sem_perm = in->sem_perm;
-	out->sem_base = CAST_DOWN_EXPLICIT(__int32_t, in->sem_base);
+	out->sem_base = (int32_t)VM_KERNEL_ADDRHASH(in->sem_base);
 	out->sem_nsems = in->sem_nsems;
 	out->sem_otime = in->sem_otime;         /* XXX loses precision */
 	out->sem_ctime = in->sem_ctime;         /* XXX loses precision */
@@ -933,8 +933,7 @@ semget(__unused struct proc *p, struct semget_args *uap, int32_t *retval)
 		semakptr->u.sem_perm.cgid = kauth_cred_getgid(cred);
 		semakptr->u.sem_perm.gid = kauth_cred_getgid(cred);
 		semakptr->u.sem_perm.mode = (semflg & 0777) | SEM_ALLOC;
-		semakptr->u.sem_perm._seq =
-		    (semakptr->u.sem_perm._seq + 1) & 0x7fff;
+		semakptr->u.sem_perm._seq = ipc_perm_seq_inc(semakptr->u.sem_perm._seq);
 		semakptr->u.sem_nsems = nsems;
 		semakptr->u.sem_otime = 0;
 		semakptr->u.sem_ctime = sysv_semtime();

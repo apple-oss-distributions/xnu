@@ -544,8 +544,7 @@ ipc_kmsg_init_trailer_and_sign(
 		bzero(trailer, sizeof(*trailer));
 		trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 		trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
-		trailer->msgh_sender = *task_get_sec_token(sender);
-		trailer->msgh_audit = *task_get_audit_token(sender);
+		task_get_tokens(sender, &trailer->msgh_sender, &trailer->msgh_audit);
 	}
 
 	ipc_kmsg_sign(kmsg, trailer);

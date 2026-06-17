@@ -733,9 +733,53 @@ extern uint32_t mteinfo_tag_storage_fragmentation(bool actual);
  * @function mteinfo_tag_storage_active()
  *
  * @abstract
- * Computed value returning the number of active tag storage pages.
+ * Computed value returning the number of active tag storage pages (including
+ * those without any tags).
  */
-extern uint32_t mteinfo_tag_storage_active(bool fq_locked);
+extern uint32_t mteinfo_tag_storage_active(void);
+
+/*!
+ * @function mteinfo_tag_storage_active_locked()
+ *
+ * @abstract
+ * Computed value returning the number of active tag storage pages, excluding
+ * those with no covered pages.
+ */
+extern uint32_t mteinfo_tag_storage_active_locked(void);
+
+/*!
+ * @function mteinfo_tag_storage_active_zero_locked()
+ *
+ * @abstract
+ * Computed value returning the number of "active" tag storage pages which
+ * currently hold no tags but have not been retyped.
+ */
+extern uint32_t mteinfo_tag_storage_active_zero_locked(void);
+
+/*!
+ * @function mteinfo_tag_storage_unused_locked()
+ *
+ * @abstract
+ * Computed value returning the number of tag storage pages in an inactive,
+ * transitioning, or free state.
+ */
+extern uint32_t mteinfo_tag_storage_free_locked(void);
+
+/*!
+ * @function mteinfo_tag_storage_nontags_wired_locked()
+ *
+ * @abstract
+ * Computed value returning the number of claimed, allocated, wired tag storage pages.
+ */
+extern uint32_t mteinfo_tag_storage_nontags_wired_locked(void);
+
+/*!
+ * @function mteinfo_tag_storage_nontags_unwired_locked()
+ *
+ * @abstract
+ * Computed value returning the number of claimed, allocated, unwired tag storage pages.
+ */
+extern uint32_t mteinfo_tag_storage_nontags_pageable_locked(void);
 
 /*!
  * @function mteinfo_tag_storage_free_pages_for_covered()

@@ -5564,6 +5564,10 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 		}
 
 		case SO_STATISTICS_EVENT:
+			if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
+				error = EINVAL;
+				goto out;
+			}
 			error = sooptcopyin(sopt, &long_optval,
 			    sizeof(long_optval), sizeof(long_optval));
 			if (error != 0) {

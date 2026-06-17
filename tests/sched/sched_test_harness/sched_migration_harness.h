@@ -14,6 +14,9 @@
 /* Mocking the HW topology */
 typedef enum {
 	TEST_CPU_TYPE_EFFICIENCY,
+#if HAS_MCORE
+	TEST_CPU_TYPE_MP_OPTIMIZED,
+#endif /* HAS_MCORE */
 	TEST_CPU_TYPE_PERFORMANCE,
 	TEST_CPU_TYPE_MAX,
 } test_cpu_type_t;
@@ -56,6 +59,9 @@ extern struct test_hw_topology single_core; // 1P
 extern struct test_hw_topology basic_amp; // 2P + 4E
 extern struct test_hw_topology dual_die; // 2E + 4P + 4P + 2E + 4P + 4P
 extern struct test_hw_topology two_of_each; // 2E + 2P + 2E + 2P
+#if HAS_MCORE
+extern struct test_hw_topology sotra_chop; /* 6M + 6M + 6P */
+#endif /* HAS_MCORE */
 
 /* Test harness utilities */
 extern test_sched_topology_t init_migration_harness(test_hw_topology_t hw_topology);

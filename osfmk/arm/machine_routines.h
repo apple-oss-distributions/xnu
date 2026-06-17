@@ -261,6 +261,7 @@ typedef enum {
 	CLUSTER_TYPE_SMP     = 0,
 	CLUSTER_TYPE_E       = 1,
 	CLUSTER_TYPE_P       = 2,
+	CLUSTER_TYPE_M       = 3,
 	MAX_CPU_TYPES,
 } cluster_type_t;
 

@@ -25,6 +25,7 @@
 #include <sys/types.h>
 
 #include <mach/mach_error.h>
+#include <mach/mach_host.h>
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
@@ -2955,4 +2956,66 @@ T_DECL(make_memory_entry_clipping,
 	// setup-cow, which locks exclusive and clips
 	make_memory_entry_clipping(true, false, true);
 	make_memory_entry_clipping(false, false, false);
+}
+
+T_DECL(vm_read_overwrite_to_wired, "test overwriting wired mapping - \
+    rdar://169034000",
+    T_META_ALL_VALID_ARCHS(true))
+{
+	kern_return_t           kr;
+	mach_port_t             obj_port = MACH_PORT_NULL;
+	mach_vm_address_t       vmaddr1, vmaddr2;
+	mach_vm_size_t          vmsize1, readsize;
+	int                     ret;
+
+	vmsize1 = 128 * 1024;
+	kr = mach_memory_object_memory_entry_64(mach_host_self(),
+	    /* internal */ TRUE,
+	    vmsize1,
+	    VM_PROT_DEFAULT,
+	    MACH_PORT_NULL,
+	    &obj_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "memory_object_memory_entry_64()");
+	vmaddr1 = 0;
+	kr = mach_vm_map(mach_task_self(),
+	    &vmaddr1,
+	    vmsize1,
+	    /* mask */ 0,
+	    VM_FLAGS_ANYWHERE,
+	    obj_port,
+	    /* offset */ 0,
+	    /* copy */ FALSE,
+	    VM_PROT_DEFAULT,
+	    VM_PROT_DEFAULT,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_map()");
+	memset((void *)(uintptr_t)vmaddr1, 0x41, vmsize1);
+	ret = mlock((void *)(uintptr_t)vmaddr1, (size_t)vmsize1);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mlock()");
+
+	vmaddr2 = 0;
+	kr = mach_vm_allocate(mach_task_self(),
+	    &vmaddr2,
+	    vmsize1,
+	    VM_FLAGS_ANYWHERE);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_allocate()");
+	memset((void *)(uintptr_t)vmaddr2, 0x42, vmsize1);
+
+	readsize = 0;
+	kr = mach_vm_read_overwrite(mach_task_self(),
+	    /* src */ vmaddr2,
+	    vmsize1,
+	    /* dst */ vmaddr1,
+	    &readsize);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_read_overwrite()");
+
+	unsigned char *cp = (unsigned char *)(uintptr_t)vmaddr1;
+	for (int i = 0; i < vmsize1; i++) {
+		T_QUIET;
+		T_ASSERT_EQ(cp[i], 0x42, "vmaddr1[%d] = 0x%x instead of 0x%x",
+		    i, cp[i], 0x42);
+	}
+
+	kr = mach_port_deallocate(mach_task_self(), obj_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_port_deallocate()");
 }

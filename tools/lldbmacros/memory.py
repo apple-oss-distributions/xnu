@@ -147,7 +147,7 @@ def Memstats(cmd_args=None, cmd_options={}):
     if has_mte and hasattr(kern.globals, 'vm_mte_cluster_kernel_tagged'):
         if kern.globals.vm_mte_cluster_kernel_tagged:
             memstats["vm_page_free_kernel_tagged_count"] = int(kern.globals.vm_page_free_kernel_tagged_count) 
-            memstats["vm_page_kernel_tagged_reserve"] = int(kern.globals.vm_page_kernel_tagged_reserve)
+            memstats["vm_page_kernel_tagged_reserved"] = int(kern.globals.vm_page_kernel_tagged_reserved)
     memstats["vm_page_active_count"] = int(kern.globals.vm_page_active_count)
     memstats["vm_page_inactive_count"] = int(kern.globals.vm_page_inactive_count)
     memstats["vm_page_inactive_target"] = int(kern.globals.vm_page_inactive_target)

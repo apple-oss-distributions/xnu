@@ -121,7 +121,7 @@ common_hook(void)
 	return rv;
 }
 
-#if (MAC_POLICY_OPS_VERSION != 92)
+#if (MAC_POLICY_OPS_VERSION != 93)
 # error "struct mac_policy_ops doesn't match definition in mac_policy.h"
 #endif
 /*
@@ -194,7 +194,7 @@ const static struct mac_policy_ops policy_ops = {
 	.mpo_reserved16 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved17 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved18 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved19 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(vnode_notify_will_rename_swap)
 	.mpo_reserved20 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved21 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved22 = (mpo_reserved_hook_t *)common_hook,

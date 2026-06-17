@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2025 Apple Inc. All rights reserved.
+ * Copyright (c) 2022, 2025, 2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -46,6 +46,78 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("networking"),
 	T_META_OWNER("vlubet")
 	);
+
+/*
+ * Test that negative delay and bandwidth values are rejected by
+ * IP_DUMMYNET_CONFIGURE
+ */
+T_DECL(test_dummynet_negative_delay,
+    "test dummynet rejects negative delay values",
+    T_META_ASROOT(true),
+    T_META_CHECK_LEAKS(false))
+{
+	int fd;
+
+	fd = socket(PF_INET, SOCK_RAW, IPPROTO_RAW);
+	T_ASSERT_POSIX_SUCCESS(fd, "socket(PF_INET, SOCK_RAW, IPPROTO_RAW)");
+
+	/* Negative delay should be rejected */
+	struct dn_pipe pipeData = {};
+	pipeData.pipe_nr = 1;
+	pipeData.delay = -443987883; /* value from fuzzer crash */
+
+	int ret = setsockopt(fd, IPPROTO_IP, IP_DUMMYNET_CONFIGURE,
+	    &pipeData, sizeof(struct dn_pipe));
+	T_EXPECT_TRUE(ret != 0 && errno == EINVAL,
+	    "setsockopt with negative delay rejected with EINVAL");
+
+	/* Negative bandwidth should be rejected */
+	memset(&pipeData, 0, sizeof(pipeData));
+	pipeData.pipe_nr = 1;
+	pipeData.bandwidth = -1;
+
+	ret = setsockopt(fd, IPPROTO_IP, IP_DUMMYNET_CONFIGURE,
+	    &pipeData, sizeof(struct dn_pipe));
+	T_EXPECT_TRUE(ret != 0 && errno == EINVAL,
+	    "setsockopt with negative bandwidth rejected with EINVAL");
+
+	close(fd);
+}
+
+/*
+ * Test that large delay values do not cause integer overflow
+ * during the ms-to-ticks conversion in config_pipe()
+ */
+T_DECL(test_dummynet_large_delay,
+    "test dummynet handles large delay values without overflow",
+    T_META_ASROOT(true),
+    T_META_CHECK_LEAKS(false))
+{
+	int fd;
+
+	fd = socket(PF_INET, SOCK_RAW, IPPROTO_RAW);
+	T_ASSERT_POSIX_SUCCESS(fd, "socket(PF_INET, SOCK_RAW, IPPROTO_RAW)");
+
+	/* Configure a pipe with a large delay that would have overflowed
+	 * the old int arithmetic: delay(ms) * (hz * 10) where hz=100
+	 * means delay * 1000, so any delay > INT_MAX/1000 = 2147483
+	 * would have overflowed. The fix uses int64_t arithmetic. */
+	struct dn_pipe pipeData = {};
+	pipeData.pipe_nr = 1;
+	pipeData.delay = 5000000; /* 5 million ms -- would overflow old code */
+
+	int ret = setsockopt(fd, IPPROTO_IP, IP_DUMMYNET_CONFIGURE,
+	    &pipeData, sizeof(struct dn_pipe));
+	T_EXPECT_POSIX_SUCCESS(ret,
+	    "setsockopt with large delay (5000000 ms) should succeed");
+
+	/* Flush */
+	T_ASSERT_POSIX_SUCCESS(
+		setsockopt(fd, IPPROTO_IP, IP_DUMMYNET_FLUSH, NULL, 0),
+		"setsockopt(IP_DUMMYNET_FLUSH)");
+
+	close(fd);
+}
 
 T_DECL(test_dummynet_configure,
     "test dummynet pipe configuration and flush",

@@ -87,7 +87,7 @@ enum {
 
 extern os_log_t tcp_mpkl_log_object;
 extern uint32_t tcp_log_enable_flags;
-extern uint16_t tcp_log_port;
+extern unsigned int tcp_log_port;
 
 #define TLEF_MASK_DST (TLEF_DST_LOOPBACK | TLEF_DST_LOCAL | TLEF_DST_GW)
 

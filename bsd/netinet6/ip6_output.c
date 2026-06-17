@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1882,8 +1882,23 @@ ip6_do_fragmentation(struct mbuf **mptr, uint32_t optlen, struct ifnet *ifp,
 			mtu = IPV6_MAXPACKET;
 		}
 
-		len = (mtu - hlen - sizeof(struct ip6_frag)) & ~7;
-		if (len < 8) {
+		/*
+		 * If the unfragmentable part plus the fragment header
+		 * exceeds the MTU, fragmentation is impossible.  Check
+		 * this before the subtraction to avoid uint32_t underflow.
+		 *
+		 * Each fragment must carry at least IPV6_FRAG_UNIT bytes
+		 * of payload because the fragment offset is expressed in
+		 * 8-octet units (RFC 8200 Section 4.5).
+		 */
+#define IPV6_FRAG_UNIT  8       /* fragment offset granularity (octets) */
+		if ((hlen + sizeof(struct ip6_frag) + IPV6_FRAG_UNIT) > mtu) {
+			in6_ifstat_inc(ifp, ifs6_out_fragfail);
+			return EMSGSIZE;
+		}
+
+		len = (mtu - hlen - sizeof(struct ip6_frag)) & ~(IPV6_FRAG_UNIT - 1);
+		if (len < IPV6_FRAG_UNIT) {
 			in6_ifstat_inc(ifp, ifs6_out_fragfail);
 			return EMSGSIZE;
 		}
@@ -3190,8 +3205,8 @@ ip6_raw_ctloutput(struct socket *so, struct sockopt *sopt)
 			if (error) {
 				break;
 			}
-			if ((optval % 2) != 0) {
-				/* the API assumes even offset values */
+			if ((optval < 0) || (optval % 2) != 0) {
+				/* the API assumes non-negative, even offset values */
 				error = EINVAL;
 			} else if (SOCK_PROTO(so) == IPPROTO_ICMPV6) {
 				if (optval != icmp6off) {

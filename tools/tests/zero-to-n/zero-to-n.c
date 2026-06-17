@@ -1682,6 +1682,7 @@ read_cluster_type_arg()
 	char cluster = optarg[0];
 	switch (cluster) {
 	case 'E':
+	case 'M':
 	case 'P':
 		/* Cluster type is valid. */
 		return cluster;

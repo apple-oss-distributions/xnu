@@ -181,16 +181,17 @@ sysctl_inp_log_port SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1, arg2)
 	int error;
-	int new_value = *(uint16_t *)oidp->oid_arg1;
+	int new_value = *(unsigned int *)oidp->oid_arg1;
 
 	error = sysctl_handle_int(oidp, &new_value, 0, req);
-	if (error == 0) {
-		if (new_value < 0 || new_value > UINT16_MAX) {
-			return EINVAL;
-		}
-		*(int *)oidp->oid_arg1 = new_value;
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
 	}
-	return error;
+	if (new_value < 0 || new_value > UINT16_MAX) {
+		return EINVAL;
+	}
+	*(unsigned int *)oidp->oid_arg1 = new_value;
+	return 0;
 }
 
 __attribute__((noinline))

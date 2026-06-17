@@ -9668,6 +9668,12 @@ pset_type_from_name_char(char pset_type_name, pset_type_t *pset_type)
 	case 'e':
 		*pset_type = PSET_AMP_E;
 		return KERN_SUCCESS;
+#if HAS_MCORE
+	case 'M':
+	case 'm':
+		*pset_type = PSET_AMP_M;
+		return KERN_SUCCESS;
+#endif /* HAS_MCORE */
 	case 'P':
 	case 'p':
 		*pset_type = PSET_AMP_P;
@@ -9855,6 +9861,10 @@ pset_type_to_name_char(pset_type_t pset_type)
 	switch (pset_type) {
 	case PSET_AMP_E:
 		return 'E';
+#if HAS_MCORE
+	case PSET_AMP_M:
+		return 'M';
+#endif /* HAS_MCORE */
 	case PSET_AMP_P:
 		return 'P';
 	default:

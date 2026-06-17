@@ -239,6 +239,7 @@ extern int proc_is_classic(proc_t p);
 extern bool proc_is_exotic(proc_t p);
 extern bool proc_is_alien(proc_t p);
 proc_t current_proc_EXTERNAL(void);
+extern proc_t proc_ref_nowait(proc_t);
 
 /*
  * __unsafe_indexable is a workaround for
@@ -288,6 +289,7 @@ extern proc_t proc_find(int pid);
  *    - PROC_NULL on error
  */
 extern proc_t proc_find_ident(const proc_ident_t i);
+
 /* find a process with a given audit token */
 extern proc_t proc_find_audit_token(const audit_token_t token);
 /* returns a handle to current process which is referenced. The reference needs to be dropped with proc_rele */

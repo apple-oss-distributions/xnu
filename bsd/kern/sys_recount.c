@@ -86,10 +86,14 @@ _perflevel_index_to_cpu_kind(unsigned int perflevel)
 		// Default to first index for SMP.
 		return (recount_cpu_kind_t)0;
 #if __AMP__
-	case CLUSTER_TYPE_E:
-		return RCT_CPU_EFFICIENCY;
 	case CLUSTER_TYPE_P:
 		return RCT_CPU_PERFORMANCE;
+#if HAS_MCORE
+	case CLUSTER_TYPE_M:
+		return RCT_CPU_MP_EFFICIENT;
+#endif // HAS_MCORE
+	case CLUSTER_TYPE_E:
+		return RCT_CPU_EFFICIENCY;
 #endif // __AMP__
 	default:
 		panic("recount: unexpected CPU type %d for perflevel %d", cluster,
@@ -127,7 +131,7 @@ static int
 _selfcounts_perf_level(thread_selfcounts_kind_t kind, user_addr_t buf,
     size_t size)
 {
-	struct recount_usage usages[RCT_CPU_KIND_COUNT] = { 0 };
+	struct recount_usage usages[RECOUNT_CPU_KIND_COUNT] = { 0 };
 	boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
 	recount_current_thread_perf_level_usage(usages);
 	ml_set_interrupts_enabled(interrupt_state);
@@ -135,11 +139,11 @@ _selfcounts_perf_level(thread_selfcounts_kind_t kind, user_addr_t buf,
 	unsigned int cpu_types = ml_get_cpu_types();
 	unsigned int level_count = __builtin_popcount(cpu_types);
 	const size_t counts_len = MIN(MIN(recount_topo_count(RCT_TOPO_CPU_KIND),
-	    RCT_CPU_KIND_COUNT), level_count);
+	    RECOUNT_CPU_KIND_COUNT), level_count);
 
 	switch (kind) {
 	case THSC_CPI_PER_PERF_LEVEL: {
-		struct thsc_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
+		struct thsc_cpi counts[RECOUNT_CPU_KIND_COUNT] = { 0 };
 		for (unsigned int i = 0; i < counts_len; i++) {
 			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
 			counts[i] = _usage_to_cpi(&usages[cpu_kind]);
@@ -147,7 +151,7 @@ _selfcounts_perf_level(thread_selfcounts_kind_t kind, user_addr_t buf,
 		return copyout(&counts, buf, MIN(sizeof(counts[0]) * counts_len, size));
 	}
 	case THSC_TIME_CPI_PER_PERF_LEVEL: {
-		struct thsc_time_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
+		struct thsc_time_cpi counts[RECOUNT_CPU_KIND_COUNT] = { 0 };
 		for (unsigned int i = 0; i < counts_len; i++) {
 			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
 			counts[i] = _usage_to_time_cpi(&usages[cpu_kind]);
@@ -155,7 +159,7 @@ _selfcounts_perf_level(thread_selfcounts_kind_t kind, user_addr_t buf,
 		return copyout(&counts, buf, MIN(sizeof(counts[0]) * counts_len, size));
 	}
 	case THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL: {
-		struct thsc_time_energy_cpi counts[RCT_CPU_KIND_COUNT] = { 0 };
+		struct thsc_time_energy_cpi counts[RECOUNT_CPU_KIND_COUNT] = { 0 };
 		for (unsigned int i = 0; i < counts_len; i++) {
 			const recount_cpu_kind_t cpu_kind = _perflevel_index_to_cpu_kind(i);
 			counts[i] = _usage_to_time_energy_cpi(&usages[cpu_kind]);
@@ -209,14 +213,14 @@ proc_pidthreadcounts(
 	size_t usize,
 	int *size_out)
 {
-	struct recount_usage usages[RCT_CPU_KIND_COUNT] = { 0 };
+	struct recount_usage usages[RECOUNT_CPU_KIND_COUNT] = { 0 };
 	// Keep this in sync with proc_threadcounts_data -- this one just has the
 	// array length hard-coded to the maximum.
 	struct {
 		uint16_t counts_len;
 		uint16_t reserved0;
 		uint32_t reserved1;
-		struct proc_threadcounts_data counts[RCT_CPU_KIND_COUNT];
+		struct proc_threadcounts_data counts[RECOUNT_CPU_KIND_COUNT];
 	} counts = { 0 };
 
 	task_t task = proc_task(p);
@@ -230,7 +234,7 @@ proc_pidthreadcounts(
 	}
 
 	const size_t counts_len = MIN(recount_topo_count(RCT_TOPO_CPU_KIND),
-	    RCT_CPU_KIND_COUNT);
+	    RECOUNT_CPU_KIND_COUNT);
 	counts.counts_len = (uint16_t)counts_len;
 	// The number of perflevels for this boot can be constrained by the `cpus=`
 	// boot-arg, so determine the runtime number to prevent unexpected calls

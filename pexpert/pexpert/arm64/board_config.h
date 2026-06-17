@@ -277,6 +277,28 @@
 
 #endif  /* ARM64_BOARD_CONFIG_T6041 */
 
+#ifdef ARM64_BOARD_CONFIG_T6050
+/**
+ * This needs to be set before including H17.h so that the definitions in
+ * apple_arm64_cpu.h are interpreted correctly.
+ */
+#define HAS_MCORE                      1
+#include <pexpert/arm64/H17.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       36
+#define MAX_CPU_CLUSTERS               6
+#define MAX_CPU_CLUSTER_PHY_ID         18
+
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define NO_CPU_OVRD                    1 /* CPU_OVRD register accesses are banned */
+#define XNU_SUPPORT_BOOTCPU_SHUTDOWN   1
+#define RHODES_CLUSTER_POWERDOWN_WORKAROUND 1 /* Workaround for rdar://89107373 (Rhodes cluster power down: cannot manually power down and up a core multiple times without powering down the cluster) */
+
+
+
+#endif  /* ARM64_BOARD_CONFIG_T6050 */
 
 
 

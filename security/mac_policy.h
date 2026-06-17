@@ -5641,6 +5641,27 @@ typedef void mpo_vnode_notify_swap_t(
 	);
 
 /**
+ *  @brief Notification that a vnode rename swap is about to be performed
+ *  @param cred User credential for the swapping process
+ *  @param v1 First vnode about to be swapped
+ *  @param vl1 Policy label for v1
+ *  @param v2 Second vnode about to be swapped
+ *  @param vl2 Policy label for v2
+ *
+ *  This hook is called immediately before the filesystem rename swap
+ *  operation, after all access control checks have completed successfully.
+ *  Policies may use this hook to prepare state that must be held across
+ *  the rename operation itself.
+ */
+typedef void mpo_vnode_notify_will_rename_swap_t(
+	kauth_cred_t cred,
+	struct vnode *v1,
+	struct label *vl1,
+	struct vnode *v2,
+	struct label *vl2
+	);
+
+/**
  *  @brief Inform MAC policies that a vnode has been linked
  *  @param cred User credential for the renaming process
  *  @param dvp Parent directory for the destination
@@ -5988,7 +6009,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 92 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 93 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -6054,7 +6075,7 @@ struct mac_policy_ops {
 	mpo_reserved_hook_t                     *mpo_reserved16;
 	mpo_reserved_hook_t                     *mpo_reserved17;
 	mpo_reserved_hook_t                     *mpo_reserved18;
-	mpo_reserved_hook_t                     *mpo_reserved19;
+	mpo_vnode_notify_will_rename_swap_t     *mpo_vnode_notify_will_rename_swap;
 	mpo_reserved_hook_t                     *mpo_reserved20;
 	mpo_reserved_hook_t                     *mpo_reserved21;
 	mpo_reserved_hook_t                     *mpo_reserved22;

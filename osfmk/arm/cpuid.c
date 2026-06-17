@@ -234,6 +234,12 @@ cpuid_get_cpufamily(void)
 		case CPU_PART_PCORE_HIDRA:
 			cpufamily = CPUFAMILY_ARM_HIDRA;
 			break;
+		case CPU_PART_MCORE_SOTRA_S:
+		case CPU_PART_PCORE_SOTRA_S:
+		case CPU_PART_MCORE_SOTRA_C:
+		case CPU_PART_PCORE_SOTRA_C:
+			cpufamily = CPUFAMILY_ARM_SOTRA;
+			break;
 		case CPU_PART_ECORE_THERA:
 		case CPU_PART_PCORE_THERA:
 			cpufamily = CPUFAMILY_ARM_THERA;
@@ -354,6 +360,14 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_ECORE_HIDRA:
 	case CPU_PART_PCORE_HIDRA:
 		cpusubfamily = CPUSUBFAMILY_ARM_HG;
+		break;
+	case CPU_PART_MCORE_SOTRA_S:
+	case CPU_PART_PCORE_SOTRA_S:
+		cpusubfamily = CPUSUBFAMILY_ARM_HS;
+		break;
+	case CPU_PART_MCORE_SOTRA_C:
+	case CPU_PART_PCORE_SOTRA_C:
+		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
 		break;
 	case CPU_PART_ECORE_THERA:
 	case CPU_PART_PCORE_THERA:

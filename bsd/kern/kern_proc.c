@@ -1055,8 +1055,8 @@ proc_self(void)
 	return proc_ref_try_fast(p) ? p : PROC_NULL;
 }
 
-proc_t
-proc_ref(proc_t p, int locked)
+static proc_t
+proc_ref_impl(proc_t p, bool wait, bool locked)
 {
 	uint32_t bits;
 
@@ -1066,10 +1066,26 @@ proc_ref(proc_t p, int locked)
 	}
 
 	if (__improbable(proc_ref_needs_wait_for_exec(bits))) {
-		return proc_ref_wait_for_exec(p, bits, locked);
+		if (wait) {
+			return proc_ref_wait_for_exec(p, bits, locked);
+		} else {
+			/* can't wait - just return null */
+			return PROC_NULL;
+		}
 	}
-
 	return p;
+}
+
+proc_t
+proc_ref(proc_t p, int locked)
+{
+	return proc_ref_impl(p, true, (bool)locked);
+}
+
+proc_t
+proc_ref_nowait(proc_t p)
+{
+	return proc_ref_impl(p, false, false /* doesn't matter */);
 }
 
 static void

@@ -35,7 +35,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 
-#include <os/x18.h>
+#include <os/arch/arm64.h>
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.arm"),
@@ -58,7 +58,7 @@ T_DECL(x18_toggle,
 	uint64_t tpidr = __builtin_arm_rsr64("TPIDR_EL0");
 	printf("tpidr: %016llx\n", tpidr);
 
-	T_ASSERT_FALSE(os_custom_x18_abi_get(), "custom x18 ABI should be initially disabled");
+	T_ASSERT_FALSE(os_custom_x18_abi_enabled(), "custom x18 ABI should be initially disabled");
 
 	for (uint64_t i = 0xFEEDB0B000000000ULL; i < 0xFEEDB0B000000000ULL + 10000; ++i) {
 		asm volatile ("mov x18, %0" : : "r"(i));
@@ -74,9 +74,9 @@ T_DECL(x18_toggle,
 		T_QUIET; T_ASSERT_EQ(x18_val, 0ULL, "check that x18 is cleared after yield");
 	}
 
-	os_custom_x18_abi(true);
+	os_set_custom_x18_abi_enabled(true);
 
-	T_ASSERT_TRUE(os_custom_x18_abi_get(), "custom x18 ABI should be enabled after os_custom_x18_abi(true)");
+	T_ASSERT_TRUE(os_custom_x18_abi_enabled(), "custom x18 ABI should be enabled after os_set_custom_x18_abi_enabled(true)");
 
 	tpidr = __builtin_arm_rsr64("TPIDR_EL0");
 	printf("tpidr: %016llx\n", tpidr);
@@ -98,9 +98,9 @@ T_DECL(x18_toggle,
 		T_QUIET; T_ASSERT_EQ(x18_val, i, "check that x18 reads back correctly after yield");
 	}
 
-	os_custom_x18_abi(false);
+	os_set_custom_x18_abi_enabled(false);
 
-	T_ASSERT_FALSE(os_custom_x18_abi_get(), "custom x18 ABI should be disabled after os_custom_x18_abi(false)");
+	T_ASSERT_FALSE(os_custom_x18_abi_enabled(), "custom x18 ABI should be disabled after os_set_custom_x18_abi_enabled(false)");
 
 	tpidr = __builtin_arm_rsr64("TPIDR_EL0");
 	printf("tpidr: %016llx\n", tpidr);
@@ -136,12 +136,12 @@ static void
 sigvtalrm_handler(int sig)
 {
 	// Step 1: Capture current x18 ABI state
-	bool was_enabled = os_custom_x18_abi_get();
+	bool was_enabled = os_custom_x18_abi_enabled();
 	x18_was_enabled_in_signal = was_enabled;
 
 	// Step 2: Transition out of custom ABI mode if enabled
 	if (was_enabled) {
-		os_custom_x18_abi(false);
+		os_set_custom_x18_abi_enabled(false);
 	}
 
 	// Step 3: Signal completion to main thread
@@ -178,8 +178,8 @@ T_DECL(x18_signal_handling,
 	T_ASSERT_POSIX_ZERO(setitimer(ITIMER_VIRTUAL, &timer, NULL), "set virtual timer");
 
 	// Enable custom x18 ABI mode
-	os_custom_x18_abi(true);
-	T_ASSERT_TRUE(os_custom_x18_abi_get(), "custom x18 ABI should be enabled before signal");
+	os_set_custom_x18_abi_enabled(true);
+	T_ASSERT_TRUE(os_custom_x18_abi_enabled(), "custom x18 ABI should be enabled before signal");
 
 	// Busy spin to consume CPU time (triggers virtual timer)
 	// No OS calls allowed in custom ABI mode - only spinning and x18 API
@@ -196,7 +196,7 @@ T_DECL(x18_signal_handling,
 	T_ASSERT_TRUE(signal_handler_completed, "signal handler should have completed");
 	T_ASSERT_TRUE(x18_was_enabled_in_signal,
 	    "custom x18 ABI should have been enabled when signal handler executed");
-	T_ASSERT_FALSE(os_custom_x18_abi_get(),
+	T_ASSERT_FALSE(os_custom_x18_abi_enabled(),
 	    "custom x18 ABI should be disabled after signal handler");
 	T_ASSERT_LT(spin_counter, MAX_SPIN_COUNT, "should not have hit timeout");
 

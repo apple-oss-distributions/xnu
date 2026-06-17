@@ -2226,7 +2226,7 @@ key_sp2msg(
 			bcopy(&isr->saidx.src, p, isr->saidx.src.ss_len);
 			p += isr->saidx.src.ss_len;
 			bcopy(&isr->saidx.dst, p, isr->saidx.dst.ss_len);
-			p += isr->saidx.src.ss_len;
+			p += isr->saidx.dst.ss_len;
 
 			xisr->sadb_x_ipsecrequest_len =
 			    PFKEY_ALIGN8(sizeof(*xisr)

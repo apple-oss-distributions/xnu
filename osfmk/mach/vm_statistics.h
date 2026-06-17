@@ -174,12 +174,62 @@ struct vm_statistics64 {
 	uint64_t        total_uncompressed_pages_in_compressor; /* # of pages (uncompressed) held within the compressor. */
 	/* added for rev2 */
 	uint64_t        swapped_count;          /* # of compressor-stored pages currently stored in swap */
+	/* Added in rev3 */
+	/* The total number of physical pages in the tag storage region */
+	uint64_t total_tag_storage_pages;
+	/*
+	 * The number of tag storage pages which hold non-tag data and are pageable
+	 */
+	uint64_t nontag_pageable_tag_storage_pages;
+	/* The number of tag storage pages which hold non-tag data and are wired */
+	uint64_t nontag_wired_tag_storage_pages;
+	/*
+	 * The number of tag storage pages which are being used for neither tags nor
+	 * regular memory
+	 */
+	uint64_t free_tag_storage_pages;
+	/* The number of tag storage pages which currently hold tags */
+	uint64_t tag_storing_tag_storage_pages;
+
+	/* The total number of virtual pages which are tagged */
+	uint64_t total_tagged_pages;
+	/* The number of resident, physical pages which are tagged */
+	uint64_t resident_tagged_pages;
+	/*
+	 * The outstanding number of virtual tagged pages whose contents reside in the
+	 * compressor
+	 */
+	uint64_t compressed_tagged_pages;
+
+	/* The number of tagged pages which have been compressed since boot */
+	uint64_t tagged_compressions;
+	/* The number of tagged pages which have been decompressed since boot */
+	uint64_t tagged_decompressions;
+	/* The current number of bytes consumed by compressed tag storage data */
+	uint64_t compressed_tag_storage_bytes;
 } __attribute__((aligned(8)));
 
 typedef struct vm_statistics64  *vm_statistics64_t;
 typedef struct vm_statistics64  vm_statistics64_data_t;
-
+#if KERNEL
+/*
+ * @func vm_stats
+ *
+ * @brief
+ * Get virtual memory statistics for the host machine. Equivalent to system call
+ * @c host_statistics64() with flavor @c HOST_VM_INFO64.
+ *
+ * @param info
+ * Out-param of type vm_statistics64_data_t
+ *
+ * @param count
+ * The size of the @c info buffer in words
+ *
+ * @returns
+ * KERN_SUCCESS if successful
+ */
 kern_return_t vm_stats(void *info, unsigned int *count);
+#endif
 
 /*
  * VM_STATISTICS_TRUNCATE_TO_32_BIT

@@ -3934,7 +3934,7 @@ set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
 		ipc_space_policy_t pol = ipc_policy_for_task(excepting_task);
 		bool only_one_exception_port =
 		    IOTaskHasEntitlement(excepting_task, IPC_ONLY_ONE_EXCEPTION_PORT)
-		    && ipc_should_apply_policy(pol, IPC_SPACE_POLICY_ENHANCED_V1);
+		    && ipc_should_apply_policy(pol, IPC_POLICY_ENHANCED_V1);
 
 		if (!hardened_exception && only_one_exception_port) {
 			kprintf("Disallowing set_exception_ports from [%s] on [%s] due "

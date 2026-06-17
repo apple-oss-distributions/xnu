@@ -141,61 +141,62 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 /*
  * Reason namespaces.
  */
-#define OS_REASON_INVALID       0
-#define OS_REASON_JETSAM        1
-#define OS_REASON_SIGNAL        2
-#define OS_REASON_CODESIGNING   3
-#define OS_REASON_HANGTRACER    4
-#define OS_REASON_TEST          5
-#define OS_REASON_DYLD          6
-#define OS_REASON_LIBXPC        7
-#define OS_REASON_OBJC          8
-#define OS_REASON_EXEC          9
-#define OS_REASON_SPRINGBOARD   10
-#define OS_REASON_TCC           11
-#define OS_REASON_REPORTCRASH   12
-#define OS_REASON_COREANIMATION 13
-#define OS_REASON_AGGREGATED    14
-#define OS_REASON_RUNNINGBOARD  15
-#define OS_REASON_ASSERTIOND    OS_REASON_RUNNINGBOARD  /* old name */
-#define OS_REASON_SKYWALK       16
-#define OS_REASON_SETTINGS      17
-#define OS_REASON_LIBSYSTEM     18
-#define OS_REASON_FOUNDATION    19
-#define OS_REASON_WATCHDOG      20
-#define OS_REASON_METAL         21
-#define OS_REASON_WATCHKIT      22
-#define OS_REASON_GUARD         23
-#define OS_REASON_ANALYTICS     24
-#define OS_REASON_SANDBOX       25
-#define OS_REASON_SECURITY      26
-#define OS_REASON_ENDPOINTSECURITY      27
-#define OS_REASON_PAC_EXCEPTION 28
-#define OS_REASON_BLUETOOTH_CHIP 29
-#define OS_REASON_PORT_SPACE    30
-#define OS_REASON_WEBKIT        31
-#define OS_REASON_BACKLIGHTSERVICES 32
-#define OS_REASON_MEDIA 33
-#define OS_REASON_ROSETTA 34
-#define OS_REASON_LIBIGNITION 35
-#define OS_REASON_BOOTMOUNT 36
-#define OS_REASON_MTE_FAIL   37
-#define OS_REASON_REALITYKIT 38
-#define OS_REASON_AUDIO      39
-#define OS_REASON_WAKEBOARD  40
-#define OS_REASON_CORERC     41
-#define OS_REASON_SELF_RESTRICT 42
-#define OS_REASON_ARKIT      43
-#define OS_REASON_CAMERA     44
-#define OS_REASON_BACKBOARD  45
-#define OS_REASON_POWEREXCEPTIONS 46
-#define OS_REASON_SECINIT    47
+#define OS_REASON_INVALID             0
+#define OS_REASON_JETSAM              1
+#define OS_REASON_SIGNAL              2
+#define OS_REASON_CODESIGNING         3
+#define OS_REASON_HANGTRACER          4
+#define OS_REASON_TEST                5
+#define OS_REASON_DYLD                6
+#define OS_REASON_LIBXPC              7
+#define OS_REASON_OBJC                8
+#define OS_REASON_EXEC                9
+#define OS_REASON_SPRINGBOARD         10
+#define OS_REASON_TCC                 11
+#define OS_REASON_REPORTCRASH         12
+#define OS_REASON_COREANIMATION       13
+#define OS_REASON_AGGREGATED          14
+#define OS_REASON_RUNNINGBOARD        15
+#define OS_REASON_ASSERTIOND          OS_REASON_RUNNINGBOARD  /* old name */
+#define OS_REASON_SKYWALK             16
+#define OS_REASON_SETTINGS            17
+#define OS_REASON_LIBSYSTEM           18
+#define OS_REASON_FOUNDATION          19
+#define OS_REASON_WATCHDOG            20
+#define OS_REASON_METAL               21
+#define OS_REASON_WATCHKIT            22
+#define OS_REASON_GUARD               23
+#define OS_REASON_ANALYTICS           24
+#define OS_REASON_SANDBOX             25
+#define OS_REASON_SECURITY            26
+#define OS_REASON_ENDPOINTSECURITY    27
+#define OS_REASON_PAC_EXCEPTION       28
+#define OS_REASON_BLUETOOTH_CHIP      29
+#define OS_REASON_PORT_SPACE          30
+#define OS_REASON_WEBKIT              31
+#define OS_REASON_BACKLIGHTSERVICES   32
+#define OS_REASON_MEDIA               33
+#define OS_REASON_ROSETTA             34
+#define OS_REASON_LIBIGNITION         35
+#define OS_REASON_BOOTMOUNT           36
+#define OS_REASON_MTE_FAIL            37
+#define OS_REASON_REALITYKIT          38
+#define OS_REASON_AUDIO               39
+#define OS_REASON_WAKEBOARD           40
+#define OS_REASON_CORERC              41
+#define OS_REASON_SELF_RESTRICT       42
+#define OS_REASON_ARKIT               43
+#define OS_REASON_CAMERA              44
+#define OS_REASON_BACKBOARD           45
+#define OS_REASON_POWEREXCEPTIONS     46
+#define OS_REASON_SECINIT             47
 #define OS_REASON_SECURITY_SOFT_TRAPS 48
+#define OS_REASON_RESOURCES           49
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_SECURITY_SOFT_TRAPS
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_RESOURCES
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 
@@ -337,6 +338,13 @@ int terminate_with_payload(int pid, uint32_t reason_namespace, uint64_t reason_c
 #define EXEC_EXIT_REASON_BAD_PSATTR         19
 #define EXEC_EXIT_REASON_NOX86EXEC          20
 #define EXEC_EXIT_REASON_MAP_EXEC_FAILURE   21
+
+/* Specific reasons related to resources management */
+#define RESOURCES_LIMIT_MACH_PORTS_EXHAUSTION       1
+#define RESOURCES_LIMIT_FILE_DESCRIPTORS_EXHAUSTION 2
+#define RESOURCES_LIMIT_KQWORKLOOPS_EXHAUSTION      3
+
+
 /*
  * guard reasons
  */

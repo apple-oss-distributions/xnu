@@ -160,6 +160,7 @@ typedef enum {
 #if __AMP__
 	PSET_AMP_E  = 0,
 	PSET_AMP_P  = 1,
+	PSET_AMP_M  = 2,
 #else /* !__AMP__*/
 	PSET_SMP    = 0,
 #endif /* !__AMP__ */

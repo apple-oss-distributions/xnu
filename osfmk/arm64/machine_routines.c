@@ -1231,6 +1231,8 @@ ml_parse_cpu_topology(void)
 		int cluster_type = (int)ml_readprop(child, "cluster-type", 0);
 		if (cluster_type == 'E') {
 			cpu->cluster_type = CLUSTER_TYPE_E;
+		} else if (cluster_type == 'M') {
+			cpu->cluster_type = CLUSTER_TYPE_M;
 		} else if (cluster_type == 'P') {
 			cpu->cluster_type = CLUSTER_TYPE_P;
 		}
@@ -2390,7 +2392,13 @@ ml_stack_base(void)
 	if ((local < intstack_top_ptr) && (local > intstack_top_ptr - INTSTACK_SIZE)) {
 		return intstack_top_ptr - INTSTACK_SIZE;
 	} else {
-		return current_thread()->kernel_stack;
+		vm_offset_t base = current_thread()->kernel_stack;
+#if CONFIG_SPTM
+		if (current_thread()->machine.kredzonestack) {
+			base -= PAGE_SIZE;
+		}
+#endif /* CONFIG_SPTM */
+		return base;
 	}
 }
 vm_size_t
@@ -2403,7 +2411,13 @@ ml_stack_size(void)
 	if ((local < intstack_top_ptr) && (local > intstack_top_ptr - INTSTACK_SIZE)) {
 		return INTSTACK_SIZE;
 	} else {
-		return kernel_stack_size;
+		vm_size_t sz = kernel_stack_size;
+#if CONFIG_SPTM
+		if (current_thread()->machine.kredzonestack) {
+			sz += PAGE_SIZE;
+		}
+#endif /* CONFIG_SPTM */
+		return sz;
 	}
 }
 #endif

@@ -485,6 +485,31 @@ ipc_create_port_with_type(ipc_test_port_type_t type)
 }
 
 /*
+ * Test Setup Utilities
+ */
+
+void
+ipc_ensure_mach_port_guard_fatal(void)
+{
+#if TARGET_OS_BRIDGE
+	kern_return_t kr;
+	task_exc_guard_behavior_t behavior;
+
+	/* Get current exception guard behavior */
+	kr = task_get_exc_guard_behavior(mach_task_self(), &behavior);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "task_get_exc_guard_behavior");
+
+	/* Clear existing MP flags and set DELIVER + FATAL */
+	behavior &= ~TASK_EXC_GUARD_MP_ALL;
+	behavior |= TASK_EXC_GUARD_MP_DELIVER | TASK_EXC_GUARD_MP_FATAL;
+
+	/* Apply the new behavior */
+	kr = task_set_exc_guard_behavior(mach_task_self(), behavior);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "task_set_exc_guard_behavior");
+#endif /* TARGET_OS_BRIDGE */
+}
+
+/*
  * Fork and Expect SIGKILL Testing
  */
 

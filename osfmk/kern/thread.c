@@ -148,6 +148,7 @@
 #include <sys/bsdtask_info.h>
 #include <sys/reason.h>
 #include <mach/sdt.h>
+#include <os/log.h>
 #include <san/kasan.h>
 #include <san/kcov_stksz.h>
 
@@ -282,6 +283,7 @@ extern uint64_t get_return_to_kernel_offset_from_proc(void *p);
 extern uint64_t get_wq_quantum_offset_from_proc(void *);
 extern int      proc_selfpid(void);
 extern void     proc_name(int, char*, int);
+extern int      proc_pid(struct proc *);
 extern char *   proc_name_address(void *p);
 exception_type_t get_exception_from_corpse_crashinfo(kcdata_descriptor_t corpse_info);
 extern void kdebug_proc_name_args(struct proc *proc, long args[static 4]);
@@ -524,32 +526,12 @@ thread_terminate_self(void)
 	uthread_cleanup(get_bsdthread_info(thread), tro);
 
 	if (kdebug_enable && bsd_info && !task_is_exec_copy(task)) {
+		recount_current_thread_trace_cpi();
 		/* trace out pid before we sign off */
 		long dbg_arg1 = 0;
 		long dbg_arg2 = 0;
 
 		kdbg_trace_data(get_bsdtask_info(task), &dbg_arg1, &dbg_arg2);
-#if CONFIG_PERVASIVE_CPI
-		if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_THR_EXIT)) {
-			struct recount_usage usage = { 0 };
-			struct recount_usage perf_only = { 0 };
-			boolean_t intrs_end = ml_set_interrupts_enabled(FALSE);
-			recount_current_thread_usage_perf_only(&usage, &perf_only);
-			ml_set_interrupts_enabled(intrs_end);
-			KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_THR_EXIT,
-			    recount_usage_instructions(&usage),
-			    recount_usage_cycles(&usage),
-			    recount_usage_system_time_mach(&usage),
-			    usage.ru_metrics[RCT_LVL_USER].rm_time_mach);
-#if __AMP__
-			KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_THR_EXIT,
-			    recount_usage_instructions(&perf_only),
-			    recount_usage_cycles(&perf_only),
-			    recount_usage_system_time_mach(&perf_only),
-			    perf_only.ru_metrics[RCT_LVL_USER].rm_time_mach);
-#endif // __AMP__
-		}
-#endif/* CONFIG_PERVASIVE_CPI */
 		KDBG_RELEASE(TRACE_DATA_THREAD_TERMINATE_PID, dbg_arg1, dbg_arg2);
 	}
 
@@ -579,28 +561,10 @@ thread_terminate_self(void)
 	if (threadcnt == 0 && bsd_info != NULL) {
 		mach_exception_data_type_t subcode = 0;
 		if (kdebug_enable) {
+			recount_current_task_trace_cpi();
 			/* since we're the last thread in this process, trace out the command name too */
 			long args[4] = { 0 };
 			kdebug_proc_name_args(bsd_info, args);
-#if CONFIG_PERVASIVE_CPI
-			if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_PROC_EXIT)) {
-				struct recount_usage usage = { 0 };
-				struct recount_usage perf_only = { 0 };
-				recount_current_task_usage_perf_only(&usage, &perf_only);
-				KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_PROC_EXIT,
-				    recount_usage_instructions(&usage),
-				    recount_usage_cycles(&usage),
-				    recount_usage_system_time_mach(&usage),
-				    usage.ru_metrics[RCT_LVL_USER].rm_time_mach);
-#if __AMP__
-				KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_PROC_EXIT,
-				    recount_usage_instructions(&perf_only),
-				    recount_usage_cycles(&perf_only),
-				    recount_usage_system_time_mach(&perf_only),
-				    perf_only.ru_metrics[RCT_LVL_USER].rm_time_mach);
-#endif // __AMP__
-			}
-#endif/* CONFIG_PERVASIVE_CPI */
 			KDBG_RELEASE(TRACE_STRING_PROC_EXIT, args[0], args[1], args[2], args[3]);
 		}
 
@@ -2537,7 +2501,22 @@ guard_ast(thread_t t,
     mach_exception_data_type_t code,
     mach_exception_data_type_t subcode)
 {
-	switch (EXC_GUARD_DECODE_GUARD_TYPE(code)) {
+	task_t task = get_threadtask(t);
+	void *bsd_info = get_bsdtask_info(task);
+	uint32_t guard_type = EXC_GUARD_DECODE_GUARD_TYPE(code);
+	uint32_t guard_flavor = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
+	uint32_t guard_target = EXC_GUARD_DECODE_GUARD_TARGET(code);
+
+	/* Log guard exception details for early boot debugging */
+	if (bsd_info != NULL) {
+		os_log_error_with_startup_serial(OS_LOG_DEFAULT,
+		    "ERROR: [%s:%d] EXC_GUARD AST: type=0x%x flavor=0x%x target=0x%x code=0x%llx subcode=0x%llx\n",
+		    proc_best_name((struct proc *)bsd_info), proc_pid((struct proc *)bsd_info),
+		    guard_type, guard_flavor, guard_target,
+		    code, subcode);
+	}
+
+	switch (guard_type) {
 	case GUARD_TYPE_MACH_PORT:
 		mach_port_guard_ast(t, code, subcode);
 		break;

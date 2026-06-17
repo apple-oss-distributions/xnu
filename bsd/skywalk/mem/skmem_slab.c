@@ -331,7 +331,7 @@ again:
 	SLIST_REMOVE(&sl->sl_head, bc, skmem_bufctl, bc_link);
 
 	/* sanity check */
-	VERIFY(bc->bc_usecnt == 0);
+	VERIFY(os_atomic_load(&bc->bc_usecnt, relaxed) == 0);
 
 	/*
 	 * Also store the master object's region info for the caller.
@@ -633,7 +633,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	VERIFY(SKMEM_SLAB_MEMBER(sl, SKMEM_MEMTAG_STRIP_TAG(buf, skm->skm_objsize)));
 
 	/* make sure this object is not currently in use by another object */
-	VERIFY(bc->bc_usecnt == 0);
+	VERIFY(os_atomic_load(&bc->bc_usecnt, relaxed) == 0);
 
 	/* if auditing is enabled, record this transaction */
 	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {

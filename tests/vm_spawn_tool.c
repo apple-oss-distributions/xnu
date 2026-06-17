@@ -43,7 +43,7 @@ main(int argc, char *argv[])
 
 	int r = sysctlbyname("debug.vm_mixed_pagesize_supported", &supported, &supported_size, NULL, 0);
 	if (r == 0 && supported) {
-		sp_flags |= _POSIX_SPAWN_FORCE_4K_PAGES;
+		posix_spawnattr_set_4k_page_size_np(&spawnattrs);
 	} else {
 		/*
 		 * We didnt find debug.vm.mixed_page.supported OR its set to 0.

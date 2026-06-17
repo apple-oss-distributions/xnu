@@ -6595,12 +6595,29 @@ __attribute__((always_inline))
 static bool
 from_current_stack(vm_offset_t addr, vm_size_t size)
 {
-	vm_offset_t start = (vm_offset_t)__builtin_frame_address(0);
-	vm_offset_t end = (start + kernel_stack_size - 1) & -kernel_stack_size;
-
 	addr = vm_memtag_canonicalize_kernel(addr);
 
-	return (addr >= start) && (addr + size < end);
+#if CONFIG_SPTM
+	thread_t thread = current_thread();
+	vm_offset_t start = thread->kernel_stack;
+	struct mach_vm_range r = {
+		.min_address = start,
+		.max_address = start + kernel_stack_size,
+	};
+
+	/* If redzone is mapped, extend the valid range to include it */
+	if (thread->machine.kredzonestack) {
+		r.min_address -= PAGE_SIZE;
+	}
+#else
+	vm_offset_t start = (vm_offset_t)__builtin_frame_address(0);
+	struct mach_vm_range r = {
+		.min_address = start,
+		.max_address = (start + kernel_stack_size - 1) & -kernel_stack_size,
+	};
+#endif /* CONFIG_SPTM */
+
+	return mach_vm_range_contains(&r, addr, size);
 }
 
 /*
@@ -6629,8 +6646,14 @@ static void
 zalloc_ro_mut_validation_panic(zone_id_t zid, void *elem,
     const vm_offset_t src, vm_size_t src_size)
 {
+#if CONFIG_SPTM
+	thread_t thread = current_thread();
+	vm_offset_t stack_start = thread->kernel_stack;
+	vm_offset_t stack_end = stack_start + kernel_stack_size;
+#else
 	vm_offset_t stack_start = (vm_offset_t)__builtin_frame_address(0);
 	vm_offset_t stack_end = (stack_start + kernel_stack_size - 1) & -kernel_stack_size;
+#endif /* CONFIG_SPTM */
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)
 	extern vm_offset_t rorgn_begin;
 	extern vm_offset_t rorgn_end;
@@ -6646,6 +6669,22 @@ zalloc_ro_mut_validation_panic(zone_id_t zid, void *elem,
 		    " (expected: %s, actual: %s", (void *)src, elem, src_zone->z_name,
 		    dst_zone->z_name);
 	}
+
+#if CONFIG_SPTM
+	if (thread->machine.kredzonestack) {
+		vm_offset_t redzone_start = stack_start - PAGE_SIZE;
+		vm_offset_t redzone_end = stack_start;
+
+		panic("zalloc_ro_mut failed: source (%p, phys %p) not from RO zone map (%p - %p), "
+		    "current stack (%p - %p), redzone (%p - %p) or const memory (phys %p - %p)",
+		    (void *)src, (void*)kvtophys(src),
+		    (void *)zone_info.zi_ranges[Z_SUBMAP_IDX_READ_ONLY].min_address,
+		    (void *)zone_info.zi_ranges[Z_SUBMAP_IDX_READ_ONLY].max_address,
+		    (void *)stack_start, (void *)stack_end,
+		    (void *)redzone_start, (void *)redzone_end,
+		    (void *)rorgn_begin, (void *)rorgn_end);
+	}
+#endif /* CONFIG_SPTM */
 
 	panic("zalloc_ro_mut failed: source (%p, phys %p) not from RO zone map (%p - %p), "
 	    "current stack (%p - %p) or const memory (phys %p - %p)",

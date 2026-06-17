@@ -110,6 +110,9 @@ test_notification_registration(ipc_test_port_type_t type, mach_msg_id_t notify_i
 T_DECL(containment_ipc_notification_registration,
     "Containment processes with IPC entitlements cannot register for notifications")
 {
+	/* Ensure mach port guard exceptions are fatal on bridgeOS */
+	ipc_ensure_mach_port_guard_fatal();
+
 	/*
 	 * Iterate through all port types and all notification types.
 	 * Each combination should result in SIGKILL for containment processes.

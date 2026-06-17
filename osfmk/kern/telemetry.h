@@ -293,9 +293,46 @@ int telemetry_pagein_setup(uint64_t buffer_size, telemetry_pagein_flags_t flags)
 void telemetry_pagein_start(void *coalition);
 
 /**
- * Emit page-in metadata for telemetry, called by the VM when a page is faulted.
+ * A token used to request page-in telemetry during a fault.
+ *
+ * @field tpit_pagerv_in
+ * The `memory_object_t` corresponding to the pager backing the memory object
+ * that's being faulted.  When returning `true`, a reference is taken on the
+ * pager that must be consumed by a subsequent call to `telemetry_pagein_emit`.
+ *
+ * @field tpit_file_offset_in
+ * The file offset that was accessed by the page-in.
+ *
+ * @field tpit_tgid_out
+ * The thread group that matches the current page-in telemetry filters.
  */
-void telemetry_pagein_emit(void *obj, mach_vm_offset_t mem_offset);
+struct telemetry_pagein_token {
+	void             *tpit_pagerv_in;
+	mach_vm_offset_t  tpit_file_offset_in;
+	uint64_t          tpit_tgid_out;
+};
+
+/**
+ * Check whether page-in telemetry should be emitted on this thread.
+ *
+ * @param token_in_out
+ * An in-out-parameter token for passing details about the page-in.
+ *
+ * @return
+ * True if telemetry should be emitted for this page-in. A subsequent call to
+ * telemetry_pagein_emit _must_ be used to consume the reference on the token.
+ * Or false otherwise.
+ */
+bool telemetry_pagein_should_emit(struct telemetry_pagein_token *token_in_out);
+
+/**
+ * Emit page-in metadata for telemetry, called by the VM when a page is faulted.
+ *
+ * @param token
+ * A page-in token that was previously returned successfully by
+ * telemetry_pagein_should_emit .
+ */
+void telemetry_pagein_emit(struct telemetry_pagein_token *token);
 
 /**
  * Stop page-in telemetry and read any accumulated data into a user space

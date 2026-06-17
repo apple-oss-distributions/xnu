@@ -1791,6 +1791,18 @@ vfs_isswapmount(mount_t mnt)
 	return mnt && ISSET(mnt->mnt_kern_flag, MNTK_SWAP_MOUNT) ? 1 : 0;
 }
 
+void
+vfs_setsnapshotmntflags(mount_t mp, mount_t snap_mp)
+{
+	uint32_t sec_flags = (MNT_IGNORE_OWNERSHIP | MNT_QUARANTINE | MNT_NOSUID |
+	    MNT_NODEV);
+
+	mount_lock(snap_mp);
+	snap_mp->mnt_flag &= ~sec_flags;
+	snap_mp->mnt_flag |= (mp->mnt_flag & sec_flags);
+	mount_unlock(snap_mp);
+}
+
 /* XXXXXXXXXXXXXX VNODE KAPIS XXXXXXXXXXXXXXXXXXXXXXXXX */
 
 

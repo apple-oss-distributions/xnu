@@ -237,7 +237,8 @@ fq_head_drop(fq_if_t *fqs, fq_t *fq)
 
 	IFCQ_DROP_ADD(ifq, 1, pktsched_get_pkt_len(&pkt));
 	IFCQ_CONVERT_LOCK(ifq);
-	pktsched_free_pkt(&pkt);
+	pktsched_drop_pkt(&pkt, ifq->ifcq_ifp, DROP_REASON_AQM_HEAD_DROP,
+	    __func__, __LINE__, 0);
 }
 
 
@@ -283,10 +284,8 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 
-		if (__improbable(droptap_verbose > 0)) {
-			droptap_output_mbuf(m, DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
-			    fqs->fqs_ifq->ifcq_ifp);
-		}
+		droptap_output_mbuf(m, DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
+		    fqs->fqs_ifq->ifcq_ifp);
 
 		m_freem(m);
 	}
@@ -305,10 +304,8 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 
-		if (__improbable(droptap_verbose > 0)) {
-			droptap_output_packet(SK_PKT2PH(kpkt), DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
-			    fqs->fqs_ifq->ifcq_ifp, 0, NULL, -1, NULL, 0, 0);
-		}
+		droptap_output_packet(SK_PKT2PH(kpkt), DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
+		    fqs->fqs_ifq->ifcq_ifp, 0, NULL, -1, NULL, 0, 0);
 
 		struct kern_pbufpool *pp =
 		    __DECONST(struct kern_pbufpool *, ((struct __kern_quantum *)kpkt)->qum_pp);
@@ -1176,12 +1173,8 @@ static void
 fq_drop_pkt(struct ifclassq *ifcq, struct ifnet *ifp, pktsched_pkt_t *pkt)
 {
 	IFCQ_DROP_ADD(ifcq, 1, pktsched_get_pkt_len(pkt));
-	if (__improbable(droptap_verbose > 0)) {
-		pktsched_drop_pkt(pkt, ifp, DROP_REASON_AQM_HIGH_DELAY,
-		    __func__, __LINE__, 0);
-	} else {
-		pktsched_free_pkt(pkt);
-	}
+	pktsched_drop_pkt(pkt, ifp, DROP_REASON_AQM_HIGH_DELAY,
+	    __func__, __LINE__, 0);
 }
 
 void

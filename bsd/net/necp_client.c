@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2025 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -39,6 +39,7 @@
 #include <net/necp.h>
 #include <net/network_agent.h>
 #include <net/ntstat.h>
+#include <net/route_private.h>
 #include <net/aop/kpi_aop.h>
 #include <net/aop/aop_stats.h>
 
@@ -2155,7 +2156,6 @@ necp_destroy_client_flow_registration(struct necp_client *client,
 		if (search_flow->route_eh_tag != NULL) {
 			if (search_flow->route_eh != NULL) {
 				necp_flow_route_monitor_unregister(search_flow->route_eh, search_flow->route_eh_tag);
-				rtfree(search_flow->route_eh); /* Release route reference held for monitoring */
 				search_flow->route_eh = NULL;
 				search_flow->route_eh_tag = NULL;
 				NECPLOG0(LOG_DEBUG, "Route monitor cleaned up during flow destruction");
@@ -4642,7 +4642,20 @@ necp_client_route_monitor_register(struct rtentry *rt, struct necp_client* clien
 static void
 necp_flow_route_monitor_unregister(struct rtentry *rt, eventhandler_tag tag)
 {
-	EVENTHANDLER_DEREGISTER(&rt->rt_evhdlr_ctxt, route_event, tag);
+	/*
+	 * Use asynchronous deregistration via the network work queue.
+	 * EVENTHANDLER_DEREGISTER() can sleep waiting for concurrent handler
+	 * invocations to drain (el_runcount drops to 0).  Calling it while
+	 * holding NECP_CLIENT_LOCK creates a lock-ordering inversion with
+	 * tcbinfo, leading to a Sleep/Wake deadlock (rdar://171981309).
+	 *
+	 * route_event_enqueue_nwk_wq_entry with ROUTE_EVHDLR_DEREGISTER
+	 * enqueues the deregistration onto the network work queue where it
+	 * executes without holding any NECP locks.  The route reference
+	 * is released by route_event_callback after deregistration completes.
+	 */
+	route_event_enqueue_nwk_wq_entry(rt, NULL,
+	    ROUTE_EVHDLR_DEREGISTER, tag, FALSE);
 }
 
 static bool
@@ -5273,12 +5286,16 @@ necp_update_client_result(proc_t proc,
 			int8_t if_lqm = client->current_route->rt_ifp->if_interface_state.lqm_state;
 
 			// Upgrade to enhancedLQM for cellular interfaces that support it
-			if (client->current_route->rt_ifp->if_type == IFT_CELLULAR && client->current_route->rt_ifp->if_link_status != NULL) {
-				struct if_cellular_status_v1 *cell_link_status = &client->current_route->rt_ifp->if_link_status->ifsr_u.ifsr_cell.if_cell_u.if_status_v1;
+			if (client->current_route->rt_ifp->if_type == IFT_CELLULAR) {
+				lck_rw_lock_shared(&client->current_route->rt_ifp->if_link_status_lock);
+				if (client->current_route->rt_ifp->if_link_status != NULL) {
+					struct if_cellular_status_v1 *cell_link_status = &client->current_route->rt_ifp->if_link_status->ifsr_u.ifsr_cell.if_cell_u.if_status_v1;
 
-				if (cell_link_status->valid_bitmask & IF_CELL_LINK_QUALITY_METRIC_VALID) {
-					if_lqm = ifnet_lqm_normalize(cell_link_status->link_quality_metric);
+					if (cell_link_status->valid_bitmask & IF_CELL_LINK_QUALITY_METRIC_VALID) {
+						if_lqm = ifnet_lqm_normalize(cell_link_status->link_quality_metric);
+					}
 				}
+				lck_rw_done(&client->current_route->rt_ifp->if_link_status_lock);
 			}
 
 			cursor = necp_buffer_write_tlv_if_different(cursor, NECP_CLIENT_RESULT_LINK_QUALITY,

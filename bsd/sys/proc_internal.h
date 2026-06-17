@@ -437,6 +437,12 @@ struct proc {
 	volatile uint64_t was_throttled __attribute__((aligned(8))); /* Counter for number of throttled I/Os */
 	volatile uint64_t did_throttle __attribute__((aligned(8)));  /* Counter for number of I/Os this proc throttled */
 
+	/*
+	 * Saved argv[0] during exec. Present iff the process has the no-read-procargs entitlement.
+	 * If non-null, points to a fixed size allocation of MAXPATHLEN bytes.
+	 */
+	char *p_execpath;
+
 #if DIAGNOSTIC
 	unsigned int p_fdlock_pc[4];
 	unsigned int p_fdunlock_pc[4];
@@ -509,6 +515,7 @@ struct proc {
 };
 
 #define PGRPID_DEAD 0xdeaddead
+#define SYSCTL_PROCARGS_NO_READ_ENTITLEMENT "com.apple.private.no-read-procargs"
 
 /* p_listflag */
 #define P_LIST_WAITING          0x00000010
@@ -779,6 +786,9 @@ struct proc_ident {
 _Static_assert(sizeof(pid_t) == 4, "proc_ident assumes a 32-bit pid_t");
 _Static_assert(PID_MAX < (1 << PROC_IDENT_PID_BIT_COUNT), "proc_ident assumes PID_MAX requires less than 28bits");
 _Static_assert(NO_PID < (1 << PROC_IDENT_PID_BIT_COUNT), "proc_ident assumes NO_PID requires less than 28bits");
+
+/* try to acquire proc ref on proc pointer (that can hold dead proc, but memory must be valid) */
+proc_t proc_ref_nowait(proc_t p);
 #endif
 
 #define BSD_SIMUL_EXECS         33 /* 32 , allow for rounding */

@@ -146,6 +146,56 @@ rt_init_completed(void)
 		}
 	}
 
+#if HAS_MCORE
+	pset_node_t p_node = pset_node_for_pset_type(PSET_AMP_P);
+	pset_node_t m_node = pset_node_for_pset_type(PSET_AMP_M);
+
+	/* Disallow spill/steal between M psets. */
+	foreach_pset_id(src_pset_id, m_node) {
+		foreach_pset_id(dst_pset_id, m_node) {
+			if (src_pset_id == dst_pset_id) {
+				continue;
+			}
+			sched_rt_config_set((pset_id_t)src_pset_id, (pset_id_t)dst_pset_id, (sched_clutch_edge) {
+				.sce_migration_allowed = false,
+				.sce_steal_allowed = false,
+				.sce_migration_weight = 0,
+			});
+		}
+	}
+
+	/* Identify a "reserve" pset for the system to run on when P-recommended
+	 * realtime threads spill. */
+	pset_id_t reserve_pset_id = PSET_ID_INVALID;
+
+	if (!pset_node_is_empty(m_node)) {
+		/* Choose an M pset to be the reserve pset. We should choose the same
+		 * pset as sched_edge_cpu_init_completed() uses for a low-M performance
+		 * island. */
+		reserve_pset_id = (pset_id_t)lsb_first(m_node->pset_map);
+	}
+
+
+	foreach_pset_id(src_pset_id, p_node) {
+		foreach_pset_id(dst_pset_id, m_node) {
+			if (dst_pset_id == reserve_pset_id) {
+				/* Spill is already disallowed because the psets are heterogeneous. */
+				continue;
+			}
+			/* Allow bi-directional steal. */
+			sched_rt_config_set((pset_id_t)src_pset_id, (pset_id_t)dst_pset_id, (sched_clutch_edge) {
+				.sce_migration_allowed = true,
+				.sce_steal_allowed = true,
+				.sce_migration_weight = 1,
+			});
+			sched_rt_config_set((pset_id_t)dst_pset_id, (pset_id_t)src_pset_id, (sched_clutch_edge) {
+				.sce_migration_allowed = true, /* allow migration so followup-spill IPIs work */
+				.sce_steal_allowed = true,
+				.sce_migration_weight = 0,
+			});
+		}
+	}
+#endif /* HAS_MCORE */
 
 	for (pset_id_t pset_id = 0; pset_id < sched_num_psets; pset_id++) {
 		sched_rt_config_pset_push(pset_array[pset_id]);

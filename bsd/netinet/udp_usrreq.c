@@ -831,6 +831,17 @@ udp_input(struct mbuf *m, int iphlen)
 		drop_reason = DROP_REASON_UDP_SOCKET_CLOSING;
 		goto bad;
 	}
+
+	/*
+	 * Transition to full wake for an UDP packet to an open port.
+	 * Unlike TCP, UDP has no idle connection concept — any packet
+	 * to an open port triggers a full AP wake unless SO_NOWAKEFROMSLEEP is set
+	 */
+	if (__improbable(if_is_lpw_enabled(ifp) && !is_magic_packet)) {
+		if ((inp->inp_socket->so_options & SO_NOWAKEFROMSLEEP) == 0) {
+			udp_proto_process_lpw_packet(m, inp, "LPW UDP unicast");
+		}
+	}
 #if NECP
 	if (!necp_socket_is_allowed_to_send_recv_v4(inp, uh->uh_dport,
 	    uh->uh_sport, &ip->ip_dst, &ip->ip_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {

@@ -52,6 +52,7 @@
 #include <kern/mpsc_ring.h>
 #include <kern/kern_stackshot.h>
 #include <vm/vm_shared_region_xnu.h>
+#include <vm/vm_ubc.h>
 
 #include <pexpert/pexpert.h>
 
@@ -1802,11 +1803,8 @@ _pagein_telemetry_active(uint64_t *trace_tgid_out)
 }
 
 static bool
-_pagein_get_emit_index(unsigned int *index_out, uint64_t *trace_tgid_out)
+_pagein_get_emit_index(unsigned int *index_out)
 {
-	if (__probable(!_pagein_telemetry_active(trace_tgid_out))) {
-		return false;
-	}
 	unsigned int reserved_index = os_atomic_inc_orig(&_pagein_globals.tp_count, relaxed);
 	/*
 	 * Best effort to avoid expense, this is double-checked under the lock later.
@@ -1845,24 +1843,35 @@ _pagein_emit_internal(
 	lck_mtx_unlock(&_telemetry_pagein_mtx);
 }
 
-void
-telemetry_pagein_emit(
-	void *objectv,
-	mach_vm_offset_t mem_offset)
+bool
+telemetry_pagein_should_emit(struct telemetry_pagein_token *token)
 {
-	vm_object_t const object = objectv;
-	memory_object_t pager = object->pager;
-	if (memory_object_is_vnode_pager(pager)) {
-		struct vnode *vp = vnode_pager_lookup_vnode(pager);
-		if (vp != NULL) {
-			unsigned int emit_index = 0;
-			uint64_t tgid = 0;
-			if (_pagein_get_emit_index(&emit_index, &tgid)) {
-				off_t file_offset = object->paging_offset + mem_offset;
-				_pagein_emit_internal(emit_index, tgid, vp, file_offset);
-			}
+	memory_object_t pager = token->tpit_pagerv_in;
+	if (!memory_object_is_vnode_pager(pager)) {
+		return false;
+	}
+	if (__probable(!_pagein_telemetry_active(&token->tpit_tgid_out))) {
+		return false;
+	}
+	vnode_pager_reference(pager);
+	return true;
+}
+
+void
+telemetry_pagein_emit(struct telemetry_pagein_token *token)
+{
+	assert(token->tpit_tgid_out != 0);
+
+	memory_object_t pager = token->tpit_pagerv_in;
+	struct vnode *vp = vnode_pager_lookup_vnode(pager);
+	if (vp != NULL) {
+		unsigned int emit_index = 0;
+		uint64_t const tgid = token->tpit_tgid_out;
+		if (_pagein_get_emit_index(&emit_index)) {
+			_pagein_emit_internal(emit_index, tgid, vp, token->tpit_file_offset_in);
 		}
 	}
+	vnode_pager_deallocate(pager);
 }
 
 int
@@ -1951,10 +1960,14 @@ telemetry_pagein_start(__unused void *coal)
 {
 }
 
+bool
+telemetry_pagein_should_emit(__unused struct telemetry_pagein_token *token)
+{
+	return false;
+}
+
 void
-telemetry_pagein_emit(
-	__unused void *vp,
-	__unused mach_vm_offset_t file_offset)
+telemetry_pagein_emit(__unused struct telemetry_pagein_token *token)
 {
 }
 

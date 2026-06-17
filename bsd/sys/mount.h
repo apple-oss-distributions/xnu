@@ -1475,6 +1475,14 @@ int vfs_mount_at_path(const char *fstype, const char *path,
 #define VFS_MOUNT_FLAG_PERMIT_UNMOUNT   0x02 /* Allow (non-forced) unmounts by users other the one who mounted the volume */
 #define VFS_MOUNT_FLAG_CURRENT_CONTEXT  0x04 /* Mount using the current VFS context */
 
+/*!
+ * @function vfs_setsnapshotmntflags
+ * @abstract Set mount flags for snapshot mount based on livefs's mount flags.
+ * @param mp Livefs mountpoint which the mount flags to based on
+ * @param snap_mp Snapshot mountpoint to set the mount's flags
+ */
+void vfs_setsnapshotmntflags(mount_t mp, mount_t snap_mp);
+
 #endif  /* KERNEL_PRIVATE */
 __END_DECLS
 

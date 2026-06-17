@@ -23,6 +23,7 @@ osfmk/arm64/sptm/pmap/pmap_ppl_interface.c	optional nos_arm_asm config_sptm
 osfmk/arm64/sptm/start_sptm.s		optional nos_arm_asm config_sptm
 osfmk/arm64/amcc_rorgn_sptm.c		optional nos_arm_asm config_sptm
 osfmk/arm64/sptm/arm_init_sptm.c	optional config_sptm
+osfmk/arm64/sop.c			optional config_sptm
 
 osfmk/arm64/bsd_arm64.c		optional mach_bsd
 osfmk/arm/machdep_call.c	optional mach_bsd

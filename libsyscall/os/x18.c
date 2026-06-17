@@ -41,7 +41,7 @@
 void (*update_tpidr)(uint64_t) = NULL;
 
 void
-os_custom_x18_abi(bool const want_custom_x18_abi)
+os_set_custom_x18_abi_enabled(bool const want_custom_x18_abi)
 {
 	uint64_t tpidr_upper = __builtin_arm_rsr64("TPIDR_EL0");
 
@@ -59,7 +59,7 @@ os_custom_x18_abi(bool const want_custom_x18_abi)
 }
 
 bool
-os_custom_x18_abi_get(void)
+os_custom_x18_abi_enabled(void)
 {
 	return (bool)(__builtin_arm_rsr64("TPIDR_EL0") & MACHDEP_TPIDR_FLAG_PRESERVE_X18);
 }

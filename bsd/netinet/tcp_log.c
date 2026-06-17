@@ -69,7 +69,7 @@ SYSCTL_STRING(_net_inet_tcp_log, OID_AUTO, enable_usage, CTLFLAG_RD | CTLFLAG_LO
 #undef X
 
 
-uint16_t tcp_log_port = 0;
+unsigned int tcp_log_port = 0;
 SYSCTL_PROC(_net_inet_tcp_log, OID_AUTO, rtt_port,
     CTLFLAG_RW | CTLFLAG_LOCKED | CTLTYPE_INT, &tcp_log_port, 0,
     sysctl_inp_log_port, "UI", "");

@@ -43,11 +43,15 @@
 #include <kern/machine.h>
 #include <kern/kpc.h>
 #include <kern/monotonic.h>
+#include <kern/startup.h>
 
 #include <machine/atomic.h>
 #include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/x86_64_compat.h>
+#if CONFIG_SPTM
+#include <arm64/sop.h>
+#endif
 #include <arm/cpu_data_internal.h>
 #include <arm/machdep_call.h>
 #include <arm/misc_protos.h>
@@ -784,6 +788,17 @@ machine_thread_destroy(thread_t thread)
 		thread->machine.DebugData = NULL;
 		free_debug_state(pTmp);
 	}
+
+#if CONFIG_SPTM
+	/*
+	 * Unmap any redzone stack page that was mapped for this thread.
+	 * This is the cleanup path for threads that terminate while still
+	 * having a mapped redzone page.
+	 */
+	if (thread->machine.kredzonestack && thread->kernel_stack) {
+		sop_unmap_redzone_page(thread);
+	}
+#endif /* CONFIG_SPTM */
 }
 
 
@@ -934,6 +949,17 @@ machine_stack_detach(thread_t thread)
 #if CONFIG_STKSZ
 	kcov_stksz_set_thread_stack(thread, stack);
 #endif
+#if CONFIG_SPTM
+	/*
+	 * If this thread has a redzone page mapped, unmap it now BEFORE
+	 * we clear kernel_stack. We need kernel_stack to calculate the VA.
+	 * This prevents leaking redzone pages when threads are destroyed
+	 * after their stacks are detached.
+	 */
+	if (thread->machine.kredzonestack) {
+		sop_unmap_redzone_page(thread);
+	}
+#endif /* CONFIG_SPTM */
 	thread->kernel_stack = 0;
 	thread->machine.kstackptr = NULL;
 
@@ -965,6 +991,16 @@ machine_stack_attach(thread_t thread,
 	kcov_stksz_set_thread_stack(thread, 0);
 #endif
 	void *kstackptr = (void *)(stack + kernel_stack_size - sizeof(struct thread_kernel_state));
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+	/*
+	 * Artificially reduce stack size for testing stack overflow protection.
+	 * Only apply after lockdown to avoid affecting early boot threads.
+	 * Align to 16 bytes to prevent stack alignment faults.
+	 */
+	if (startup_phase >= STARTUP_SUB_LOCKDOWN) {
+		kstackptr = (void *)(((uintptr_t)kstackptr - sop_kstack_reduce) & ~0xFUL);
+	}
+#endif
 	thread->machine.kstackptr = kstackptr;
 	thread_initialize_kernel_state(thread);
 
@@ -1021,13 +1057,46 @@ machine_stack_handoff(thread_t old,
 	kpc_off_cpu(old);
 #endif /* CONFIG_CPU_COUNTERS */
 
+#if CONFIG_SPTM
+	/*
+	 * Don't transfer kredzonestack ownership to avoid stale mappings.
+	 * If the old thread had a redzone page mapped, unmap it now BEFORE
+	 * detaching the stack (we need old->kernel_stack to calculate the VA).
+	 * The new thread will remap the redzone page on demand if needed.
+	 *
+	 * This avoids issues where kredzonestack indicates a page is mapped
+	 * but the actual mapping no longer exists (e.g., if the page was
+	 * unmapped through pmap operations that bypassed sop_unmap_redzone_page).
+	 */
+	if (old->machine.kredzonestack) {
+		sop_unmap_redzone_page(old);
+	}
+#endif /* CONFIG_SPTM */
+
 	stack = machine_stack_detach(old);
 #if CONFIG_STKSZ
 	kcov_stksz_set_thread_stack(new, 0);
 #endif
 	new->kernel_stack = stack;
 	void *kstackptr = (void *)(stack + kernel_stack_size - sizeof(struct thread_kernel_state));
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+	/*
+	 * Artificially reduce stack size for testing stack overflow protection.
+	 * Only apply after lockdown to avoid affecting early boot threads.
+	 * Align to 16 bytes to prevent stack alignment faults.
+	 */
+	if (startup_phase >= STARTUP_SUB_LOCKDOWN) {
+		kstackptr = (void *)(((uintptr_t)kstackptr - sop_kstack_reduce) & ~0xFUL);
+	}
+#endif
 	new->machine.kstackptr = kstackptr;
+#if CONFIG_SPTM
+	/*
+	 * The new thread starts with no redzone page mapped.
+	 * It will be remapped on demand if needed.
+	 */
+	new->machine.kredzonestack = 0;
+#endif /* CONFIG_SPTM */
 	if (stack == old->reserved_stack) {
 		assert(new->reserved_stack);
 		old->reserved_stack = new->reserved_stack;

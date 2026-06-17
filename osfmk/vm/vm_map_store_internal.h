@@ -478,6 +478,22 @@ extern vm_map_size_t vm_map_store_lookup_hole(
 
 /*!
  * @abstract
+ * Returns whether there is any vm entry in the specified range.
+ *
+ * @param map           The map to search.
+ * @param start         The range start.
+ * @param end           The range end.
+ *
+ * @returns             Whether there are any existing vm entry in @c map,
+ *                      within @c [start, end).
+ */
+extern bool vm_map_store_has_entries(
+	struct _vm_map         *map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         end);
+
+/*!
+ * @abstract
  * Locate free space in a map.
  *
  * @param map           The map to search.

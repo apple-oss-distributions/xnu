@@ -1536,6 +1536,9 @@ _copy_ap_name(unsigned int cpuid, void *dst, size_t size)
 	case CLUSTER_TYPE_E:
 		name = "AP-E";
 		break;
+	case CLUSTER_TYPE_M:
+		name = "AP-M";
+		break;
 	case CLUSTER_TYPE_P:
 		name = "AP-P";
 		break;

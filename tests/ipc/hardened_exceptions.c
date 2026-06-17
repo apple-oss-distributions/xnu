@@ -1,4 +1,5 @@
 #include "exc_helpers.h"
+#include "ipc_utils.h"
 #include <darwintest.h>
 
 #include <mach/mach_init.h>
@@ -35,7 +36,9 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("IPC"),
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_ENABLED(TARGET_CPU_ARM64),
+	T_META_TAG_VM_PREFERRED);
 
 struct mach_exception_options {
 	mach_port_t exc_port;
@@ -120,9 +123,6 @@ static mach_port_t
 create_hardened_exception_port(const struct mach_exception_options meo,
     uint32_t signing_key_local)
 {
-#if !__arm64__
-	T_SKIP("Hardened exceptions not supported on !arm64");
-#endif /* !__arm64__ */
 	kern_return_t kr;
 	mach_port_t exc_port;
 	mach_port_options_t opts = {
@@ -142,11 +142,27 @@ create_hardened_exception_port(const struct mach_exception_options meo,
 	return exc_port;
 }
 
-T_DECL(hardened_exceptions_default,
+/*
+ * ENTITLED: binary carries com.apple.security.only-one-exception-port, a
+ * restriction entitlement that forbids thread_set_exception_ports(2) and
+ * limits the process to one exception port registered via
+ * task_register_hardened_exception_handler.
+ * ENTITLED_DEBUGGER: same restriction, with additional debugger entitlement.
+ */
+#if defined(ENTITLED)
+#define HARDENED_EXCEPTIONS_DEFAULT_DECL hardened_exceptions_entitled
+#elif defined(ENTITLED_DEBUGGER)
+#define HARDENED_EXCEPTIONS_DEFAULT_DECL hardened_exceptions_entitled_debugger
+#else
+#define HARDENED_EXCEPTIONS_DEFAULT_DECL hardened_exceptions
+#endif
+
+#define HARDENED_EXCEPTIONS_CONCAT(a, b) a##b
+#define HARDENED_EXCEPTIONS_EXPAND(a, b) HARDENED_EXCEPTIONS_CONCAT(a, b)
+#define HARDENED_EXCEPTIONS_DECL(suffix) HARDENED_EXCEPTIONS_EXPAND(HARDENED_EXCEPTIONS_DEFAULT_DECL, suffix)
+
+T_DECL(HARDENED_EXCEPTIONS_DECL(_new_flow),
     "Test creating and using hardened exception ports") {
-#if !__arm64__
-	T_SKIP("Hardened exceptions not supported on !arm64");
-#endif /* !__arm64__ */
 	struct mach_exception_options meo;
 	meo.exceptions_allowed = EXC_MASK_BAD_ACCESS;
 	meo.behaviors_allowed = EXCEPTION_STATE_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES;
@@ -161,35 +177,39 @@ T_DECL(hardened_exceptions_default,
 	    EXCEPTION_STATE_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES, true);
 	bad_access_func();
 
-	printf("Successfully recovered from the exception!\n");
+	T_PASS("Successfully recovered from the exception!\n");
 }
 
-extern char *__progname;
+#if !defined(ENTITLED)
 
-T_DECL(entitled_process_exceptions_disallowed,
-    "Test that when you have the special entitlement you may not use the hardened exception flow, unless you have debugger entitlements",
-    T_META_IGNORECRASHES("*hardened_exceptions_entitled")) {
-#if !__arm64__
-	T_SKIP("Hardened exceptions not supported on !arm64");
-#endif /* !__arm64__ */
-
-	bool entitled = strstr(__progname, "entitled") != NULL;
-	bool debugger = strstr(__progname, "debugger") != NULL;
-	/* thread_set_exception_ports as a platform restrictions binary should fail */
+T_DECL(HARDENED_EXCEPTIONS_DECL(_tse_not_regressed),
+    "Test that a process without only-one-exception-port restriction or with debugger "
+    "entitlement may use thread_set_exception_ports normally") {
 	kern_return_t kr = thread_set_exception_ports(
 		mach_thread_self(),
 		EXC_MASK_ALL,
 		MACH_PORT_NULL,
 		(exception_behavior_t)((unsigned int)EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES),
 		EXCEPTION_THREAD_STATE);
-
-	if (!entitled && !debugger) {
-		T_ASSERT_MACH_SUCCESS(kr, "unentitled works normally");
-	} else if (entitled && !debugger) {
-		T_FAIL("We should have already crashed due to hardening entitlement");
-	} else if (entitled && debugger) {
-		T_ASSERT_MACH_SUCCESS(kr, "debugger entitlement works normally");
-	} else {
-		T_FAIL("invalid configuration");
-	}
+	T_ASSERT_MACH_SUCCESS(kr, "works normally without only-one-exception-port restriction");
 }
+
+#else /* !defined(ENTITLED) */
+
+T_DECL(HARDENED_EXCEPTIONS_DECL(_tse_disallowed),
+    "Test that a process restricted by only-one-exception-port may not use thread_set_exception_ports") {
+	if (ipc_hardening_disabled()) {
+		T_SKIP("IPC hardening disabled via boot-args");
+	}
+	/* thread_set_exception_ports on a process with only-one-exception-port restriction should be killed with SIGKILL */
+	expect_sigkill(^{
+		(void)thread_set_exception_ports(
+			mach_thread_self(),
+			EXC_MASK_ALL,
+			MACH_PORT_NULL,
+			(exception_behavior_t)((unsigned int)EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES),
+			EXCEPTION_THREAD_STATE);
+	}, "thread_set_exception_ports disallowed for process with only-one-exception-port restriction");
+}
+
+#endif /* !defined(ENTITLED) */

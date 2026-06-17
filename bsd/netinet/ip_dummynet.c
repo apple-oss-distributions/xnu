@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -555,7 +555,7 @@ cp_pipe_to_32_user(struct dn_pipe *p, char *bp0 __ended_by(bp_end), char *bp_end
 
 	cp_flow_set_to_32_user( &(p->fs), &(pipe_bp->fs));
 
-	pipe_bp->delay = (pipe_bp->delay * 1000) / (hz * 10);
+	pipe_bp->delay = (int)((int64_t)pipe_bp->delay * 1000 / (hz * 10));
 	/*
 	 * XXX the following is a hack based on ->next being the
 	 * first field in dn_pipe and dn_flow_set. The correct
@@ -610,7 +610,7 @@ cp_pipe_to_64_user(struct dn_pipe *p, char *bp0 __ended_by(bp_end), char *bp_end
 
 	cp_flow_set_to_64_user( &(p->fs), &(pipe_bp->fs));
 
-	pipe_bp->delay = (pipe_bp->delay * 1000) / (hz * 10);
+	pipe_bp->delay = (int)((int64_t)pipe_bp->delay * 1000 / (hz * 10));
 	/*
 	 * XXX the following is a hack based on ->next being the
 	 * first field in dn_pipe and dn_flow_set. The correct
@@ -666,7 +666,7 @@ dn_heap_update_node_offset(struct dn_heap *heap, int node, int pos)
 		/* Heap entries don't contain offsets, nothing to do. */
 		return;
 	}
-	VERIFY(heap->size <= node);
+	VERIFY(node >= 0 && heap->size > node);
 	ent = &(heap->p[node]);
 	VERIFY(heap->offset + sizeof(int) <= ent->obj_size);
 	obj_bytes = ent->object;
@@ -918,7 +918,7 @@ transmit_event(struct dn_pipe *pipe, struct mbuf **head, struct mbuf **tail)
  * equal to 1000.
  */
 #define SET_TICKS(_m, q, p)     \
-    ((_m)->m_pkthdr.len*8*(hz*10) - (q)->numbytes + p->bandwidth - 1 ) / \
+    ((int64_t)(_m)->m_pkthdr.len*8*(hz*10) - (q)->numbytes + p->bandwidth - 1 ) / \
 	    p->bandwidth ;
 
 /*
@@ -979,7 +979,7 @@ ready_event(struct dn_flow_queue *q, struct mbuf **head, struct mbuf **tail)
 	q->numbytes += (curr_time - q->sched_time) * p->bandwidth;
 	while ((pkt = q->head) != NULL) {
 		int len = pkt->m_pkthdr.len;
-		int len_scaled = p->bandwidth ? len * 8 * (hz * 10) : 0;
+		int64_t len_scaled = p->bandwidth ? (int64_t)len * 8 * (hz * 10) : 0;
 		if (len_scaled > q->numbytes) {
 			break;
 		}
@@ -1052,7 +1052,7 @@ ready_event_wfq(struct dn_pipe *p, struct mbuf **head, struct mbuf **tail)
 			struct mbuf *pkt = q->head;
 			struct dn_flow_set *fs = q->fs;
 			u_int32_t len = pkt->m_pkthdr.len;
-			u_int64_t len_scaled = p->bandwidth ? len * 8 * (hz * 10) : 0;
+			u_int64_t len_scaled = p->bandwidth ? (u_int64_t)len * 8 * (hz * 10) : 0;
 
 			heap_extract(sch, NULL, 0); /* remove queue from heap */
 			p_numbytes -= len_scaled;
@@ -2159,7 +2159,10 @@ config_pipe(struct dn_pipe *p)
 	 * delay = ms, must be translated into ticks.
 	 * qsize = slots/bytes
 	 */
-	p->delay = (p->delay * (hz * 10)) / 1000;
+	if (p->delay < 0 || p->bandwidth < 0) {
+		return EINVAL;
+	}
+	p->delay = (int)((int64_t)p->delay * (hz * 10) / 1000);
 	/* We need either a pipe number or a flow_set number */
 	if (p->pipe_nr == 0 && pfs->fs_nr == 0) {
 		return EINVAL;

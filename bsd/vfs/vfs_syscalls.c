@@ -1263,6 +1263,20 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 			flags |= MNT_REMOVABLE;
 		}
 
+		/*
+		 * If it is a snapshot mount, we can't turn off MNT_IGNORE_OWNERSHIP,
+		 * MNT_NOSUID and MNT_NODEV flags so we'll just silently add them if
+		 * they are not passed in. We also don't allow setting these flags if
+		 * these flags are currently absence in the the snapshot mount.
+		 */
+		if (mp->mnt_flag & MNT_SNAPSHOT) {
+			int cur_flags = mp->mnt_flag & (MNT_IGNORE_OWNERSHIP | MNT_NOSUID |
+			    MNT_NODEV);
+
+			flags &= ~(MNT_IGNORE_OWNERSHIP | MNT_NOSUID | MNT_NODEV);
+			flags |= cur_flags;
+		}
+
 		/* Can't downgrade the backer of the root FS */
 		if ((mp->mnt_kern_flag & MNTK_BACKS_ROOT) &&
 		    (!vfs_isrdonly(mp)) && (flags & MNT_RDONLY)) {
@@ -1296,8 +1310,6 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 		}
 		flag = mp->mnt_flag;
 		flag_set = true;
-
-
 
 		mp->mnt_flag |= flags & (MNT_RELOAD | MNT_FORCE | MNT_UPDATE);
 
@@ -10004,6 +10016,12 @@ skipped_lookup:
 	vnode_breakdirlease(tdvp, false, O_WRONLY);
 #endif
 
+#if CONFIG_MACF
+	if (ISSET(flags, VFS_RENAME_SWAP)) {
+		mac_vnode_notify_will_rename_swap(ctx, fvp, tvp);
+	}
+#endif
+
 	error = vn_rename(fdvp, &fvp, &fromnd->ni_cnd, fvap,
 	    tdvp, &tvp, &tond->ni_cnd, tvap,
 	    flags, ctx);
@@ -15276,8 +15294,9 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 	if (flags & SNAPSHOT_MNT_NOFOLLOW) {
 		mount_flags |= MNT_NOFOLLOW;
 	}
-	/* Reflect the livefs's 'noowners' status on the snapshot mount. */
-	mount_flags |= (mp->mnt_flag & MNT_IGNORE_OWNERSHIP);
+	/* Reflect the livefs's security related flags on the snapshot mount. */
+	mount_flags |= (mp->mnt_flag &
+	    (MNT_IGNORE_OWNERSHIP | MNT_QUARANTINE | MNT_NOSUID | MNT_NODEV));
 
 	/* Get the vnode to be covered */
 	NDINIT(dirndp, LOOKUP, OP_MOUNT, FOLLOW | AUDITVNPATH1 | WANTPARENT,

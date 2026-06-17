@@ -2746,7 +2746,11 @@ IOUserServer::kill(const char * reason)
 	IOReturn ret = kIOReturnError;
 	if (fOwningTask != NULL) {
 		DKLOG(DKS"::kill(%s)\n", DKN(this), reason);
-		task_bsdtask_kill(fOwningTask);
+		proc_t unsafe_proc = (proc_t)get_bsdtask_info(fOwningTask);
+		proc_t p = proc_ref_nowait(unsafe_proc);
+		if (p) {
+			taskbsd_kill_and_release(p);
+		}
 		ret = kIOReturnSuccess;
 	}
 	return ret;

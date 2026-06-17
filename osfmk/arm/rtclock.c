@@ -88,7 +88,7 @@ rtclock_early_init(void)
 #if DEVELOPMENT || DEBUG
 	uint32_t tmp_mv = 1;
 
-#if defined(APPLE_ARM64_ARCH_FAMILY)
+#if defined(APPLE_ARM64_ARCH_FAMILY) && !APPLEVIRTUALPLATFORM
 	/* Enable MAT validation on A0 hardware by default. */
 	timebase_validation = ml_get_topology_info()->chip_revision == CPU_VERSION_A0;
 #endif

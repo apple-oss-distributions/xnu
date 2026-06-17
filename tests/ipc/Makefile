@@ -226,21 +226,21 @@ ipc/imm_pinned_control_port_crasher_3P_hardened: ipc/imm_pinned_control_port_cra
 
 # Hardened Exceptions
 
-ipc/hardened_exceptions: excserver_protect_state exc_helpers.c
-ipc/hardened_exceptions: ipc/hardened_exceptions_entitled ipc/hardened_exceptions_entitled_debugger
+ipc/hardened_exceptions: excserver_protect_state exc_helpers.c $(IPC_UTILS)
 ipc/hardened_exceptions: $(OBJROOT)/excserver_protect_state.c
 
-CUSTOM_TARGETS += ipc/hardened_exceptions_entitled
-ipc/hardened_exceptions_entitled: OTHER_CFLAGS += -I $(OBJROOT)
+OTHER_TEST_TARGETS += ipc/hardened_exceptions_entitled
+ipc/hardened_exceptions_entitled: OTHER_CFLAGS += -DENTITLED
 ipc/hardened_exceptions_entitled: CODE_SIGN_ENTITLEMENTS = entitlements/only_one_exception_port.entitlement
 ipc/hardened_exceptions_entitled: excserver_protect_state
-ipc/hardened_exceptions_entitled: exc_helpers.c ipc/hardened_exceptions.c $(OBJROOT)/excserver_protect_state.c
+ipc/hardened_exceptions_entitled: exc_helpers.c ipc/hardened_exceptions.c $(IPC_UTILS) $(OBJROOT)/excserver_protect_state.c
 	$(call DARWIN_COMPILE_C_TEST,$^,$@)
 
-CUSTOM_TARGETS += ipc/hardened_exceptions_entitled_debugger
+OTHER_TEST_TARGETS += ipc/hardened_exceptions_entitled_debugger
+ipc/hardened_exceptions_entitled_debugger: OTHER_CFLAGS += -DENTITLED_DEBUGGER
 ipc/hardened_exceptions_entitled_debugger: CODE_SIGN_ENTITLEMENTS = entitlements/only_one_exception_port_debugger.entitlement
 ipc/hardened_exceptions_entitled_debugger: excserver_protect_state
-ipc/hardened_exceptions_entitled_debugger: exc_helpers.c ipc/hardened_exceptions.c $(OBJROOT)/excserver_protect_state.c
+ipc/hardened_exceptions_entitled_debugger: exc_helpers.c ipc/hardened_exceptions.c $(IPC_UTILS) $(OBJROOT)/excserver_protect_state.c
 	$(call DARWIN_COMPILE_C_TEST,$^,$@)
 
 

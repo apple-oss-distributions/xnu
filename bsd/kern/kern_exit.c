@@ -2638,6 +2638,8 @@ proc_exit(proc_t p)
 		vnode_rele(tvp);
 	}
 
+	kfree_data(p->p_execpath, MAXPATHLEN);
+
 	/*
 	 * Save exit status and final rusage info, adding in child rusage
 	 * info and self times.  If we were unable to allocate a zombie
@@ -3808,6 +3810,13 @@ exit_with_fatal_exception_and_notify(
 	mach_exception_data_type_t mx_subcode,
 	uint32_t flags)
 {
+	/* Log fatal exception details for early boot debugging */
+	os_log_error_with_startup_serial(OS_LOG_DEFAULT,
+	    "ERROR: [%s:%d] FATAL exception: type=0x%x reason=0x%x code=0x%llx subcode=0x%llx\n",
+	    proc_best_name(p), proc_pid(p),
+	    exception_type, os_reason,
+	    mx_code, mx_subcode);
+
 	if ((p == current_proc()) &&
 	    (task_exception_notify(EXC_GUARD, mx_code, mx_subcode, /* fatal */ true) == KERN_SUCCESS)) {
 		flags |= PX_NO_CRASH_REPORT;

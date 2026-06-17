@@ -35,6 +35,7 @@
 #include <ipc/ipc_port.h>
 
 #include "mocks/osfmk/mock_ipc.h"
+#include "mocks/osfmk/unit_test_utils.h"
 #include "mocks/mock_dynamic.h"
 
 #include "ipc/utils/mach_port_construct_helpers.h"
@@ -150,6 +151,35 @@ T_DECL(
 			}
 		}
 	}
+}
+
+T_DECL(
+	ipc_should_apply_policy_rejects_version_bits_without_enhanced,
+	"ipc_should_apply_policy must panic if requested_level has version bits "
+	"but not IPC_SPACE_POLICY_ENHANCED") {
+	/*
+	 * Passing a raw IPC_SPACE_POLICY_ENHANCED_V* constant (version bits only,
+	 * no IPC_SPACE_POLICY_ENHANCED flag) is the classic caller mistake —
+	 * the correct constants are IPC_POLICY_ENHANCED_V* which OR in the ENHANCED
+	 * flag.  The assert at the top of ipc_should_apply_policy() must catch this.
+	 */
+	T_ASSERT_PANIC({
+		T_MOCK_ORIGINAL(ipc_should_apply_policy)(
+			IPC_SPACE_POLICY_DEFAULT,
+			IPC_SPACE_POLICY_ENHANCED_V1);
+	}, "passing version bits without IPC_SPACE_POLICY_ENHANCED should panic");
+
+	T_ASSERT_PANIC({
+		T_MOCK_ORIGINAL(ipc_should_apply_policy)(
+			IPC_SPACE_POLICY_DEFAULT,
+			IPC_SPACE_POLICY_ENHANCED_V2);
+	}, "passing version bits without IPC_SPACE_POLICY_ENHANCED should panic");
+
+	T_ASSERT_PANIC({
+		T_MOCK_ORIGINAL(ipc_should_apply_policy)(
+			IPC_SPACE_POLICY_DEFAULT,
+			IPC_SPACE_POLICY_ENHANCED_V3);
+	}, "passing version bits without IPC_SPACE_POLICY_ENHANCED should panic");
 }
 
 #define CONSTRUCTION_REQUIRE_ENTITLMENT(type) \

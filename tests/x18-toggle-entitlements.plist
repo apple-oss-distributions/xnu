@@ -4,5 +4,7 @@
 <dict>
 	<key>com.apple.security.custom-x18-abi-toggle</key>
 	<true/>
+	<key>com.apple.private.4k-pages</key>
+	<true/>
 </dict>
 </plist>

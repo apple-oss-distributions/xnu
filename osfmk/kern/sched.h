@@ -208,6 +208,16 @@ typedef enum {
 
 #if CONFIG_SCHED_EDGE
 
+#if HAS_MCORE
+/*
+ * Enable scheduler features for enforcing performance islands on
+ * multi-cluster platforms with M-cores.
+ * Performance islands are deployed as a power optimization to utilize
+ * the M-cores more efficiently, since otherwise the M-cores cost more energy
+ * compared to E-cores.
+ */
+#define CONFIG_SCHED_PERF_ISLANDS 1
+#endif /* HAS_MCORE */
 
 #endif /* CONFIG_SCHED_EDGE */
 

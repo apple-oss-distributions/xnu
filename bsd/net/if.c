@@ -4552,13 +4552,20 @@ ifioctl_ifreq(struct socket *so, u_long cmd, struct ifreq *ifr, struct proc *p)
 		    (caddr_t)(struct ifreq *__indexable)ifr, ifp, p));
 		socket_unlock(so, 1);
 
+		/*
+		 * The old socket data structure does not have sa_len, just sa_family as a uint16_t
+		 */
 		switch (ocmd) {
 		case OSIOCGIFADDR:
 		case OSIOCGIFDSTADDR:
 		case OSIOCGIFBRDADDR:
-		case OSIOCGIFNETMASK:
-			SOCKADDR_COPY(&ifr->ifr_addr.sa_family, &ifr->ifr_addr,
-			    sizeof(u_short));
+		case OSIOCGIFNETMASK: {
+			struct osockaddr *osa = (struct osockaddr *)(void *)&ifr->ifr_addr;
+			osa->sa_family = ifr->ifr_addr.sa_family;
+			break;
+		}
+		default:
+			break;
 		}
 
 		if (cmd == SIOCSIFKPI) {

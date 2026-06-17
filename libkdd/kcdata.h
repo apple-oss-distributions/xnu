@@ -961,6 +961,15 @@ struct instrs_cycles_snapshot_v2 {
 	uint64_t ics_p_cycles;
 } __attribute__((packed));
 
+struct instrs_cycles_snapshot_v3 {
+	uint64_t ics_instructions;
+	uint64_t ics_cycles;
+	uint64_t ics_p_instructions;
+	uint64_t ics_p_cycles;
+	uint64_t ics_m_instructions;
+	uint64_t ics_m_cycles;
+} __attribute__((packed));
+
 struct thread_delta_snapshot_v2 {
 	uint64_t  tds_thread_id;
 	uint64_t  tds_voucher_identifier;

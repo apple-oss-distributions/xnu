@@ -350,6 +350,9 @@ panic_display_hung_cpus_help(void)
 			case CLUSTER_TYPE_P:
 				cluster_letter = 'P';
 				break;
+			case CLUSTER_TYPE_M:
+				cluster_letter = 'M';
+				break;
 			default:
 				cluster_letter = '?';
 			}

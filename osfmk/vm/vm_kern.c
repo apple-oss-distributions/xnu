@@ -231,7 +231,15 @@ __kmem_mapping_type(kmem_flags_t flags)
 static inline vm_size_t
 __kmem_guard_left(kmem_flags_t flags)
 {
-	return (flags & KMEM_GUARD_FIRST) ? PAGE_SIZE : 0;
+	vm_size_t size = 0;
+	if (flags & KMEM_GUARD_FIRST) {
+		size += PAGE_SIZE;
+	}
+	if (flags & KMEM_GUARD_STACK) {
+		assert(flags & KMEM_GUARD_FIRST);
+		size += PAGE_SIZE;
+	}
+	return size;
 }
 
 static inline vm_size_t
@@ -838,6 +846,7 @@ kmem_alloc_guard_internal(
 	vm_map_offset_t         map_addr, fill_start;
 	vm_map_size_t           map_size, fill_size;
 	vm_page_t               guard_left = VM_PAGE_NULL;
+	vm_page_t               guard_stack = VM_PAGE_NULL;
 	vm_page_t               guard_right = VM_PAGE_NULL;
 	vm_page_t               wired_page_list = VM_PAGE_NULL;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE();
@@ -938,12 +947,22 @@ kmem_alloc_guard_internal(
 		vmk_flags.vmkf_guard_before = true;
 		fill_start += PAGE_SIZE;
 	}
+	if (flags & KMA_GUARD_STACK) {
+		fill_start += PAGE_SIZE;
+	}
 	if (flags & KMA_NOSOFTLIMIT) {
 		vmk_flags.vmkf_no_soft_limit = true;
 	}
 	if ((flags & KMA_GUARD_FIRST) && !skip_guards) {
 		guard_left = vm_page_create_guard((flags & KMA_NOPAGEWAIT) == 0);
 		if (__improbable(guard_left == VM_PAGE_NULL)) {
+			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
+			goto out_error;
+		}
+	}
+	if ((flags & KMA_GUARD_STACK) && !skip_guards) {
+		guard_stack = vm_page_create_guard((flags & KMA_NOPAGEWAIT) == 0);
+		if (__improbable(guard_stack == VM_PAGE_NULL)) {
 			kmr.kmr_return = KERN_RESOURCE_SHORTAGE;
 			goto out_error;
 		}
@@ -1042,7 +1061,7 @@ kmem_alloc_guard_internal(
 		vme_btref_consider_and_set(entry, __builtin_frame_address(0));
 	}
 
-	if (guard_left || guard_right || wired_page_list) {
+	if (guard_left || guard_stack || guard_right || wired_page_list) {
 		vm_object_offset_t offset = 0ull;
 
 		vm_object_lock(object);
@@ -1055,6 +1074,12 @@ kmem_alloc_guard_internal(
 			vm_page_insert(guard_left, object, offset);
 			guard_left->vmp_busy = FALSE;
 			guard_left = VM_PAGE_NULL;
+		}
+
+		if (guard_stack) {
+			vm_page_insert(guard_stack, object, offset + PAGE_SIZE);
+			guard_stack->vmp_busy = FALSE;
+			guard_stack = VM_PAGE_NULL;
 		}
 
 		if (guard_right) {
@@ -1127,6 +1152,10 @@ out_error:
 	if (guard_left) {
 		guard_left->vmp_snext = wired_page_list;
 		wired_page_list = guard_left;
+	}
+	if (guard_stack) {
+		guard_stack->vmp_snext = wired_page_list;
+		wired_page_list = guard_stack;
 	}
 	if (guard_right) {
 		guard_right->vmp_snext = wired_page_list;

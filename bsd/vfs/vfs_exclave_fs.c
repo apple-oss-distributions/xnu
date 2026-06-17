@@ -50,6 +50,7 @@ __private_extern__ int unlink1(vfs_context_t, vnode_t, user_addr_t,
 struct open_vnode {
 	LIST_ENTRY(open_vnode) chain;
 	vnode_t vp;
+	uint8_t vp_type; // needed in order to obtain original vnode type after forced unmount
 	dev_t dev;
 	uint64_t file_id;
 	uint32_t fstag;
@@ -923,6 +924,7 @@ increment_vnode_open_count(vnode_t vp, registered_fs_tag_t *base_dir, uint64_t f
 			goto out;
 		}
 		entry->vp = vp;
+		entry->vp_type = vp->v_type;
 		entry->dev = base_dir->dev;
 		entry->file_id = file_id;
 		entry->fstag = base_dir->fstag;
@@ -948,10 +950,11 @@ out:
  * If base dir is a graft, file_id should be the graft inode number.
  */
 static int
-decrement_vnode_open_count(registered_fs_tag_t *base_dir, uint64_t file_id, vnode_t *vpp)
+decrement_vnode_open_count(registered_fs_tag_t *base_dir, uint64_t file_id, vnode_t *vpp, uint8_t *out_vp_type)
 {
 	struct open_vnode *entry;
 	vnode_t vp;
+	uint8_t vp_type;
 	uint64_t vp_file_id;
 	int error = 0;
 
@@ -978,6 +981,7 @@ decrement_vnode_open_count(registered_fs_tag_t *base_dir, uint64_t file_id, vnod
 	}
 
 	vp = entry->vp;
+	vp_type = entry->vp_type;
 	entry->open_count--;
 
 	if (entry->open_count == 0) {
@@ -989,6 +993,7 @@ decrement_vnode_open_count(registered_fs_tag_t *base_dir, uint64_t file_id, vnod
 	error = vnode_getwithref(vp);
 	if (!error) {
 		*vpp = vp;
+		*out_vp_type = vp_type;
 	}
 
 out:
@@ -1160,6 +1165,7 @@ int
 vfs_exclave_fs_close(uint32_t fs_tag, uint64_t file_id)
 {
 	vnode_t vp = NULLVP;
+	uint8_t vp_type;
 	registered_fs_tag_t base_dir;
 	int flags = FREAD;
 	int error;
@@ -1173,12 +1179,12 @@ vfs_exclave_fs_close(uint32_t fs_tag, uint64_t file_id)
 		return error;
 	}
 
-	error = decrement_vnode_open_count(&base_dir, file_id, &vp);
+	error = decrement_vnode_open_count(&base_dir, file_id, &vp, &vp_type);
 	if (error) {
 		goto out;
 	}
 
-	if (is_fs_writeable(fs_tag) && !vnode_isdir(vp)) {
+	if (is_fs_writeable(fs_tag) && (vp_type != VDIR)) {
 		flags |= FWRITE;
 	}
 

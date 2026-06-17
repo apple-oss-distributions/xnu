@@ -104,6 +104,8 @@ typedef mach_voucher_attr_key_t *mach_voucher_attr_key_array_t;
 #define MACH_VOUCHER_ATTR_KEY_PTHPRIORITY       ((mach_voucher_attr_key_t)4)
 #define MACH_VOUCHER_ATTR_KEY_USER_DATA         ((mach_voucher_attr_key_t)7)
 #define MACH_VOUCHER_ATTR_KEY_BITS              MACH_VOUCHER_ATTR_KEY_USER_DATA
+
+/* not used, for compatibility only */
 #define MACH_VOUCHER_ATTR_KEY_TEST              ((mach_voucher_attr_key_t)8)
 
 /* not used, for compatibility only */

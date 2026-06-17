@@ -489,8 +489,6 @@ msgctl(struct proc *p, struct msgctl_args *uap, int32_t *retval)
 			goto msgctlout;
 		}
 
-		SYSV_MSG_SUBSYS_UNLOCK();
-
 		if (IS_64BIT_PROCESS(p)) {
 			struct user64_msqid_ds tmpds;
 			eval = copyin(uap->buf, &tmpds, sizeof(tmpds));
@@ -504,10 +502,8 @@ msgctl(struct proc *p, struct msgctl_args *uap, int32_t *retval)
 			msqid_ds_user32tokernel(&tmpds, &msqbuf);
 		}
 		if (eval) {
-			return eval;
+			goto msgctlout;
 		}
-
-		SYSV_MSG_SUBSYS_LOCK();
 
 		if (msqbuf.msg_qbytes > msqptr->u.msg_qbytes) {
 			eval = suser(cred, &p->p_acflag);
@@ -515,7 +511,6 @@ msgctl(struct proc *p, struct msgctl_args *uap, int32_t *retval)
 				goto msgctlout;
 			}
 		}
-
 
 		/* compare (msglen_t) value against restrict (int) value */
 		if (msqbuf.msg_qbytes > (user_msglen_t)msginfo.msgmnb) {
@@ -667,7 +662,7 @@ msgget(__unused struct proc *p, struct msgget_args *uap, int32_t *retval)
 		msqptr->u.msg_perm.gid = kauth_cred_getgid(cred);
 		msqptr->u.msg_perm.mode = (msgflg & 0777);
 		/* Make sure that the returned msqid is unique */
-		msqptr->u.msg_perm._seq++;
+		msqptr->u.msg_perm._seq = ipc_perm_seq_inc(msqptr->u.msg_perm._seq);
 		msqptr->u.msg_first = NULL;
 		msqptr->u.msg_last = NULL;
 		msqptr->u.msg_cbytes = 0;

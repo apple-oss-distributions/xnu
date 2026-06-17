@@ -575,6 +575,8 @@ void    mac_vnode_notify_rename(vfs_context_t ctx, struct vnode *fvp,
 void    mac_vnode_notify_rename_swap(vfs_context_t ctx, struct vnode *fvp,
     struct vnode *fdvp, struct componentname *fcnp, struct vnode *tvp,
     struct vnode *tdvp, struct componentname *tcnp);
+void    mac_vnode_notify_will_rename_swap(vfs_context_t ctx,
+    struct vnode *fvp, struct vnode *tvp);
 void    mac_vnode_notify_setacl(vfs_context_t ctx, struct vnode *vp, struct kauth_acl *acl);
 void    mac_vnode_notify_setattrlist(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist);
 void    mac_vnode_notify_setextattr(vfs_context_t ctx, struct vnode *vp, const char *name, struct uio *uio);

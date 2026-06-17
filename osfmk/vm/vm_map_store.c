@@ -1467,6 +1467,17 @@ vm_map_store_lookup_hole(
 	return 0;
 }
 
+bool
+vm_map_store_has_entries(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_address_t        end)
+{
+	vm_map_entry_t entry = vm_map_store_lookup_entry(map, start, true);
+
+	return start != end && entry != vm_map_to_entry(map) && entry->vme_start < end;
+}
+
 /*!
  * @brief
  * Looks up a hole within a specified range forward.
@@ -3088,6 +3099,14 @@ vm_map_store_swap(
 		DTRACE_MAP_ENTRY_LINK(map, new_entry, old_entry);
 	}
 
+	if (VME_IS_SENTINEL(old_entry) != VME_IS_SENTINEL(new_entry)) {
+		if (VME_IS_SENTINEL(old_entry)) {
+			map->size += e_end - e_start;
+		} else {
+			map->size -= e_end - e_start;
+		}
+	}
+
 	map->unlink_timestamp++;
 	vm_map_hdr_store_insert(&map->hdr, new_entry,
 	    vm_map_header_store_remove(&map->hdr, old_entry));
@@ -3132,6 +3151,22 @@ vm_map_store_merge(
 	if (__improbable(vm_debug_events)) {
 		DTRACE_MAP_ENTRY_UNLINK(map, right, right);
 		DTRACE_MAP_ENTRY_EXTEND(map, left, right->vme_end);
+	}
+
+	if (VME_IS_SENTINEL(left) != VME_IS_SENTINEL(right)) {
+		if (keep_left) {
+			if (VME_IS_SENTINEL(right)) {
+				map->size += r_end - l_end;
+			} else {
+				map->size -= r_end - l_end;
+			}
+		} else {
+			if (VME_IS_SENTINEL(left)) {
+				map->size += l_end - l_start;
+			} else {
+				map->size -= l_end - l_start;
+			}
+		}
 	}
 
 	map->unlink_timestamp++;

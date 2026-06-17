@@ -92,8 +92,6 @@ extern void pmap_tt_ledger_credit(pmap_t, vm_size_t, bool);
 extern void pmap_tt_ledger_debit(pmap_t, vm_size_t, bool);
 extern void pmap_tt_deallocate(pmap_t, pmap_paddr_t, unsigned int);
 
-extern void write_pte(pt_entry_t *, pt_entry_t);
-
 /**
  * The qsort function is used by various parts of the pmap but doesn't contain
  * its own header file with prototype so it must be manually extern'd.
@@ -123,24 +121,31 @@ extern void qsort(void *a, size_t n, size_t es, cmpfunc_t cmp);
 /* Helper macro for rounding an address up to a correctly aligned value. */
 #define PMAP_ALIGN(addr, align) ((addr) + ((align) - 1) & ~((align) - 1))
 
-/**
- * Initialize a pmap object's TXM reader/writer lock.
- *
- * @param pmap The pmap whose TXM lock to initialize.
- */
-static inline void
-pmap_txmlock_init(pmap_t pmap)
-{
-	lck_rw_init(&pmap->txm_lck, &pmap_lck_grp, 0);
-}
 
 /**
- * Destroy a pmap object's TXM reader/writer lock.
+ * Special pmap routines for mapping/unmapping kernel stack redzone pages.
+ * These functions bypass epochs and PVH locks and call SPTM directly,
+ * as kernel stack pages are single-threaded and don't need synchronization.
  *
- * @param pmap The pmap whose TXM lock to destroy.
+ * WARNING: These functions should ONLY be used for kernel stack redzone pages.
+ * They skip critical locking and synchronization that normal pmap operations require.
  */
-static inline void
-pmap_txmlock_destroy(pmap_t pmap)
-{
-	lck_rw_destroy(&pmap->txm_lck, &pmap_lck_grp);
-}
+
+/**
+ * Map a kernel stack redzone page directly via SPTM without epochs or PVH locks.
+ *
+ * @param pmap The kernel pmap (must be kernel_pmap).
+ * @param va The virtual address to map.
+ * @param pa The physical address to map.
+ *
+ * @return KERN_SUCCESS if mapping succeeded, KERN_FAILURE otherwise.
+ */
+kern_return_t pmap_map_stack_page_direct(pmap_t pmap, vm_map_address_t va, pmap_paddr_t pa);
+
+/**
+ * Unmap a kernel stack redzone page directly via SPTM without epochs or PVH locks.
+ *
+ * @param pmap The kernel pmap (must be kernel_pmap).
+ * @param va The virtual address to unmap.
+ */
+void pmap_unmap_stack_page_direct(pmap_t pmap, vm_map_address_t va);

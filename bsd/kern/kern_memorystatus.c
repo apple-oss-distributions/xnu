@@ -4050,9 +4050,9 @@ memstat_kill_idle_process(memorystatus_kill_cause_t cause,
 			proc_best_name(p), proc_getpid(p), memstat_kill_cause_name[cause], cause);
 		memorystatus_kill_proc(p, cause, jetsam_reason, &killed, footprint_out);
 		proc_rele(p);
-	} else {
-		os_reason_free(jetsam_reason);
 	}
+
+	os_reason_free(jetsam_reason);
 
 	return killed;
 }

@@ -3741,7 +3741,7 @@ static int
 tag_storage_active SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1, arg2, oidp)
-	uint32_t value = mteinfo_tag_storage_active(false);
+	uint32_t value = mteinfo_tag_storage_active();
 
 	return SYSCTL_OUT(req, &value, sizeof(value));
 }

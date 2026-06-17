@@ -24,6 +24,7 @@ struct all_host_info {
 	vm_statistics64_data_t host_vm_info64_rev0;
 	vm_statistics64_data_t host_vm_info64_rev1;
 	vm_statistics64_data_t host_vm_info64_rev2;
+	vm_statistics64_data_t host_vm_info64_rev3;
 	vm_extmod_statistics_data_t host_extmod_info64;
 	host_load_info_data_t host_load_info;
 	vm_statistics_data_t host_vm_info_rev0;
@@ -109,6 +110,10 @@ get_host_info(struct all_host_info* data, host_t self, int iter)
 		count = HOST_VM_INFO64_REV2_COUNT;
 		T_QUIET; T_ASSERT_POSIX_ZERO(host_statistics64(self, HOST_VM_INFO64, (host_info64_t)&data[i].host_vm_info64_rev2, &count), NULL);
 		T_QUIET; T_ASSERT_EQ(count, HOST_VM_INFO64_REV2_COUNT, NULL);
+
+		count = HOST_VM_INFO64_REV3_COUNT;
+		T_QUIET; T_ASSERT_POSIX_ZERO(host_statistics64(self, HOST_VM_INFO64, (host_info64_t)&data[i].host_vm_info64_rev3, &count), NULL);
+		T_QUIET; T_ASSERT_EQ(count, HOST_VM_INFO64_REV3_COUNT, NULL);
 
 		count = HOST_EXTMOD_INFO64_COUNT;
 		T_QUIET; T_ASSERT_POSIX_ZERO(host_statistics64(self, HOST_EXTMOD_INFO64, (host_info64_t)&data[i].host_extmod_info64, &count), NULL);

@@ -743,6 +743,11 @@ lt_e_thread(void *arg, wait_result_t wres __unused)
 	lt_pset_bound_thread(arg, 'e');
 }
 
+static void
+lt_m_thread(void *arg, wait_result_t wres __unused)
+{
+	lt_pset_bound_thread(arg, 'm');
+}
 
 static void
 lt_p_thread(void *arg, wait_result_t wres __unused)
@@ -1006,6 +1011,9 @@ lt_test_locks()
 		switch (pset->pset_type) {
 		case PSET_AMP_P:
 			lt_start_lock_thread_with_bind(lt_p_thread, lt_stress_ticket_lock);
+			break;
+		case PSET_AMP_M:
+			lt_start_lock_thread_with_bind(lt_m_thread, lt_stress_ticket_lock);
 			break;
 		case PSET_AMP_E:
 			lt_start_lock_thread_with_bind(lt_e_thread, lt_stress_ticket_lock);

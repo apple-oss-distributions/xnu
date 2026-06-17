@@ -1831,6 +1831,12 @@ pmap_valid_address(
 
 
 
+static bool
+__unused is_pte_tpro_protected(pt_entry_t pte __unused)
+{
+	return false;
+}
+
 
 /*
  *      Map memory at initialization.  The physical addresses being
@@ -10260,8 +10266,8 @@ pmap_unnest_options_internal(
 		if (start < grand->nested_pmap->nested_region_true_start) {
 			start = grand->nested_pmap->nested_region_true_start;
 		}
-		start_index = (unsigned int)((start - grand->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
-		max_index = (unsigned int)((true_end - grand->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
+		start_index = (unsigned int)((start - grand->nested_pmap->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
+		max_index = (unsigned int)((true_end - grand->nested_pmap->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
 		bool flush_tlb = false;
 
 		for (current_index = start_index, addr = start; current_index < max_index; current_index++) {
@@ -11467,16 +11473,28 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
 	 * it is reserved and unavailable to mach VM for future mappings.
 	 */
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(commpage_pmap_default);
-	int num_ptes = pt_attr_leaf_size(pt_attr) >> PTE_SHIFT;
+	vm_map_address_t text_index_mask = pt_attr_leaf_index_mask(pt_attr);
+	int num_ptes = (int)(pt_attr_leaf_size(pt_attr) >> PTE_SHIFT);
+
+#if __ARM_MIXED_PAGE_SIZE__ && defined(XNU_TARGET_OS_OSX)
+	/*
+	 * for mixed page size configurations, 4K tasks nest the commpage at L2
+	 * which only covers 2MB (vs 32MB for 16K tasks). Constrain the text VA
+	 * randomization to the 4K L2 block containing the data commpage so that
+	 * both mappings are covered by a single nested L2 entry in 4K tasks.
+	 */
+	text_index_mask &= pt_attr_twig_offmask(&pmap_pt_attr_4k);
+	num_ptes = (int)((text_index_mask >> pt_attr_leaf_shift(pt_attr)) + 1);
+#endif /* __ARM_MIXED_PAGE_SIZE__&& defined(XNU_TARGET_OS_OSX) */
 
 	vm_map_address_t commpage_text_va = 0;
 
 	do {
 		int text_leaf_index = random() % num_ptes;
 
-		// Generate a VA for the commpage text with the same root and twig index as data
-		// comm page, but with new leaf index we've just generated.
-		commpage_text_va = (_COMM_PAGE64_BASE_ADDRESS & ~pt_attr_leaf_index_mask(pt_attr));
+		// Generate a VA for the commpage text within the same nesting block as
+		// the data comm page, with a new leaf index we've just generated.
+		commpage_text_va = (_COMM_PAGE64_BASE_ADDRESS & ~text_index_mask);
 		commpage_text_va |= (text_leaf_index << pt_attr_leaf_shift(pt_attr));
 	} while ((commpage_text_va == _COMM_PAGE64_BASE_ADDRESS) || (commpage_text_va == _COMM_PAGE64_RO_ADDRESS)); // Try again if we collide (should be unlikely)
 
@@ -11521,6 +11539,12 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
 	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, ro_data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
 	assert(kr == KERN_SUCCESS);
 	pmap_update_tt3e(commpage_pmap_4k, _COMM_PAGE64_RO_ADDRESS, PMAP_COMM_PAGE_PTE_TEMPLATE);
+
+#if CONFIG_ARM_PFZ && defined(XNU_TARGET_OS_OSX)
+	kr = pmap_enter_addr(commpage_pmap_4k, commpage_text_va, text_pa, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);
+	assert(kr == KERN_SUCCESS);
+	pmap_update_tt3e(commpage_pmap_4k, commpage_text_va, PMAP_COMM_PAGE_TEXT_PTE_TEMPLATE);
+#endif /* CONFIG_ARM_PFZ && defined(XNU_TARGET_OS_OSX) */
 
 	/* ...and the user 32-bit mapping. */
 	kr = pmap_enter_addr(commpage_pmap_4k, _COMM_PAGE32_BASE_ADDRESS, data_pa, VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, TRUE);

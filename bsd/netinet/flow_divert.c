@@ -245,17 +245,17 @@ flow_divert_packet_type2str(uint8_t packet_type)
 }
 
 static inline void
-flow_divert_lock_socket(struct socket *so, struct flow_divert_pcb *fd_cb)
+flow_divert_lock_socket(struct socket *so, struct flow_divert_pcb *fd_cb, int refcount)
 {
-	socket_lock(so, 0);
+	socket_lock(so, refcount);
 	fd_cb->plugin_locked = true;
 }
 
 static inline void
-flow_divert_unlock_socket(struct socket *so, struct flow_divert_pcb *fd_cb)
+flow_divert_unlock_socket(struct socket *so, struct flow_divert_pcb *fd_cb, int refcount)
 {
 	fd_cb->plugin_locked = false;
-	socket_unlock(so, 0);
+	socket_unlock(so, refcount);
 }
 
 static struct flow_divert_pcb *
@@ -284,7 +284,9 @@ flow_divert_group_lookup(uint32_t ctl_unit, struct flow_divert_pcb *fd_cb)
 			FDLOG0(LOG_ERR, fd_cb, "No active groups, flow divert cannot be used for this socket");
 		}
 	} else if (ctl_unit == 0 || (ctl_unit >= GROUP_COUNT_MAX && ctl_unit < FLOW_DIVERT_IN_PROCESS_UNIT_MIN)) {
-		FDLOG(LOG_ERR, fd_cb, "Cannot lookup group with invalid control unit (%u)", ctl_unit);
+		if (fd_cb != NULL) {
+			FDLOG(LOG_ERR, fd_cb, "Cannot lookup group with invalid control unit (%u)", ctl_unit);
+		}
 	} else if (ctl_unit < FLOW_DIVERT_IN_PROCESS_UNIT_MIN) {
 		if (g_flow_divert_groups == NULL) {
 			if (fd_cb != NULL) {
@@ -3466,7 +3468,7 @@ flow_divert_handle_flow_states_request(struct flow_divert_group *group)
 		if (fd_cb->so != NULL) {
 			struct flow_divert_flow_state state = {};
 			struct socket *so = fd_cb->so;
-			flow_divert_lock_socket(so, fd_cb);
+			flow_divert_lock_socket(so, fd_cb, 1);
 
 			state.conn_id = fd_cb->hash;
 			state.bytes_written_by_app = fd_cb->bytes_written_by_app;
@@ -3480,7 +3482,7 @@ flow_divert_handle_flow_states_request(struct flow_divert_group *group)
 				FDLOG(LOG_ERR, fd_cb, "Failed to add a flow state: %d", error);
 			}
 
-			flow_divert_unlock_socket(so, fd_cb);
+			flow_divert_unlock_socket(so, fd_cb, 1);
 		}
 		FDUNLOCK(fd_cb);
 		FDRELEASE(fd_cb);
@@ -3547,7 +3549,7 @@ flow_divert_input(mbuf_ref_t packet, struct flow_divert_group *group)
 	FDLOCK(fd_cb);
 	if (fd_cb->so != NULL) {
 		struct socket *so = fd_cb->so;
-		flow_divert_lock_socket(so, fd_cb);
+		flow_divert_lock_socket(so, fd_cb, 1);
 
 		switch (hdr.packet_type) {
 		case FLOW_DIVERT_PKT_CONNECT_RESULT:
@@ -3577,7 +3579,7 @@ flow_divert_input(mbuf_ref_t packet, struct flow_divert_group *group)
 			break;
 		}
 
-		flow_divert_unlock_socket(so, fd_cb);
+		flow_divert_unlock_socket(so, fd_cb, 1);
 	}
 	FDUNLOCK(fd_cb);
 
@@ -3615,12 +3617,12 @@ flow_divert_close_all(struct flow_divert_group *group)
 		SLIST_REMOVE_HEAD(&tmp_list, tmp_list_entry);
 		if (fd_cb->so != NULL) {
 			struct socket *so = fd_cb->so;
-			flow_divert_lock_socket(so, fd_cb);
+			flow_divert_lock_socket(so, fd_cb, 1);
 			flow_divert_pcb_remove(fd_cb);
 			flow_divert_update_closed_state(fd_cb, SHUT_RDWR, true, true);
 			so->so_error = ECONNABORTED;
 			flow_divert_disconnect_socket(so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT), false);
-			flow_divert_unlock_socket(so, fd_cb);
+			flow_divert_unlock_socket(so, fd_cb, 1);
 		}
 		FDUNLOCK(fd_cb);
 		FDRELEASE(fd_cb);
@@ -4914,11 +4916,11 @@ flow_divert_kctl_rcvd(__unused kern_ctl_ref kctlref, uint32_t unit, __unused voi
 			FDLOCK(fd_cb);
 			if (fd_cb->so != NULL) {
 				struct socket *so = fd_cb->so;
-				flow_divert_lock_socket(so, fd_cb);
+				flow_divert_lock_socket(so, fd_cb, 1);
 				if (fd_cb->group != NULL) {
 					flow_divert_send_buffered_data(fd_cb, FALSE);
 				}
-				flow_divert_unlock_socket(so, fd_cb);
+				flow_divert_unlock_socket(so, fd_cb, 1);
 			}
 			FDUNLOCK(fd_cb);
 			FDRELEASE(fd_cb);

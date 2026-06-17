@@ -506,6 +506,10 @@ typedef enum {
 typedef enum {
 	e_recc = 0,
 	p_recc = 1,
+#if HAS_MCORE
+	low_m_island = 2,
+	p_island = 3,
+#endif /* HAS_MCORE */
 	recc_type_max = 2,
 } recc_type_t;
 
@@ -517,6 +521,12 @@ thread_recc_to_core_type_str(recc_type_t recc)
 		return "E";
 	case p_recc:
 		return "P";
+#if HAS_MCORE
+	case low_m_island:
+		return "LM";
+	case p_island:
+		return "P";
+#endif /* HAS_MCORE */
 	default:
 		assert(false);
 	}
@@ -543,7 +553,14 @@ no_steal_expect(int stealing_pset, char *explanation)
 static int
 recc_type_to_ind(recc_type_t recc)
 {
+#if HAS_MCORE
+	if (recc < recc_type_max) {
+		return recc;
+	}
+	return recc - recc_type_max;
+#else /* !HAS_MCORE */
 	return (int)recc;
+#endif /* !HAS_MCORE */
 }
 
 static void

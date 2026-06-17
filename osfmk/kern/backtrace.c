@@ -115,6 +115,12 @@ backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
 #endif
 	bottom = thread->kernel_stack;
 	top = bottom + kernel_stack_size;
+#if CONFIG_SPTM
+	/* If the redzone page is mapped, the valid stack extends one page lower */
+	if (thread->machine.kredzonestack) {
+		bottom -= PAGE_SIZE;
+	}
+#endif /* CONFIG_SPTM */
 
 #define IN_STK_BOUNDS(__addr) \
 	(((uintptr_t)(__addr) >= (uintptr_t)bottom) && \

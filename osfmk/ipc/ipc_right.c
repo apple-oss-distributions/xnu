@@ -2180,7 +2180,7 @@ ipc_right_copyin(
 	}
 
 	case MACH_MSG_TYPE_MAKE_SEND_ONCE: {
-		bool send_telemetry = false;
+		/* const bool send_telemetry = false; */
 
 		if ((bits & MACH_PORT_TYPE_RECEIVE) == 0) {
 			goto invalid_right;
@@ -2207,20 +2207,24 @@ ipc_right_copyin(
 		 * send-once right at any given moment.
 		 */
 #if DEVELOPMENT || DEBUG
-		if (ip_is_reply_port(port) && (port->ip_sorights > 0)) {
-			send_telemetry = true;
-		}
+		/*
+		 *  if (ip_is_reply_port(port) && (port->ip_sorights > 0)) {
+		 *       send_telemetry = true;
+		 *  }
+		 */
 #endif /* DEVELOPMENT || DEBUG */
 
 		ipc_port_make_sonce_locked(port);
 		ip_mq_unlock(port);
 
-		if (__improbable(send_telemetry)) {
-			mach_port_guard_exception(name,
-			    MPG_PAYLOAD(MPG_FLAGS_INVALID_RIGHT_COPYIN, copyin_reason,
-			    msgt_name),
-			    kGUARD_EXC_REPLY_PORT_SINGLE_SO_RIGHT);
-		}
+		/*
+		 *  if (__improbable(send_telemetry)) {
+		 *       mach_port_guard_exception(name,
+		 *           MPG_PAYLOAD(MPG_FLAGS_INVALID_RIGHT_COPYIN, copyin_reason,
+		 *           msgt_name),
+		 *           kGUARD_EXC_REPLY_PORT_SINGLE_SO_RIGHT);
+		 *  }
+		 */
 
 		*portp = port;
 		break;

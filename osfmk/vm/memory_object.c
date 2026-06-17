@@ -860,16 +860,15 @@ RETRY_COW_OF_LOCK_REQUEST:
 				vm_object_paging_begin(copy_object);
 				goto RETRY_COW_OF_LOCK_REQUEST;
 			case VM_FAULT_SUCCESS_NO_VM_PAGE:
-				/* success but no VM page: fail */
-				vm_object_paging_end(copy_object);
-				vm_object_unlock(copy_object);
-				OS_FALLTHROUGH;
+				/* success but no VM page: skip to next page */
+				prot = VM_PROT_WRITE | VM_PROT_READ;
+				continue;
 			case VM_FAULT_MEMORY_ERROR:
-				if (object != copy_object) {
-					vm_object_deallocate(copy_object);
-				}
-				vm_object_lock(object);
-				goto BYPASS_COW_COPYIN;
+				/* no page here: skip to next page */
+				prot = VM_PROT_WRITE | VM_PROT_READ;
+				vm_object_lock(copy_object);
+				vm_object_paging_begin(copy_object);
+				continue;
 			default:
 				panic("vm_object_update: unexpected error 0x%x"
 				    " from vm_fault_page()\n", result);
@@ -900,7 +899,6 @@ RETRY_COW_OF_LOCK_REQUEST:
 		vm_object_deallocate(copy_object);
 		vm_object_lock(object);
 	}
-BYPASS_COW_COPYIN:
 
 	/*
 	 * when we have a really large range to check relative

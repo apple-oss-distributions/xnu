@@ -206,12 +206,16 @@ class RecountPlan(object):
         elif topo == GetEnumValue("recount_topo_t", "RCT_TOPO_CPU_KIND"):
             if kern.arch.startswith("arm64"):
                 self._group_column = "cpu-kind"
-                cluster_mask = int(kern.globals.topology_info.cluster_types)
-                self._group_count = bin(cluster_mask).count("1")
-                self._group_names = [
-                    GetEnumName("recount_cpu_kind_t", i)[8:][:4]
-                    for i in range(self._group_count)
-                ]
+                has_m_cores = False
+                if GetEnumValue('recount_cpu_kind_t', 'RCT_CPU_MP_EFFICIENT'):
+                    has_m_cores = True
+                # RCT_CPU_EFFICIENCY is always the last entry in the enum.
+                self._group_count = GetEnumValue('recount_cpu_kind_t', 'RCT_CPU_EFFICIENCY') + 1
+                self._group_names = ['P']
+                if has_m_cores:
+                    self._group_names.append('M')
+                if not has_m_cores or self._group_count > 2:
+                    self._group_names.append('E')
             else:
                 self._group_count = 1
         elif topo == GetEnumValue("recount_topo_t", "RCT_TOPO_SYSTEM"):

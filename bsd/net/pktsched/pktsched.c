@@ -100,12 +100,8 @@ pktsched_enqueue_noop(struct ifclassq *ifq,
 {
 	pktsched_pkt_t pkt;
 	pktsched_pkt_encap_chain(&pkt, h, t, cnt, bytes);
-	if (__improbable(droptap_verbose > 0)) {
-		pktsched_drop_pkt(&pkt, ifq->ifcq_ifp, DROP_REASON_AQM_BK_SYS_THROTTLED,
-		    __func__, __LINE__, 0);
-	} else {
-		pktsched_free_pkt(&pkt);
-	}
+	pktsched_drop_pkt(&pkt, ifq->ifcq_ifp, DROP_REASON_AQM_BK_SYS_THROTTLED,
+	    __func__, __LINE__, 0);
 
 	*pdrop = true;
 	return ENXIO;
@@ -524,6 +520,7 @@ pktsched_drop_pkt(pktsched_pkt_t *pkt, struct ifnet *ifp, drop_reason_t reason, 
 		/* NOTREACHED */
 		__builtin_unreachable();
 	}
+	_PKTSCHED_PKT_INIT(pkt);
 }
 
 mbuf_svc_class_t

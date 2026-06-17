@@ -44,7 +44,7 @@ These interfaces report counter data to user space and are backed by Recount.
 
 - Under Tests, "F" is functional and "P" is performance.
 - ¹ Time precision is microseconds.
-- ² These return overall totals and hard-code a separate, P-core-only value.
+- ² These return overall totals and hard-code separate, CPU kind-only values.
 
 ## LLDB
 

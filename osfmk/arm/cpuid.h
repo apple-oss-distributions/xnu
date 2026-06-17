@@ -275,6 +275,18 @@ typedef union {
 /* H17G Hidra p-Core. */
 #define CPU_PART_PCORE_HIDRA 0x63
 
+/* H17S Sotra S m-Core. */
+#define CPU_PART_MCORE_SOTRA_S 0x64
+
+/* H17S Sotra S p-Core. */
+#define CPU_PART_PCORE_SOTRA_S 0x65
+
+/* H17C Sotra C m-Core. */
+#define CPU_PART_MCORE_SOTRA_C 0x68
+
+/* H17C Sotra C p-Core. */
+#define CPU_PART_PCORE_SOTRA_C 0x69
+
 
 /* H18P Thera e-Core. */
 #define CPU_PART_ECORE_THERA 0x70

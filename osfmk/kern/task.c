@@ -171,7 +171,6 @@
 #include <sys/kdebug_triage.h>
 #include <sys/code_signing.h> /* for is_address_space_debugged */
 #include <sys/reason.h>
-
 /*
  * Exported interfaces
  */
@@ -203,6 +202,8 @@
 #endif
 
 #include <string.h>
+
+static KALLOC_TYPE_DEFINE(task_tokens_zone, struct task_token_data, KT_DEFAULT);
 
 #if KPERF
 extern int kpc_force_all_ctrs(task_t, int);
@@ -1590,10 +1591,34 @@ task_create_internal(
 
 	new_task->task_shared_region_slide = -1;
 
-	if (parent_task != NULL) {
-		task_ro_data.task_tokens.sec_token = *task_get_sec_token(parent_task);
-		task_ro_data.task_tokens.audit_token = *task_get_audit_token(parent_task);
+	/*
+	 * Allocate and initialize task tokens.
+	 */
+	struct task_token_data *tokens;
+	security_token_t sec_token;
+	audit_token_t audit_token;
 
+	tokens = kalloc_type(struct task_token_data,
+	    Z_WAITOK | Z_NOFAIL);
+
+	if (parent_task != NULL) {
+		task_get_tokens(parent_task, &sec_token, &audit_token);
+	} else {
+		sec_token = KERNEL_SECURITY_TOKEN;
+		audit_token = KERNEL_AUDIT_TOKEN;
+	}
+
+	os_atomic_init(&tokens->tc_uids,
+	    task_token_pack(sec_token.val[0], audit_token.val[3]));
+	os_atomic_init(&tokens->tc_gids,
+	    task_token_pack(sec_token.val[1], audit_token.val[4]));
+	os_atomic_init(&tokens->tc_auid, audit_token.val[0]);
+	os_atomic_init(&tokens->tc_asid, audit_token.val[6]);
+	os_atomic_init(&tokens->tc_pid, audit_token.val[5]);
+	os_atomic_init(&tokens->tc_pidversion, audit_token.val[7]);
+	new_task->task_tokens = tokens;
+
+	if (parent_task != NULL) {
 		task_ro_data.t_flags_ro |= parent_t_flags_ro & TFRO_FILTER_MSG;
 #if CONFIG_MACF
 		if (!(t_flags & TF_CORPSE_FORK)) {
@@ -1601,9 +1626,6 @@ task_create_internal(
 			task_ro_data.task_filters.mach_kobj_filter_mask = task_get_mach_kobj_filter_mask(parent_task);
 		}
 #endif
-	} else {
-		task_ro_data.task_tokens.sec_token = KERNEL_SECURITY_TOKEN;
-		task_ro_data.task_tokens.audit_token = KERNEL_AUDIT_TOKEN;
 	}
 	/* set in task_set_ctrl_port_default */
 	task_ro_data.task_control_port_options = TASK_CONTROL_PORT_OPTIONS_INVALID;
@@ -2179,6 +2201,7 @@ task_deallocate_internal(
 	}
 
 	task_ref_count_fini(task);
+	kfree_type(struct task_token_data, task->task_tokens);
 	proc_ro_erase_task(task->bsd_info_ro);
 	task_release_proc_task_struct(task, task->bsd_info_ro);
 }
@@ -5660,7 +5683,7 @@ task_info(
 
 		sec_token_p = (security_token_t *) task_info_out;
 
-		*sec_token_p = *task_get_sec_token(task);
+		task_get_sec_token(task, sec_token_p);
 
 		*task_info_count = TASK_SECURITY_TOKEN_COUNT;
 		break;
@@ -5677,7 +5700,7 @@ task_info(
 
 		audit_token_p = (audit_token_t *) task_info_out;
 
-		*audit_token_p = *task_get_audit_token(task);
+		task_get_audit_token(task, audit_token_p);
 
 		*task_info_count = TASK_AUDIT_TOKEN_COUNT;
 		break;
@@ -6743,7 +6766,7 @@ task_power_info_locked(
 
 	struct recount_usage usage = { 0 };
 	struct recount_usage usage_perf = { 0 };
-	recount_task_usage_perf_only(task, &usage, &usage_perf);
+	recount_task_usage_cpu_kinds(task, &usage, &usage_perf, NULL);
 
 	info->total_user = usage.ru_metrics[RCT_LVL_USER].rm_time_mach;
 	info->total_system = recount_usage_system_time_mach(&usage);
@@ -7817,49 +7840,84 @@ task_get_phys_footprint_limit(
 }
 #endif /* CONFIG_MEMORYSTATUS */
 
-security_token_t *
-task_get_sec_token(task_t task)
+static void
+task_fill_sec_token(uint64_t uids, uint64_t gids, security_token_t *out)
 {
-	return &task_get_ro(task)->task_tokens.sec_token;
+	out->val[0] = task_token_effective(uids);
+	out->val[1] = task_token_effective(gids);
+}
+
+static void
+task_fill_audit_token(const struct task_token_data *tokens,
+    uint64_t uids, uint64_t gids, audit_token_t *out)
+{
+	out->val[0] = os_atomic_load(&tokens->tc_auid, relaxed);
+	out->val[1] = task_token_effective(uids);
+	out->val[2] = task_token_effective(gids);
+	out->val[3] = task_token_real(uids);
+	out->val[4] = task_token_real(gids);
+	out->val[5] = os_atomic_load(&tokens->tc_pid, relaxed);
+	out->val[6] = os_atomic_load(&tokens->tc_asid, relaxed);
+	out->val[7] = os_atomic_load(&tokens->tc_pidversion, relaxed);
 }
 
 void
-task_set_sec_token(task_t task, security_token_t *token)
+task_get_sec_token(task_t task, security_token_t *out)
 {
-	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
-	    task_tokens.sec_token, token);
-}
+	const struct task_token_data *tokens = task->task_tokens;
+	uint64_t uids = os_atomic_load(&tokens->tc_uids, relaxed);
+	uint64_t gids = os_atomic_load(&tokens->tc_gids, relaxed);
 
-audit_token_t *
-task_get_audit_token(task_t task)
-{
-	return &task_get_ro(task)->task_tokens.audit_token;
+	task_fill_sec_token(uids, gids, out);
 }
 
 void
-task_set_audit_token(task_t task, audit_token_t *token)
+task_get_audit_token(task_t task, audit_token_t *out)
 {
-	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
-	    task_tokens.audit_token, token);
+	const struct task_token_data *tokens = task->task_tokens;
+	uint64_t uids = os_atomic_load(&tokens->tc_uids, relaxed);
+	uint64_t gids = os_atomic_load(&tokens->tc_gids, relaxed);
+
+	task_fill_audit_token(tokens, uids, gids, out);
+}
+
+void
+task_get_tokens(task_t task, security_token_t *sec_out, audit_token_t *audit_out)
+{
+	const struct task_token_data *tokens = task->task_tokens;
+	uint64_t uids = os_atomic_load(&tokens->tc_uids, relaxed);
+	uint64_t gids = os_atomic_load(&tokens->tc_gids, relaxed);
+
+	if (sec_out) {
+		task_fill_sec_token(uids, gids, sec_out);
+	}
+	if (audit_out) {
+		task_fill_audit_token(tokens, uids, gids, audit_out);
+	}
 }
 
 void
 task_set_tokens(task_t task, security_token_t *sec_token, audit_token_t *audit_token)
 {
-	struct task_token_ro_data tokens;
+	struct task_token_data *tokens = task->task_tokens;
 
-	tokens = task_get_ro(task)->task_tokens;
-	tokens.sec_token = *sec_token;
-	tokens.audit_token = *audit_token;
+	task_lock_assert_owned(task);
 
-	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task), task_tokens,
-	    &tokens);
+	os_atomic_store(&tokens->tc_uids, task_token_pack(sec_token->val[0],
+	    audit_token->val[3]), relaxed);
+	os_atomic_store(&tokens->tc_gids, task_token_pack(sec_token->val[1],
+	    audit_token->val[4]), relaxed);
+	os_atomic_store(&tokens->tc_auid, audit_token->val[0], relaxed);
+	os_atomic_store(&tokens->tc_asid, audit_token->val[6], relaxed);
+	os_atomic_store(&tokens->tc_pid, audit_token->val[5], relaxed);
+	os_atomic_store(&tokens->tc_pidversion, audit_token->val[7], relaxed);
 }
 
 boolean_t
 task_is_privileged(task_t task)
 {
-	return task_get_sec_token(task)->val[0] == 0;
+	uint64_t uids = os_atomic_load(&task->task_tokens->tc_uids, relaxed);
+	return task_token_effective(uids) == 0;
 }
 
 #ifdef CONFIG_MACF
@@ -8020,14 +8078,11 @@ current_task(void)
 	return get_threadtask(current_thread());
 }
 
-/* defined in bsd/kern/kern_prot.c */
-extern int get_audit_token_pid(audit_token_t *audit_token);
-
 __mockable int
 task_pid(task_t task)
 {
 	if (task) {
-		return get_audit_token_pid(task_get_audit_token(task));
+		return (int)os_atomic_load(&task->task_tokens->tc_pid, relaxed);
 	}
 	return -1;
 }
@@ -8575,18 +8630,13 @@ task_allocate_fatal_port(void)
 static void
 task_fatal_port_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 {
-	task_t task = TASK_NULL;
 	kern_return_t kr;
 
 	task_id_token_t token = ipc_kobject_get_stable(port, IKOT_TASK_FATAL);
 
 	assert(token != NULL);
 	if (token) {
-		kr = task_identity_token_get_task_grp(token, &task, TASK_GRP_KERNEL); /* takes a reference on task */
-		if (task) {
-			task_bsdtask_kill(task);
-			task_deallocate(task);
-		}
+		kr = task_identity_token_try_sigkill(token); /* takes a reference on task */
 		task_id_token_release(token); /* consumes ref given by notification */
 	}
 }
@@ -8639,7 +8689,7 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task_t task, uint32_t
 		task_fatal_port = task_allocate_fatal_port();
 		if (!task_fatal_port) {
 			os_log(OS_LOG_DEFAULT, "process %s[%d] Unable to create task token ident object", procname, pid);
-			task_bsdtask_kill(task);
+			task_self_sigkill(os_reason_create(OS_REASON_RESOURCES, RESOURCES_LIMIT_MACH_PORTS_EXHAUSTION));
 		}
 	} else {
 		flags |= kRNSoftLimitFlag;
@@ -8692,7 +8742,7 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_KQWORKLOOPS(task_t task, int cur
 		task_fatal_port = task_allocate_fatal_port();
 		if (task_fatal_port == MACH_PORT_NULL) {
 			os_log(OS_LOG_DEFAULT, "process %s[%d] Unable to create task token ident object", procname, pid);
-			task_bsdtask_kill(task);
+			task_self_sigkill(os_reason_create(OS_REASON_RESOURCES, RESOURCES_LIMIT_KQWORKLOOPS_EXHAUSTION));
 		}
 	} else {
 		flags |= kRNSoftLimitFlag;
@@ -8750,7 +8800,7 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, in
 		task_fatal_port = task_allocate_fatal_port();
 		if (!task_fatal_port) {
 			os_log(OS_LOG_DEFAULT, "process %s[%d] Unable to create task token ident object", procname, pid);
-			task_bsdtask_kill(task);
+			task_self_sigkill(os_reason_create(OS_REASON_RESOURCES, RESOURCES_LIMIT_FILE_DESCRIPTORS_EXHAUSTION));
 		}
 	} else {
 		flags |= kRNSoftLimitFlag;

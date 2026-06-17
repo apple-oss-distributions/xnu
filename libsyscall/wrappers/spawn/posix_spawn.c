@@ -160,6 +160,7 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	psattrp->psa_max_addr = 0;
 
 	psattrp->psa_no_smt = false;
+	psattrp->psa_4k = false;
 	psattrp->psa_tecs = false;
 
 	psattrp->psa_crash_count = 0;
@@ -2644,6 +2645,21 @@ posix_spawnattr_setnosmt_np(const posix_spawnattr_t * __restrict attr)
 
 	psattr = *(_posix_spawnattr_t *)attr;
 	psattr->psa_no_smt = true;
+
+	return 0;
+}
+
+int
+posix_spawnattr_set_4k_page_size_np(const posix_spawnattr_t * __restrict attr)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+	psattr->psa_4k = true;
 
 	return 0;
 }

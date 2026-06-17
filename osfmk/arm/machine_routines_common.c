@@ -67,8 +67,13 @@ extern volatile uint32_t debug_enabled;
 extern _Atomic unsigned int cluster_type_num_active_cpus[MAX_CPU_TYPES];
 const char *cluster_type_names[MAX_CPU_TYPES] = {
 	[CLUSTER_TYPE_SMP] = "Standard",
-	[CLUSTER_TYPE_P] = "Performance",
 	[CLUSTER_TYPE_E] = "Efficiency",
+#if HAS_MCORE || defined(ARM64_BOARD_CONFIG_T8142)
+	[CLUSTER_TYPE_M] = "Performance",
+	[CLUSTER_TYPE_P] = "Super",
+#else /* HAS_MCORE || defined(ARM64_BOARD_CONFIG_T8142) */
+	[CLUSTER_TYPE_P] = "Performance",
+#endif /* HAS_MCORE || defined(ARM64_BOARD_CONFIG_T8142) */
 };
 
 static int max_cpus_initialized = 0;
@@ -811,6 +816,8 @@ ml_get_current_core_type(void)
 	switch (processor->processor_set->pset_type) {
 	case PSET_AMP_P:
 		return 'P';
+	case PSET_AMP_M:
+		return 'M';
 	case PSET_AMP_E:
 		return 'E';
 	default:
@@ -1209,7 +1216,13 @@ ml_stack_remaining(void)
 	if ((local < intstack_top_ptr) && (local > intstack_top_ptr - INTSTACK_SIZE)) {
 		return local - (getCpuDatap()->intstack_top - INTSTACK_SIZE);
 	} else {
-		return local - current_thread()->kernel_stack;
+		vm_offset_t bottom = current_thread()->kernel_stack;
+#if CONFIG_SPTM
+		if (current_thread()->machine.kredzonestack) {
+			bottom -= PAGE_SIZE;
+		}
+#endif /* CONFIG_SPTM */
+		return local - bottom;
 	}
 }
 

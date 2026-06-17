@@ -160,7 +160,9 @@ int     posix_spawnattr_setexceptionports_np(posix_spawnattr_t * __restrict,
 int     posix_spawnattr_setspecialport_np(posix_spawnattr_t * __restrict,
     mach_port_t, int) __API_AVAILABLE(macos(10.5), ios(2.0)) __SPI_AVAILABLE(watchos(2.0), tvos(9.0), bridgeos(1.0));
 
-int     posix_spawnattr_setnosmt_np(const posix_spawnattr_t * __restrict attr) __API_AVAILABLE(macos(10.16));
+int     posix_spawnattr_setnosmt_np(const posix_spawnattr_t * __restrict) __API_AVAILABLE(macos(10.16));
+
+int     posix_spawnattr_set_4k_page_size_np(const posix_spawnattr_t * __restrict) __API_AVAILABLE(macos(26.0));
 
 /*
  * Set CPU Security Mitigation on the spawned process

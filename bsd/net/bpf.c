@@ -1851,6 +1851,17 @@ bpf_setup(struct bpf_d *d_to, uuid_t uuid_from, ifnet_t ifp, struct proc *proc)
 	}
 
 	/*
+	 * Make sure d_from has buffers allocated
+	 */
+	if (d_from->bd_sbuf == NULL) {
+		error = ENOENT;
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: d_from buffers not allocated error %d",
+		    __func__, error);
+		goto done;
+	}
+
+	/*
 	 * For now require the same buffer size
 	 */
 	if (d_from->bd_bufsize != d_to->bd_bufsize) {

@@ -65,7 +65,8 @@
 #define POSIX_SPAWN_SETSID              0x0400
 #ifdef  PRIVATE
 /* unused                               0x0800 */
-#define _POSIX_SPAWN_FORCE_4K_PAGES     0x1000
+#define _POSIX_SPAWN_FORCE_4K_PAGES                                            \
+  0x1000 /* DEPRECATED: use posix_spawnattr_set_4k_page_size_np() */
 #define _POSIX_SPAWN_ALLOW_DATA_EXEC    0x2000
 #endif  /* PRIVATE */
 #define POSIX_SPAWN_CLOEXEC_DEFAULT     0x4000

@@ -86,6 +86,7 @@
 #include <pexpert/arm64/boot.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>
+#include <arm64/sop.h>
 #include <prng/random.h>
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
@@ -134,8 +135,12 @@ main(int     argc,
 #endif /* CONFIG_SPTM */
 	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
 	DECLARE("TH_KSTACKPTR", offsetof(struct thread, machine.kstackptr));
+	DECLARE("TH_KERNEL_STACK", offsetof(struct thread, kernel_stack));
 #if __has_feature(ptrauth_calls)
 	DECLARE("TH_KSTACKPTR_DIVERSIFIER", ptrauth_string_discriminator("machine_thread.kstackptr"));
+#endif
+#if CONFIG_SPTM
+	DECLARE("TH_KREDZONESTACK", offsetof(struct thread, machine.kredzonestack));
 #endif
 	DECLARE("TH_THREAD_ID", offsetof(struct thread, thread_id));
 #if defined(HAS_APPLE_PAC)
@@ -423,6 +428,17 @@ main(int     argc,
 	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ELR", offsetof(struct panic_lockdown_initiator_state, elr));
 	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_FAR", offsetof(struct panic_lockdown_initiator_state, far));
 #endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
+
+#if CONFIG_SPTM
+	DECLARE("PAGE_SIZE", PAGE_SIZE);
+	DECLARE("PAGE_MASK", PAGE_SIZE - 1);
+#endif /* CONFIG_SPTM */
+
+	DECLARE("SOP_EXCEPTION_SNAPSHOT_SIZE", sizeof(sop_exception_snapshot_t));
+
+	static_assert(!(SOP_EXCEPTION_RING_SIZE & (SOP_EXCEPTION_RING_SIZE - 1)),
+	    "SOP_EXCEPTION_RING_SIZE must be a power of 2");
+	DECLARE("SOP_EXCEPTION_RING_INDEX_MASK", SOP_EXCEPTION_RING_SIZE - 1);
 
 #if DEVELOPMENT || DEBUG
 	STATIC_IF_KEY_DECLARE_TRUE(static_if_test_key_true); DECLARE_STATIC_IF_METADATA(static_if_test_key_true);

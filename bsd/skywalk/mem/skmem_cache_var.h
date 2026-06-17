@@ -46,7 +46,7 @@ struct skmem_bufctl {
 	uint32_t                bc_lim;         /* buffer obj limit */
 	uint32_t                bc_flags;       /* SKMEM_BUFCTL_* flags */
 	uint32_t                bc_idx;         /* buffer index within slab */
-	volatile uint32_t       bc_usecnt;      /* outstanding use */
+	uint32_t _Atomic        bc_usecnt;      /* outstanding use */
 };
 
 #define SKMEM_BUFCTL_SHAREOK    0x1             /* supports sharing */
@@ -73,7 +73,7 @@ struct skmem_bufctl_audit {
 	uint32_t                bc_lim;         /* buffer obj limit */
 	uint32_t                bc_flags;       /* SKMEM_BUFCTL_* flags */
 	uint32_t                bc_idx;         /* buffer index within slab */
-	volatile uint32_t       bc_usecnt;      /* outstanding use */
+	uint32_t _Atomic        bc_usecnt;      /* outstanding use */
 	struct thread           *bc_thread;     /* thread doing transaction */
 	uint32_t                bc_timestamp;   /* transaction time */
 	uint32_t                bc_depth;       /* stack depth */
@@ -360,13 +360,11 @@ __attribute__((always_inline))
 static inline void
 skmem_bufctl_use(struct skmem_bufctl *bc)
 {
-	uint32_t old, new;
+	uint32_t new;
+	new = os_atomic_inc(&bc->bc_usecnt, relaxed);
 
-	os_atomic_rmw_loop(&bc->bc_usecnt, old, new, relaxed, {
-		new = old + 1;
-		VERIFY(new != 0);
-		ASSERT(new == 1 || (bc->bc_flags & SKMEM_BUFCTL_SHAREOK));
-	});
+	VERIFY(new != 0);
+	ASSERT(new == 1 || (bc->bc_flags & SKMEM_BUFCTL_SHAREOK));
 }
 
 /*
@@ -377,12 +375,11 @@ static inline uint32_t
 skmem_bufctl_unuse(struct skmem_bufctl *bc)
 {
 	uint32_t old, new;
+	old = os_atomic_dec_orig(&bc->bc_usecnt, acq_rel);
+	new = old - 1;
 
-	os_atomic_rmw_loop(&bc->bc_usecnt, old, new, relaxed, {
-		new = old - 1;
-		VERIFY(old != 0);
-		ASSERT(old == 1 || (bc->bc_flags & SKMEM_BUFCTL_SHAREOK));
-	});
+	VERIFY(old != 0);
+	ASSERT(old == 1 || (bc->bc_flags & SKMEM_BUFCTL_SHAREOK));
 
 	return new;
 }

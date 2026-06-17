@@ -191,6 +191,17 @@ bool ipc_reply_port_causes_sigkill_as_exception_port(ipc_test_port_type_t type);
 bool ipc_containment_notification_causes_sigkill(ipc_test_port_type_t type);
 
 /*
+ * Test Setup Utilities
+ */
+
+/*
+ * Ensure mach port guard exceptions are fatal on bridgeOS.
+ * On bridgeOS, TASK_EXC_GUARD_MP_FATAL is not set by default, so we need to
+ * override it to ensure tests work correctly.
+ */
+void ipc_ensure_mach_port_guard_fatal(void);
+
+/*
  * Fork and Expect SIGKILL Testing
  */
 

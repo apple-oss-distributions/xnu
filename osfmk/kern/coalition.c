@@ -781,8 +781,8 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	int64_t swapins = 0;
 	struct recount_usage stats_sum = { 0 };
 	struct recount_usage stats_perf_only = { 0 };
-	recount_coalition_usage_perf_only(&coal->r.co_recount, &stats_sum,
-	    &stats_perf_only);
+	recount_coalition_usage_cpu_kinds(&coal->r.co_recount, &stats_sum,
+	    &stats_perf_only, NULL);
 	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES] = { 0 };
 	uint64_t cpu_time_rqos[COALITION_NUM_THREAD_QOS_TYPES] = { 0 };
 	memcpy(cpu_time_eqos, &coal->r.cpu_time_eqos, sizeof(cpu_time_eqos));
@@ -832,7 +832,7 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		phys_footprint += task_phys_footprint;
 
 		task_update_cpu_time_qos_stats(task, cpu_time_eqos, cpu_time_rqos);
-		recount_task_usage_perf_only(task, &stats_sum, &stats_perf_only);
+		recount_task_usage_cpu_kinds(task, &stats_sum, &stats_perf_only, NULL);
 	}
 
 	kr = ledger_get_balance(sum_ledger, task_ledgers.conclave_mem,

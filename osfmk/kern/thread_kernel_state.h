@@ -37,8 +37,12 @@ struct thread_kernel_state {
 
 typedef struct thread_kernel_state * thread_kernel_state_t;
 
+#if __arm64__
+#define thread_get_kernel_state(thread) ((thread_kernel_state_t)(thread)->machine.kstackptr)
+#else
 #define thread_get_kernel_state(thread) ((thread_kernel_state_t) \
     ((thread)->kernel_stack + kernel_stack_size - sizeof(struct thread_kernel_state)))
+#endif
 
 #define thread_initialize_kernel_state(thread)  \
     thread_get_kernel_state((thread))->allocation_name = NULL;

@@ -592,6 +592,12 @@ chudxnu_thread_get_callstack64_internal(
 	uint64_t                prevPC = 0ULL;
 	uint64_t                kernStackMin = thread->kernel_stack;
 	uint64_t                kernStackMax = kernStackMin + kernel_stack_size;
+#if CONFIG_SPTM
+	/* If the redzone page is mapped, the valid stack extends one page lower */
+	if (thread->machine.kredzonestack) {
+		kernStackMin -= PAGE_SIZE;
+	}
+#endif /* CONFIG_SPTM */
 	uint64_t       *buffer = callStack;
 	int             bufferIndex = 0;
 	int             bufferMaxIndex = 0;

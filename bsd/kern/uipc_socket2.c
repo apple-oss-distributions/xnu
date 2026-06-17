@@ -1975,7 +1975,7 @@ sbcreatecontrol(caddr_t __sized_by(size) p, int size, int type, int level)
 	}
 	cp = mtod(m, struct cmsghdr *);
 	VERIFY(IS_P2ALIGNED(cp, sizeof(u_int32_t)));
-	/* XXX check size? */
+	bzero(cp, CMSG_SPACE(size));
 	(void) memcpy(CMSG_DATA(cp), p, size);
 	m->m_len = (int32_t)CMSG_SPACE(size);
 	cp->cmsg_len = CMSG_LEN(size);
@@ -2008,7 +2008,7 @@ sbcreatecontrol_mbuf(caddr_t __sized_by(size) p, int size, int type, int level, 
 	VERIFY(IS_P2ALIGNED(cp, sizeof(u_int32_t)));
 	m->m_len += (int32_t)CMSG_SPACE(size);
 
-	/* XXX check size? */
+	bzero(cp, CMSG_SPACE(size));
 	(void) memcpy(CMSG_DATA(cp), p, size);
 	cp->cmsg_len = CMSG_LEN(size);
 	cp->cmsg_level = level;

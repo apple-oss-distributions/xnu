@@ -410,12 +410,17 @@ kperf_thread_inscyc_log(struct kperf_context *context)
 		return;
 	}
 
-	struct recount_usage usage = { 0 };
-	struct recount_usage perf_only = { 0 };
-	recount_current_thread_usage_perf_only(&usage, &perf_only);
-	BUF_DATA(PERF_TI_INSCYCDATA, recount_usage_instructions(&usage),
-	    recount_usage_cycles(&usage), recount_usage_instructions(&perf_only),
-	    recount_usage_cycles(&perf_only));
+	struct recount_usage usage_all = { 0 };
+	struct recount_usage usage_perf = { 0 };
+	struct recount_usage usage_mp = { 0 };
+	recount_current_thread_usage_cpu_kinds(&usage_all, &usage_perf, &usage_mp);
+	BUF_DATA(PERF_TI_INSCYCDATA, recount_usage_instructions(&usage_all),
+	    recount_usage_cycles(&usage_all), recount_usage_instructions(&usage_perf),
+	    recount_usage_cycles(&usage_perf));
+#if HAS_MCORE
+	BUF_DATA(PERF_TI_INSCYCDATA_2, recount_usage_instructions(&usage_mp),
+	    recount_usage_cycles(&usage_mp));
+#endif // HAS_MCORE
 #else /* CONFIG_PERVASIVE_CPI */
 #pragma unused(context)
 #endif /* !CONFIG_PERVASIVE_CPI */

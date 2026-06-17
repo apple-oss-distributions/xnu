@@ -137,6 +137,9 @@ struct machine_thread {
 	uint64_t                  recover_esr;
 
 	void *                    XNU_PTRAUTH_SIGNED_PTR("machine_thread.kstackptr") kstackptr; /* top of kernel stack */
+#if CONFIG_SPTM
+	uint64_t                  kredzonestack;
+#endif
 	struct perfcontrol_state  perfctrl_state;
 	uint64_t                  reserved5;
 

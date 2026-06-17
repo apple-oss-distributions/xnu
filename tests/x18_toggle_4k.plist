@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>RadarComponents</key>
+	<dict>
+		<key>Name</key>
+		<string>xnu</string>
+		<key>Version</key>
+		<string>arm</string>
+	</dict>
+	<key>Tests</key>
+	<array>
+		<dict>
+			<key>Command</key>
+			<array>
+				<string>/AppleInternal/Tests/xnu/darwintests/tools/vm_spawn_tool</string>
+				<string>/AppleInternal/Tests/xnu/darwintests/x18_toggle</string>
+				<string>-n</string>
+				<string>x18_toggle</string>
+			</array>
+			<key>TestName</key>
+			<string>xnu.arm.x18_toggle_4k</string>
+		</dict>
+		<dict>
+			<key>Command</key>
+			<array>
+				<string>/AppleInternal/Tests/xnu/darwintests/tools/vm_spawn_tool</string>
+				<string>/AppleInternal/Tests/xnu/darwintests/x18_toggle</string>
+				<string>-n</string>
+				<string>x18_signal_handling</string>
+			</array>
+			<key>TestName</key>
+			<string>xnu.arm.x18_signal_handling_4k</string>
+		</dict>
+	</array>
+	<key>Timeout</key>
+	<integer>240</integer>
+</dict>
+</plist>

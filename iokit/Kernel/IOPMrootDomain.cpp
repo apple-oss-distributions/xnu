@@ -1686,7 +1686,7 @@ static OSSharedPtr<const OSSymbol> gIOPMSettingLowLatencyAudioModeKey;
 //
 //******************************************************************************
 
-#define kRootDomainSettingsCount           20
+#define kRootDomainSettingsCount           21
 #define kRootDomainNoPublishSettingsCount  4
 
 bool
@@ -1732,6 +1732,7 @@ IOPMrootDomain::start( IOService * nub )
 		gIOPMSettingDebugPowerRelativeKey,
 		OSSymbol::withCString(kIOPMSettingWakeOnRingKey),
 		OSSymbol::withCString(kIOPMSettingRestartOnPowerLossKey),
+		OSSymbol::withCString(kIOPMSettingRestartOnPowerConnectKey),
 		OSSymbol::withCString(kIOPMSettingWakeOnClamshellKey),
 		OSSymbol::withCString(kIOPMSettingWakeOnACChangeKey),
 		OSSymbol::withCString(kIOPMSettingTimeZoneOffsetKey),

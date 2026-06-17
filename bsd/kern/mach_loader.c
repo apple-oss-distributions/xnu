@@ -778,7 +778,7 @@ load_machfile(
 #if __ARM_MIXED_PAGE_SIZE__ && XNU_TARGET_OS_OSX
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr* psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
-		if (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES) {
+		if (psa->psa_4k || (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES)) {
 			pmap_flags |= PMAP_CREATE_FORCE_4K_PAGES;
 
 			/*

@@ -3513,18 +3513,6 @@ proceed_with_enter_mte_memory_request:
 	 *	semantics.
 	 */
 
-#if HAS_MTE
-	/*
-	 * We'll have to make a decision on coalescing the mapping,
-	 * let's record if it's MTE enabled.
-	 */
-	bool prev_object_is_mte_mappable = false;
-
-	if (entry && !entry->is_sub_map && VME_OBJECT(entry)) {
-		prev_object_is_mte_mappable = vm_object_is_mte_mappable(VME_OBJECT(entry));
-	}
-#endif /* HAS_MTE */
-
 	if (purgable ||
 	    entry_for_jit ||
 	    entry_for_tpro ||
@@ -3624,15 +3612,6 @@ proceed_with_enter_mte_memory_request:
 #if __arm64e__
 			    (!entry->used_for_tpro && !entry_for_tpro) &&
 #endif
-#if HAS_MTE
-			    /*
-			     * Given that we only coalesce if object == VM_OBJECT_NULL and we
-			     * will always enter the first arm of the if on `is_caller_entering_mte_memory`
-			     * this check will only really kick in for non-MTE mapping, which will
-			     * be the only ones being coalesced here.
-			     */
-			    (prev_object_is_mte_mappable == is_caller_entering_mte_memory) &&
-#endif /* HAS_MTE */
 			    (!entry->csm_associated) &&
 			    (entry->iokit_acct == iokit_acct) &&
 			    (!entry->vme_resilient_codesign) &&
@@ -4175,7 +4154,7 @@ BailOut:
 			z_start = vm_map_zap_first_entry(&zap_old_list)->vme_start;
 			z_end   = vm_map_zap_last_entry(&zap_old_list)->vme_end;
 
-			if (vm_map_store_lookup_hole(map, z_start, -PAGE_SIZE) >= z_end - z_start) {
+			if (!vm_map_store_has_entries(map, z_start, z_end)) {
 				/*
 				 * Transfer the saved map entries from
 				 * "zap_old_map" to the original "map".
@@ -9667,9 +9646,12 @@ vm_map_copy_overwrite_transfer_object(
 	assert(!dst_entry->is_sub_map);
 	assert(!copy_entry->is_sub_map);
 	assert(!dst_map->mapped_in_other_pmaps);
+	assert3u(dst_entry->user_wired_count, ==, 0);
+	assert3u(dst_entry->wired_count, ==, 0);
 
 	/* transfer the object to the entry */
 	if (old_object != VM_OBJECT_NULL) {
+		assert3u(old_object->copy_strategy, ==, MEMORY_OBJECT_COPY_SYMMETRIC);
 		assert(!dst_entry->vme_permanent);
 		pmap_remove(dst_map->pmap,
 		    dst_entry->vme_start,
@@ -9785,9 +9767,10 @@ vm_map_entry_copy_overwrite_aligned(
 	 *	+ JIT regions,
 	 *	+ TPRO regions,
 	 *	+ pmap-specific protection policies,
-	 *	+ VM objects with COPY_NONE copy strategy.
+	 *	+ VM objects that could be shared (i.e. not NULL and not COPY_SYMMETRIC)
 	 */
-	if ((!dst_entry->is_shared &&
+	if (!dst_entry->is_shared &&
+	    dst_entry->wired_count == 0 && /* wiring affects both entry and object */
 	    !dst_entry->vme_permanent &&
 	    !dst_entry->used_for_jit &&
 #if __arm64e__
@@ -9795,11 +9778,9 @@ vm_map_entry_copy_overwrite_aligned(
 #endif /* __arm64e__ */
 	    !(dst_entry->protection & VM_PROT_EXECUTE) &&
 	    !pmap_has_prot_policy(dst_map->pmap, dst_entry->translated_allow_execute, dst_entry->protection) &&
-	    ((object == VM_OBJECT_NULL) ||
-	    (object->internal &&
-	    !object->true_share &&
-	    object->copy_strategy != MEMORY_OBJECT_COPY_NONE))) ||
-	    dst_entry->needs_copy) {
+	    /* can only replace object if it could not have been shared */
+	    (object == VM_OBJECT_NULL ||
+	    object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC)) {
 		vm_object_t         old_object = VME_OBJECT(dst_entry);
 		vm_object_offset_t  old_offset = VME_OFFSET(dst_entry);
 
@@ -10699,9 +10680,17 @@ vm_map_copy_remap(
 		new_entry->vme_start += adjustment;
 		new_entry->vme_end += adjustment;
 		/* clear some attributes */
+#if __arm64e__
+		if (new_entry->used_for_tpro) {
+			new_entry->protection = VM_PROT_READ;
+			new_entry->max_protection = VM_PROT_DEFAULT;
+		} else
+#endif /* __arm64e__ */
+		{
+			new_entry->protection = cur_prot;
+			new_entry->max_protection = max_prot;
+		}
 		new_entry->inheritance = inheritance;
-		new_entry->protection = cur_prot;
-		new_entry->max_protection = max_prot;
 		new_entry->behavior = VM_BEHAVIOR_DEFAULT;
 		/* insert the new entry in the map */
 		vm_map_store_insert(map, new_entry, rsv, vmk_flags);
@@ -10945,9 +10934,17 @@ vm_map_copyout_internal(
 		assert(VM_MAP_PAGE_ALIGNED(entry->vme_end,
 		    VM_MAP_PAGE_MASK(dst_map)));
 
+#if __arm64e__
+		if (entry->used_for_tpro) {
+			entry->protection = VM_PROT_READ;
+			entry->max_protection = VM_PROT_DEFAULT;
+		} else
+#endif /* __arm64e__ */
+		{
+			entry->protection = VM_PROT_DEFAULT;
+			entry->max_protection = VM_PROT_ALL;
+		}
 		entry->inheritance = VM_INHERIT_DEFAULT;
-		entry->protection = VM_PROT_DEFAULT;
-		entry->max_protection = VM_PROT_ALL;
 		entry->behavior = VM_BEHAVIOR_DEFAULT;
 
 		/*
@@ -11467,7 +11464,8 @@ _vm_map_copyin_select_strategy(
 	 * Check if the source is in the data private range.
 	 * If so, we must use a kernel buffer to avoid COW.
 	 */
-	if (kalloc_is_data_private((void *)src_start, len)) {
+	if (vm_kernel_map_is_kernel(src_map) &&
+	    kalloc_is_data_private((void *)src_start, len)) {
 		return VM_MAP_COPYIN_STRATEGY_KERNEL_LARGE_BUFFER;
 	}
 

@@ -4060,22 +4060,11 @@ vm_fault_enter_prepare(
 					*type_of_fault = DBG_PAGEIND_FAULT;
 				} else {
 					*type_of_fault = DBG_PAGEINV_FAULT;
-					telemetry_pagein_emit(object, m->vmp_offset);
 				}
 
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-			} else if (*type_of_fault == DBG_PAGEINV_FAULT) {
-				/*
-				 * Fresh page-in of a clustered page (not found in cache).
-				 * This can happen when clustering is disabled or cluster_size=1.
-				 * We must emit telemetry here, otherwise single-page reads
-				 * marked as clustered would never be recorded.
-				 */
-				telemetry_pagein_emit(object, m->vmp_offset);
 			}
 			VM_PAGE_CONSUME_CLUSTERED(m);
-		} else if (*type_of_fault == DBG_PAGEINV_FAULT) {
-			telemetry_pagein_emit(object, m->vmp_offset);
 		}
 	}
 
@@ -4875,6 +4864,7 @@ vm_fault_internal(
 	vm_object_offset_t      resilient_media_offset = (vm_object_offset_t)-1;
 	bool                    page_needs_data_sync = false;
 	vm_map_entry_t          entry;
+	thread_pri_floor_t      pri_token = { .thread = THREAD_NULL };
 
 	VM_MAP_LOCK_CTX_DECLARE(ctx);
 
@@ -6713,9 +6703,18 @@ handle_copy_delay:
 	}
 
 	/*
-	 * Drop the object locks, then go and retry with a new lookup and lock
+	 * Drop the object locks, then go and retry with a new lookup and lock.
 	 */
 	if (m != VM_PAGE_NULL) {
+		/*
+		 * To avoid a priority inversion, we need to take a priority boost until
+		 * we un-busy the page. Otherwise, if we're a low-priority thread, we
+		 * may be descheduled the moment we drop the object lock, while still
+		 * holding the page busy. This would be problematic if a high-priority
+		 * thread then needed the page, as there is no priority propagation
+		 * mechanism for the busy bit.
+		 */
+		pri_token = thread_priority_floor_start();
 		vm_object_unlock(m_object);
 	} else {
 		vm_object_unlock(object);
@@ -6751,12 +6750,17 @@ handle_copy_delay:
 			assert(VM_PAGE_OBJECT(m) == m_object);
 
 			/*
-			 * retake the lock so that
-			 * we can drop the paging reference
-			 * in vm_fault_cleanup and do the
-			 * vm_page_wakeup_done() in RELEASE_PAGE
+			 * Re-take the object lock so that we can drop the paging reference
+			 * in vm_fault_cleanup and do the vm_page_wakeup_done() in
+			 * RELEASE_PAGE.
 			 */
 			vm_object_lock(m_object);
+
+			/*
+			 * With the object locked, it's safe to drop our priority boost.
+			 */
+			assert3p(pri_token.thread, !=, THREAD_NULL);
+			thread_priority_floor_end(&pri_token);
 
 			RELEASE_PAGE(m);
 
@@ -6792,12 +6796,17 @@ handle_copy_delay:
 			assert(VM_PAGE_OBJECT(m) == m_object);
 
 			/*
-			 * retake the lock so that
-			 * we can drop the paging reference
-			 * in vm_fault_cleanup and do the
-			 * vm_page_wakeup_done() in RELEASE_PAGE
+			 * Re-take the lock so that we can drop the paging reference in
+			 * vm_fault_cleanup and do the vm_page_wakeup_done() in
+			 * RELEASE_PAGE.
 			 */
 			vm_object_lock(m_object);
+
+			/*
+			 * With the object locked, it's safe to drop our priority boost.
+			 */
+			assert3p(pri_token.thread, !=, THREAD_NULL);
+			thread_priority_floor_end(&pri_token);
 
 			RELEASE_PAGE(m);
 
@@ -6836,6 +6845,12 @@ handle_copy_delay:
 			KDBG(VMDBG_CODE(DBG_VM_FAULT_SLOW_OBJECT_CONTENTION) | DBG_FUNC_NONE, trace_real_vaddr, m_object->internal, m_object->copy_strategy, fault_type);
 		}
 		vm_object_lock(m_object);
+
+		/*
+		 * With the object locked, it's safe to drop our priority boost.
+		 */
+		assert3p(pri_token.thread, !=, THREAD_NULL);
+		thread_priority_floor_end(&pri_token);
 	} else {
 		if (vm_object_is_contended_for_kdbg(object)) {
 			KDBG(VMDBG_CODE(DBG_VM_FAULT_SLOW_OBJECT_CONTENTION) | DBG_FUNC_NONE, trace_real_vaddr, object->internal, object->copy_strategy, fault_type);
@@ -7145,7 +7160,25 @@ cleanup:
 		}
 		vm_page_wakeup_done(m_object, m);
 
+		/*
+		 * Under the lock, check whether this fault is eligible and able to
+		 * gather telemetry.  If so, prepare a token to be consumed outside of
+		 * the object lock.
+		 */
+		struct telemetry_pagein_token telemetry = {
+			.tpit_pagerv_in = m_object->pager,
+			.tpit_file_offset_in = m_object->paging_offset + m->vmp_offset,
+		};
+		bool const telemetry_eligible = kr == KERN_SUCCESS &&
+		    type_of_fault == DBG_PAGEINV_FAULT;
+		bool const emit_telemetry = telemetry_eligible ?
+		    telemetry_pagein_should_emit(&telemetry) : false;
+
 		vm_fault_cleanup(m_object, top_page);
+
+		if (emit_telemetry) {
+			telemetry_pagein_emit(&telemetry);
+		}
 	} else {
 		vm_fault_cleanup(object, top_page);
 	}
@@ -7157,6 +7190,11 @@ cleanup:
 
 done:
 	thread_interrupt_level(interruptible_state);
+
+	/*
+	 * Priority boost must have ended by this point.
+	 */
+	assert3p(pri_token.thread, ==, THREAD_NULL);
 
 	if (resilient_media_object != VM_OBJECT_NULL) {
 		assert(resilient_media_retry);

@@ -798,7 +798,7 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 			 * into magzine layer to prevent immediate reuse of the buffer and
 			 * data corruption.
 			 */
-			if (nbuf->buf_ctl->bc_usecnt > 1) {
+			if (os_atomic_load(&nbuf->buf_ctl->bc_usecnt, relaxed) > 1) {
 				*pp_blist_nocache_large = (struct skmem_obj *)(void *)nbuf;
 				pp_blist_nocache_large =
 				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
@@ -808,7 +808,7 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
 			}
 		} else {
-			if (nbuf->buf_ctl->bc_usecnt > 1) {
+			if (os_atomic_load(&nbuf->buf_ctl->bc_usecnt, relaxed) > 1) {
 				*pp_blist_nocache_def = (struct skmem_obj *)(void *)nbuf;
 				pp_blist_nocache_def =
 				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
@@ -2258,6 +2258,38 @@ pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
 	return mdp;
 }
 
+/*
+ * Free a chain of attached packets that may belong to different pools.
+ * Accumulates runs of same-pool packets and batch-frees each run.
+ */
+static void
+pp_free_attached_packets(struct __kern_packet *pkt_chain)
+{
+	struct __kern_packet *pkt, *next;
+
+	while (pkt_chain != NULL) {
+		const struct kern_pbufpool *pp = pkt_chain->pkt_qum.qum_pp;
+		struct __kern_packet *subchain = pkt_chain;
+		struct __kern_packet **tail = &pkt_chain->pkt_nextpkt;
+		int cnt = 0;
+
+		for (pkt = pkt_chain->pkt_nextpkt; pkt != NULL; pkt = next) {
+			next = pkt->pkt_nextpkt;
+			if (pkt->pkt_qum.qum_pp != pp) {
+				break;
+			}
+			tail = &pkt->pkt_nextpkt;
+		}
+
+		/* Terminate subchain and advance to remainder */
+		*tail = NULL;
+		pkt_chain = pkt;
+
+		pp_free_packet_chain(subchain, &cnt);
+		DTRACE_SKYWALK1(free__attached__pkt, int, cnt);
+	}
+}
+
 void
 pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 {
@@ -2313,9 +2345,7 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 		}
 	}
 	if (kptop != NULL) {
-		int cnt = 0;
-		pp_free_packet_chain(kptop, &cnt);
-		DTRACE_SKYWALK1(free__attached__pkt, int, cnt);
+		pp_free_attached_packets(kptop);
 	}
 	if (npkt != NULL) {
 		*npkt = c;
@@ -2416,9 +2446,7 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *__counted_by(num)array,
 		}
 	}
 	if (kptop != NULL) {
-		int cnt = 0;
-		pp_free_packet_chain(kptop, &cnt);
-		DTRACE_SKYWALK1(free__attached__pkt, int, cnt);
+		pp_free_attached_packets(kptop);
 	}
 }
 
@@ -2653,7 +2681,7 @@ pp_free_buflet_common(const kern_pbufpool_t pp, kern_buflet_t kbft)
 		ASSERT(kbft->buf_ctl != NULL);
 		ASSERT(((struct __kern_buflet_ext *)kbft)->
 		    kbe_buf_upp_link.sle_next == NULL);
-		if (kbft->buf_ctl->bc_usecnt > 1) {
+		if (os_atomic_load(&kbft->buf_ctl->bc_usecnt, relaxed) > 1) {
 			skmem_cache_free_nocache(BUFLET_HAS_LARGE_BUF(kbft) ?
 			    PP_KBFT_CACHE_LARGE(pp) : PP_KBFT_CACHE_DEF(pp),
 			    (void *)kbft);

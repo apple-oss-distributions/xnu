@@ -2903,6 +2903,29 @@ mac_vnode_notify_unlink(vfs_context_t ctx, struct vnode *dvp, struct vnode *vp,
 }
 
 void
+mac_vnode_notify_will_rename_swap(vfs_context_t ctx,
+    struct vnode *fvp, struct vnode *tvp)
+{
+	kauth_cred_t cred;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return;
+	}
+
+	VFS_KERNEL_DEBUG_START1(109, fvp);
+	MAC_PERFORM(vnode_notify_will_rename_swap, cred,
+	    fvp, mac_vnode_label(fvp), tvp, mac_vnode_label(tvp));
+	VFS_KERNEL_DEBUG_END1(109, fvp);
+}
+
+void
 mac_vnode_notify_rename_swap(vfs_context_t ctx, struct vnode *fdvp,
     struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
     struct vnode *tvp, struct componentname *tcnp)

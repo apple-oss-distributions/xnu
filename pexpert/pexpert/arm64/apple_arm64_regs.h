@@ -104,6 +104,7 @@
 #define MPIDR_CORETYPE_MASK   ((1ULL << MPIDR_CORETYPE_WIDTH) - 1)
 #define MPIDR_CORETYPE_ACC_E  (0ULL)
 #define MPIDR_CORETYPE_ACC_P  (1ULL)
+#define MPIDR_CORETYPE_ACC_M  (4ULL)
 
 
 
@@ -149,6 +150,21 @@
 #endif
 .endmacro
 
+/*
+ * Determines whether the executing core is an M-core.
+ *
+ * @param arg0 result register; will be non-zero if executed on an M-core, else
+ *             zero if executed on an E-core / P-core / non-AMP architectures.
+ */
+.macro ARM64_IS_MCORE
+#if defined(APPLEMONSOON) || HAS_CLUSTER
+	mrs   $0, MPIDR_EL1
+	ubfx  $0, $0, #MPIDR_CORETYPE_SHIFT, #MPIDR_CORETYPE_WIDTH
+	and   $0, $0, #MPIDR_CORETYPE_ACC_M
+#else
+	mov   $0, xzr
+#endif
+.endmacro
 
 /*
  * Determines whether the executing core is an E-core.

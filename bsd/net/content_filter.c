@@ -616,6 +616,12 @@ os_refgrp_decl(static, cfil_refgrp, "CFILRefGroup", NULL);
 	cfil_info_free(cfil_info); \
     }
 
+#define CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry) \
+    cfil_info = (hash_entry)->soflow_feat_ctxt; \
+    if ((cfil_info) == NULL || os_ref_retain_try(&(cfil_info)->cfi_ref_count) == false) { \
+	return true; \
+    }
+
 #define SOCKET_PID(so) ((so->so_flags & SOF_DELEGATED) ? so->e_pid : so->last_pid)
 #define MATCH_PID(so) (so && (cfil_log_pid == SOCKET_PID(so)))
 #define MATCH_PORT(inp, local, remote) \
@@ -658,6 +664,15 @@ os_refgrp_decl(static, cfil_refgrp, "CFILRefGroup", NULL);
 
 #define SO_DELAYED_TCP_TIME_WAIT_GET(so) \
     (so->so_cfil ? (so->so_cfil->cfi_flags & CFIF_SO_DELAYED_TCP_TIME_WAIT) : false)
+
+/*
+ * Check if cfil_info is on the stats list.
+ * Note: After TAILQ_REMOVE, we explicitly clear the pointers to NULL
+ * to ensure this check works correctly.
+ */
+#define CFIL_IS_ON_STATS_LIST(cfil) \
+    ((cfil)->cfi_link_stats.tqe_next != NULL || \
+     (cfil)->cfi_link_stats.tqe_prev != NULL)
 
 /*
  * Periodic Statistics Report:
@@ -796,7 +811,7 @@ static int cfil_action_drop(struct socket *, struct cfil_info *, uint32_t);
 static int cfil_action_bless_client(uint32_t, struct cfil_msg_hdr *);
 static int cfil_action_qualify_flow(uint32_t, struct cfil_msg_hdr *);
 static int cfil_action_set_crypto_key(uint32_t, struct cfil_msg_hdr *);
-static int cfil_dispatch_closed_event(struct socket *, struct cfil_info *, int);
+static int cfil_dispatch_closed_event(struct socket *, struct cfil_info *, int, struct soflow_hash_entry *hash_entry);
 static int cfil_data_common(struct socket *, struct cfil_info *, int, struct sockaddr *,
     struct mbuf *, struct mbuf *, uint32_t);
 static int cfil_data_filter(struct socket *, struct cfil_info *, uint32_t, int,
@@ -1810,8 +1825,6 @@ done:
 static void
 cfil_info_stats_toggle(struct cfil_info *cfil_info, struct cfil_entry *entry, uint32_t report_frequency)
 {
-	struct cfil_info *cfil = NULL;
-	Boolean found = FALSE;
 	int kcunit;
 
 	if (cfil_info == NULL) {
@@ -1831,11 +1844,9 @@ cfil_info_stats_toggle(struct cfil_info *cfil_info, struct cfil_entry *entry, ui
 			}
 			microuptime(&entry->cfe_stats_report_ts);
 
-			// Insert cfil_info into list only if it is not in yet.
-			TAILQ_FOREACH(cfil, &cfil_sock_head_stats, cfi_link_stats) {
-				if (cfil == cfil_info) {
-					return;
-				}
+			// cfil_info already on list, no need to insert
+			if (CFIL_IS_ON_STATS_LIST(cfil_info)) {
+				return;
 			}
 
 			TAILQ_INSERT_TAIL(&cfil_sock_head_stats, cfil_info, cfi_link_stats);
@@ -1868,25 +1879,38 @@ cfil_info_stats_toggle(struct cfil_info *cfil_info, struct cfil_entry *entry, ui
 					return;
 				}
 			}
+		} else {
+			// Check if we need to clean up this cfil_info from stats list.
+			// If none of the filters has stats enabled, nothing to clean up.
+			Boolean statsEnabled = false;
+			for (kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
+				if (cfil_info->cfi_entries[kcunit - 1].cfe_stats_report_frequency > 0) {
+					statsEnabled = true;
+					break;
+				}
+			}
+			if (statsEnabled == false) {
+				return;
+			}
+		}
+
+		// cfil_info not on list, nothing to remove
+		if (!CFIL_IS_ON_STATS_LIST(cfil_info)) {
+			return;
 		}
 
 		// No more filter asking for stats for this cfil_info, remove from list.
 		if (!TAILQ_EMPTY(&cfil_sock_head_stats)) {
-			found = FALSE;
-			TAILQ_FOREACH(cfil, &cfil_sock_head_stats, cfi_link_stats) {
-				if (cfil == cfil_info) {
-					found = TRUE;
-					break;
-				}
-			}
-			if (found) {
-				cfil_sock_attached_stats_count--;
-				TAILQ_REMOVE(&cfil_sock_head_stats, cfil_info, cfi_link_stats);
-				if (cfil_info->cfi_debug && cfil_log_stats) {
-					CFIL_LOG(LOG_ERR, "CFIL: VERDICT RECEIVED - STATS FLOW DELETED: <so %llx sockID %llu <%llx>> stats frequency reset",
-					    cfil_info->cfi_so ? (uint64_t)VM_KERNEL_ADDRPERM(cfil_info->cfi_so) : 0,
-					    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
-				}
+			cfil_sock_attached_stats_count--;
+			TAILQ_REMOVE(&cfil_sock_head_stats, cfil_info, cfi_link_stats);
+			// Explicitly clear pointers to NULL so CFIL_IS_ON_STATS_LIST works correctly
+			// (TRASHIT in TAILQ_REMOVE may set these to -1 instead of NULL)
+			cfil_info->cfi_link_stats.tqe_next = NULL;
+			cfil_info->cfi_link_stats.tqe_prev = NULL;
+			if (cfil_info->cfi_debug && cfil_log_stats) {
+				CFIL_LOG(LOG_ERR, "CFIL: VERDICT RECEIVED - STATS FLOW DELETED: <so %llx sockID %llu <%llx>> stats frequency reset",
+				    cfil_info->cfi_so ? (uint64_t)VM_KERNEL_ADDRPERM(cfil_info->cfi_so) : 0,
+				    cfil_info->cfi_sock_id, cfil_info->cfi_sock_id);
 			}
 		}
 	}
@@ -3700,7 +3724,7 @@ done:
 }
 
 int
-cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int kcunit)
+cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int kcunit, struct soflow_hash_entry *hash_entry)
 {
 	struct cfil_entry *entry;
 	struct cfil_msg_sock_closed msg_closed;
@@ -3761,8 +3785,8 @@ cfil_dispatch_closed_event(struct socket *so, struct cfil_info *cfil_info, int k
 				boolean_t outgoing = (cfil_info->cfi_dir == CFS_CONNECTION_DIR_OUT);
 				union sockaddr_in_4_6 *src = outgoing ? &cfil_info->cfi_so_attach_laddr : NULL;
 				union sockaddr_in_4_6 *dst = outgoing ? NULL : &cfil_info->cfi_so_attach_laddr;
-				cfil_fill_event_msg_addresses(cfil_info->cfi_hash_entry, inp,
-				    src, dst, outgoing);
+				cfil_fill_event_msg_addresses(cfil_info->cfi_hash_entry ? cfil_info->cfi_hash_entry : hash_entry,
+				    inp, src, dst, outgoing);
 			}
 		}
 
@@ -5576,7 +5600,7 @@ cfil_sock_is_closed(struct socket *so)
 
 	for (kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
 		/* Let the filters know of the closing */
-		error = cfil_dispatch_closed_event(so, so->so_cfil, kcunit);
+		error = cfil_dispatch_closed_event(so, so->so_cfil, kcunit, NULL);
 	}
 
 	/* Last chance to push passed data out */
@@ -6276,29 +6300,47 @@ cfil_log_printf(struct socket *so, struct cfil_info *info, const char *format, .
 	}
 }
 
-static void
-cfil_sock_udp_unlink_flow(struct socket *so, struct soflow_hash_entry *hash_entry, struct cfil_info *cfil_info)
+static struct cfil_info *
+cfil_sock_udp_unlink_flow(struct socket *so, struct soflow_hash_entry *hash_entry, const char *log_string)
 {
-	if (so == NULL || hash_entry == NULL || cfil_info == NULL) {
-		return;
+	struct cfil_info *cfil_info = NULL;
+
+	if (so == NULL || hash_entry == NULL) {
+		return NULL;
 	}
+
+	// Hold exclusive lock before clearing cfil_info hash entry link
+	cfil_rw_lock_exclusive(&cfil_lck_rw);
+
+	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
+	if (cfil_info == NULL) {
+		cfil_rw_unlock_exclusive(&cfil_lck_rw);
+		return NULL;
+	}
+
+	if (cfil_info->cfi_debug) {
+		cfil_info_log(LOG_ERR, cfil_info, log_string);
+	}
+
+	cfil_info->cfi_hash_entry = NULL;
+
+	// Clear the forward pointer in hash_entry to prevent use-after-free
+	hash_entry->soflow_feat_ctxt = NULL;
+	hash_entry->soflow_feat_ctxt_id = 0;
+
+	cfil_rw_unlock_exclusive(&cfil_lck_rw);
 
 	if (so->so_flags & SOF_CONTENT_FILTER) {
 		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 	}
 
-	// Hold exclusive lock before clearing cfil_info hash entry link
-	cfil_rw_lock_exclusive(&cfil_lck_rw);
-
-	cfil_info->cfi_hash_entry = NULL;
-
 	if (cfil_info->cfi_debug) {
 		CFIL_LOG(LOG_ERR, "CFIL <%s>: <so %llx> - use count %d",
 		    IS_UDP(so) ? "UDP" : "TCP", (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_usecount);
 	}
 
-	cfil_rw_unlock_exclusive(&cfil_lck_rw);
+	return cfil_info;
 }
 
 bool
@@ -6361,27 +6403,45 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 		return NULL;
 	}
 
+	cfil_rw_lock_shared(&cfil_lck_rw);
+
 	if (hash_entry->soflow_feat_ctxt != NULL && hash_entry->soflow_feat_ctxt_id != 0) {
 		/* Drop pre-existing UDP flow if filter state changed */
 		cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
 		new_filter_control_unit = filter_control_unit;
 		if (new_filter_control_unit > 0 && new_filter_control_unit != cfil_info->cfi_filter_control_unit) {
 			if (cfil_info->cfi_filter_policy_gencount == hash_entry->soflow_policies_gencount) {
-				CFIL_LOG(LOG_NOTICE, "CFIL: UDP(%s) <so %llx> - filter state changed to 0x%x, but policies did not. Keeping existing filter state 0x%x",
-				    outgoing ? "OUT" : "IN", (uint64_t)VM_KERNEL_ADDRPERM(so), new_filter_control_unit, cfil_info->cfi_filter_control_unit);
+				CFIL_LOG(LOG_NOTICE, "CFIL: UDP(%s) <so %llx> - filter state changed, but policies did not. Update state 0x%x -> 0x%x and preserve",
+				    outgoing ? "OUT" : "IN", (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_filter_control_unit, new_filter_control_unit);
+				// filter state changed but not a result of policy change, preserve flow and update the state.
+				cfil_info->cfi_filter_control_unit = new_filter_control_unit;
+				cfil_rw_unlock_shared(&cfil_lck_rw);
+				return cfil_info;
 			} else if (DO_PRESERVE_CONNECTIONS) {
 				CFIL_LOG(LOG_NOTICE, "CFIL: UDP(%s) <so %llx> - filter state changed from 0x%x to 0x%x, but existing connections are to be preserved",
 				    outgoing ? "OUT" : "IN", (uint64_t)VM_KERNEL_ADDRPERM(so), cfil_info->cfi_filter_control_unit, new_filter_control_unit);
 				// CFIL state has changed, but preserve the flow intentionally because preserve existing connections is in effect.
 				cfil_info->cfi_filter_control_unit = new_filter_control_unit;
+				cfil_rw_unlock_shared(&cfil_lck_rw);
+				return cfil_info;
 			} else {
-				cfil_log_printf(so, cfil_info, "CFIL: %sbound UDP data dropped (0x%x -> 0x%x)",
-				    (outgoing ? "out" : "in"), cfil_info->cfi_filter_control_unit, new_filter_control_unit);
-				return NULL;
+				cfil_log_printf(so, cfil_info, "CFIL: filter state changed (0x%x -> 0x%x), re-evaluate flow", cfil_info->cfi_filter_control_unit, new_filter_control_unit);
+				cfil_rw_unlock_shared(&cfil_lck_rw);
+
+				// We need to detach and cleanup outdated cfil_info and let filters perform cleanup also.
+				cfil_dgram_gc_perform(so, hash_entry);
+
+				goto new_flow;
 			}
+		} else {
+			cfil_rw_unlock_shared(&cfil_lck_rw);
+			return cfil_info;
 		}
-		return cfil_info;
 	}
+
+	cfil_rw_unlock_shared(&cfil_lck_rw);
+
+new_flow:
 
 	cfil_info = cfil_info_alloc(so, hash_entry);
 	if (cfil_info == NULL) {
@@ -6419,13 +6479,15 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 	/* Hold a reference on the socket for each flow */
 	so->so_usecount++;
 
-	/* link cfil_info to flow */
-	hash_entry->soflow_feat_ctxt = cfil_info;
-	hash_entry->soflow_feat_ctxt_id = cfil_info->cfi_sock_id;
-
 	if (cfil_info->cfi_debug) {
 		cfil_info_log(LOG_ERR, cfil_info, "CFIL: ADDED");
 	}
+
+	/* link cfil_info to flow */
+	cfil_rw_lock_exclusive(&cfil_lck_rw);
+	hash_entry->soflow_feat_ctxt = cfil_info;
+	hash_entry->soflow_feat_ctxt_id = cfil_info->cfi_sock_id;
+	cfil_rw_unlock_exclusive(&cfil_lck_rw);
 
 	error = cfil_dispatch_attach_event(so, cfil_info, 0,
 	    outgoing ? CFS_CONNECTION_DIR_OUT : CFS_CONNECTION_DIR_IN);
@@ -6490,8 +6552,9 @@ cfil_sock_udp_handle_data(bool outgoing, struct socket *so,
 		return error;
 	}
 
+	// Get cfil_info and get refcnt to make sure cfil_info stay valid
 	cfil_info = cfil_sock_udp_get_info(so, filter_control_unit, outgoing, hash_entry, local, remote);
-	if (cfil_info == NULL) {
+	if (cfil_info == NULL || os_ref_retain_try(&cfil_info->cfi_ref_count) == false) {
 		return EPIPE;
 	}
 	// Update last used timestamp, this is for flow Idle TO
@@ -6504,6 +6567,7 @@ cfil_sock_udp_handle_data(bool outgoing, struct socket *so,
 		if (cfil_info->cfi_debug) {
 			cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP DROP");
 		}
+		CFIL_INFO_FREE(cfil_info);
 		return EPIPE;
 	}
 	if (control != NULL) {
@@ -6517,6 +6581,7 @@ cfil_sock_udp_handle_data(bool outgoing, struct socket *so,
 
 	error = cfil_data_common(so, cfil_info, outgoing, remote, data, control, flags);
 
+	CFIL_INFO_FREE(cfil_info);
 	return error;
 }
 
@@ -6539,11 +6604,11 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 	errno_t error = 0;
 	int kcunit;
 
-	if (hash_entry->soflow_feat_ctxt == NULL || context == NULL) {
+	if (context == NULL) {
 		return true;
 	}
 
-	cfil_info = hash_entry->soflow_feat_ctxt;
+	CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry)
 	apply_context = (struct cfil_udp_attached_context *)context;
 
 	for (kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
@@ -6580,6 +6645,7 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 			if (so->so_flow_db == NULL ||
 			    (cfil_info != soflow_db_get_feature_context(so->so_flow_db, sock_flow_id))) {
 				// cfil_info is not valid, do not continue
+				CFIL_INFO_FREE(cfil_info)
 				return false;
 			}
 
@@ -6600,12 +6666,15 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
 				}
 
 				entry->cfe_flags |= CFEF_CFIL_DETACHED;
+				CFIL_INFO_FREE(cfil_info)
 				return false;
 			}
 		}
 		apply_context->attached = 1;
+		CFIL_INFO_FREE(cfil_info)
 		return false;
 	}
+	CFIL_INFO_FREE(cfil_info)
 	return true;
 }
 
@@ -6655,14 +6724,15 @@ cfil_sock_udp_data_pending_per_flow(struct socket *so,
 
 	uint64_t pending = 0;
 
-	if (hash_entry->soflow_feat_ctxt == NULL || context == NULL) {
+	if (context == NULL) {
 		return true;
 	}
 
-	cfil_info = hash_entry->soflow_feat_ctxt;
+	CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry)
 	apply_context = (struct cfil_udp_data_pending_context *)context;
 
 	if (apply_context->sb == NULL) {
+		CFIL_INFO_FREE(cfil_info)
 		return true;
 	}
 
@@ -6682,6 +6752,7 @@ cfil_sock_udp_data_pending_per_flow(struct socket *so,
 	}
 
 	apply_context->total_pending += pending;
+	CFIL_INFO_FREE(cfil_info)
 	return true;
 }
 
@@ -6721,21 +6792,23 @@ cfil_sock_udp_notify_shutdown_per_flow(struct socket *so,
 	errno_t error = 0;
 	int kcunit;
 
-	if (hash_entry->soflow_feat_ctxt == NULL || context == NULL) {
+	if (context == NULL) {
 		return true;
 	}
 
-	cfil_info = hash_entry->soflow_feat_ctxt;
+	CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry)
 	apply_context = (struct cfil_udp_notify_shutdown_context *)context;
 
 	// This flow is marked as DROP
 	if (cfil_info->cfi_flags & apply_context->drop_flag) {
 		apply_context->done_count++;
+		CFIL_INFO_FREE(cfil_info);
 		return true;
 	}
 
 	// This flow has been shut already, skip
 	if (cfil_info->cfi_flags & apply_context->shut_flag) {
+		CFIL_INFO_FREE(cfil_info);
 		return true;
 	}
 	// Mark flow as shut
@@ -6757,6 +6830,7 @@ cfil_sock_udp_notify_shutdown_per_flow(struct socket *so,
 		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW NOTIFY_SHUTDOWN");
 	}
 
+	CFIL_INFO_FREE(cfil_info);
 	return true;
 }
 
@@ -6881,15 +6955,11 @@ cfil_sock_udp_is_closed_per_flow(struct socket *so,
 	errno_t error = 0;
 	int kcunit;
 
-	if (hash_entry->soflow_feat_ctxt == NULL) {
-		return true;
-	}
-
-	cfil_info = hash_entry->soflow_feat_ctxt;
+	CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry)
 
 	for (kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
 		/* Let the filters know of the closing */
-		error = cfil_dispatch_closed_event(so, cfil_info, kcunit);
+		error = cfil_dispatch_closed_event(so, cfil_info, kcunit, NULL);
 	}
 
 	/* Last chance to push passed data out */
@@ -6910,6 +6980,7 @@ cfil_sock_udp_is_closed_per_flow(struct socket *so,
 		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW IS_CLOSED");
 	}
 
+	CFIL_INFO_FREE(cfil_info);
 	return true;
 }
 
@@ -6933,21 +7004,23 @@ cfil_sock_udp_buf_update_per_flow(struct socket *so,
 	errno_t error = 0;
 	int outgoing;
 
-	if (hash_entry->soflow_feat_ctxt == NULL || context == NULL) {
+	if (context == NULL) {
 		return true;
 	}
 
-	cfil_info = hash_entry->soflow_feat_ctxt;
+	CFIL_INFO_RETAIN_OR_RETURN(cfil_info, hash_entry)
 	sb = (struct sockbuf *) context;
 
 	if ((sb->sb_flags & SB_RECV) == 0) {
 		if ((cfil_info->cfi_flags & CFIF_RETRY_INJECT_OUT) == 0) {
+			CFIL_INFO_FREE(cfil_info)
 			return true;
 		}
 		outgoing = 1;
 		OSIncrementAtomic(&cfil_stats.cfs_inject_q_out_retry);
 	} else {
 		if ((cfil_info->cfi_flags & CFIF_RETRY_INJECT_IN) == 0) {
+			CFIL_INFO_FREE(cfil_info)
 			return true;
 		}
 		outgoing = 0;
@@ -6962,6 +7035,8 @@ cfil_sock_udp_buf_update_per_flow(struct socket *so,
 		cfil_service_inject_queue(so, cfil_info, outgoing);
 	}
 	cfil_release_sockbuf(so, outgoing);
+
+	CFIL_INFO_FREE(cfil_info)
 	return true;
 }
 
@@ -7148,12 +7223,16 @@ cfil_dgram_gc_needed(struct socket *so, struct soflow_hash_entry *hash_entry, u_
 #pragma unused(current_time)
 	struct cfil_info *cfil_info = NULL;
 
-	if (so == NULL || hash_entry == NULL || hash_entry->soflow_feat_ctxt == NULL) {
+	if (so == NULL || hash_entry == NULL) {
 		return false;
 	}
-	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
 
 	cfil_rw_lock_shared(&cfil_lck_rw);
+	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
+	if (cfil_info == NULL) {
+		cfil_rw_unlock_shared(&cfil_lck_rw);
+		return false;
+	}
 
 	if (cfil_info_action_timed_out(cfil_info, UDP_FLOW_GC_ACTION_TO) ||
 	    cfil_info_buffer_threshold_exceeded(cfil_info)) {
@@ -7173,20 +7252,20 @@ cfil_dgram_gc_perform(struct socket *so, struct soflow_hash_entry *hash_entry)
 {
 	struct cfil_info *cfil_info = NULL;
 
-	if (so == NULL || hash_entry == NULL || hash_entry->soflow_feat_ctxt == NULL) {
+	if (so == NULL || hash_entry == NULL) {
 		return false;
 	}
-	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
 
-	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_ERR, cfil_info, "CFIL: UDP PER-FLOW GC PERFORM");
+	// Grab the cfil_info and unlink within lock
+	cfil_info = cfil_sock_udp_unlink_flow(so, hash_entry, "CFIL: UDP PER-FLOW GC PERFORM");
+	if (cfil_info == NULL) {
+		return false;
 	}
 
 	for (int kcunit = 1; kcunit <= MAX_CONTENT_FILTER; kcunit++) {
 		/* Let the filters know of the closing */
-		cfil_dispatch_closed_event(so, cfil_info, kcunit);
+		cfil_dispatch_closed_event(so, cfil_info, kcunit, hash_entry);
 	}
-	cfil_sock_udp_unlink_flow(so, hash_entry, cfil_info);
 	CFIL_INFO_FREE(cfil_info);
 	OSIncrementAtomic(&cfil_stats.cfs_sock_detached);
 	return true;
@@ -7197,16 +7276,16 @@ cfil_dgram_detach_entry(struct socket *so, struct soflow_hash_entry *hash_entry)
 {
 	struct cfil_info *cfil_info = NULL;
 
-	if (hash_entry == NULL || hash_entry->soflow_feat_ctxt == NULL) {
-		return true;
-	}
-	cfil_info = (struct cfil_info *) hash_entry->soflow_feat_ctxt;
-
-	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_ERR, cfil_info, "CFIL: DGRAM DETACH ENTRY");
+	if (so == NULL || hash_entry == NULL) {
+		return false;
 	}
 
-	cfil_sock_udp_unlink_flow(so, hash_entry, cfil_info);
+	// Grab the cfil_info and unlink within lock
+	cfil_info = cfil_sock_udp_unlink_flow(so, hash_entry, "CFIL: DGRAM DETACH ENTRY");
+	if (cfil_info == NULL) {
+		return false;
+	}
+
 	CFIL_INFO_FREE(cfil_info);
 	OSIncrementAtomic(&cfil_stats.cfs_sock_detached);
 

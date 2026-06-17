@@ -274,6 +274,25 @@ ipc_should_apply_policy(
 	const ipc_space_policy_t current_policy,
 	const ipc_space_policy_t requested_level)
 {
+	/*
+	 * Version bits (IPC_SPACE_POLICY_ENHANCED_VERSION_MASK) are only
+	 * meaningful inside the ENHANCED branch below. A caller that passes
+	 * version bits without IPC_SPACE_POLICY_ENHANCED (e.g. accidentally
+	 * using IPC_SPACE_POLICY_ENHANCED_V1 instead of IPC_POLICY_ENHANCED_V1)
+	 * will silently fall through to the bitwise fallback and return the
+	 * wrong result.
+	 */
+	assert(!(requested_level & IPC_SPACE_POLICY_ENHANCED_VERSION_MASK) ||
+	    (requested_level & IPC_SPACE_POLICY_ENHANCED));
+
+	/*
+	 * IPC_SPACE_POLICY_DEFAULT may be passed alone as a requested_level
+	 * (meaning "should this space be opted out"), but must not
+	 * be combined with other bits. Mixing it with specific policy flags is
+	 * always a caller bug since it always returns true unless opted out
+	 */
+	assert(!(requested_level & IPC_SPACE_POLICY_DEFAULT) || requested_level == IPC_SPACE_POLICY_DEFAULT);
+
 	/* Do not apply security policies on these binaries to avoid bincompat regression */
 	if ((current_policy & IPC_SPACE_POLICY_SIMULATED) ||
 	    (current_policy & IPC_SPACE_POLICY_OPTED_OUT) ||
@@ -298,6 +317,7 @@ ipc_should_apply_policy(
 		assert(requested_version != 0);
 		return requested_version <= current_es_version;
 	}
+
 	return current_policy & requested_level;
 }
 
@@ -1318,12 +1338,12 @@ mach_port_guard_ast(
 
 	/* Are we using the unified security policy violation interface? */
 	ipc_sec_policy_in_flight_violation_info_t* in_flight_pv_info = &current_thread()->pending_ipc_sec_policy_violation_info;
-	if (in_flight_pv_info != NULL) {
+	ipc_sec_policy_t policy_type = in_flight_pv_info->violated_policy_type;
+	if (policy_type != IPC_SEC_POLICY_NONE) {
 		/*
 		 * We're handling an IPC security policy violation.
 		 * Either we're going to emit telemetry, or we'll enforce the violation and kill the process.
 		 */
-		ipc_sec_policy_t policy_type = in_flight_pv_info->violated_policy_type;
 		ipc_sec_policy_config_t* conf = ipc_sec_policy_config_get(policy_type);
 
 		/* And free the backing storage after reading off copies of the fields */

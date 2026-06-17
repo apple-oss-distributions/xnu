@@ -4822,8 +4822,10 @@ c_seg_swapin_requeue(c_segment_t c_seg, boolean_t has_data, boolean_t minor_comp
 int
 c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_on_swapin_q)
 {
-	vm_offset_t     addr = 0;
-	uint32_t        io_size = 0;
+	kern_return_t   kr;
+	vm_offset_t     addr;
+	uint32_t        io_size;
+	uint64_t        size_pages;
 	uint64_t        f_offset;
 	thread_pri_floor_t token;
 
@@ -4833,6 +4835,7 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 	c_seg_trim_tail(c_seg);
 #endif
 	io_size = round_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset));
+	size_pages = atop_64(io_size);
 	f_offset = c_seg->c_store.c_swap_handle;
 
 	c_seg_mark_busy(c_seg);
@@ -4855,14 +4858,8 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 	kernel_memory_populate(addr, io_size, KMA_NOFAIL | KMA_COMPRESSOR,
 	    VM_KERN_MEMORY_COMPRESSOR);
 
-	if (vm_swap_get(c_seg, f_offset, io_size) != KERN_SUCCESS) {
-		c_page_replacement_disallowed_start();
-
-		kernel_memory_depopulate(addr, io_size, KMA_COMPRESSOR,
-		    VM_KERN_MEMORY_COMPRESSOR);
-
-		c_seg_swapin_requeue(c_seg, FALSE, TRUE, age_on_swapin_q);
-	} else {
+	kr = vm_swap_get(c_seg, f_offset, io_size);
+	if (kr == KERN_SUCCESS) {
 #if ENCRYPTED_SWAP
 		vm_swap_decrypt(c_seg, true);
 #endif /* ENCRYPTED_SWAP */
@@ -4900,18 +4897,7 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 		lck_mtx_unlock_always(c_list_lock);
 #endif /* CONFIG_FREEZE */
 
-		VM_COUNTER_ATOMIC_ADD(&c_segment_pages_compressed_incore, c_seg->c_slots_used);
-		if (c_seg->c_has_donated_pages) {
-			VM_COUNTER_ATOMIC_ADD(&c_segment_pages_compressed_incore_late_swapout, c_seg->c_slots_used);
-		}
-
 		VM_COUNTER_ATOMIC_ADD(&compressor_bytes_used, c_seg->c_bytes_used);
-
-		uint64_t size_pages = atop_64(io_size);
-		VM_COUNTER_ATOMIC_SUB(&vm_page_swap_count, size_pages);
-		VM_COUNTER_ATOMIC_SUB(&c_pages_swap_by_reason[c_seg->c_swapout_reason], size_pages);
-		VM_COUNTER_ATOMIC_SUB(&vm_page_swapped_count, c_seg->c_slots_used);
-		VM_COUNTER_ATOMIC_SUB(&c_pages_swapped_by_reason[c_seg->c_swapout_reason], c_seg->c_slots_used);
 
 		switch (c_seg->c_swapout_reason) {
 		case C_SWAPOUT_REG:
@@ -4937,7 +4923,6 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 			break;
 #endif
 		}
-		c_seg->c_swapout_reason = C_SWAPOUT_NONE;
 
 		if (force_minor_compaction == TRUE) {
 			if (c_seg_minor_compaction_and_unlock(c_seg, FALSE)) {
@@ -4954,7 +4939,38 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 
 			lck_mtx_lock_spin_always(&c_seg->c_lock);
 		}
+	} else {
+		/*
+		 * The swap-in failed, free the segment's buffer and put it on the "BAD"
+		 * queue so that future decompressions fail gracefully.
+		 */
+		vm_log_debug("swapin for segment %d failed with error %d\n", c_seg->c_mysegno, kr);
+
+		c_page_replacement_disallowed_start();
+
+		kernel_memory_depopulate(addr, io_size, KMA_COMPRESSOR,
+		    VM_KERN_MEMORY_COMPRESSOR);
+
+		c_seg_swapin_requeue(c_seg, FALSE, TRUE, age_on_swapin_q);
 	}
+
+	/*
+	 * Update global accounting. Even if the swapin failed, we want to reflect
+	 * the fact that the segment's slots are "incore" and no longer populated in
+	 * the swapfile so that future attempts to free these slots (via
+	 * vm_compressor_free()) can proceed normally.
+	 */
+	VM_COUNTER_ATOMIC_ADD(&c_segment_pages_compressed_incore, c_seg->c_slots_used);
+	if (c_seg->c_has_donated_pages) {
+		VM_COUNTER_ATOMIC_ADD(&c_segment_pages_compressed_incore_late_swapout, c_seg->c_slots_used);
+	}
+	VM_COUNTER_ATOMIC_SUB(&vm_page_swap_count, size_pages);
+	VM_COUNTER_ATOMIC_SUB(&c_pages_swap_by_reason[c_seg->c_swapout_reason], size_pages);
+	VM_COUNTER_ATOMIC_SUB(&vm_page_swapped_count, c_seg->c_slots_used);
+	VM_COUNTER_ATOMIC_SUB(&c_pages_swapped_by_reason[c_seg->c_swapout_reason], c_seg->c_slots_used);
+
+	c_seg->c_swapout_reason = C_SWAPOUT_NONE;
+
 	c_seg_wakeup_done(c_seg);
 
 	/*
@@ -5866,16 +5882,25 @@ bypass_busy_check:
 	} /* dst */
 	else {
 		/*
-		 * We are freeing an uncompressed page from this c_seg and so balance the ledgers.
+		 * There is no destination buffer (dst == NULL), so we're being asked to
+		 * free this slot from the segment. Check if we need to balance any
+		 * accounting.
+		 *
+		 * Note that the segment being freed from may be BAD (i.e. the corresponding
+		 * compressed data was corrupted or couldn't be read from the swapfile). We'll
+		 * allow the free to proceed (even though a decompression couldn't have) so
+		 * that compressor pagers can tear down gracefully without "leaking" slot
+		 * mappings. This also allows BAD segments to be freed once their slots are
+		 * all unused.
 		 */
+		assert(!(flags & C_KEEP));
 		if (C_SEG_IS_ONDISK(c_seg)) {
+			/*
+			 * Simulate a swap-in of this slot so that the incore decrement below is
+			 * balanced.
+			 */
 			VM_COUNTER_ATOMIC_DEC(&vm_page_swapped_count);
 			VM_COUNTER_ATOMIC_DEC(&c_pages_swapped_by_reason[c_seg->c_swapout_reason]);
-			/*
-			 * We are freeing a page in swap without swapping it in. We bump the in-core
-			 * count here to simulate a swapin of a page so that we can accurately
-			 * decrement it below.
-			 */
 			VM_COUNTER_ATOMIC_INC(&c_segment_pages_compressed_incore);
 			if (c_seg->c_has_donated_pages) {
 				VM_COUNTER_ATOMIC_INC(&c_segment_pages_compressed_incore_late_swapout);
@@ -5889,12 +5914,6 @@ bypass_busy_check:
 			if (c_seg->c_task_owner) {
 				task_update_frozen_to_swap_acct(c_seg->c_task_owner, PAGE_SIZE_64, DEBIT_FROM_SWAP);
 			}
-		} else if (c_seg->c_state == C_ON_BAD_Q) {
-			assert(c_seg->c_store.c_buffer == NULL);
-			*zeroslot = 0;
-
-			retval = DECOMPRESS_FAILED_BAD_Q_FREEZE;
-			goto done; /* this is intended to avoid the decrement of c_segment_pages_compressed_incore below */
 #endif /* CONFIG_FREEZE */
 		}
 #if HAS_MTE
@@ -6030,6 +6049,10 @@ bypass_busy_check:
 		} else if (c_seg->c_state != C_ON_SWAPPEDOUTSPARSE_Q && C_SEG_ONDISK_IS_SPARSE(c_seg)) {
 			c_seg_move_to_sparse_list(c_seg);
 			consider_defragmenting = TRUE;
+#if MACH_ASSERT
+		} else if (c_seg->c_state == C_ON_BAD_Q) {
+			assert3p(c_seg->c_store.c_buffer, ==, NULL);
+#endif /* MACH_ASSERT */
 		}
 	} /* c_state != C_IS_FILLING */
 done:

@@ -106,6 +106,7 @@ static const char *_track_zone_names[RCT_TOPO_COUNT] = {
 	[RCT_TOPO_CPU_KIND] = "recount_track_cpu_kind",
 };
 
+// Whether or not a `recount_topo_t` needs to allocate memory for its tracks.
 static const bool _topo_allocates[RCT_TOPO_COUNT] = {
 	[RCT_TOPO_SYSTEM] = false,
 	[RCT_TOPO_CPU] = true,
@@ -115,21 +116,54 @@ static const bool _topo_allocates[RCT_TOPO_COUNT] = {
 // Fixed-size zones for allocations.
 __security_const_late zone_t _recount_usage_zones[RCT_TOPO_COUNT] = { };
 __security_const_late zone_t _recount_track_zones[RCT_TOPO_COUNT] = { };
+__security_const_late unsigned int _recount_cpu_kind_count = 0;
+
+static unsigned int
+_recount_cpu_count(void)
+{
+#if __arm__ || __arm64__
+	return ml_get_cpu_count();
+#else // __arm__ || __arm64__
+	return ml_early_cpu_max_number() + 1;
+#endif // !__arm__ && !__arm64__
+}
 
 __startup_func
 static void
 recount_startup(void)
 {
+	unsigned int cpu_count = _recount_cpu_count();
+	unsigned int cpu_kind_bits = 0;
+
 #if __AMP__
-	unsigned int cpu_count = ml_get_cpu_count();
 	const ml_topology_info_t *topo_info = ml_get_topology_info();
 	for (unsigned int i = 0; i < cpu_count; i++) {
 		cluster_type_t type = topo_info->cpus[i].cluster_type;
-		uint8_t cluster_i = (type == CLUSTER_TYPE_P) ? RCT_CPU_PERFORMANCE :
-		    RCT_CPU_EFFICIENCY;
-		_topo_cpu_kinds[i] = cluster_i;
+		switch (type) {
+		case CLUSTER_TYPE_P:
+			_topo_cpu_kinds[i] = RCT_CPU_PERFORMANCE;
+			break;
+#if HAS_MCORE
+		case CLUSTER_TYPE_M:
+			_topo_cpu_kinds[i] = RCT_CPU_MP_EFFICIENT;
+			break;
+#endif // HAS_MCORE
+		case CLUSTER_TYPE_E:
+			_topo_cpu_kinds[i] = RCT_CPU_EFFICIENCY;
+			break;
+		default:
+			panic("recount: cannot map cluster type %d to CPU kind", type);
+		}
 	}
 #endif // __AMP__
+
+	for (unsigned int i = 0; i < cpu_count; i++) {
+		cpu_kind_bits |= 1 << _topo_cpu_kinds[i];
+	}
+	_recount_cpu_kind_count = __builtin_popcount(cpu_kind_bits);
+	assertf(_recount_cpu_kind_count <= RECOUNT_CPU_KIND_COUNT,
+	    "detected number of CPU kinds (%u) greater-than expected (%u), from bits 0x%x",
+	    _recount_cpu_kind_count, RECOUNT_CPU_KIND_COUNT, cpu_kind_bits);
 
 	for (unsigned int i = 0; i < RCT_TOPO_COUNT; i++) {
 		if (_topo_allocates[i]) {
@@ -393,19 +427,30 @@ recount_sum_unsafe(recount_plan_t plan, const struct recount_track *tracks,
 	}
 }
 
-void
-recount_sum_and_isolate_cpu_kind(recount_plan_t plan,
-    struct recount_track *tracks, recount_cpu_kind_t kind,
-    struct recount_usage *sum, struct recount_usage *only_kind)
+// Get usage for all CPUs and each non-Efficiency CPU kind.
+static void
+recount_sum_and_isolate_cpu_kinds(
+	recount_plan_t plan,
+	struct recount_track *tracks,
+	struct recount_usage *usage_all,
+	struct recount_usage *usage_perf,
+	struct recount_usage *usage_mp)
 {
 	size_t topo_count = recount_topo_count(plan->rpl_topo);
 	struct recount_usage tmp = { 0 };
 	for (size_t i = 0; i < topo_count; i++) {
 		recount_read_track(&tmp, &tracks[i]);
-		recount_usage_add(sum, &tmp);
-		if (recount_topo_matches_cpu_kind(plan->rpl_topo, kind, i)) {
-			recount_usage_add(only_kind, &tmp);
+		recount_usage_add(usage_all, &tmp);
+		if (recount_topo_matches_cpu_kind(plan->rpl_topo, RCT_CPU_PERFORMANCE, i)) {
+			recount_usage_add(usage_perf, &tmp);
 		}
+#if HAS_MCORE
+		if (usage_mp && recount_topo_matches_cpu_kind(plan->rpl_topo, RCT_CPU_MP_EFFICIENT, i)) {
+			recount_usage_add(usage_mp, &tmp);
+		}
+#else // HAS_MCORE
+#pragma unused(usage_mp)
+#endif // !HAS_MCORE
 	}
 }
 
@@ -419,17 +464,25 @@ recount_sum_usage(recount_plan_t plan, const struct recount_usage *usages,
 	}
 }
 
-void
-recount_sum_usage_and_isolate_cpu_kind(recount_plan_t plan,
-    struct recount_usage *usage, recount_cpu_kind_t kind,
-    struct recount_usage *sum, struct recount_usage *only_kind)
+// The same as above, but for usage-only objects, like coalitions.
+static void
+recount_sum_usage_and_isolate_cpu_kinds(recount_plan_t plan,
+    struct recount_usage *usages, struct recount_usage *usage_all,
+    struct recount_usage *usage_perf, struct recount_usage *usage_mp)
 {
 	const size_t topo_count = recount_topo_count(plan->rpl_topo);
 	for (size_t i = 0; i < topo_count; i++) {
-		recount_usage_add(sum, &usage[i]);
-		if (only_kind && recount_topo_matches_cpu_kind(plan->rpl_topo, kind, i)) {
-			recount_usage_add(only_kind, &usage[i]);
+		recount_usage_add(usage_all, &usages[i]);
+		if (recount_topo_matches_cpu_kind(plan->rpl_topo, RCT_CPU_PERFORMANCE, i)) {
+			recount_usage_add(usage_perf, &usages[i]);
 		}
+#if HAS_MCORE
+		if (usage_mp && recount_topo_matches_cpu_kind(plan->rpl_topo, RCT_CPU_MP_EFFICIENT, i)) {
+			recount_usage_add(usage_mp, &usages[i]);
+		}
+#else // HAS_MCORE
+#pragma unused(usage_mp)
+#endif // !HAS_MCORE
 	}
 }
 
@@ -564,15 +617,21 @@ recount_current_thread_usage(struct recount_usage *usage)
 }
 
 void
-recount_current_thread_usage_perf_only(struct recount_usage *usage,
-    struct recount_usage *usage_perf_only)
+recount_current_thread_usage_cpu_kinds(
+	struct recount_usage *usage_all,
+	struct recount_usage *usage_perf,
+	struct recount_usage *usage_mp)
 {
-	struct recount_usage usage_perf_levels[RCT_CPU_KIND_COUNT] = { 0 };
-	recount_current_thread_perf_level_usage(usage_perf_levels);
-	recount_sum_usage(&recount_thread_plan, usage_perf_levels, usage);
-	*usage_perf_only = usage_perf_levels[RCT_CPU_PERFORMANCE];
-	_fix_time_precision(usage);
-	_fix_time_precision(usage_perf_only);
+	struct recount_usage usage_levels[RECOUNT_CPU_KIND_COUNT];
+
+	recount_current_thread_perf_level_usage(usage_levels);
+	recount_sum_usage(&recount_thread_plan, usage_levels, usage_all);
+	*usage_perf = usage_levels[RCT_CPU_PERFORMANCE];
+#if HAS_MCORE
+	*usage_mp = usage_levels[RCT_CPU_MP_EFFICIENT];
+#else // HAS_MCORE
+#pragma unused(usage_mp)
+#endif // !HAS_MCORE
 }
 
 void
@@ -584,6 +643,31 @@ recount_thread_perf_level_usage(struct thread *thread,
 	size_t topo_count = recount_topo_count(RCT_TOPO_CPU_KIND);
 	for (size_t i = 0; i < topo_count; i++) {
 		_fix_time_precision(&usage_levels[i]);
+	}
+}
+
+void
+recount_thread_usage_cpu_kinds_kdp(struct thread *thread,
+    struct recount_usage *usage_all,
+    struct recount_usage *usage_perf,
+    struct recount_usage *usage_mp)
+{
+	struct recount_track *tracks = thread->th_recount.rth_lifetime;
+	size_t topo_count = recount_topo_count(recount_thread_plan.rpl_topo);
+	for (size_t i = 0; i < topo_count; i++) {
+		// Not sequenced with writers.
+		struct recount_usage *usage_unsafe = &tracks[i].rt_usage;
+		recount_usage_add(usage_all, usage_unsafe);
+		if (recount_topo_matches_cpu_kind(recount_thread_plan.rpl_topo, RCT_CPU_PERFORMANCE, i)) {
+			recount_usage_add(usage_perf, usage_unsafe);
+		}
+#if HAS_MCORE
+		if (recount_topo_matches_cpu_kind(recount_thread_plan.rpl_topo, RCT_CPU_MP_EFFICIENT, i)) {
+			recount_usage_add(usage_mp, usage_unsafe);
+		}
+#else // HAS_MCORE
+#pragma unused(usage_mp)
+#endif // !HAS_MCORE
 	}
 }
 
@@ -745,15 +829,74 @@ recount_current_task_usage(struct recount_usage *usage)
 }
 
 void
-recount_current_task_usage_perf_only(struct recount_usage *usage,
-    struct recount_usage *usage_perf_only)
+recount_current_task_trace_cpi(void)
 {
+#if CONFIG_PERVASIVE_CPI
+	if (!kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_PROC_EXIT)) {
+		return;
+	}
 	task_t task = current_task();
-	struct recount_track *tracks = task->tk_recount.rtk_lifetime;
-	recount_sum_and_isolate_cpu_kind(&recount_task_plan,
-	    tracks, RCT_CPU_PERFORMANCE, usage, usage_perf_only);
-	_fix_time_precision(usage);
-	_fix_time_precision(usage_perf_only);
+	struct recount_usage usage_all = { 0 };
+	struct recount_usage usage_perf = { 0 };
+	struct recount_usage usage_mp = { 0 };
+	recount_task_usage_cpu_kinds(task, &usage_all, &usage_perf, &usage_mp);
+
+	KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_PROC_EXIT,
+	    recount_usage_instructions(&usage_all),
+	    recount_usage_cycles(&usage_all),
+	    recount_usage_system_time_mach(&usage_all),
+	    usage_all.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#if __AMP__
+	KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_PROC_EXIT,
+	    recount_usage_instructions(&usage_perf),
+	    recount_usage_cycles(&usage_perf),
+	    recount_usage_system_time_mach(&usage_perf),
+	    usage_perf.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#if HAS_MCORE
+	KDBG_RELEASE(DBG_MT_M_INSTRS_CYCLES_PROC_EXIT,
+	    recount_usage_instructions(&usage_mp),
+	    recount_usage_cycles(&usage_mp),
+	    recount_usage_system_time_mach(&usage_mp),
+	    usage_mp.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#endif // HAS_MCORE
+#endif // __AMP__
+#endif/* CONFIG_PERVASIVE_CPI */
+}
+
+void
+recount_current_thread_trace_cpi(void)
+{
+#if CONFIG_PERVASIVE_CPI
+	if (!kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_THR_EXIT)) {
+		return;
+	}
+	struct recount_usage usage_all = { 0 };
+	struct recount_usage usage_perf = { 0 };
+	struct recount_usage usage_mp = { 0 };
+	boolean_t interrupt_state = ml_set_interrupts_enabled(FALSE);
+	recount_current_thread_usage_cpu_kinds(&usage_all, &usage_perf, &usage_mp);
+	ml_set_interrupts_enabled(interrupt_state);
+
+	KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_THR_EXIT,
+	    recount_usage_instructions(&usage_all),
+	    recount_usage_cycles(&usage_all),
+	    recount_usage_system_time_mach(&usage_all),
+	    usage_all.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#if __AMP__
+	KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_THR_EXIT,
+	    recount_usage_instructions(&usage_perf),
+	    recount_usage_cycles(&usage_perf),
+	    recount_usage_system_time_mach(&usage_perf),
+	    usage_perf.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#endif // __AMP__
+#if HAS_MCORE
+	KDBG_RELEASE(DBG_MT_M_INSTRS_CYCLES_THR_EXIT,
+	    recount_usage_instructions(&usage_mp),
+	    recount_usage_cycles(&usage_mp),
+	    recount_usage_system_time_mach(&usage_mp),
+	    usage_mp.ru_metrics[RCT_LVL_USER].rm_time_mach);
+#endif // HAS_MCORE
+#endif/* CONFIG_PERVASIVE_CPI */
 }
 
 void
@@ -792,23 +935,38 @@ recount_task_terminated_times(struct task *task)
 }
 
 void
-recount_task_terminated_usage_perf_only(task_t task,
-    struct recount_usage *usage, struct recount_usage *perf_only)
+recount_task_terminated_usage_cpu_kinds(task_t task,
+    struct recount_usage *usage_all,
+    struct recount_usage *usage_perf,
+    struct recount_usage *usage_mp)
 {
-	recount_sum_usage_and_isolate_cpu_kind(&recount_task_terminated_plan,
-	    task->tk_recount.rtk_terminated, RCT_CPU_PERFORMANCE, usage, perf_only);
-	_fix_time_precision(usage);
-	_fix_time_precision(perf_only);
+	recount_sum_usage_and_isolate_cpu_kinds(&recount_task_terminated_plan,
+	    task->tk_recount.rtk_terminated, usage_all, usage_perf, usage_mp);
+	_fix_time_precision(usage_all);
+	_fix_time_precision(usage_perf);
+#if HAS_MCORE
+	if (usage_mp) {
+		_fix_time_precision(usage_mp);
+	}
+#endif // HAS_MCORE
 }
 
 void
-recount_task_usage_perf_only(task_t task, struct recount_usage *sum,
-    struct recount_usage *sum_perf_only)
+recount_task_usage_cpu_kinds(
+	task_t task,
+	struct recount_usage *usage_all,
+	struct recount_usage *usage_perf,
+	struct recount_usage *usage_mp)
 {
-	recount_sum_and_isolate_cpu_kind(&recount_task_plan,
-	    task->tk_recount.rtk_lifetime, RCT_CPU_PERFORMANCE, sum, sum_perf_only);
-	_fix_time_precision(sum);
-	_fix_time_precision(sum_perf_only);
+	recount_sum_and_isolate_cpu_kinds(&recount_task_plan,
+	    task->tk_recount.rtk_lifetime, usage_all, usage_perf, usage_mp);
+	_fix_time_precision(usage_all);
+	_fix_time_precision(usage_perf);
+#if HAS_MCORE
+	if (usage_mp) {
+		_fix_time_precision(usage_mp);
+	}
+#endif // HAS_MCORE
 }
 
 void
@@ -846,13 +1004,21 @@ recount_task_energy_nj(struct task *task)
 }
 
 void
-recount_coalition_usage_perf_only(struct recount_coalition *coal,
-    struct recount_usage *sum, struct recount_usage *sum_perf_only)
+recount_coalition_usage_cpu_kinds(
+	struct recount_coalition *coal,
+	struct recount_usage *usage_all,
+	struct recount_usage *usage_perf,
+	struct recount_usage *usage_mp)
 {
-	recount_sum_usage_and_isolate_cpu_kind(&recount_coalition_plan,
-	    coal->rco_exited, RCT_CPU_PERFORMANCE, sum, sum_perf_only);
-	_fix_time_precision(sum);
-	_fix_time_precision(sum_perf_only);
+	recount_sum_usage_and_isolate_cpu_kinds(&recount_coalition_plan,
+	    coal->rco_exited, usage_all, usage_perf, usage_mp);
+	_fix_time_precision(usage_all);
+	_fix_time_precision(usage_perf);
+#if HAS_MCORE
+	if (usage_mp) {
+		_fix_time_precision(usage_mp);
+	}
+#endif // HAS_MCORE
 }
 
 OS_ALWAYS_INLINE
@@ -1210,18 +1376,6 @@ _state_time(uint64_t state_stamp)
 }
 
 void
-recount_processor_init(processor_t processor)
-{
-#if __AMP__
-	processor->pr_recount.rpr_cpu_kind_index =
-	    processor->processor_set->pset_type == PSET_AMP_P ?
-	    RCT_CPU_PERFORMANCE : RCT_CPU_EFFICIENCY;
-#else // __AMP__
-#pragma unused(processor)
-#endif // !__AMP__
-}
-
-void
 recount_processor_run(struct recount_processor *pr, struct recount_snap *snap)
 {
 	uint64_t state = os_atomic_load_wide(&pr->rpr_state_last_abs_time, relaxed);
@@ -1316,7 +1470,7 @@ recount_topo_index(recount_topo_t topo, processor_t processor)
 		return processor->cpu_id;
 	case RCT_TOPO_CPU_KIND:
 #if __AMP__
-		return processor->pr_recount.rpr_cpu_kind_index;
+		return _topo_cpu_kinds[processor->cpu_id];
 #else // __AMP__
 		return 0;
 #endif // !__AMP__
@@ -1334,21 +1488,10 @@ recount_topo_count(recount_topo_t topo)
 	switch (topo) {
 	case RCT_TOPO_SYSTEM:
 		return 1;
-
 	case RCT_TOPO_CPU_KIND:
-#if __AMP__
-		return 2;
-#else // __AMP__
-		return 1;
-#endif // !__AMP__
-
+		return _recount_cpu_kind_count;
 	case RCT_TOPO_CPU:
-#if __arm__ || __arm64__
-		return ml_get_cpu_count();
-#else // __arm__ || __arm64__
-		return ml_early_cpu_max_number() + 1;
-#endif // !__arm__ && !__arm64__
-
+		return _recount_cpu_count();
 	default:
 		panic("recount: invalid topography %d", topo);
 	}

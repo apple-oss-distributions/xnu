@@ -831,11 +831,7 @@ pac_exception_triage(
 		/* Should only be called on current proc */
 		proc_name = proc_name_address(proc);
 
-		/*
-		 * For a ptrauth violation, check if the task has the
-		 * TFRO_PAC_EXC_FATAL flag set.
-		 */
-		if (task_is_pac_exception_fatal(task)) {
+		if (task_is_pac_exception_fatal(task) && !is_address_space_debugged(proc)) {
 			os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n",
 			    __func__, proc_name, pid);
 

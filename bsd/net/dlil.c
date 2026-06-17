@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2025 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -5517,12 +5517,6 @@ ifnet_detach(ifnet_t ifp)
 		bzero(ifp->if_ipv6_stat, sizeof(*ifp->if_ipv6_stat));
 	}
 
-	/* Release memory held for interface link status report */
-	if (ifp->if_link_status != NULL) {
-		kfree_type(struct if_link_status, ifp->if_link_status);
-		ifp->if_link_status = NULL;
-	}
-
 	/* Disable forwarding cached route */
 	lck_mtx_lock(&ifp->if_cached_route_lock);
 	ifp->if_fwd_cacheok = 0;
@@ -5705,6 +5699,14 @@ ifnet_detach_final(struct ifnet *ifp)
 #if SKYWALK
 	VERIFY(LIST_EMPTY(&ifp->if_netns_tokens));
 #endif /* SKYWALK */
+	/* Release memory held for interface link status report */
+	lck_rw_lock_exclusive(&ifp->if_link_status_lock);
+	if (ifp->if_link_status != NULL) {
+		kfree_type(struct if_link_status, ifp->if_link_status);
+		ifp->if_link_status = NULL;
+	}
+	lck_rw_done(&ifp->if_link_status_lock);
+
 	/* Drain and destroy send queue */
 	ifclassq_teardown(ifp->if_snd);
 

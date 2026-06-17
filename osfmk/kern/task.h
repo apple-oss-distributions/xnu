@@ -107,6 +107,7 @@
 #include <kern/cpc.h>
 #include <sys/kern_sysctl.h>
 #include <sys/resource_private.h>
+#include <sys/reason.h>
 
 #if CONFIG_EXCLAVES
 #include <mach/exclaves.h>
@@ -205,6 +206,43 @@ struct task_security_config {
 typedef struct task_security_config task_security_config_s;
 
 struct task_watchports;
+
+/*
+ * Task token data, allocated separately and protected by dPAC.
+ *
+ * euid+ruid and egid+rgid are each packed into a 64-bit field so
+ * that readers always see a consistent pair. The euid and egid also
+ * form the security_token_t and are duplicated in audit_token_t;
+ * readers construct both tokens from these authoritative fields to
+ * avoid torn reads across the two token types.
+ */
+struct task_token_data {
+	_Atomic uint64_t                tc_uids;        /* euid (lo) | ruid (hi) */
+	_Atomic uint64_t                tc_gids;        /* egid (lo) | rgid (hi) */
+	_Atomic uint32_t                tc_auid;        /* audit user ID */
+	_Atomic uint32_t                tc_asid;        /* audit session ID */
+	_Atomic uint32_t                tc_pid;         /* process ID (immutable) */
+	_Atomic uint32_t                tc_pidversion;  /* PID version (immutable) */
+};
+
+static inline uint64_t
+task_token_pack(unsigned int effective, unsigned int real)
+{
+	return (uint64_t)effective | ((uint64_t)real << 32);
+}
+
+static inline uint32_t
+task_token_effective(uint64_t packed)
+{
+	return (uint32_t)packed;
+}
+
+static inline uint32_t
+task_token_real(uint64_t packed)
+{
+	return (uint32_t)(packed >> 32);
+}
+
 #include <bank/bank_internal.h>
 
 struct ucred;
@@ -308,6 +346,8 @@ struct task {
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_resource_notify") itk_resource_notify; /* a send right to the resource notify port */
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 	struct ipc_space * XNU_PTRAUTH_SIGNED_PTR("task.itk_space") itk_space;
+
+	struct task_token_data * XNU_PTRAUTH_SIGNED_PTR("task.task_tokens") task_tokens;
 
 	ledger_t        ledger;
 	/* Synchronizer ownership information */
@@ -1140,10 +1180,9 @@ extern kern_return_t task_set_diag_footprint_limit(task_t task, uint64_t new_lim
 extern kern_return_t task_get_conclave_mem_limit(task_t, uint64_t *conclave_limit);
 extern kern_return_t task_set_conclave_mem_limit_internal(task_t, uint64_t conclave_limit);
 
-extern security_token_t *task_get_sec_token(task_t task);
-extern void task_set_sec_token(task_t task, security_token_t *token);
-extern audit_token_t *task_get_audit_token(task_t task);
-extern void task_set_audit_token(task_t task, audit_token_t *token);
+extern void task_get_sec_token(task_t task, security_token_t *out);
+extern void task_get_audit_token(task_t task, audit_token_t *out);
+extern void task_get_tokens(task_t task, security_token_t *sec_out, audit_token_t *audit_out);
 extern void task_set_tokens(task_t task, security_token_t *sec_token, audit_token_t *audit_token);
 extern boolean_t task_is_privileged(task_t task);
 extern uint8_t *task_get_mach_trap_filter_mask(task_t task);
@@ -1334,6 +1373,7 @@ extern int get_task_cdhash(task_t task, char cdhash[CS_CDHASH_LEN]);
 
 extern boolean_t kdp_task_is_locked(task_t task);
 
+extern void             task_self_sigkill(os_reason_t reason);
 /* redeclaration from task_server.h for the sake of kern_exec.c */
 extern kern_return_t _kernelrpc_mach_ports_register3(
 	task_t                  task,
@@ -1379,7 +1419,11 @@ void task_add_conclave_crash_info(task_t task, void *crash_info_ptr);
 
 extern void     *get_bsdtask_info(task_t);
 extern void     *get_bsdthreadtask_info(thread_t);
-extern void task_bsdtask_kill(task_t);
+/* NOTE: This function is not for common or generic use. Never use on a generic proc ident token */
+extern kern_return_t
+task_identity_token_try_sigkill(
+	task_id_token_t token);
+extern void     taskbsd_kill_and_release(void *);
 extern vm_map_t get_task_map(task_t);
 extern ledger_t get_task_ledger(task_t);
 

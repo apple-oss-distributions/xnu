@@ -489,8 +489,10 @@ TUNABLE(restricted_data_mode_t,
     "restricted_data_mode",
 #if __x86_64__
     RESTRICTED_DATA_MODE_NONE
-#else
+#elif XNU_TARGET_OS_OSX || XNU_TARGET_OS_TV
     RESTRICTED_DATA_MODE_TELEMETRY
+#else
+    RESTRICTED_DATA_MODE_ENFORCE
 #endif
     );
 
@@ -1227,7 +1229,7 @@ kalloc_type_cmp_var(const void *a, const void *b)
 	const char *ktA_hdr = ktA->kt_sig_hdr ?: "";
 	const char *ktB_hdr = ktB->kt_sig_hdr ?: "";
 	bool ktA_ptrArray = kalloc_type_is_ptr_array(ktA->kt_flags);
-	bool ktB_ptrArray = kalloc_type_is_ptr_array(ktA->kt_flags);
+	bool ktB_ptrArray = kalloc_type_is_ptr_array(ktB->kt_flags);
 	int result = 0;
 
 	/*

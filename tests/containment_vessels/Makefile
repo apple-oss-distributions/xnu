@@ -1,6 +1,6 @@
 INCLUDED_TEST_SOURCE_DIRS += containment_vessels
 
-CUSTOM_TARGETS += containment_vessels/exception_send_allowed_entitled
+OTHER_TEST_TARGETS += containment_vessels/exception_send_allowed_entitled
 containment_vessels/exception_send_allowed_entitled: CODE_SIGN_ENTITLEMENTS = containment_vessels/entitlements/entitlement_true_set_exception.plist
 containment_vessels/exception_send_allowed_entitled: OTHER_CFLAGS += -DSET_EXCEPTION_ENTITLED
 containment_vessels/exception_send_allowed_entitled: OTHER_CFLAGS += -I $(OBJROOT)

@@ -5723,6 +5723,18 @@ vm_object_coalesce(
 		vm_object_unlock(prev_object);
 		return FALSE;
 	}
+
+#if HAS_MTE
+	/*
+	 * The new mapping (NULL object) represents untagged memory.
+	 * Coalescing with a tagged object would therefore be incorrect.
+	 */
+	if (vm_object_is_mte_mappable(prev_object)) {
+		vm_object_unlock(prev_object);
+		return FALSE;
+	}
+#endif /* HAS_MTE */
+
 	/* newsize = prev_offset + prev_size + next_size; */
 	if (__improbable(os_add3_overflow(prev_offset, prev_size, next_size,
 	    &newsize))) {

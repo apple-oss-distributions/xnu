@@ -35,6 +35,8 @@
 #include <mach/notify.h>
 #include <sys/sysctl.h>
 #include <sys/code_signing.h>
+#include <mach/mk_timer.h>
+#include <mach/task_info.h>
 #include "ipc_utils.h"
 
 T_GLOBAL_META(
@@ -44,7 +46,6 @@ T_GLOBAL_META(
 	T_META_TIMEOUT(10),
 	T_META_IGNORECRASHES(".*port_type_policy.*"),
 	T_META_RUN_CONCURRENTLY(TRUE));
-
 
 struct msg_complex_port {
 	mach_msg_base_t         base;
@@ -501,6 +502,9 @@ T_DECL(reply_port_policies,
 
 T_DECL(immovable_receive_port_types,
     "Port types we expect to be immovable-receive") {
+	/* Ensure mach port guard exceptions are fatal on bridgeOS */
+	ipc_ensure_mach_port_guard_fatal();
+
 	test_receive_immovability(TEST_IOT_CONNECTION_PORT_WITH_PORT_ARRAY);
 
 	test_receive_immovability(TEST_IOT_EXCEPTION_PORT);
@@ -509,13 +513,7 @@ T_DECL(immovable_receive_port_types,
 
 	test_receive_immovability(TEST_IOT_SPECIAL_REPLY_PORT);
 
-	/*
-	 * kGUARD_EXC_KERN_FAILURE is not fatal on Bridge OS because
-	 * we don't set TASK_EXC_GUARD_MP_FATAL by default/
-	 */
-#if !TARGET_OS_BRIDGE
 	test_receive_immovability(TEST_IOT_SERVICE_PORT);
-#endif /* !TARGET_OS_BRIDGE */
 
 	test_receive_immovability(TEST_IOT_BOOTSTRAP_PORT);
 }
@@ -842,7 +840,7 @@ T_DECL(report_crash_exception_port,
  * Helper function to test notification registration with a specific port type.
  */
 static void
-test_notification_with_port_type(ipc_test_port_type_t type)
+test_notification_with_port_type(ipc_test_port_type_t type, mach_msg_type_name_t disp)
 {
 	kern_return_t kr;
 	mach_port_t port, notify_port, previous;
@@ -862,15 +860,26 @@ test_notification_with_port_type(ipc_test_port_type_t type)
 	    MACH_NOTIFY_PORT_DESTROYED,
 	    0,
 	    notify_port,
-	    MACH_MSG_TYPE_MAKE_SEND_ONCE,
+	    disp,
 	    &previous);
 
-	T_QUIET; T_ASSERT_MACH_SUCCESS(kr,
-	    "%s successfully registered for notifications", desc->port_type_name);
-
+	if (type == TEST_IOT_TIMER_PORT) {
+		if (disp == MACH_MSG_TYPE_MAKE_SEND) {
+			T_QUIET; T_ASSERT_NE(kr, KERN_SUCCESS,
+			    "%s registering for notifications disallowed with %s", desc->port_type_name, get_disp_name(disp));
+		} else {
+			T_QUIET; T_ASSERT_MACH_SUCCESS(kr,
+			    "%s registering for notifications allowed with %s", desc->port_type_name, get_disp_name(disp));
+		}
+	} else {
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr,
+		    "%s successfully registered for notifications with %s", desc->port_type_name, get_disp_name(disp));
+	}
 	/* Clean up */
 	ipc_deallocate_port(port);
-	if (type != TEST_IOT_REPLY_PORT &&
+	if (type == TEST_IOT_TIMER_PORT) {
+		mk_timer_destroy(notify_port);
+	} else if (type != TEST_IOT_REPLY_PORT &&
 	    type != TEST_IOT_SPECIAL_REPLY_PORT) {
 		ipc_deallocate_port(notify_port);
 	}
@@ -880,9 +889,13 @@ T_DECL(notification_port_can_receive_notifications,
     "Test all port types for pol_can_receive_notifications",
     T_META_CHECK_LEAKS(false))
 {
+	/* Ensure mach port guard exceptions are fatal on bridgeOS */
+	ipc_ensure_mach_port_guard_fatal();
+
 	/*
 	 * Iterate through all port types and verify that only those with
 	 * pol_can_receive_notifications set can be used as notification ports.
+	 * Test with both MAKE_SEND_ONCE and MAKE_SEND dispositions.
 	 */
 	for (ipc_test_port_type_t type = 0; type < TEST_PORT_TYPE_COUNT; type++) {
 		if (type == TEST_IOT_REPLY_PORT) {
@@ -898,20 +911,29 @@ T_DECL(notification_port_can_receive_notifications,
 		if (should_succeed) {
 			/* Port type should allow notification registration - expect normal exit */
 			assert_normal_exit(^{
-				test_notification_with_port_type(type);
-			}, "notification registration with %s", desc->port_type_name);
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+			}, "notification registration with %s (MAKE_SEND_ONCE)", desc->port_type_name);
 		} else if (type == TEST_IOT_SPECIAL_REPLY_PORT ||
-		    type == TEST_IOT_REPLY_PORT ||
-		    type == TEST_IOT_TIMER_PORT) {
-			/* Reply ports should crash */
+		    type == TEST_IOT_REPLY_PORT) {
+			/* Reply ports and timer ports should crash - mach_port_request_notification requires make_so */
 			expect_sigkill(^{
-				test_notification_with_port_type(type);
-			}, "notification registration with %s (disallowed)", desc->port_type_name);
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+			}, "notification registration with %s MAKE_SEND_ONCE (disallowed)", desc->port_type_name);
+			expect_sigkill(^{
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND);
+			}, "notification registration with %s MAKE_SEND (disallowed)", desc->port_type_name);
+		} else if (type == TEST_IOT_TIMER_PORT) {
+			assert_normal_exit(^{
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND);
+			}, "notification registration with %s MAKE_SEND", desc->port_type_name);
+			assert_normal_exit(^{
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+			}, "notification registration with %s MAKE_SEND_ONCE", desc->port_type_name);
 		} else {
 			/* Port type should NOT allow notifications - expect exc_guard */
-			ipc_expect_exc_guard(kGUARD_EXC_INVALID_NOTIFICATION_PORT, ^{
-				test_notification_with_port_type(type);
-			}, "notification registration with %s (disallowed)", desc->port_type_name);
+			expect_sigkill(^{
+				test_notification_with_port_type(type, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+			}, "notification registration with %s MAKE_SEND_ONCE (disallowed)", desc->port_type_name);
 		}
 	}
 }

@@ -60,7 +60,8 @@ EXPORT_MD_LIST = \
 	pal_hibernate.h \
 	mte.h \
 	mte_xnu.h \
-	x86_64_compat.h
+	x86_64_compat.h \
+	sop.h
 
 # These headers will be available with #include <arm64/header_file.h>
 EXPORT_MD_DIR = arm64

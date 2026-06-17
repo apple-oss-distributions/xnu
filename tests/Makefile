@@ -877,6 +877,8 @@ udp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 tcp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 tcp_send_implied_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
+sockopt_so_statistics_event: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+
 tcp_cache_test: CODE_SIGN_ENTITLEMENTS = tcp_cache_entitlements.plist
 
 socket_bind_35243417: in_cksum.c net_test_lib.c
@@ -970,6 +972,9 @@ rvi_doublefree: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
 INCLUDED_TEST_SOURCE_DIRS += net
 
+net/icmp6_redirect_raw_socket: bpflib.c in_cksum.c net_test_lib.c
+net/icmp6_redirect_raw_socket: OTHER_LDFLAGS += -ldarwintest_utils
+
 net/test_magic_packet: bpflib.c in_cksum.c net_test_lib.c
 
 net/unreach_icmp_34054660: net/unreach_icmp_34054660.c
@@ -983,9 +988,13 @@ net/test_ctl_bind_race: net_test_lib.c in_cksum.c
 
 net/test_mbuf_exhaustion: net_test_lib.c in_cksum.c
 
+net/test_osiocgif: net_test_lib.c in_cksum.c
+
 net/test_sockopts_with_send: net_test_lib.c in_cksum.c
 
 net/test_zero_length_send: net_test_lib.c in_cksum.c
+
+net/cmsg_padding_leak_171110501: CODE_SIGN_ENTITLEMENTS = net/test_sysctl_tcp_info-entitlements.plist
 
 net/test_sysctl_tcp_info: CODE_SIGN_ENTITLEMENTS = net/test_sysctl_tcp_info-entitlements.plist
 
@@ -1498,8 +1507,12 @@ x18_entitled: CODE_SIGN_ENTITLEMENTS = x18-entitlements.plist
 x18_toggle: OTHER_CFLAGS += -ffixed-x18 -Wno-language-extension-token
 x18_toggle: CODE_SIGN_ENTITLEMENTS = x18-toggle-entitlements.plist
 x18_unentitled: OTHER_CFLAGS += -ffixed-x18 -Wno-language-extension-token
+# Also run x18_toggle tests in a 4k address space (via vm_spawn_tool).
+# Uses -n to bypass minirunner respawn, which would lose the 4k spawn attr.
+BATS_PLISTS += $(SRCROOT)/x18_toggle_4k.plist
+EXCLUDED_SOURCES += x18_toggle_4k.plist
 else
-EXCLUDED_SOURCES += x18_entitled.c x18_toggle.c x18_unentitled.c
+EXCLUDED_SOURCES += x18_entitled.c x18_toggle.c x18_unentitled.c x18_toggle_4k.plist
 endif
 
 ifneq ($(PLATFORM),MacOSX)
@@ -1581,6 +1594,8 @@ pmap_fault_on_commpage: INVALID_ARCHS = $(filter-out arm%,$(ARCH_CONFIGS))
 
 sptm_info: INVALID_ARCHS = $(filter-out arm64%,$(ARCH_CONFIGS))
 sptm_info: OTHER_CFLAGS += -framework perfdata -isystem $(SDKROOT)/System/Library/Frameworks/Kernel.framework/Versions/A/Headers/platform
+
+tpro_cs: INVALID_ARCHS = $(filter-out arm64%,$(ARCH_CONFIGS))
 
 hw_breakpoint_step_arm64: CODE_SIGN_ENTITLEMENTS = hw_breakpoint_step_arm64_entitlements.plist
 hw_breakpoint_step_arm64: INVALID_ARCHS = $(filter-out arm64%,$(ARCH_CONFIGS))

@@ -201,10 +201,6 @@ extern boolean_t vm_darkwake_mode;
 static TUNABLE(bool, bootarg_execfailurereports, "execfailurecrashes", false);
 
 #if XNU_TARGET_OS_OSX
-#if __has_feature(ptrauth_calls)
-static TUNABLE(bool, bootarg_arm64e_preview_abi, "-arm64e_preview_abi", false);
-#endif /* __has_feature(ptrauth_calls) */
-
 #if DEBUG || DEVELOPMENT
 static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
 #endif /* DEBUG || DEVELOPMENT */
@@ -1026,7 +1022,6 @@ arm64_cpusubtype_uses_ptrauth(cpu_subtype_t cpusubtype)
 }
 
 #endif /* __has_feature(ptrauth_calls) */
-
 /**
  * Returns whether a type/subtype slice matches the requested
  * type/subtype.
@@ -2201,35 +2196,6 @@ grade:
 	}
 
 #if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
-	/*
-	 * ptrauth version 0 is a preview ABI.  Developers can opt into running
-	 * their own arm64e binaries for local testing, with the understanding
-	 * that future OSes may break ABI.
-	 */
-	if ((imgp->ip_origcpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E &&
-	    CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(imgp->ip_origcpusubtype) == 0 &&
-	    !load_result.platform_binary &&
-	    !bootarg_arm64e_preview_abi) {
-		static bool logged_once = false;
-		set_proc_name(imgp, p);
-
-		printf("%s: not running binary \"%s\" built against preview arm64e ABI\n", __func__, p->p_name);
-		if (!os_atomic_xchg(&logged_once, true, relaxed)) {
-			printf("%s: (to allow this, add \"-arm64e_preview_abi\" to boot-args)\n", __func__);
-		}
-
-		exec_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_MACHO);
-		if (bootarg_execfailurereports) {
-			exec_failure_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
-			exec_failure_reason->osr_flags |= OS_REASON_FLAG_CONSISTENT_FAILURE;
-		}
-
-		/* release new address space since we won't use it */
-		imgp->ip_free_map = map;
-		map = VM_MAP_NULL;
-		goto badtoolate;
-	}
-
 	if ((imgp->ip_origcpusubtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E &&
 	    imgp->ip_origcputype == CPU_TYPE_ARM64 &&
 	    load_result.platform_binary &&
@@ -2527,6 +2493,20 @@ grade:
 			exec_failure_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
 		}
 		goto badtoolate;
+	}
+
+	/*
+	 * Save the exec path if the no-read-procargs entitlement is present, while
+	 * we still have ip_strings in hand.
+	 */
+	if (IOTaskHasEntitlement(task, SYSCTL_PROCARGS_NO_READ_ENTITLEMENT)) {
+		char *exec_path = imgp->ip_strings + strlen(EXECUTABLE_KEY);
+		char *new_execpath = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		strlcpy(new_execpath, exec_path, MAXPATHLEN);
+
+		/* The exec path always starts from a clean process, so this should never be set. */
+		assert(p->p_execpath == NULL);
+		p->p_execpath = new_execpath;
 	}
 
 	/* Switch to target task's map to copy out strings */
@@ -7012,7 +6992,6 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, exe_boothash_salt_generate);
 #define APP_BOOT_SESSION_KEY "executable_boothash="
 #if __has_feature(ptrauth_calls)
 #define PTRAUTH_DISABLED_FLAG "ptrauth_disabled=1"
-#define DYLD_ARM64E_ABI_KEY "arm64e_abi="
 #endif /* __has_feature(ptrauth_calls) */
 #define MAIN_TH_PORT_KEY "th_port="
 
@@ -7021,9 +7000,9 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, exe_boothash_salt_generate);
 #define HEX_STR_LEN 18 // 64-bit hex value "0x0123456701234567"
 #define HEX_STR_LEN32 10 // 32-bit hex value "0x01234567"
 
-#if XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES
+#if XNU_TARGET_OS_OSX && __ARM_MIXED_PAGE_SIZE__
 #define VM_FORCE_4K_PAGES_KEY "vm_force_4k_pages=1"
-#endif /* XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES */
+#endif /* XNU_TARGET_OS_OSX && __ARM_MIXED_PAGE_SIZE__ */
 
 static int
 exec_add_entropy_key(struct image_params *imgp,
@@ -7274,21 +7253,6 @@ exec_add_apple_strings(struct image_params *imgp,
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
-
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
-	{
-		char dyld_abi_string[strlen(DYLD_ARM64E_ABI_KEY) + 8];
-		strlcpy(dyld_abi_string, DYLD_ARM64E_ABI_KEY, sizeof(dyld_abi_string));
-		bool allowAll = bootarg_arm64e_preview_abi;
-		strlcat(dyld_abi_string, (allowAll ? "all" : "os"), sizeof(dyld_abi_string));
-		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(dyld_abi_string), UIO_SYSSPACE, FALSE);
-		if (error) {
-			goto bad;
-		}
-
-		imgp->ip_applec++;
-	}
-#endif
 	/*
 	 * Add main thread mach port name
 	 * +1 uref on main thread port, this ref will be extracted by libpthread in __pthread_init
@@ -7310,10 +7274,10 @@ exec_add_apple_strings(struct image_params *imgp,
 		imgp->ip_applec++;
 	}
 
-#if XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES
+#if XNU_TARGET_OS_OSX && __ARM_MIXED_PAGE_SIZE__
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr* psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
-		if (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES) {
+		if (psa->psa_4k || (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES)) {
 			const char *vm_force_4k_string = VM_FORCE_4K_PAGES_KEY;
 			error = exec_add_user_string(imgp, CAST_USER_ADDR_T(vm_force_4k_string), UIO_SYSSPACE, FALSE);
 			if (error) {
@@ -7322,7 +7286,7 @@ exec_add_apple_strings(struct image_params *imgp,
 			imgp->ip_applec++;
 		}
 	}
-#endif /* XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES */
+#endif /* XNU_TARGET_OS_OSX && __ARM_MIXED_PAGE_SIZE__ */
 
 	/* adding the libmalloc experiment string */
 	local_experiment_factors = os_atomic_load_wide(&libmalloc_experiment_factors, relaxed);

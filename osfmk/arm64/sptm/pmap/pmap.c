@@ -714,14 +714,6 @@ pte_update_wiredcnt(pmap_t pmap, pt_entry_t *pte_p, boolean_t wired, __assert_on
 }
 
 /*
- * Synchronize updates to PTEs that were previously invalid or had the AF bit cleared,
- * therefore not requiring TLBI.  Use a store-load barrier to ensure subsequent loads
- * will observe the updated PTE.
- */
-#define FLUSH_PTE()                                                                     \
-	__builtin_arm_dmb(DMB_ISH);
-
-/*
  * Synchronize updates to PTEs that were previously valid and thus may be cached in
  * TLBs.  DSB is required to ensure the PTE stores have completed prior to the ensuing
  * TLBI.  This should only require a store-store barrier, as subsequent accesses in
@@ -736,78 +728,6 @@ pte_update_wiredcnt(pmap_t pmap, pt_entry_t *pte_p, boolean_t wired, __assert_on
  */
 #define FLUSH_PTE_STRONG()                                                             \
 	__builtin_arm_dsb(DSB_ISHST);
-
-/**
- * Write enough page table entries to map a single VM page. On systems where the
- * VM page size does not match the hardware page size, multiple page table
- * entries will need to be written.
- *
- * @note This function does not emit a barrier to ensure these page table writes
- *       have completed before continuing. This is commonly needed. In the case
- *       where a DMB or DSB barrier is needed, then use the write_pte() and
- *       write_pte_strong() functions respectively instead of this one.
- *
- * @param ptep Pointer to the first page table entry to update.
- * @param pte The value to write into each page table entry. In the case that
- *            multiple PTEs are updated to a non-empty value, then the address
- *            in this value will automatically be incremented for each PTE
- *            write.
- */
-static void
-write_pte_fast(pt_entry_t *ptep, pt_entry_t pte)
-{
-	/**
-	 * The PAGE_SHIFT (and in turn, the PAGE_RATIO) can be a variable on some
-	 * systems, which is why it's checked at runtime instead of compile time.
-	 * The "unreachable" warning needs to be suppressed because it still is a
-	 * compile time constant on some systems.
-	 */
-	__unreachable_ok_push
-	if (TEST_PAGE_RATIO_4) {
-		if (((uintptr_t)ptep) & 0x1f) {
-			panic("%s: PTE write is unaligned, ptep=%p, pte=%p",
-			    __func__, ptep, (void*)pte);
-		}
-
-		if ((pte & ~ARM_PTE_COMPRESSED_MASK) == ARM_PTE_EMPTY) {
-			/**
-			 * If we're writing an empty/compressed PTE value, then don't
-			 * auto-increment the address for each PTE write.
-			 */
-			*ptep = pte;
-			*(ptep + 1) = pte;
-			*(ptep + 2) = pte;
-			*(ptep + 3) = pte;
-		} else {
-			*ptep = pte;
-			*(ptep + 1) = pte | 0x1000;
-			*(ptep + 2) = pte | 0x2000;
-			*(ptep + 3) = pte | 0x3000;
-		}
-	} else {
-		*ptep = pte;
-	}
-	__unreachable_ok_pop
-}
-
-/**
- * Writes enough page table entries to map a single VM page and then ensures
- * those writes complete by executing a Data Memory Barrier.
- *
- * @note The DMB issued by this function is not strong enough to protect against
- *       TLB invalidates from being reordered above the PTE writes. If a TLBI
- *       instruction is going to immediately be called after this write, it's
- *       recommended to call write_pte_strong() instead of this function.
- *
- * See the function header for write_pte_fast() for more details on the
- * parameters.
- */
-void
-write_pte(pt_entry_t *ptep, pt_entry_t pte)
-{
-	write_pte_fast(ptep, pte);
-	FLUSH_PTE();
-}
 
 /**
  * Retrieve the pmap structure for the thread running on the current CPU.
@@ -1523,7 +1443,7 @@ pmap_map_bd_with_options(
 	vaddr = virt;
 	paddr = start;
 	while (paddr < end) {
-		__assert_only sptm_return_t ret = sptm_map_page(kernel_pmap->ttep, vaddr, pmap_force_pte_kernel_ro_if_protected_io(paddr, tmplate) | pa_to_pte(paddr));
+		__assert_only sptm_return_t ret = sptm_map_page(kernel_pmap->ttep, vaddr, pmap_force_pte_kernel_ro_if_protected_io(paddr, tmplate) | pa_to_pte(paddr), SPTM_MAP_PAGE_NO_OUTPUT);
 		assert((ret == SPTM_SUCCESS) || (ret == SPTM_MAP_VALID));
 
 		vaddr += PAGE_SIZE;
@@ -1615,7 +1535,7 @@ scan:
 #if __ARM_KERNEL_PROTECT__
 		pte |= ARM_PTE_NG;
 #endif /* __ARM_KERNEL_PROTECT__ */
-		__assert_only sptm_return_t ret = sptm_map_page(kernel_pmap->ttep, va, pte);
+		__assert_only sptm_return_t ret = sptm_map_page(kernel_pmap->ttep, va, pte, SPTM_MAP_PAGE_NO_OUTPUT);
 		assert((ret == SPTM_SUCCESS) || (ret == SPTM_MAP_VALID));
 	}
 #if KASAN
@@ -1938,20 +1858,20 @@ pmap_create_commpage_table(vm_map_address_t rw_va, vm_map_address_t ro_va,
 	    | ARM_PTE_AP(AP_RORO) | ARM_PTE_AF;
 
 	sptm_return_t sptm_ret = sptm_map_page(temp_commpage_pmap->ttep, rw_va,
-	    commpage_pte_template | ARM_PTE_NX | pa_to_pte(rw_pa));
+	    commpage_pte_template | ARM_PTE_NX | pa_to_pte(rw_pa), SPTM_MAP_PAGE_NO_OUTPUT);
 	assert(sptm_ret == SPTM_SUCCESS);
 
 	if (ro_pa != 0) {
 		assert((ro_va & ~pt_attr_twig_offmask(pt_attr)) == (rw_va & ~pt_attr_twig_offmask(pt_attr)));
 		sptm_ret = sptm_map_page(temp_commpage_pmap->ttep, ro_va,
-		    commpage_pte_template | ARM_PTE_NX | pa_to_pte(ro_pa));
+		    commpage_pte_template | ARM_PTE_NX | pa_to_pte(ro_pa), SPTM_MAP_PAGE_NO_OUTPUT);
 		assert(sptm_ret == SPTM_SUCCESS);
 	}
 
 	if (rx_pa != 0) {
 		assert((commpage_text_user_va & ~pt_attr_twig_offmask(pt_attr)) == (rw_va & ~pt_attr_twig_offmask(pt_attr)));
 		assert((commpage_text_user_va != rw_va) && (commpage_text_user_va != ro_va));
-		sptm_ret = sptm_map_page(temp_commpage_pmap->ttep, commpage_text_user_va, commpage_pte_template | pa_to_pte(rx_pa));
+		sptm_ret = sptm_map_page(temp_commpage_pmap->ttep, commpage_text_user_va, commpage_pte_template | pa_to_pte(rx_pa), SPTM_MAP_PAGE_NO_OUTPUT);
 		assert(sptm_ret == SPTM_SUCCESS);
 	}
 
@@ -2007,7 +1927,7 @@ pmap_prepare_commpages(void)
 
 #if __ARM_MIXED_PAGE_SIZE__
 	commpage_4k_table = pmap_create_commpage_table(_COMM_PAGE64_BASE_ADDRESS, _COMM_PAGE64_RO_ADDRESS,
-	    commpage_data_pa, commpage_ro_data_pa, 0, PMAP_CREATE_64BIT | PMAP_CREATE_FORCE_4K_PAGES);
+	    commpage_data_pa, commpage_ro_data_pa, commpage_text_pa, PMAP_CREATE_64BIT | PMAP_CREATE_FORCE_4K_PAGES);
 
 	/*
 	 * SPTM TODO: Enable this, along with the appropriate 32-bit commpage address checks and flushes in the
@@ -4328,6 +4248,86 @@ pmap_remove_some_phys(
 	/* Implement to support working set code */
 }
 
+/**
+ * Special pmap routines for kernel stack redzone pages that bypass epochs and PVH locks.
+ * These call SPTM directly since kernel stack pages may be mapped with interrupt disabled
+ * spinlocks or pmap locks held (eg. pmap itself could be overflowing the kernel stack).
+ */
+
+/**
+ * Map a kernel stack redzone page directly via SPTM without epochs or PVH locks.
+ *
+ * This function is designed ONLY for mapping kernel stack redzone pages from
+ * exception context. It bypasses all normal pmap locking and synchronization.
+ *
+ * @param pmap The kernel pmap (must be kernel_pmap).
+ * @param va The virtual address to map.
+ * @param pa The physical address to map.
+ *
+ * @return KERN_SUCCESS if mapping succeeded, KERN_FAILURE otherwise.
+ */
+kern_return_t
+pmap_map_stack_page_direct(pmap_t pmap, vm_map_address_t va, pmap_paddr_t pa)
+{
+	assert(pmap == kernel_pmap);
+	assert((va & PAGE_MASK) == 0);
+	assert((pa & PAGE_MASK) == 0);
+
+	/*
+	 * Build a kernel RW mapping PTE.
+	 * Use the same attributes as pmap_enter for kernel internal pages:
+	 * - ARM_PTE_TYPE_VALID: Valid mapping
+	 * - ARM_PTE_AF: Access flag set
+	 * - ARM_PTE_AP(AP_RWNA): Read/write, no user access
+	 * - ARM_PTE_ATTRINDX: Normal memory
+	 * - ARM_PTE_SH: Outer shareable
+	 * - ARM_PTE_NX | ARM_PTE_PNX: No execute
+	 */
+	const pt_entry_t pte = pa_to_pte(pa)
+	    | ARM_PTE_TYPE_VALID
+	    | ARM_PTE_AF
+	    | ARM_PTE_AP(AP_RWNA)
+	    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT)
+	    | ARM_PTE_SH(SH_OUTER_MEMORY)
+	    | ARM_PTE_NX
+	    | ARM_PTE_PNX;
+
+	/*
+	 * Call SPTM directly without epoch or PVH lock.
+	 * We expect either SPTM_SUCCESS (new mapping) or SPTM_MAP_VALID (remapping).
+	 * Any other return value indicates failure.
+	 */
+	const sptm_return_t sptm_status = sptm_map_page(pmap->ttep, va, pte, SPTM_MAP_PAGE_NO_OUTPUT);
+
+	if ((sptm_status == SPTM_SUCCESS) || (sptm_status == SPTM_MAP_VALID)) {
+		return KERN_SUCCESS;
+	}
+
+	return KERN_FAILURE;
+}
+
+/**
+ * Unmap a kernel stack redzone page directly via SPTM without epochs or PVH locks.
+ *
+ * This function is designed ONLY for unmapping kernel stack redzone pages.
+ * It bypasses all normal pmap locking and synchronization.
+ *
+ * @param pmap The kernel pmap (must be kernel_pmap).
+ * @param va The virtual address to unmap.
+ */
+void
+pmap_unmap_stack_page_direct(pmap_t pmap, vm_map_address_t va)
+{
+	assert(pmap == kernel_pmap);
+	assert((va & PAGE_MASK) == 0);
+
+	/*
+	 * Call SPTM directly without epoch or PVH lock.
+	 * Pass 0 for sptm_flags to use default unmapping behavior.
+	 */
+	sptm_unmap_region(pmap->ttep, va, 1, 0);
+}
+
 /*
  * Implementation of PMAP_SWITCH_USER that Mach VM uses to
  * switch a thread onto a new vm_map.
@@ -5011,6 +5011,28 @@ pmap_page_protect_options_with_flush_range(
 	}
 	assert(local_locked_pvh.pvh != 0);
 	pvh_assert_locked(pai);
+	if ((options & PMAP_OPTIONS_COMPRESSOR_IFF_MODIFIED)) {
+		/*
+		 * On ARM, the "modified" bit is managed by software, so
+		 * we know up-front if the physical page is "modified",
+		 * without having to scan all the PTEs pointing to it.
+		 * We must make this check under the PVH lock, as a
+		 * concurrent fast fault could otherwise update the
+		 * MODIFIED bit.
+		 */
+		if (pmap_is_modified(ppnum)) {
+			/*
+			 * The page has been modified and will be sent to
+			 * the VM compressor.
+			 */
+			options |= PMAP_OPTIONS_COMPRESSOR;
+		} else {
+			/*
+			 * The page hasn't been modified and will be freed
+			 * instead of compressed.
+			 */
+		}
+	}
 
 	pmap_epoch_t *epoch = NULL;
 	bool pvh_lock_sleep_mode_needed = false;
@@ -5770,7 +5792,7 @@ pmap_protect_options_internal(
 				    PP_ATTR_REFERENCED | PP_ATTR_MODIFIED);
 			}
 
-			__assert_only const sptm_return_t sptm_status = sptm_map_page(pmap->ttep, va, spte);
+			__assert_only const sptm_return_t sptm_status = sptm_map_page(pmap->ttep, va, spte, SPTM_MAP_PAGE_NO_OUTPUT);
 
 			/**
 			 * We don't expect the VM to be concurrently calling pmap_remove() against these
@@ -6427,7 +6449,7 @@ pmap_enter_pte(
 			}
 		}
 	}
-	const sptm_return_t sptm_status = sptm_map_page(pmap->ttep, v, new_pte);
+	const sptm_return_t sptm_status = sptm_map_page(pmap->ttep, v, new_pte, 0);
 
 	if (__improbable(((sptm_status != SPTM_SUCCESS) && (sptm_status != SPTM_MAP_VALID)))) {
 		pmap_epoch_exit(epoch);
@@ -6849,11 +6871,10 @@ pmap_enter_options_internal(
 				}
 			}
 
-			pvh_unlock_nopreempt(&locked_pvh);
-
 			if (pp_attr_bits != 0) {
 				ppattr_pa_set_bits(pa, pp_attr_bits);
 			}
+			pvh_unlock_nopreempt(&locked_pvh);
 
 			if (!had_valid_mapping && (pmap != kernel_pmap)) {
 				const uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
@@ -7649,17 +7670,21 @@ phys_attribute_clear_with_flush_range(
 	assert(pn != vm_page_fictitious_addr);
 
 	if (options & PMAP_OPTIONS_CLEAR_WRITE) {
-		assert(bits == PP_ATTR_MODIFIED);
+		assert3u(bits, ==, PP_ATTR_MODIFIED);
+		if (pa_valid(pa)) {
+			locked_pvh_t locked_pvh = pvh_lock(pa_index(pa));
 
-		pmap_page_protect_options_with_flush_range(pn, (VM_PROT_ALL & ~VM_PROT_WRITE), options, NULL, flush_range);
-		/*
-		 * We short circuit this case; it should not need to
-		 * invoke arm_force_fast_fault, so just clear the modified bit.
-		 * pmap_page_protect has taken care of resetting
-		 * the state so that we'll see the next write as a fault to
-		 * the VM (i.e. we don't want a fast fault).
-		 */
-		ppattr_pa_clear_bits(pa, (pp_attr_t)bits);
+			pmap_page_protect_options_with_flush_range(pn, (VM_PROT_ALL & ~VM_PROT_WRITE), options, &locked_pvh, flush_range);
+			/*
+			 * We short circuit this case; it should not need to
+			 * invoke arm_force_fast_fault, so just clear the modified bit.
+			 * pmap_page_protect has taken care of resetting
+			 * the state so that we'll see the next write as a fault to
+			 * the VM (i.e. we don't want a fast fault).
+			 */
+			ppattr_pa_clear_bits(pa, (pp_attr_t)bits);
+			pvh_unlock(&locked_pvh);
+		}
 		return;
 	}
 	if (bits & PP_ATTR_REFERENCED) {
@@ -7768,6 +7793,7 @@ phys_attribute_clear_twig_internal(
 		if (pte_is_valid(spte) && pa_valid(pa)) {
 			/* The PTE maps a managed page, so do the appropriate PV list-based permission changes. */
 			const ppnum_t pn = (ppnum_t) atop(pa);
+			flush_range->region_entry_added = false;
 			phys_attribute_clear_with_flush_range(pn, bits, options, NULL, flush_range);
 			if (__probable(flush_range->region_entry_added)) {
 				flush_range->region_entry_added = false;
@@ -7876,6 +7902,8 @@ phys_attribute_clear_range_internal(
 	pmap_multipage_op_submit(&flush_range);
 	assert((flush_range.pending_disjoint_entries == 0) && (flush_range.pending_region_entries == 0));
 	if (flush_range.ptfr_flush_needed) {
+		/* Sync the PTE writes before potential TLB/Cache flushes. */
+		FLUSH_PTE_STRONG();
 		pmap_get_pt_ops(pmap)->flush_tlb_region_async(
 			flush_range.ptfr_start,
 			flush_range.ptfr_end - flush_range.ptfr_start,
@@ -8136,29 +8164,6 @@ pmap_disconnect_options(
 	unsigned int options,
 	void *arg)
 {
-	if ((options & PMAP_OPTIONS_COMPRESSOR_IFF_MODIFIED)) {
-		/*
-		 * On ARM, the "modified" bit is managed by software, so
-		 * we know up-front if the physical page is "modified",
-		 * without having to scan all the PTEs pointing to it.
-		 * The caller should have made the VM page "busy" so noone
-		 * should be able to establish any new mapping and "modify"
-		 * the page behind us.
-		 */
-		if (pmap_is_modified(pn)) {
-			/*
-			 * The page has been modified and will be sent to
-			 * the VM compressor.
-			 */
-			options |= PMAP_OPTIONS_COMPRESSOR;
-		} else {
-			/*
-			 * The page hasn't been modified and will be freed
-			 * instead of compressed.
-			 */
-		}
-	}
-
 	/* disconnect the page */
 	pmap_page_protect_options(pn, 0, options, arg);
 
@@ -8509,8 +8514,12 @@ arm_force_fast_fault_with_flush_range(
 			result = FALSE;
 		}
 
-		// A concurrent pmap_remove() may have cleared the PTE
-		if (__improbable(!pte_is_valid(spte))) {
+		/**
+		 * A concurrent pmap_remove() may have cleared the PTE, or we may simply
+		 * not need to make any changes to the mapping because we're only updating
+		 * accounting flags (e.g. reusable) and not revoking permissions.
+		 */
+		if ((allow_mode == VM_PROT_ALL) || __improbable(!pte_is_valid(spte))) {
 			skip_pte = true;
 		}
 
@@ -8678,13 +8687,14 @@ fff_skip_pve:
 	enable_preemption();
 
 	/*
-	 * If we are using the same approach for ref and mod
-	 * faults on this PTE, do not clear the write fault;
-	 * this would cause both ref and mod to be set on the
-	 * page again, and prevent us from taking ANY read/write
-	 * fault on the mapping.
+	 * If we are using the same approach for ref and mod faults on this PTE,
+	 * do not clear the write fault; this would cause both ref and mod to be
+	 * set on the page again, and prevent us from taking ANY read/write fault
+	 * on the mapping.
 	 */
 	if (clear_write_fault && !ref_aliases_mod) {
+		/* We don't currently support ranged "clear reusable" operations. */
+		assert(flush_range == NULL);
 		arm_clear_fast_fault(ppnum, VM_PROT_WRITE, local_locked_pvh.pvh, PT_ENTRY_NULL, 0);
 	}
 
@@ -8899,7 +8909,8 @@ cff_skip_pve:
 		if ((num_mappings + num_skipped_mappings) == SPTM_MAPPING_LIMIT) {
 			if (num_mappings != 0) {
 				sptm_update_disjoint(pa, sptm_pcpu->sptm_ops_pa, num_mappings,
-				    SPTM_UPDATE_PERMS_AND_WAS_WRITABLE | SPTM_UPDATE_AF);
+				    SPTM_UPDATE_PERMS_AND_WAS_WRITABLE | SPTM_UPDATE_AF |
+				    SPTM_UPDATE_ALLOW_PERMISSION_UPGRADE);
 				num_mappings = 0;
 			}
 			/*
@@ -8921,7 +8932,8 @@ cff_skip_pve:
 	if (num_mappings != 0) {
 		assert(result == TRUE);
 		sptm_update_disjoint(pa, sptm_pcpu->sptm_ops_pa, num_mappings,
-		    SPTM_UPDATE_PERMS_AND_WAS_WRITABLE | SPTM_UPDATE_AF);
+		    SPTM_UPDATE_PERMS_AND_WAS_WRITABLE | SPTM_UPDATE_AF |
+		    SPTM_UPDATE_ALLOW_PERMISSION_UPGRADE);
 	}
 
 	if (attrs_to_set | attrs_to_clear) {
@@ -9256,7 +9268,7 @@ pmap_map_globals(
 #endif /* __ARM_KERNEL_PROTECT__ */
 	pte |= ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITEBACK);
 	pte |= ARM_PTE_SH(SH_OUTER_MEMORY);
-	sptm_map_page(kernel_pmap->ttep, LOWGLOBAL_ALIAS, pte);
+	sptm_map_page(kernel_pmap->ttep, LOWGLOBAL_ALIAS, pte, SPTM_MAP_PAGE_NO_OUTPUT);
 
 
 #if KASAN
@@ -9327,7 +9339,7 @@ pmap_map_cpu_windows_copy_internal(
 	 *   for computing cpu_window_index above will observe the PTE_INVALID_IN_FLIGHT token set
 	 *   by the SPTM, and will select a different index.
 	 */
-	const sptm_return_t sptm_status = sptm_map_page(kernel_pmap->ttep, cpu_copywindow_vaddr, pte);
+	const sptm_return_t sptm_status = sptm_map_page(kernel_pmap->ttep, cpu_copywindow_vaddr, pte, SPTM_MAP_PAGE_NO_OUTPUT);
 	if (__improbable(sptm_status != SPTM_SUCCESS)) {
 		panic("%s: failed to map CPU copy-window VA 0x%llx with SPTM status %d",
 		    __func__, (unsigned long long)cpu_copywindow_vaddr, sptm_status);
@@ -10058,8 +10070,8 @@ pmap_unnest_options_internal(
 		if (start < subord->nested_region_true_start) {
 			start = subord->nested_region_true_start;
 		}
-		start_index = (unsigned int)((start - grand->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
-		max_index = (unsigned int)((true_end - grand->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
+		start_index = (unsigned int)((start - subord->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
+		max_index = (unsigned int)((true_end - subord->nested_region_addr) >> pt_attr_twig_shift(pt_attr));
 
 		for (current_index = start_index, addr = start; current_index < max_index; current_index++) {
 			vm_map_offset_t vlim = (addr + pt_attr_twig_size(pt_attr)) & ~pt_attr_twig_offmask(pt_attr);
@@ -11191,16 +11203,28 @@ pmap_create_commpages(vm_map_address_t *kernel_data_addr, vm_map_address_t *kern
 	 * max of user VA or is pre-reserved in vm_map_exec(). This means that
 	 * it is reserved and unavailable to mach VM for future mappings.
 	 */
-	const int num_ptes = pt_attr_leaf_size(native_pt_attr) >> PTE_SHIFT;
+	vm_map_address_t text_index_mask = pt_attr_leaf_index_mask(native_pt_attr);
+	int num_ptes = (int)(pt_attr_leaf_size(native_pt_attr) >> PTE_SHIFT);
+
+#if __ARM_MIXED_PAGE_SIZE__ && defined(XNU_TARGET_OS_OSX)
+	/*
+	 * for mixed page size configurations, 4K tasks nest the commpage at L2
+	 * which only covers 2MB (vs 32MB for 16K tasks). Constrain the text VA
+	 * randomization to the 4K L2 block containing the data commpage so that
+	 * both mappings are covered by a single nested L2 entry in 4K tasks.
+	 */
+	text_index_mask &= pt_attr_twig_offmask(&pmap_pt_attr_4k);
+	num_ptes = (int)((text_index_mask >> pt_attr_leaf_shift(native_pt_attr)) + 1);
+#endif /* __ARM_MIXED_PAGE_SIZE__ && defined(XNU_TARGET_OS_OSX) */
 
 	do {
 		const int text_leaf_index = random() % num_ptes;
 
 		/**
-		 * Generate a VA for the commpage text with the same root and twig index as data
-		 * comm page, but with new leaf index we've just generated.
+		 * Generate a VA for the commpage text within the same nesting block as
+		 * the data comm page, with a new leaf index we've just generated.
 		 */
-		commpage_text_user_va = (_COMM_PAGE64_BASE_ADDRESS & ~pt_attr_leaf_index_mask(native_pt_attr));
+		commpage_text_user_va = (_COMM_PAGE64_BASE_ADDRESS & ~text_index_mask);
 		commpage_text_user_va |= (text_leaf_index << pt_attr_leaf_shift(native_pt_attr));
 	} while ((commpage_text_user_va == _COMM_PAGE64_BASE_ADDRESS) ||
 	    (commpage_text_user_va == _COMM_PAGE64_RO_ADDRESS)); // Try again if we collide (should be unlikely)

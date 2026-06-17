@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2025 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2026 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -8765,7 +8765,7 @@ necp_application_find_policy_match_internal(proc_t proc,
 					struct if_cellular_status_v1 *ifsr;
 
 					ifnet_lock_shared(rt->rt_ifp);
-					lck_rw_lock_exclusive(&rt->rt_ifp->if_link_status_lock);
+					lck_rw_lock_shared(&rt->rt_ifp->if_link_status_lock);
 
 					if (rt->rt_ifp->if_link_status != NULL) {
 						ifsr = &rt->rt_ifp->if_link_status->ifsr_u.ifsr_cell.if_cell_u.if_status_v1;

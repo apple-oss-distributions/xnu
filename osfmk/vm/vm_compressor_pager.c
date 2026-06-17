@@ -920,9 +920,11 @@ vm_compressor_pager_state_clr(
 
 	num_slots_freed = 0;
 	if (slot_p && *slot_p != 0) {
-		vm_compressor_free(slot_p, 0);
-		num_slots_freed++;
-		assert(*slot_p == 0);
+		vm_decompress_result_t result = vm_compressor_free(slot_p, 0);
+		if (result == DECOMPRESS_SUCCESS) {
+			num_slots_freed++;
+			assert(*slot_p == 0);
+		}
 	}
 
 	return num_slots_freed;

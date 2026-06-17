@@ -974,7 +974,7 @@ extern uint64_t zalloc_ro_mut_atomic(
  *
  */
 #define zalloc_ro_update_field_atomic(zone_id, elem, field, op, value)  ({ \
-	const typeof((elem)->field) __value = (value);                         \
+	const os_atomic_basetypeof(&(elem)->field) __value = (value);           \
 	static_assert(sizeof(__value) == (op & 0xf));                          \
 	(os_atomic_basetypeof(&(elem)->field))zalloc_ro_mut_atomic(zone_id,    \
 	    elem, offsetof(typeof(*(elem)), field), op, (uint64_t)__value);    \

@@ -236,6 +236,7 @@ typedef struct _posix_spawnattr {
 
 	uint64_t        psa_max_addr;           /* Max valid VM address */
 	bool            psa_no_smt;
+	bool            psa_4k;                 /* Force 4k address space */
 	bool            psa_tecs;
 	int             psa_platform;           /* Plaform for the binary */
 

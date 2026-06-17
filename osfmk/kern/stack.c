@@ -191,7 +191,7 @@ stack_alloc_internal(void)
 	vm_offset_t     stack = 0;
 	spl_t           s;
 	kma_flags_t     flags = KMA_NOFAIL | KMA_GUARD_FIRST | KMA_GUARD_LAST |
-	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
+	    KMA_GUARD_STACK | KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
 
 	s = splsched();
 	stack_lock();
@@ -212,21 +212,21 @@ stack_alloc_internal(void)
 
 	if (stack == 0) {
 		/*
-		 * Request guard pages on either side of the stack.  Ask
-		 * kernel_memory_allocate() for two extra pages to account
+		 * Request two guard pages below the stack and one above.  Ask
+		 * kernel_memory_allocate() for three extra pages to account
 		 * for these.
 		 */
 
 		kernel_memory_allocate(kernel_map, &stack,
-		    kernel_stack_size + ptoa(2), stack_addr_mask,
+		    kernel_stack_size + ptoa(3), stack_addr_mask,
 		    flags, VM_KERN_MEMORY_STACK);
 
 		/*
 		 * The stack address that comes back is the address of the lower
-		 * guard page.  Skip past it to get the actual stack base address.
+		 * guard pages.  Skip past them to get the actual stack base address.
 		 */
 
-		stack += PAGE_SIZE;
+		stack += ptoa(2);
 	}
 	return stack;
 }
@@ -257,6 +257,9 @@ stack_free(
 {
 	vm_offset_t         stack = machine_stack_detach(thread);
 
+#if CONFIG_SPTM
+	assert(thread->machine.kredzonestack == 0);
+#endif
 	assert(stack);
 	if (stack != thread->reserved_stack) {
 		stack_free_stack(stack);
@@ -376,9 +379,9 @@ stack_collect(void)
 			splx(s);
 
 			/*
-			 * Get the stack base address, then decrement by one page
-			 * to account for the lower guard page.  Add two extra pages
-			 * to the size to account for the guard pages on both ends
+			 * Get the stack base address, then decrement by two pages
+			 * to account for the lower guard pages.  Add three extra pages
+			 * to the size to account for the guard pages (two below, one above)
 			 * that were originally requested when the stack was allocated
 			 * back in stack_alloc().
 			 */
@@ -386,9 +389,9 @@ stack_collect(void)
 			stack = (vm_offset_t)vm_map_trunc_page(
 				stack,
 				VM_MAP_PAGE_MASK(kernel_map));
-			stack -= PAGE_SIZE;
-			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(2),
-			    KMF_GUARD_FIRST | KMF_GUARD_LAST);
+			stack -= ptoa(2);
+			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(3),
+			    KMF_GUARD_FIRST | KMF_GUARD_LAST | KMF_GUARD_STACK);
 			stack = 0;
 
 			s = splsched();
